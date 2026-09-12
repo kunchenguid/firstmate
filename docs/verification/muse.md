@@ -202,6 +202,39 @@ That is the same terminal shape the `echo`-provider interrupt produced, now conf
 
 `tests/fm-muse-harness.test.sh` pins the resulting classifier behavior: a log settled by either terminal reads `idle`, an open run reads `busy`, and only a resolution failure reads `unknown`.
 
+## Session-log folding on Muse Code 1.1.1 (verified 2026-09-11)
+
+This entry records session-log discovery and run-event folding only.
+It does not refresh the 0.1.0 process-identity, trust-dialog, interrupt, composer, or credentialed multi-step evidence above.
+
+| Field | Value |
+|---|---|
+| Version | `Muse Code 1.1.1 (1.1.1-R2514.1)` |
+| Verified | 2026-09-11 |
+| What | workspace binding after a leading `retained_frame`, and run-event folding independent of JSON field order |
+
+Muse Code 1.1.1 writes a leading `retained_frame` before `runtime.session.metadata`, and serializes each run payload with `event` before `kind`.
+The lifecycle is unchanged: one `started` event pairs with one `terminal` event whose `terminal` value is `completed` or `cancelled`.
+`workspace_root` on the metadata record still matches the task worktree, so binding is a read of that record rather than a change to how the sidecar is written.
+
+Portable regressions in `tests/fm-muse-harness.test.sh` feed 0.1.x-ordered and 1.1.1-ordered fixtures, each with and without `jq`, and keep the 0.1.x verdicts unchanged.
+
+```
+$ muse --version
+Muse Code 1.1.1 (1.1.1-R2514.1)
+
+$ FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
+FM_TEST_BEGIN 2026-09-11T08:46:05Z tests/fm-muse-signals-live-e2e.test.sh family=live-harness-optin expected_gate_skip=live-capability
+ok - Muse's real session protocol on Muse Code 1.1.1 (1.1.1-R2514.1) classifies busy in flight
+ok - Muse's real session protocol on Muse Code 1.1.1 (1.1.1-R2514.1) binds the workspace log
+ok - Muse's real session protocol on Muse Code 1.1.1 (1.1.1-R2514.1) emits one matched run bracket
+ok - Muse's real prompt glyph color on Muse Code 1.1.1 (1.1.1-R2514.1) # SKIP composer glyph out of scope; 1.1.1 drift tracked as follow-up muse-111-composer-glyph-drift
+FM_TEST_END 2026-09-11T08:46:06Z tests/fm-muse-signals-live-e2e.test.sh exit=0 duration_ms=551 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=595
+FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=551 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-muse-signals-live-e2e.test.sh duration_ms=551
+```
+
 ## Refreshing this record
 
 Run both live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:

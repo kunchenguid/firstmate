@@ -4,10 +4,11 @@
 # session-log busy source, and teardown cleanup of the busy binding.
 #
 # The session-log fixtures below reproduce muse 0.1.0-R708.1's real record
-# shapes, including the nested "record":{"kind":"terminal"} cleanup payload that
-# is NOT a run terminal. That decoy is the whole reason the fold matches an
-# anchored structural prefix instead of searching for "kind":"terminal", so a
-# fixture without it would let a naive implementation pass.
+# shapes and Muse Code 1.1.1's equivalent field order, including the nested
+# "record":{"kind":"terminal"} cleanup payload that is NOT a run terminal.
+# That decoy is the whole reason the fold matches payload.event.kind
+# structurally instead of searching for "kind":"terminal", so a fixture
+# without it would let a naive implementation pass.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,8 +28,8 @@ TMP_ROOT=$(fm_test_tmproot fm-muse-harness)
 
 # --- session-log fixtures ---------------------------------------------------
 
-# muse_log_metadata <workspace-root>: the first record of every session log,
-# which is what binds a log to a task worktree.
+# muse_log_metadata <workspace-root>: the session metadata record that binds a
+# log to a task worktree.
 muse_log_metadata() {
   printf '{"schema_version":1,"id":"d77de583","stream":{"kind":"session","id":"52f21aea"},"sequence":1,"record_type":"event","durability":"durable","payload_type":"runtime.session.metadata","payload":{"kind":"metadata","record":{"workspace_root":"%s","provider_id":"meta","build":{"sha":"427a430436","semver":"0.1.0"}}}}\n' "$1"
 }
@@ -51,6 +52,33 @@ muse_log_noise() {  # <run-id>
   printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"%s","event":{"kind":"context_block_diagnostic","block_id":"rules_file","message":"mentions kind terminal and kind started in prose"}}}\n' "$1"
 }
 
+# Muse Code 1.1.1 writes a leading retained_frame before session metadata and
+# serializes run payload fields with event before kind. Fixtures are synthetic
+# and carry no real session content.
+muse_log_retained_frame() {
+  printf '{"retained_frame":"session_permission_transaction","frame_schema_version":1,"outer_log_ordinal":0,"transaction_id":"synthetic","children":[],"content_sha256":"0"}\n'
+}
+
+muse_log_run_started_111() {  # <run-id>
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"event":{"kind":"started","prompt":"launch brief"},"kind":"run","run_id":"%s"}}\n' "$1"
+}
+
+muse_log_run_terminal_111() {  # <run-id> <completed|cancelled>
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"event":{"kind":"terminal","terminal":"%s","reason":null,"turn_duration_ms":8152},"kind":"run","run_id":"%s"}}\n' "$2" "$1"
+}
+
+muse_log_cleanup_terminal_decoy_111() {  # <run-id>
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"record":{"kind":"terminal","cleanup_effect_id":1,"outcome":{"kind":"applied"}},"kind":"reminder_cleanup_effect","run_id":"%s"}}\n' "$1"
+}
+
+muse_log_noise_111() {  # <run-id>
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"event":{"kind":"context_block_diagnostic","block_id":"rules_file","message":"mentions \\"kind\\":\\"terminal\\" and \\"kind\\":\\"started\\" in prose"},"kind":"run","run_id":"%s"}}\n' "$1"
+}
+
+muse_log_started_prompt_trap_111() {  # <run-id>
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"event":{"kind":"started","prompt":"please ignore \\"kind\\":\\"terminal\\" inside this prompt"},"kind":"run","run_id":"%s"}}\n' "$1"
+}
+
 # write_session_log <sessions-root> <yyyy> <mm> <dd> <uuid> <workspace-root>
 # Body records are read from stdin. Writes the log at muse's real depth
 # (<root>/YYYY/MM/DD/<uuid>/session.jsonl) and echoes the path.
@@ -60,6 +88,19 @@ write_session_log() {
   mkdir -p "$dir"
   path="$dir/session.jsonl"
   muse_log_metadata "$ws" > "$path"
+  cat >> "$path"
+  printf '%s\n' "$path"
+}
+
+# write_session_log_111: 1.1.1 shape with a leading retained_frame, then the
+# same metadata record, then stdin body records.
+write_session_log_111() {
+  local root=$1 y=$2 m=$3 d=$4 uuid=$5 ws=$6 dir path
+  dir="$root/$y/$m/$d/$uuid"
+  mkdir -p "$dir"
+  path="$dir/session.jsonl"
+  muse_log_retained_frame > "$path"
+  muse_log_metadata "$ws" >> "$path"
   cat >> "$path"
   printf '%s\n' "$path"
 }
@@ -547,6 +588,69 @@ run_state() {  # <log>
   )
 }
 
+run_events() {  # <log>
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    fm_busy_muse_run_events "$1"
+  )
+}
+
+run_terminal_of() {  # <log> <run-id>
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    fm_busy_muse_run_terminal "$1" "$2"
+  )
+}
+
+run_active_id() {  # <log>
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    fm_busy_muse_active_run_id "$1"
+  )
+}
+
+no_jq_path() {
+  local awk_bin dir
+  awk_bin=$(command -v awk) || fail "awk is required to exercise Muse's fallback run-event parser"
+  dir="$TMP_ROOT/no-jq-bin"
+  mkdir -p "$dir"
+  ln -sf "$awk_bin" "$dir/awk"
+  printf '%s' "$dir"
+}
+
+run_state_no_jq() {  # <log>
+  local bin
+  bin=$(no_jq_path)
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    PATH="$bin" fm_busy_muse_run_state "$1"
+  )
+}
+
+run_events_no_jq() {  # <log>
+  local bin
+  bin=$(no_jq_path)
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    PATH="$bin" fm_busy_muse_run_events "$1"
+  )
+}
+
+run_terminal_no_jq() {  # <log> <run-id>
+  local bin
+  bin=$(no_jq_path)
+  (
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$ROOT/bin/fm-busy-lib.sh"
+    PATH="$bin" fm_busy_muse_run_terminal "$1" "$2"
+  )
+}
+
 test_run_fold_tracks_open_and_settled_turns() {
   local dir log out
   dir="$TMP_ROOT/fold"
@@ -912,6 +1016,143 @@ test_muse_trusts_no_record_sources() {
   pass "muse trusts no busy record source"
 }
 
+assert_fold_both_parsers() {  # <log> <expected-state> <label>
+  local log=$1 expected=$2 label=$3 out events_jq events_awk
+  command -v jq >/dev/null 2>&1 || fail "jq is required to exercise Muse's primary run-event parser"
+  out=$(run_state "$log")
+  [ "$out" = "$expected" ] || fail "$label with jq folded to '$out', expected $expected"
+  out=$(run_state_no_jq "$log")
+  [ "$out" = "$expected" ] || fail "$label without jq folded to '$out', expected $expected"
+  events_jq=$(run_events "$log")
+  events_awk=$(run_events_no_jq "$log")
+  [ "$events_jq" = "$events_awk" ] \
+    || fail "$label jq and awk parsers emitted different events"
+}
+
+test_run_fold_is_independent_of_field_order() {
+  local dir log_old log_new events_old events_new terminal
+  dir="$TMP_ROOT/fold-order"
+  mkdir -p "$dir"
+  command -v jq >/dev/null 2>&1 || fail "jq is required to exercise Muse's primary run-event parser"
+
+  log_old=$(write_session_log "$dir/old-busy" 2026 09 11 oldbusy "$dir/ws-busy" <<EOF
+$(muse_log_run_started run-1)
+$(muse_log_noise run-1)
+EOF
+)
+  log_new=$(write_session_log_111 "$dir/new-busy" 2026 09 11 newbusy "$dir/ws-busy" <<EOF
+$(muse_log_run_started_111 run-1)
+$(muse_log_noise_111 run-1)
+EOF
+)
+  assert_fold_both_parsers "$log_old" busy "0.1.x open run"
+  assert_fold_both_parsers "$log_new" busy "1.1.1 open run"
+  events_old=$(run_events "$log_old")
+  events_new=$(run_events "$log_new")
+  [ "$events_old" = "$events_new" ] \
+    || fail "1.1.1 open-run events differed from the 0.1.x equivalent"
+  [ "$(run_active_id "$log_new")" = run-1 ] \
+    || fail "1.1.1 open run did not report the active run id"
+
+  log_old=$(write_session_log "$dir/old-none" 2026 09 11 oldnone "$dir/ws-none" </dev/null)
+  log_new=$(write_session_log_111 "$dir/new-none" 2026 09 11 newnone "$dir/ws-none" </dev/null)
+  assert_fold_both_parsers "$log_old" none "0.1.x run-free log"
+  assert_fold_both_parsers "$log_new" none "1.1.1 run-free log"
+  events_old=$(run_events "$log_old")
+  events_new=$(run_events "$log_new")
+  [ -z "$events_old" ] && [ "$events_old" = "$events_new" ] \
+    || fail "run-free logs must emit no events in either field order"
+
+  for terminal in completed cancelled; do
+    log_old=$(write_session_log "$dir/old-$terminal" 2026 09 11 "old$terminal" "$dir/ws-$terminal" <<EOF
+$(muse_log_run_started run-1)
+$(muse_log_run_terminal run-1 "$terminal")
+EOF
+)
+    log_new=$(write_session_log_111 "$dir/new-$terminal" 2026 09 11 "new$terminal" "$dir/ws-$terminal" <<EOF
+$(muse_log_run_started_111 run-1)
+$(muse_log_run_terminal_111 run-1 "$terminal")
+EOF
+)
+    assert_fold_both_parsers "$log_old" settled "0.1.x $terminal run"
+    assert_fold_both_parsers "$log_new" settled "1.1.1 $terminal run"
+    events_old=$(run_events "$log_old")
+    events_new=$(run_events "$log_new")
+    [ "$events_old" = "$events_new" ] \
+      || fail "1.1.1 $terminal events differed from the 0.1.x equivalent"
+    [ "$(run_terminal_of "$log_old" run-1)" = "$terminal" ] \
+      || fail "0.1.x $terminal run_terminal was '$(run_terminal_of "$log_old" run-1)'"
+    [ "$(run_terminal_of "$log_new" run-1)" = "$terminal" ] \
+      || fail "1.1.1 $terminal run_terminal was '$(run_terminal_of "$log_new" run-1)'"
+    [ "$(run_terminal_no_jq "$log_new" run-1)" = "$terminal" ] \
+      || fail "1.1.1 $terminal run_terminal without jq was '$(run_terminal_no_jq "$log_new" run-1)'"
+  done
+  pass "the run fold matches 0.1.x and 1.1.1 field order with and without jq"
+}
+
+test_nested_terminal_record_does_not_settle_a_run_in_111_order() {
+  local dir log out
+  dir="$TMP_ROOT/decoy-111"
+  mkdir -p "$dir"
+  log=$(write_session_log_111 "$dir/root" 2026 09 11 decoy111 "$dir/ws" <<EOF
+$(muse_log_run_started_111 run-1)
+$(muse_log_cleanup_terminal_decoy_111 run-1)
+$(muse_log_noise_111 run-1)
+EOF
+)
+  assert_fold_both_parsers "$log" busy "1.1.1 nested cleanup terminal"
+  out=$(run_state "$log")
+  [ "$out" = busy ] \
+    || fail "a 1.1.1 nested cleanup 'terminal' record settled an open run (folded '$out', expected busy)"
+  pass "a nested terminal record never settles an in-flight 1.1.1 run"
+}
+
+test_prompt_text_and_malformed_lines_do_not_close_a_run() {
+  local dir log
+  dir="$TMP_ROOT/traps"
+  mkdir -p "$dir"
+  log=$(write_session_log_111 "$dir/root" 2026 09 11 traps "$dir/ws" <<EOF
+$(muse_log_started_prompt_trap_111 run-1)
+{"payload":{"event":{"kind":"terminal","terminal":"completed"},"kind":"run","run_id":"run-1"
+not json
+{"payload":{"event":{"kind":"terminal","terminal":"completed"},"kind":"run","run_id":"run-1"}
+EOF
+)
+  assert_fold_both_parsers "$log" busy "prompt-trap and malformed 1.1.1 lines"
+  pass "prompt text and malformed lines never open or close a run"
+}
+
+test_binding_finds_metadata_after_retained_frame() {
+  local dir state id verdict root
+  dir="$TMP_ROOT/bind-111"
+  state="$dir/state"
+  root="$dir/sessions"
+  id=bind111
+  mkdir -p "$state"
+
+  write_session_log "$root" 2026 09 11 other "$dir/other-ws" >/dev/null <<EOF
+$(muse_log_run_started other-run)
+EOF
+  write_session_log_111 "$root" 2026 09 11 mine "$dir/my-ws" >/dev/null <<EOF
+$(muse_log_run_started_111 my-run)
+$(muse_log_run_terminal_111 my-run completed)
+EOF
+
+  printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/my-ws" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "idle muse-session-log" ] \
+    || fail "1.1.1 metadata after retained_frame did not bind: got '$verdict'"
+
+  write_session_log_111 "$root" 2026 09 11 open "$dir/open-ws" >/dev/null <<EOF
+$(muse_log_run_started_111 open-run)
+EOF
+  printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/open-ws" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "1.1.1 open run after retained_frame did not fold busy: got '$verdict'"
+  pass "session binding finds metadata after a leading retained_frame"
+}
+
 test_spawn_environment_allowlist_credential_preflight() {
   local setting rec case_dir home proj wt fakebin id out status
   for setting in withheld allowed stored; do
@@ -957,6 +1198,10 @@ test_non_muse_escape_does_not_clear
 test_failed_clear_is_reported
 test_run_fold_tracks_open_and_settled_turns
 test_nested_terminal_record_does_not_settle_a_run
+test_run_fold_is_independent_of_field_order
+test_nested_terminal_record_does_not_settle_a_run_in_111_order
+test_prompt_text_and_malformed_lines_do_not_close_a_run
+test_binding_finds_metadata_after_retained_frame
 test_binding_selects_the_matching_main_log
 test_workspace_binding_treats_glob_characters_literally
 test_binding_excludes_preexisting_log_when_mtimes_tie

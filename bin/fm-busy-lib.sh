@@ -278,10 +278,13 @@ fm_busy_record_read() {  # <state-dir> <id>
 # muse persists an append-only session event log per session at
 # <sessions-root>/YYYY/MM/DD/<session-uuid>/session.jsonl, and brackets every
 # submitted turn with one run lifecycle pair. Verified live on muse
-# 0.1.0-R708.1 across completed, interrupted, and killed-mid-turn turns:
-#   {"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"started",...
-#   {"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"terminal",
-#     "terminal":"completed"|"cancelled",...
+# 0.1.0-R708.1 across completed, interrupted, and killed-mid-turn turns.
+# Muse Code 1.1.1-R2514.1 keeps that lifecycle and writes the same fields in a
+# different order, with a leading retained_frame before session metadata; the
+# fold and log discovery match those fields structurally rather than by byte
+# prefix:
+#   payload.kind=run, payload.run_id, payload.event.kind=started|terminal
+#   payload.event.terminal=completed|cancelled
 # An Escape interrupt closes its run with terminal=cancelled, so unlike Claude's
 # Stop hook this source covers the interrupt path itself. Any later
 # run_retracted records follow the terminal rather than replacing it.
@@ -294,7 +297,7 @@ fm_busy_record_read() {  # <state-dir> <id>
 # Pi push sources. A version allowlist would be false precision and a maintenance
 # treadmill for an auto-updating vendor binary: busy classification receives
 # only the normalized muse harness identity, while session metadata records
-# semver 0.1.0 plus a build SHA that cannot be matched against it. Resolution
+# a Muse semver plus a build SHA that cannot be matched against it. Resolution
 # failures - no sidecar, no matching log, an unreadable or run-free log - remain
 # unknown because those prove nothing about the turn either way. See
 # docs/verification/muse.md for the evidence.
@@ -330,7 +333,9 @@ fm_busy_muse_binding_field() {  # <state-dir> <id> <key>
 }
 
 # fm_busy_muse_matching_logs: every MAIN session log whose recorded
-# workspace_root is this task's worktree. The depth bounds are what exclude
+# workspace_root is this task's worktree. Session metadata is matched
+# structurally on payload_type, whether it is the first record or follows a
+# leading retained_frame wrapper. The depth bounds are what exclude
 # muse's own native sub-agent logs, which live one directory deeper under
 # subagent/<child-session-id>/session.jsonl and carry their own independent run
 # lifecycle - folding a child's log would report the parent busy long after the
@@ -360,10 +365,23 @@ function metadataWorkspace(file) {
     descriptor = fs.openSync(file, "r");
     const buffer = Buffer.alloc(65536);
     const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
-    const newline = buffer.indexOf(10, 0);
-    if (newline < 0 || newline >= length) return null;
-    const record = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-    return record?.payload?.record?.workspace_root ?? null;
+    const text = buffer.subarray(0, length).toString("utf8");
+    const truncated = length === buffer.length && !text.endsWith("\n");
+    const lines = text.split("\n");
+    if (truncated) lines.pop();
+    for (const line of lines) {
+      if (!line) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (record?.payload_type === "runtime.session.metadata") {
+        return record?.payload?.record?.workspace_root ?? null;
+      }
+    }
+    return null;
   } catch {
     return null;
   } finally {
@@ -528,45 +546,169 @@ EOF
   printf '%s' "$selected"
 }
 
+# fm_busy_muse_run_events: emit tab-separated run_id, event kind, and
+# terminal value for each structurally valid run started/terminal record.
+# Field order inside the JSON object is not part of the match. A nested
+# cleanup "record":{"kind":"terminal"} and text inside an event never count.
+# Malformed lines contribute nothing. jq is used when present; otherwise an
+# awk JSON tokenizer matches the same fields.
 fm_busy_muse_run_events() {  # <session-log>
   [ -f "$1" ] || return 1
-  LC_ALL=C awk '
-    BEGIN { OFS = "\t"; pre = "\"payload\":{\"kind\":\"run\",\"run_id\":\"" }
-    {
-      p = index($0, pre)
-      if (p == 0) next
-      rest = substr($0, p + length(pre))
-      q = index(rest, "\"")
-      if (q == 0) next
-      rid = substr(rest, 1, q - 1)
-      rest = substr(rest, q)
-      head = "\",\"event\":{\"kind\":\""
-      if (substr(rest, 1, length(head)) != head) next
-      rest = substr(rest, length(head) + 1)
-      q = index(rest, "\"")
-      if (q == 0) next
-      ev = substr(rest, 1, q - 1)
-      terminal = ""
-      if (ev == "terminal") {
-        marker = "\"terminal\":\""
-        p = index(rest, marker)
-        if (p != 0) {
-          value = substr(rest, p + length(marker))
-          q = index(value, "\"")
-          if (q != 0) terminal = substr(value, 1, q - 1)
+  if command -v jq >/dev/null 2>&1; then
+    LC_ALL=C jq -Rr '
+      try (
+        fromjson
+        | if type == "object"
+            and .payload_type? == "runtime.session"
+            and (.payload | type) == "object"
+            and .payload.kind? == "run"
+            and (.payload.run_id | type) == "string"
+            and .payload.run_id != ""
+            and ((.payload.event.kind? == "started") or (.payload.event.kind? == "terminal"))
+          then
+            [
+              .payload.run_id,
+              .payload.event.kind,
+              (if .payload.event.kind == "terminal" and (.payload.event.terminal | type) == "string"
+               then .payload.event.terminal else "" end)
+            ] | @tsv
+          else empty
+          end
+      ) catch empty
+    ' "$1"
+  else
+    LC_ALL=C awk '
+      BEGIN { OFS = "\t" }
+      function ws(    c) {
+        while (p <= n) {
+          c = substr(line, p, 1)
+          if (c != " " && c != "\t" && c != "\r") break
+          p++
         }
       }
-      if (ev == "started" || ev == "terminal") print rid, ev, terminal
-    }
-  ' "$1"
+      function hex(c) {
+        if (c >= "0" && c <= "9") return c + 0
+        c = tolower(c)
+        return index("abcdef", c) + 9
+      }
+      function string(    c, e, h, i, code, out) {
+        if (substr(line, p, 1) != "\"") return 0
+        p++; out = ""
+        while (p <= n) {
+          c = substr(line, p++, 1)
+          if (c == "\"") { value = out; kind = "string"; return 1 }
+          if (c ~ /[[:cntrl:]]/) return 0
+          if (c != "\\") { out = out c; continue }
+          if (p > n) return 0
+          e = substr(line, p++, 1)
+          if (e == "\"" || e == "\\" || e == "/") out = out e
+          else if (e ~ /^[bfnrt]$/) out = out "?"
+          else if (e == "u") {
+            h = substr(line, p, 4)
+            if (length(h) != 4 || h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
+            code = 0
+            for (i = 1; i <= 4; i++) code = code * 16 + hex(substr(h, i, 1))
+            out = out (code < 128 ? sprintf("%c", code) : "?")
+            p += 4
+          } else return 0
+        }
+        return 0
+      }
+      function number(    c) {
+        if (substr(line, p, 1) == "-") p++
+        c = substr(line, p, 1)
+        if (c == "0") {
+          p++
+          if (substr(line, p, 1) ~ /^[0-9]$/) return 0
+        } else if (c ~ /^[1-9]$/) {
+          do { p++; c = substr(line, p, 1) } while (c ~ /^[0-9]$/)
+        } else return 0
+        if (substr(line, p, 1) == ".") {
+          p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        c = substr(line, p, 1)
+        if (c == "e" || c == "E") {
+          p++; c = substr(line, p, 1)
+          if (c == "+" || c == "-") p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        kind = "number"; value = ""
+        return 1
+      }
+      function array(depth, path,    c) {
+        p++; ws()
+        if (substr(line, p, 1) == "]") { p++; return 1 }
+        while (p <= n) {
+          if (!json(depth + 1, path)) return 0
+          ws(); c = substr(line, p, 1)
+          if (c == "]") { p++; return 1 }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function object(depth, path,    c, key, vkind, vvalue, nested) {
+        p++; ws()
+        if (substr(line, p, 1) == "}") { p++; kind = "object"; return 1 }
+        while (p <= n) {
+          if (!string()) return 0
+          key = value; ws()
+          if (substr(line, p, 1) != ":") return 0
+          p++; ws()
+          nested = (path == "" ? key : path "." key)
+          if (!json(depth + 1, nested)) return 0
+          vkind = kind; vvalue = value
+          if (path == "" && key == "payload_type" && vkind == "string") ptype = vvalue
+          if (path == "payload" && key == "kind" && vkind == "string") pkind = vvalue
+          if (path == "payload" && key == "run_id" && vkind == "string") rid = vvalue
+          if (path == "payload.event" && key == "kind" && vkind == "string") ekind = vvalue
+          if (path == "payload.event" && key == "terminal" && vkind == "string") terminal = vvalue
+          ws(); c = substr(line, p, 1)
+          if (c == "}") {
+            p++; kind = "object"; value = ""
+            return 1
+          }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function json(depth, path,    c, word) {
+        ws(); c = substr(line, p, 1)
+        if (c == "\"") return string()
+        if (c == "{") return object(depth, path)
+        if (c == "[") { kind = "array"; value = ""; return array(depth, path) }
+        if (c == "-" || c ~ /^[0-9]$/) return number()
+        word = substr(line, p)
+        if (substr(word, 1, 4) == "true" || substr(word, 1, 4) == "null") { p += 4; kind = "literal"; value = ""; return 1 }
+        if (substr(word, 1, 5) == "false") { p += 5; kind = "literal"; value = ""; return 1 }
+        return 0
+      }
+      {
+        line = $0; p = 1; n = length(line)
+        ptype = ""; pkind = ""; rid = ""; ekind = ""; terminal = ""
+        kind = ""; value = ""
+        valid = json(0, "")
+        ws()
+        if (!valid || p <= n) next
+        if (ptype == "runtime.session" && pkind == "run" && rid != "" \
+            && (ekind == "started" || ekind == "terminal")) {
+          print rid, ekind, (ekind == "terminal" ? terminal : "")
+        }
+      }
+    ' "$1"
+  fi
 }
 
 # fm_busy_muse_run_state: fold one session log to busy|settled|none.
 #   busy     at least one run started with no matching terminal
 #   settled  every started run reached a terminal
 #   none     the log holds no run lifecycle records at all
-# The match is anchored on the exact structural prefix rather than a bare
-# "kind":"terminal" search, because muse also emits nested "record":{"kind":
+# The match is structural on payload.kind=run and payload.event.kind, never a
+# bare "kind":"terminal" search, because muse also emits nested "record":{"kind":
 # "terminal"} cleanup-effect payloads that are NOT run terminals and would
 # otherwise close a run that is still in flight.
 fm_busy_muse_run_state() {  # <session-log>
