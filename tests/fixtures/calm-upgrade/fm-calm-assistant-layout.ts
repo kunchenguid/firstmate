@@ -1,22 +1,16 @@
-// Verified against Pi 0.81.1, 0.82.0, and 0.84.4, which export
-// AssistantMessageComponent with an updateContent method.
-// installCalmAssistantLayout() probes that exact method and throws if it is missing.
-// fm-calm.ts catches that failure and skips only this adapter with a diagnostic instead
-// of blocking Calm or Pi.
-// This layout removes collapsed thinking and ordinary mid-turn assistant text blocks
-// classified as "assistant-working-note" from a shallow presentation copy.
-// Text whose versioned Pi signature explicitly marks a captain-facing phase stays in
-// that copy even when a tool call follows it.
-// The message itself, model context, session storage, and export rendering are never
-// touched.
+// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
+// updateContent method. installCalmAssistantLayout() probes that exact method and throws
+// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
+// instead of blocking Calm or Pi.
+// This layout removes collapsed thinking and the mid-turn assistant text blocks
+// classified as "assistant-working-note" from a shallow presentation copy. The message
+// itself, model context, session storage, and export rendering are never touched.
 // ./fm-calm-visibility.ts owns which classes Calm hides.
-import type { TextSignatureV1 } from "@earendil-works/pi-ai";
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
-type AssistantTextBlock = Extract<AssistantMessage["content"][number], { type: "text" }>;
 
 type AssistantMessagePresentationState = {
   hiddenThinkingLabel: string;
@@ -25,7 +19,6 @@ type AssistantMessagePresentationState = {
 };
 
 type CalmAssistantLayoutPatch = {
-  originalUpdateContent?: PiAssistantMessageComponent["updateContent"];
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
 };
@@ -44,35 +37,6 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   );
 }
 
-// Pi's public TextContent.textSignature field can carry the exported TextSignatureV1
-// shape.
-// Only its explicit commentary and final_answer phases identify user-facing text.
-// Legacy opaque signatures, phase-less v1 signatures, unknown versions or phases, and
-// malformed JSON stay on the conservative working-note path.
-type CaptainFacingTextPhase = NonNullable<TextSignatureV1["phase"]>;
-
-function isCaptainFacingTextPhase(value: unknown): value is CaptainFacingTextPhase {
-  return value === "commentary" || value === "final_answer";
-}
-
-function hasExplicitCaptainFacingPhase(block: AssistantTextBlock): boolean {
-  const rawSignature = block.textSignature;
-  if (typeof rawSignature !== "string" || !rawSignature.startsWith("{")) return false;
-
-  try {
-    const parsed: unknown = JSON.parse(rawSignature);
-    if (typeof parsed !== "object" || parsed === null) return false;
-    const signature = parsed as Record<string, unknown>;
-    return (
-      signature.v === 1 &&
-      typeof signature.id === "string" &&
-      isCaptainFacingTextPhase(signature.phase)
-    );
-  } catch {
-    return false;
-  }
-}
-
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
 // double-patch a live process.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
@@ -86,25 +50,21 @@ export function installCalmAssistantLayout(): void {
   const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
   const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
   const installed = registry[CALM_ASSISTANT_LAYOUT_PATCH];
+  if (installed) {
+    installed.hidesThinking = hidesThinking;
+    installed.hidesWorkingNote = hidesWorkingNote;
+    return;
+  }
+
+  const patch: CalmAssistantLayoutPatch = { hidesThinking, hidesWorkingNote };
   const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
   if (typeof AssistantMessageComponent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
   }
-  const originalUpdateContent =
-    installed?.originalUpdateContent ?? AssistantMessageComponent.prototype.updateContent;
+  const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
   if (typeof originalUpdateContent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
   }
-
-  if (installed && !installed.originalUpdateContent) {
-    installed.hidesThinking = () => false;
-    installed.hidesWorkingNote = () => false;
-  }
-  const patch: CalmAssistantLayoutPatch = {
-    hidesThinking,
-    hidesWorkingNote,
-    originalUpdateContent,
-  };
 
   AssistantMessageComponent.prototype.updateContent = function (
     message: AssistantMessage,
@@ -123,11 +83,7 @@ export function installCalmAssistantLayout(): void {
             content: message.content.filter(
               (block) =>
                 !(hideThinking && block.type === "thinking") &&
-                !(
-                  hideWorkingNote &&
-                  block.type === "text" &&
-                  !hasExplicitCaptainFacingPhase(block)
-                ),
+                !(hideWorkingNote && block.type === "text"),
             ),
           }
         : message;

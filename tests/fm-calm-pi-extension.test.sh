@@ -1370,9 +1370,10 @@ test_calm_mid_turn_working_notes() {
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
   record_pi_version_evidence "$version" "Pi calm mid-turn presentation"
 
-  fixture="$TMP_ROOT/calm-mid-turn"
+  fixture="$TMP_ROOT/calm-mid-turn-${1:-fresh}"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ROOT/tests/fixtures/calm-upgrade/fm-calm-assistant-layout.ts" "$fixture/lib/legacy-assistant-layout.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
@@ -1384,7 +1385,7 @@ test_calm_mid_turn_working_notes() {
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
   output_file="$fixture/node-output"
-  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+  (cd "$fixture" && UPGRADE="${1:-fresh}" EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1589,6 +1590,23 @@ const requireHidden = (name, needle, context) => {
   }
 };
 
+if (process.env.UPGRADE === "upgrade") {
+  const legacy = await import("./lib/legacy-assistant-layout.ts");
+  legacy.installCalmAssistantLayout();
+  visibility.setCalmPresentation(true);
+  ui.setHiddenThinkingLabel("");
+  requireHidden("captainFacingBeforeTool", captainPreToolExplanation, "legacy Calm");
+  requireHidden("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "legacy Calm");
+  const upgraded = await import("./lib/fm-calm-assistant-layout.ts");
+  upgraded.installCalmAssistantLayout();
+  ui.setHiddenThinkingLabel("");
+  requireVisible("captainFacingBeforeTool", captainPreToolExplanation, "active upgrade");
+  requireVisible("captainFacingBeforeTool", supervisionReturnRule, "active upgrade");
+  requireHidden("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "active upgrade");
+  visibility.setCalmPresentation(false);
+  ui.setHiddenThinkingLabel(undefined);
+}
+
 let calm = await loadCalmExtension();
 if (calm.registeredTools.length !== 0) {
   throw new Error("Calm claimed built-in tools with no persisted preference");
@@ -1679,6 +1697,8 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   visibility.setCalmPresentation(false);
   ui.setHiddenThinkingLabel(undefined);
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  const reloadedLayout = await import(`./lib/fm-calm-assistant-layout.ts?reload=${encodeURIComponent(persisted)}`);
+  reloadedLayout.installCalmAssistantLayout();
   calm = await loadCalmExtension();
   if (calm.registeredTools.length !== 7) {
     throw new Error(
@@ -4087,6 +4107,12 @@ JS
   pass "Pi Calm native E2E preserves phase-marked pre-tool explanations and supervision/return guidance across redraw, export repaint, and restart while hiding unsigned narration, and retains working-ship, operational-row, Calm-off, persistence, export, and Ctrl+O behavior"
 }
 
+if [ "${1:-}" = mid-turn ]; then
+  test_calm_mid_turn_working_notes
+  test_calm_mid_turn_working_notes upgrade
+  exit 0
+fi
+
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
@@ -4095,6 +4121,7 @@ test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
+test_calm_mid_turn_working_notes upgrade
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
