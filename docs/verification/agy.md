@@ -178,7 +178,14 @@ Command:
 FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh | grep -E 'harness marker: agy'
 ```
 
-The real `agy 1.2.1` process reached the liveness check, but its tool invocation did not complete the marker probe within 180 seconds, so no passing marker output is recorded from this host.
+The binary auto-updated from 1.2.0 to 1.2.2 during verification.
+The marker probe uses AGY print mode with `gemini-3.8-flash-low`, from a temporary workspace, so it does not depend on the interactive pane responding to a tool prompt.
+
+Output:
+
+```text
+ok - harness marker: agy 1.2.2 exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process
+```
 
 Command:
 

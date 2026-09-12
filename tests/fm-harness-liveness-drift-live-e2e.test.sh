@@ -148,21 +148,25 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
 
   pass "harness liveness: $harness $version classifies alive"
   if [ "$harness" = agy ] && [ "$AGY_MARKER_PROBE" -eq 1 ]; then
-    marker_env="$LAB/agy-marker-env"
+    marker_count="$LAB/agy-marker-count"
     marker_harness="$LAB/agy-marker-harness"
-    printf -v marker_command \
-      "Use your shell tool to run exactly: env | grep '^ANTIGRAVITY_AGENT=' > %q; %q > %q; then reply MARKER_PROBE_DONE." \
-      "$marker_env" "$ROOT/bin/fm-harness.sh" "$marker_harness"
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" -l "$marker_command" \
-      || fail "agy ($version): could not submit the marker probe"
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter \
-      || fail "agy ($version): could not submit the marker probe"
-    for _ in $(seq 1 180); do
-      [ -s "$marker_env" ] && [ -s "$marker_harness" ] && break
-      sleep 1
-    done
-    grep -Fxq 'ANTIGRAVITY_AGENT=1' "$marker_env" \
-      || fail "agy ($version): the tool environment lacked ANTIGRAVITY_AGENT=1"
+    marker_reply="$LAB/agy-marker-reply"
+    printf -v marker_prompt \
+      "Use your shell tool to run exactly: env | grep -c ANTIGRAVITY_AGENT=1 > %q; %q > %q; then reply with only the number it printed." \
+      "$marker_count" "$ROOT/bin/fm-harness.sh" "$marker_harness"
+    (
+      cd "$LAB/wt" || exit 1
+      "$bin_path" --dangerously-skip-permissions --model gemini-3.8-flash-low \
+        --print "$marker_prompt" > "$marker_reply" 2>&1
+    ) || fail "agy ($version): print-mode marker probe failed"
+    marker_value=$(tr -d '[:space:]' < "$marker_count" 2>/dev/null || true)
+    case "$marker_value" in
+      ''|*[!0-9]*|0) fail "agy ($version): the tool environment lacked ANTIGRAVITY_AGENT=1" ;;
+    esac
+    marker_reply_value=$(tr -d '[:space:]' < "$marker_reply" 2>/dev/null || true)
+    case "$marker_reply_value" in
+      ''|*[!0-9]*|0) fail "agy ($version): print-mode marker reply was not a positive count" ;;
+    esac
     grep -Fxq agy "$marker_harness" \
       || fail "agy ($version): fm-harness.sh did not report agy from the tool process"
     pass "harness marker: agy $version exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process"
