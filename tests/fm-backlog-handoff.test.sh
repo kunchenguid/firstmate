@@ -48,6 +48,19 @@ inbox_body_stream() { # <state-dir> <task-id>
   done
 }
 
+# One line per durable inbox record's own body (fm_task_inbox_body prints no
+# trailing newline of its own, so inbox_body_stream's concatenation is not
+# usable when a caller needs to tell one record's body apart from another's).
+inbox_bodies_by_record() { # <state-dir> <task-id>
+  local rec
+  for rec in "$1/$2.inbox"/*.msg; do
+    [ -f "$rec" ] || continue
+    bash -c '. "$1"; fm_task_inbox_body "$2"' _ \
+      "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+    printf '\n'
+  done
+}
+
 inbox_record_count() { # <state-dir> <task-id>
   find "$1/$2.inbox" -maxdepth 1 -type f -name '*.msg' 2>/dev/null | wc -l | tr -d '[:space:]'
 }
@@ -1344,7 +1357,67 @@ EOF
   pass "registry entry without (home: ...) fails cleanly with has no home"
 }
 
+# Regression for a real 2026-08-25 incident (backlog item
+# handoff-nachricht-nennt-auftrag-nicht): the receiver's wake instruction used
+# to be one fixed line with no indication which task it named, so two
+# handoffs delivered close together were textually identical - the receiver
+# read the second as an unproven repeat of the first and blocked on it.
+test_two_consecutive_handoffs_name_their_own_items() {
+  local home="$TMP_ROOT/two-handoffs-main" sub="$TMP_ROOT/two-handoffs-sub" fakebin
+  local out1 out2 bodies first_line second_line
+  setup_homes "$home" "$sub"
+  mkdir -p "$sub/state" "$sub/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] postfach-uebergang-abschliessen - first routed item (repo: alpha)
+- [ ] vault-regelfragen-umsetzung - second routed item (repo: alpha)
+
+## Done
+EOF
+  printf '## Queued\n\n## Done\n' > "$sub/data/backlog.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/two-handoffs-fake")
+  out1="$TMP_ROOT/two-handoffs-1.out"
+  out2="$TMP_ROOT/two-handoffs-2.out"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/two-handoffs-tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/two-handoffs-fake/pane.txt" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$ROOT/bin/fm-backlog-handoff.sh" design postfach-uebergang-abschliessen \
+    > "$out1" 2>&1 \
+    || fail "first handoff failed: $(cat "$out1")"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/two-handoffs-tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/two-handoffs-fake/pane.txt" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$ROOT/bin/fm-backlog-handoff.sh" design vault-regelfragen-umsetzung \
+    > "$out2" 2>&1 \
+    || fail "second handoff failed: $(cat "$out2")"
+
+  bodies=$(inbox_body_stream "$home/state" design)
+  assert_contains "$bodies" 'New routed work is in your backlog.' \
+    "receiver inbox lost the fixed routed-work instruction"
+  assert_contains "$bodies" 'postfach-uebergang-abschliessen' \
+    "first handoff's message did not name its own item"
+  assert_contains "$bodies" 'vault-regelfragen-umsetzung' \
+    "second handoff's message did not name its own item"
+
+  bodies=$(inbox_bodies_by_record "$home/state" design)
+  first_line=$(printf '%s\n' "$bodies" | grep -F 'postfach-uebergang-abschliessen')
+  second_line=$(printf '%s\n' "$bodies" | grep -F 'vault-regelfragen-umsetzung')
+  [ "$first_line" != "$second_line" ] \
+    || fail "two handoffs for different items produced the same message text: $first_line"
+  printf '%s\n' "$first_line" | grep -qF 'vault-regelfragen-umsetzung' \
+    && fail "the first handoff's message also named the second item: $first_line"
+  printf '%s\n' "$second_line" | grep -qF 'postfach-uebergang-abschliessen' \
+    && fail "the second handoff's message also named the first item: $second_line"
+
+  pass "two consecutive handoffs each name their own item, so they are never textually identical"
+}
+
 test_handoff_wakes_live_local_receiver
+test_two_consecutive_handoffs_name_their_own_items
 test_failed_wake_retries_when_the_item_is_already_present
 test_known_receiver_failure_remains_retryable_after_grace
 test_known_failure_restores_retry_after_reconciliation_race

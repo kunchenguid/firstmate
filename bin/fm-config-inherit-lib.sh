@@ -221,6 +221,7 @@ warn_inheritable_config_error() {
 shared_captain_header_valid() {
   local src=$1 head
   head=$(sed -n '1,12p' "$src" 2>/dev/null) || return 1
+  head=$(printf '%s' "$head" | tr '\n' ' ' | tr -s '[:space:]' ' ')
   case "$head" in *main-authoritative*) ;; *) return 1 ;; esac
   case "$head" in *"read-only in secondmate homes"*) ;; *) return 1 ;; esac
   case "$head" in *"must not be edited there"*) ;; *) return 1 ;; esac
