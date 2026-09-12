@@ -273,14 +273,21 @@ fm_pi_extension_version() {
 # fm_pi_extension_loaded <marker> <expected-version> <session-lock>
 # True when <marker> records <expected-version> and names the session process in
 # <session-lock>, i.e. the session holding this home loaded exactly this build.
+# A dead child marker is accepted as stale-child evidence when the lock owner is
+# still alive, because a probe child can replace a marker without loading the
+# live session's extensions.
 fm_pi_extension_loaded() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")
-  [ -n "$marker_pid" ] || return 1
-  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+  case "$marker_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$marker_version" = "$expected_version" ] || return 1
+  [ "$marker_pid" = "$lock_pid" ] && return 0
+  fm_pid_alive "$lock_pid" || return 1
+  fm_pid_alive "$marker_pid" && return 1
+  export FM_PI_EXTENSION_LOAD_STATUS=marker-stale-child
 }
 
 # fm_pi_extension_owns_supervision <state> <root>

@@ -19,6 +19,7 @@ make_spawn_pi_probe() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --help ]; then
+  [ -z "${FM_PI_HELP_LOG:-}" ] || printf '%s\n' "$0" >> "$FM_PI_HELP_LOG"
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
   else
@@ -933,6 +934,27 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
+test_pi_tui_mode_probe_is_cached_per_binary_path() {
+  local rec id1 id2 help_log out status
+  id1=profile-pi-tui-cache-a-z8e
+  id2=profile-pi-tui-cache-b-z8f
+  rec=$(make_spawn_case profile-pi-tui-cache pi "$id1" "$id2")
+  read_case_record "$rec"
+  help_log="$CASE_DIR/pi-help.log"
+
+  out=$(FM_PI_HELP_LOG="$help_log" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "first cached Pi probe spawn should succeed: $out"
+  out=$(FM_PI_HELP_LOG="$help_log" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "second cached Pi probe spawn should succeed: $out"
+  [ "$(wc -l < "$help_log")" -eq 1 ] || fail "Pi help probe was not cached per binary path"
+
+  pass "Pi TUI support probe is cached per resolved binary path"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -1544,6 +1566,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
 test_pi_firstmate_context_is_scoped_to_project_and_worker_kind
 test_pi_threads_model_and_max_effort
+test_pi_tui_mode_probe_is_cached_per_binary_path
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

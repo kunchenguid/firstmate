@@ -114,6 +114,47 @@ SH
   pass "Pi task launch marks its process before project-local extensions load"
 }
 
+test_pi_primary_extensions_do_not_mark_from_descendant() {
+  local repo home guard out status
+  repo="$TMP_ROOT/pi-descendant-marker-root"
+  home="$TMP_ROOT/pi-descendant-marker-home"
+  guard="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions" "$home/state"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$guard"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" GUARD="$guard" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/.pi-watch-extension-loaded`, "sentinel-watch\\nsentinel-pid\\n");
+writeFileSync(`${state}/.pi-turnend-extension-loaded`, "sentinel-turnend\\nsentinel-pid\\n");
+const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+  import { pathToFileURL } from "node:url";
+  const api = { on() {}, events: { on() {}, emit() {} }, registerCommand() {} };
+  const watch = await import(pathToFileURL(process.env.PLUGIN).href);
+  const guard = await import(pathToFileURL(process.env.GUARD).href);
+  watch.default(api);
+  guard.default(api);
+`], { env: process.env, encoding: "utf8" });
+if (child.status !== 0) throw new Error(child.stderr || child.stdout);
+for (const [file, expected] of [
+  [".pi-watch-extension-loaded", "sentinel-watch\\nsentinel-pid\\n"],
+  [".pi-turnend-extension-loaded", "sentinel-turnend\\nsentinel-pid\\n"],
+]) {
+  const actual = readFileSync(`${state}/${file}`, "utf8");
+  if (actual !== expected) throw new Error(`${file} was overwritten: ${actual}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "descendant extension loads must not overwrite primary markers: $out"
+  [ -z "$out" ] || fail "descendant marker test printed output: $out"
+  pass "Pi primary extensions leave markers owned by the lock process"
+}
+
 test_pi_primary_extensions_stand_down_for_task_workers() {
   local repo home plugin guard supervisor out status
   repo="$TMP_ROOT/pi-worker-role-root"
@@ -4409,6 +4450,7 @@ EOF
 }
 
 test_pi_spawn_marks_the_task_process
+test_pi_primary_extensions_do_not_mark_from_descendant
 test_pi_primary_extensions_stand_down_for_task_workers
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result

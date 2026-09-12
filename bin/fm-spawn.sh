@@ -2187,9 +2187,22 @@ resolve_pi_executable() {
 # before composing the optional regular-TUI flag. An absent or inconclusive probe
 # omits the flag so older Pi versions can still spawn.
 pi_supports_tui_mode() {
-  local executable=$1 help
+  local executable=$1 help cache cached
+  cache="$STATE/.pi-tui-mode-cache"
+  if [ -f "$cache" ]; then
+    cached=$(awk -F '\t' -v path="$executable" '$1 == path { value=$2 } END { if (value != "") print value }' "$cache")
+    case "$cached" in
+      1) return 0 ;;
+      0) return 1 ;;
+    esac
+  fi
   help=$("$executable" --help 2>&1) || return 1
-  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
+  if printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'; then
+    printf '%s\t1\n' "$executable" >> "$cache"
+    return 0
+  fi
+  printf '%s\t0\n' "$executable" >> "$cache"
+  return 1
 }
 
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
