@@ -357,7 +357,7 @@ printf 'pod-beta\n' > "$H/api/pods"
 write_record "$H" t1 "pod=pod-typo" "deadline_epoch=$(( $(date +%s) + 3600 ))"
 run_loop "$H" t1 4 "$FB" >/dev/null
 assert_contains "$(open_decisions "$H/state/t1.status")" 'never seen pod pod-typo' \
-  'cross-pod clear: the warning about the typo\'"'"'d pod never opened, so this case would pass vacuously'
+  'cross-pod clear: the warning about the mistyped pod never opened, so this case would pass vacuously'
 # The operator retires that watch and re-arms the task on the pod that is real.
 FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
 write_record "$H" t1 "pod=pod-beta" "deadline_epoch=$(( $(date +%s) + 3600 ))"
