@@ -390,4 +390,249 @@ assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
 assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
 pass "mutated action bytes are refused before claiming the fire"
 
+# --- an action environment reaches the action, and its NAME is validated ------
+H="$TMP_ROOT/h-action-env"; new_home "$H"
+ENVLOG="$TMP_ROOT/action-env-act"
+# An action that records the one variable the assignment carries, so "the
+# environment reached the action" is observable rather than inferred.
+ENVACT="$TMP_ROOT/env-act.sh"
+cat > "$ENVACT" <<'SH'
+#!/usr/bin/env bash
+printf 'FM_TEST_HOME=%s\n' "${FM_TEST_HOME:-unset}" >> "$1"
+SH
+chmod +x "$ENVACT"
+if when "$H" arm bad-env --action-env 'not a name=x' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/bad-env.err"; then
+  fail "an assignment with an invalid NAME must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/bad-env.err" "the refusal names the offending option"
+# A shell-safe NAME is not enough: an interpreter/loader-hijacking name must be
+# refused too, or the argv[0] trust binding is worthless for any action that is
+# itself a `#!/usr/bin/env`-shebang script.
+if when "$H" arm hijack-env --action-env 'LD_PRELOAD=/tmp/evil.so' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/hijack-env.err"; then
+  fail "an interpreter/loader-hijacking NAME must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/hijack-env.err" "the LD_PRELOAD refusal names the offending option"
+assert_absent "$H/state/when/when-hijack-env.spec" "a refused LD_PRELOAD assignment is never armed"
+if when "$H" arm hijack-path --action-env 'PATH=/tmp/evil-bin' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/hijack-path.err"; then
+  fail "a PATH action-env assignment must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/hijack-path.err" "the PATH refusal names the offending option"
+when "$H" arm action-env --interval 0.1 --stable 1 \
+  --action-env "FM_TEST_HOME=$H" \
+  --condition true --action "$ENVACT" "$ENVLOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-action-env || fail "the action-env watch produced no outcome"
+assert_grep "FM_TEST_HOME=$H" "$ENVLOG" "the action ran under the registered assignment"
+RESULT=$(first_result "$H" when-action-env)
+assert_grep 'status: fired' "$RESULT" "an action with an environment still fires normally"
+pass "an action environment reaches the action and an invalid NAME is refused"
+
+# --- a repeat watch rings again after each fire, silently --------------------
+# The condition is true exactly while a trigger file exists, so the test drives
+# the watch through two independent "changes" and can prove the second ring is
+# a real re-arm rather than a leftover from the first.
+H="$TMP_ROOT/h-repeat"; new_home "$H"
+REPEAT_TRIG="$TMP_ROOT/repeat-trigger"
+REPEATLOG="$TMP_ROOT/repeat-act"
+when "$H" arm repeat --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$REPEAT_TRIG" "$TMP_ROOT/repeat-count" \
+  --action "$ACT" "$REPEATLOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_file "$TMP_ROOT/repeat-count" || fail "the repeat condition was never polled"
+: > "$REPEAT_TRIG"
+wait_for_result "$H" when-repeat || fail "the repeat watch captured no first outcome"
+RESULT=$(first_result "$H" when-repeat)
+assert_grep 'status: fired' "$RESULT" "the first repeat fire is recorded as fired"
+assert_grep 'repeat: continues' "$RESULT" "the first repeat fire declares that the watch continues"
+assert_contains "$(when "$H" classify "$RESULT")" fired "classify still reads a repeat fire as fired"
+if when "$H" terminal "$RESULT"; then
+  fail "a repeat watch's successful fire must not be terminal"
+fi
+when "$H" silent "$RESULT" || fail "a repeat watch's successful fire must be silent"
+assert_present "$H/state/when/when-repeat.fires" "the fire journal records the fire"
+# The registration survives, because only a terminal outcome retires a source.
+assert_present "$H/state/procevent/when-repeat.source" "a repeat fire keeps the watch registered"
+# Nothing woke firstmate, and the runner acknowledged the outcome itself, so a
+# later reconcile cannot re-announce it either.
+assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
+  "a successful repeat fire never reaches the durable wake queue"
+SEQ=$(basename "$RESULT" | sed 's/^when-repeat\.//; s/\.result$//')
+assert_contains "$(pe "$H" handled when-repeat "$SEQ")" "already-handled" \
+  "the runner recorded the silent repeat fire as handled itself"
+# A second change must ring again, which only a re-armed watch can do. The
+# prior fire's runner already exited, so a fresh reconcile must start a new
+# one and that runner must actually observe the trigger absent at least once
+# before it reappears - otherwise this would only prove the still-true-level
+# refire bug, not a real edge.
+rm -f -- "$REPEAT_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$REPEATLOG")" -ge 1 ] && break
+  sleep 0.1
+done
+pe "$H" reconcile >/dev/null 2>&1
+sleep 0.3
+: > "$REPEAT_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$REPEATLOG")" -ge 2 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$REPEATLOG")" -ge 2 ] || fail "the repeat watch never rang a second time"
+assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
+  "no repeat fire wakes firstmate"
+pass "a repeat watch rings again after each fire without waking firstmate"
+
+# --- a repeat watch never refires on a level that never went false -----------
+# After a fire, the prior runner has already exited; a later reconcile starts
+# a fresh one. If the condition is still (not newly) true, that is not "Y
+# changed" and must not ring the action again - only an actual false poll in
+# between may re-arm the watch for its next fire.
+H="$TMP_ROOT/h-repeat-level"; new_home "$H"
+LEVEL_TRIG="$TMP_ROOT/repeat-level-trigger"
+LEVEL_LOG="$TMP_ROOT/repeat-level-act"
+: > "$LEVEL_TRIG"
+when "$H" arm level --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$LEVEL_TRIG" "$TMP_ROOT/repeat-level-count" \
+  --action "$ACT" "$LEVEL_LOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-level || fail "the still-true repeat watch captured no first outcome"
+[ "$(count_lines "$LEVEL_LOG")" -eq 1 ] || fail "the first fire must run the action exactly once"
+# The trigger is left in place (never removed), so every later reconcile sees
+# the same continuously-true level, not a new change.
+for _ in $(seq 1 15); do
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$LEVEL_LOG")" -eq 1 ] || \
+  fail "a condition that never went false must not refire the action a second time"
+# The watch is not stuck: a genuine false-then-true edge still rings it again.
+rm -f -- "$LEVEL_TRIG"
+pe "$H" reconcile >/dev/null 2>&1
+sleep 0.3
+: > "$LEVEL_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$LEVEL_LOG")" -ge 2 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$LEVEL_LOG")" -ge 2 ] || fail "a real edge after the level must still ring the watch again"
+pass "a repeat watch never refires on a level that never went false"
+
+# --- a failed edge-marker write escalates to a captured terminal outcome ----
+# A regression guard for the exact bug the edge marker exists to prevent: if
+# the write that records "the next stable-true is not a new edge" itself
+# fails, the fix must escalate to a captured terminal outcome (status fired,
+# no `repeat: continues`) instead of the old `|| true` swallow - because a
+# swallowed failure left no marker behind, and cmd_terminal classifies any
+# fired result without `repeat: continues` as terminal, so the generic runner
+# retires the source instead of leaving a live registration that a level which
+# never goes false could refire on the very next reconcile. The write is
+# forced to fail deterministically by pre-occupying the marker's path with a
+# directory, which `: > path` can never truncate.
+H="$TMP_ROOT/h-repeat-edgefail"; new_home "$H"
+EDGEFAIL_TRIG="$TMP_ROOT/repeat-edgefail-trigger"
+EDGEFAIL_LOG="$TMP_ROOT/repeat-edgefail-act"
+rm -f -- "$EDGEFAIL_TRIG"
+when "$H" arm edgefail --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$EDGEFAIL_TRIG" "$TMP_ROOT/repeat-edgefail-count" \
+  --action "$ACT" "$EDGEFAIL_LOG" >/dev/null
+mkdir -p "$H/state/when/when-edgefail.needs-edge"
+# The obstruction directory also makes the runner start with needs_edge=1 (the
+# marker "exists"), so the runner must observe at least one real false poll
+# before it will count a true poll towards firing at all - drive that with the
+# same reconcile-then-wait-then-trigger idiom the other repeat tests use,
+# otherwise this would only prove the runner never fires, not that it fires
+# once and stops safely.
+pe "$H" reconcile >/dev/null
+wait_for_file "$TMP_ROOT/repeat-edgefail-count" || fail "the edge-marker-write-failure condition was never polled"
+: > "$EDGEFAIL_TRIG"
+wait_for_result "$H" when-edgefail || fail "the edge-marker-write-failure watch captured no first outcome"
+RESULT=$(first_result "$H" when-edgefail)
+assert_grep 'status: fired' "$RESULT" "the fire itself is still recorded as fired"
+assert_not_contains "$(cat "$RESULT")" 'repeat: continues' \
+  "a failed edge-marker write must not declare the watch continues"
+assert_grep 'edge marker could not be written' "$RESULT" \
+  "the captured outcome names the edge-marker write failure"
+[ "$(count_lines "$EDGEFAIL_LOG")" -eq 1 ] || fail "the fire must still run the action exactly once"
+when "$H" terminal "$RESULT" || fail "a failed edge-marker write must be terminal, exactly like a failed journal write"
+if when "$H" silent "$RESULT"; then
+  fail "a failed edge-marker write must never be silenced"
+fi
+# The generic runner retires a terminal source: no restart, no second fire -
+# this is the actual mechanism that stops the level from refiring, not a
+# leftover fired-claim file.
+for _ in $(seq 1 100); do
+  [ ! -e "$H/state/procevent/when-edgefail.source" ] && break
+  sleep 0.1
+done
+assert_absent "$H/state/procevent/when-edgefail.source" "a failed edge-marker write retires the watch"
+assert_contains "$(wake_payloads "$H")" "procevent when when-edgefail" \
+  "a fire whose edge marker could not be written must wake firstmate, not stay silent"
+# The trigger is left in place (still continuously true); since the watch is
+# retired, no further reconcile may run the action again.
+for _ in $(seq 1 15); do
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$EDGEFAIL_LOG")" -eq 1 ] || \
+  fail "a retired watch must never refire, even on a level that never went false"
+pass "a failed edge-marker write escalates to a captured terminal outcome and retires the watch"
+
+# --- retire stops a repeat watch ---------------------------------------------
+STOPPED=$(count_lines "$REPEATLOG")
+when "$H" retire repeat >/dev/null
+assert_absent "$H/state/procevent/when-repeat.source" "retire drops the repeat registration"
+assert_absent "$H/state/when/when-repeat.fires" "retire removes the fire journal"
+pe "$H" reconcile >/dev/null
+sleep 0.6
+assert_contains "$(count_lines "$REPEATLOG")" "$STOPPED" "a retired repeat watch never rings again"
+pass "retire stops a repeat watch"
+
+# --- a failing action still ends a repeat watch and wakes firstmate ----------
+H="$TMP_ROOT/h-repeat-fail"; new_home "$H"
+REPEATFAILLOG="$TMP_ROOT/repeat-fail-act"
+when "$H" arm repeat-fail --interval 0.1 --stable 1 --repeat \
+  --condition true --action "$ACT" "$REPEATFAILLOG" 9 >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-repeat-fail || fail "the failing repeat action captured no outcome"
+RESULT=$(first_result "$H" when-repeat-fail)
+assert_grep 'status: action-failed' "$RESULT" "the failure is captured under repeat too"
+assert_grep 'action_exit: 9' "$RESULT" "the exact exit code survives"
+when "$H" terminal "$RESULT" || fail "a failed action must stay terminal under repeat"
+if when "$H" silent "$RESULT"; then
+  fail "a failed action must never be silenced"
+fi
+for _ in $(seq 1 100); do
+  [ ! -e "$H/state/procevent/when-repeat-fail.source" ] && break
+  sleep 0.1
+done
+assert_absent "$H/state/procevent/when-repeat-fail.source" "a failed repeat watch retires itself"
+assert_contains "$(wake_payloads "$H")" "procevent when when-repeat-fail" \
+  "the failure reaches the durable wake queue"
+pass "a failing action ends a repeat watch and wakes firstmate"
+
+# --- the shape fm-spawn arms: a repeat watch whose action rings a task -------
+# fm-spawn arms this watch for every no-mistakes ship, and fm-send refuses to
+# resolve a target without an explicit FM_HOME, so the assignment is what makes
+# the ring land at all. This exercises that exact shape end to end rather than
+# reading fm-spawn's source.
+H="$TMP_ROOT/h-spawn-shape"; new_home "$H"
+RING_TASK=ring-task
+printf 'window=none\nbackend=tmux\n' > "$H/state/$RING_TASK.meta"
+when "$H" arm "nm-state-$RING_TASK" --interval 0.1 --stable 1 --repeat \
+  --action-env "FM_HOME=$H" \
+  --condition true \
+  --action "$ROOT/bin/fm-send.sh" "$RING_TASK" 'no-mistakes state changed' >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" "when-nm-state-$RING_TASK" || fail "the spawn-shaped watch captured no outcome"
+RESULT=$(first_result "$H" "when-nm-state-$RING_TASK")
+assert_grep 'status: fired' "$RESULT" "the ring succeeded, so FM_HOME reached fm-send"
+assert_grep 'repeat: continues' "$RESULT" "the spawn-shaped watch keeps watching"
+assert_present "$H/state/$RING_TASK.inbox" "the ring landed in the task's steering inbox"
+when "$H" retire "nm-state-$RING_TASK" >/dev/null
+pass "the watch shape fm-spawn arms rings a task and keeps watching"
+
 printf 'all fm-procevent-when tests passed\n'
