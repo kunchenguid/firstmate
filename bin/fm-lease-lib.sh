@@ -59,9 +59,9 @@
 #     backlog lease guard in this scope.
 #
 # Sourced by bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh,
-# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
-# bin/fm-lease.sh. Callers must have $STATE resolved before calling. No side
-# effects on source. set -u / set -e safe.
+# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh,
+# bin/fm-watch-arm.sh, and bin/fm-lease.sh. Callers must have $STATE resolved
+# before calling. No side effects on source. set -u / set -e safe.
 
 # Distinct from usage errors (2), the gate refusal (3), and fm-send's
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
