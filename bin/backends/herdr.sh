@@ -3086,7 +3086,7 @@ fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pendi
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
 # RENDERED busy footer, the same delivery-only signal bin/fm-tmux-lib.sh's
 # fm_pane_busy_state reads, scanning the same 40-line tail folded to its last
-# 12 non-blank rows. This is NOT a worker-state source: herdr's native
+# 12 non-blank rows for non-AGY harnesses. This is NOT a worker-state source: herdr's native
 # agent-state (fm_backend_herdr_busy_state) stays the semantic owner, and this
 # read exists only so the submit core below can confirm a delivery for a
 # harness whose native state never transitions. Without a harness argument the
@@ -3096,7 +3096,12 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
   local target=$1 harness=${2:-} cap visible
   cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
   printf '%s' "$cap" | grep -q -v '^[[:space:]]*$' || { printf 'unknown'; return 0; }
-  if printf '%s' "$cap" | fm_busy_lines_match "$harness"; then
+  if [ "$harness" = agy ]; then
+    visible=$cap
+  else
+    visible=$(printf '%s' "$cap" | grep -v '^[[:space:]]*$' | tail -12)
+  fi
+  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else
     printf 'idle'

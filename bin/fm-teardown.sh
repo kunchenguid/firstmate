@@ -3051,12 +3051,6 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
-    if [ "$child_harness" = agy ]; then
-      if ! rm -rf "$sub_state/$child_id.agy-hooks"; then
-        echo "error: failed to remove agy hook root '$sub_state/$child_id.agy-hooks'; retaining child record" >&2
-        return 1
-      fi
-    fi
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -3476,12 +3470,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-if [ "$TEARDOWN_META_HARNESS" = agy ]; then
-  if ! rm -rf "$STATE/$ID.agy-hooks"; then
-    echo "error: failed to remove agy hook root '$STATE/$ID.agy-hooks'; retaining task record" >&2
-    exit 1
-  fi
-fi
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

@@ -2367,7 +2367,7 @@ SH
   [ "$rc" -ne 0 ] || fail "agy-child-hook-cleanup: teardown succeeded after hook-root removal failed"
   [ -e "$home/state/child-agy.meta" ] || fail "agy-child-hook-cleanup: failed hook cleanup erased child metadata"
   [ -d "$hook_root" ] || fail "agy-child-hook-cleanup: failed hook cleanup erased the hook root"
-  assert_grep "failed to remove agy hook root '$hook_root'" "$case_dir/stderr" \
+  assert_grep "agy hook root $hook_root could not be removed; retaining" "$case_dir/stderr" \
     "agy-child-hook-cleanup: failure did not report the retained hook root"
 
   rm -f "$case_dir/fakebin/rm"
@@ -2404,7 +2404,7 @@ SH
   [ "$rc" -ne 0 ] || fail "agy-normal-hook-cleanup: teardown succeeded after hook-root removal failed"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "agy-normal-hook-cleanup: failed hook cleanup erased task metadata"
   [ -d "$hook_root" ] || fail "agy-normal-hook-cleanup: failed hook cleanup erased the hook root"
-  assert_grep "failed to remove agy hook root '$hook_root'" "$case_dir/stderr" \
+  assert_grep "agy hook root $hook_root could not be removed; retaining" "$case_dir/stderr" \
     "agy-normal-hook-cleanup: failure did not report the retained hook root"
   pass "normal AGY teardown retains metadata until hook cleanup succeeds"
 }

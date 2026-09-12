@@ -4035,7 +4035,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
-  RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
 fi
@@ -4317,6 +4316,7 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; then
   SPAWN_FRESH_WIRING_PENDING=0
+  RELAUNCH_REPLACEMENT_PENDING=0
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
