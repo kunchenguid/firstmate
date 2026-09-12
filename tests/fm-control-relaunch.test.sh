@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. An open PR's authenticated merge poll survives the transaction metadata
+#      that a relaunch appends after the preserved PR fields.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -25,11 +27,15 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -198,6 +204,26 @@ run_spawn() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
+}
+
+arm_pr_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  mkdir -p "$dir/pr-root/bin"
+  cat > "$dir/pr-root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/pr-root/bin/fm-guard.sh"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'pr view') printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  FM_ROOT_OVERRIDE="$dir/pr-root" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+    "$PR_CHECK" "$id" "$url" >/dev/null
 }
 
 meta_field() {  # <case-dir> <id> <key>
@@ -384,6 +410,30 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_open_pr_poll_authenticated() {
+  local dir untouched out rc url pr_line tx_line
+  url=https://github.com/example/repo/pull/19
+
+  untouched=$(new_case open-pr-untouched rl43)
+  add_ship_task "$untouched" rl43 claude
+  arm_pr_poll "$untouched" rl43 "$url" || fail "could not arm the untouched PR poll fixture"
+  fm_pr_poll_artifacts_valid "$untouched/home/state" rl43 "$PR_POLL" \
+    || fail "an open PR poll became invalid without a relaunch"
+
+  dir=$(new_case open-pr-relaunch rl44)
+  add_ship_task "$dir" rl44 claude
+  arm_pr_poll "$dir" rl44 "$url" || fail "could not arm the relaunched PR poll fixture"
+  out=$(run_control "$dir" rl44 relaunch --note "continue watching the open PR"); rc=$?
+  expect_code 0 "$rc" "an open-PR task should relaunch successfully"$'\n'"$out"
+  pr_line=$(grep -n '^pr=' "$dir/home/state/rl44.meta" | cut -d: -f1)
+  tx_line=$(grep -n '^control_relaunch_tx=' "$dir/home/state/rl44.meta" | cut -d: -f1)
+  [ -n "$pr_line" ] && [ -n "$tx_line" ] && [ "$tx_line" -gt "$pr_line" ] \
+    || fail "the relaunch fixture did not append its transaction marker after PR metadata"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl44 "$PR_POLL" \
+    || fail "relaunch invalidated the open PR poll after appending its transaction marker"
+  pass "fm-control relaunch: an appended transaction marker leaves open PR polling authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1561,6 +1611,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_open_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
