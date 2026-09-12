@@ -349,6 +349,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         settle({ kind: "failed" });
         return;
       }
+      markLoaded();
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) {
         settle({ kind: "empty" });

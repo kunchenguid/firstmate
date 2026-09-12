@@ -487,17 +487,22 @@ SH
 case "$*" in *fm-watch-arm.sh*'&'*) printf 'fm watcher-arm seatbelt: blocked\n' >&2; exit 2 ;; esac; exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/fm-cd-pretool-check.sh"
-  # shellcheck disable=SC2016 # $2 expands in the generated script
-  printf '#!/usr/bin/env bash\nprintf "OMP DIGEST source=%%s\\n" "$2"\n' > "$repo/bin/fm-sessionstart-run.sh"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_SESSION_PID:?}" > "${FM_HOME:?}/state/.lock"
+printf 'OMP DIGEST source=%s\n' "$2"
+SH
   chmod +x "$repo/bin/"*.sh
   out=$(FM_GUARD_LOG="$TMP_ROOT/guard/guard.log" FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+import { readFileSync, existsSync } from "node:fs";
+process.env.FM_TEST_SESSION_PID = String(process.ppid);
 const handlers = new Map();
 const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
 const mod = await import(pathToFileURL(process.env.EXT).href);
 mod.default(pi);
+const markerPath = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
+if (existsSync(`${process.env.FM_HOME}/state/.lock`) || existsSync(markerPath)) throw new Error("fresh startup must begin without a lock or marker");
 for (const name of ["session_start", "before_agent_start", "session_compact", "session_shutdown", "tool_call", "session_stop"]) {
   if (!handlers.has(name)) throw new Error(`${name} handler was not registered`);
 }
@@ -507,6 +512,7 @@ handlers.get("session_start")({ type: "session_start" }, ctx);
 const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "hi" }, ctx);
 if (!first?.message?.content?.includes("FIRSTMATE_OP: v1 session-start: OMP DIGEST source=startup")) throw new Error(`first start did not deliver a startup digest: ${JSON.stringify(first)}`);
 if (first.message.display !== false || first.message.customType !== "firstmate-sessionstart-nudge") throw new Error("digest message lost its persistent shape");
+if (readFileSync(markerPath, "utf8").split("\n")[1] !== process.env.FM_TEST_SESSION_PID) throw new Error("startup must publish the newly acquired ancestor lock identity");
 // A later in-process session_start is a replacement and maps to clear.
 handlers.get("session_start")({ type: "session_start" }, ctx);
 const second = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "hi" }, ctx);
