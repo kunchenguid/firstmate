@@ -31,8 +31,9 @@
 #     decision JSON retained so a check killed between report and queue delivery
 #     cannot lose the action
 #   receipts/<incidentId>.json  (immutable once created; no-clobber hard link)
-#     {version, incidentId, action, sourceHarness, sourceProvider,
-#      destinationHarness, destinationProvider, stowReceiptPath, reservedAt}
+#     {version, incidentId, action, sourcePid, sourceSessionId, sourceHarness,
+#      sourceProvider, destinationHarness, destinationProvider, stowReceiptPath,
+#      reservedAt}
 #   outcomes/<incidentId>.json
 #     {version, incidentId, stage: waiting-idle|exiting|launching|started|failed,
 #      reason, helperEndpoint, updatedAt}
@@ -54,9 +55,10 @@
 # Requires python3 (preflighted at arm). The helper never uses shell `&`;
 # it runs in a backend-owned terminal the way bin/fm-afk-launch.sh does, waits
 # bounded for the primary pane to go idle, proves the pane occupant still matches
-# the bound source pid/harness before sending exit once via
-# fm_control_exit_command + fm_backend_send_text_submit, and launches only after
-# the old pid is gone and the pane process predicate is shell-only.
+# the source pid/session/harness reserved on the immutable receipt before
+# sending exit once via fm_control_exit_command + fm_backend_send_text_submit,
+# and launches only after the old pid is gone and the pane process predicate is
+# shell-only.
 #
 # Residual limit: a successor that reaches a login/auth prompt still classifies
 # as a live agent; only the check-side reconciliation alert (started with no new
@@ -671,7 +673,7 @@ pr_quota_verdict() {  # <provider> <quota-json>
           else
             {provider:$provider,
              exhausted: ($reliable | map({id, kind, resetsAt, percentUsed})),
-             reliability:(if $r > 0 then "reliable" else "reliable" end),
+             reliability:"reliable",
              ambiguousReset:false}
           end
       end
@@ -1096,24 +1098,28 @@ pr_helper_endpoint_close() {  # <endpoint>
 }
 
 pr_outcome_write() {  # <incident> <stage> <reason> [<helper-endpoint>]
-  local id=$1 stage=$2 reason=$3 endpoint=${4:-} existing
-  pr_ensure_dir || return 1
+  local id=$1 stage=$2 reason=$3 endpoint=${4:-} existing record_rc=0
   if [ -z "$endpoint" ] && [ -f "$PR_DIR/outcomes/$id.json" ]; then
     existing=$(jq -r '.helperEndpoint // empty' "$PR_DIR/outcomes/$id.json" 2>/dev/null || true)
     endpoint=$existing
   fi
-  pr_write_json_atomic "$PR_DIR/outcomes/$id.json" "$(jq -nc \
-    --argjson v "$SCHEMA_VERSION" \
-    --arg id "$id" \
-    --arg stage "$stage" \
-    --arg reason "$reason" \
-    --arg endpoint "$endpoint" \
-    --argjson t "$(pr_now)" \
-    '{version:$v, incidentId:$id, stage:$stage, reason:$reason, updatedAt:$t}
-     + if $endpoint == "" then {} else {helperEndpoint:$endpoint} end')" || return 1
+  if ! pr_ensure_dir; then
+    record_rc=1
+  else
+    pr_write_json_atomic "$PR_DIR/outcomes/$id.json" "$(jq -nc \
+      --argjson v "$SCHEMA_VERSION" \
+      --arg id "$id" \
+      --arg stage "$stage" \
+      --arg reason "$reason" \
+      --arg endpoint "$endpoint" \
+      --argjson t "$(pr_now)" \
+      '{version:$v, incidentId:$id, stage:$stage, reason:$reason, updatedAt:$t}
+       + if $endpoint == "" then {} else {helperEndpoint:$endpoint} end')" || record_rc=1
+  fi
   case "$stage" in
     started|failed) pr_helper_endpoint_close "$endpoint" || true ;;
   esac
+  return "$record_rc"
 }
 
 pr_capture_argv() {  # <pid> <dest>
@@ -1506,6 +1512,13 @@ action_commit() {
 
   local pid argv_file launch_cmd
   pid=$(jq -r '.pid' "$PR_DIR/binding.json")
+  case "$pid" in
+    ''|*[!0-9]*)
+      pr_lock_release
+      printf 'fm-primary-resource: binding pid is not a process id\n' >&2
+      return 1
+      ;;
+  esac
   argv_file="$PR_DIR/launch/$incident.argv"
   pr_ensure_dir || { pr_lock_release; return 1; }
 
@@ -1558,6 +1571,8 @@ EOF
     --argjson v "$SCHEMA_VERSION" \
     --arg id "$incident" \
     --arg action "$action" \
+    --argjson spid "$pid" \
+    --arg ssid "$generation" \
     --arg sh "$src_h" \
     --arg sp "${src_p:-}" \
     --arg dh "$dest_h" \
@@ -1566,9 +1581,9 @@ EOF
     --arg stow "$stow" \
     --argjson ra "$reserved" \
     --argjson claims "$window_claims" \
-    '{version:$v, incidentId:$id, action:$action, sourceHarness:$sh, sourceProvider:$sp,
-      destinationHarness:$dh, destinationProvider:$dp, generation:$gen, stowReceiptPath:$stow,
-      reservedAt:$ra, windowClaims:$claims}')
+    '{version:$v, incidentId:$id, action:$action, sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:$sh, sourceProvider:$sp, destinationHarness:$dh, destinationProvider:$dp,
+      generation:$gen, stowReceiptPath:$stow, reservedAt:$ra, windowClaims:$claims}')
 
   if ! pr_receipt_create_noclobber "$PR_DIR/receipts/$incident.json" "$receipt"; then
     pr_lock_release
@@ -1745,7 +1760,7 @@ action_helper() {
   [ -n "$incident" ] || die_usage "helper: incident id required"
   fm_pr_task_id_valid "$incident" || die_usage "helper: invalid incident id"
 
-  local receipt binding pid harness backend target launch_cmd exit_cmd dest_h
+  local receipt binding pid session harness backend target launch_cmd exit_cmd
   receipt="$PR_DIR/receipts/$incident.json"
   [ -f "$receipt" ] || { printf 'fm-primary-resource: missing receipt\n' >&2; exit 1; }
   jq -e --arg id "$incident" '.incidentId == $id' "$receipt" >/dev/null 2>&1 \
@@ -1756,10 +1771,18 @@ action_helper() {
   chmod 0600 "$PR_DIR/helper-ready/$incident" 2>/dev/null || true
   binding="$PR_DIR/binding.json"
   [ -f "$binding" ] || { pr_outcome_write "$incident" "failed" "missing-binding"; exit 1; }
-  pid=$(jq -r '.pid' "$binding")
+  pid=$(jq -r '.sourcePid // empty' "$receipt")
+  session=$(jq -r '.sourceSessionId // empty' "$receipt")
   harness=$(jq -r '.sourceHarness // empty' "$receipt")
-  [ -n "$harness" ] || harness=$(jq -r '.harness' "$binding")
-  dest_h=$(jq -r '.destinationHarness // empty' "$receipt")
+  case "$pid" in
+    ''|*[!0-9]*) pr_outcome_write "$incident" "failed" "missing-receipt-source"; exit 1 ;;
+  esac
+  [ -n "$session" ] || { pr_outcome_write "$incident" "failed" "missing-receipt-source"; exit 1; }
+  [ -n "$harness" ] || { pr_outcome_write "$incident" "failed" "missing-receipt-source"; exit 1; }
+  if [ "$(jq -r '.sessionId // empty' "$binding" 2>/dev/null)" != "$session" ]; then
+    pr_outcome_write "$incident" "failed" "source-session-changed"
+    exit 1
+  fi
   target=${FM_SUPERVISOR_TARGET:-}
   backend=${FM_SUPERVISOR_BACKEND:-}
   [ -n "$target" ] && [ -n "$backend" ] || {

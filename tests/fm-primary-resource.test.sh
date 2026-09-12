@@ -550,8 +550,9 @@ test_helper_busy_then_idle_fake_backend() {
     '{version:1, harness:"codex", pid:$p, sessionId:"b", transcriptPath:"/dev/null", boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
   incident=busy-inc-1
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", sourceProvider:"codex",
+  jq -nc --arg id "$incident" --argjson spid "$$" --arg ssid "b" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", sourceProvider:"codex",
       destinationHarness:"codex", destinationProvider:"codex", stowReceiptPath:"", reservedAt:1}' \
     > "$home/state/primary-resource/receipts/$incident.json"
   printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
@@ -578,8 +579,9 @@ test_helper_no_pgrep_fallback_records_failure() {
   jq -nc '{version:1, harness:"codex", pid:999999001, sessionId:"np", transcriptPath:"/dev/null", boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
   incident=nopgrep-1
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"quota", sourceHarness:"codex", sourceProvider:"codex",
+  jq -nc --arg id "$incident" --argjson spid 999999001 --arg ssid "np" \
+    '{version:1, incidentId:$id, action:"quota", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", sourceProvider:"codex",
       destinationHarness:"bash", destinationProvider:"codex", stowReceiptPath:"", reservedAt:1}' \
     > "$home/state/primary-resource/receipts/$incident.json"
   printf 'echo successor\n' > "$home/state/primary-resource/launch/$incident.cmd"
@@ -609,8 +611,9 @@ test_helper_occupant_changed_no_exit() {
   jq -nc '{version:1, harness:"codex", pid:999999002, sessionId:"occ", transcriptPath:"/dev/null", boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
   incident=occ-1
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", sourceProvider:"codex",
+  jq -nc --arg id "$incident" --argjson spid 999999002 --arg ssid "occ" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", sourceProvider:"codex",
       destinationHarness:"codex", destinationProvider:"codex", stowReceiptPath:"", reservedAt:1}' \
     > "$home/state/primary-resource/receipts/$incident.json"
   printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
@@ -624,6 +627,150 @@ test_helper_occupant_changed_no_exit() {
   assert_equals "occupant-changed" "$reason" \
     "changed/missing occupant must fail before exit text"
   pass "helper occupant-changed is consumed failed attempt"
+}
+
+# Round-2 mandated regression: the exit target is the immutable receipt's
+# reserved source pid/session/harness. binding.json is refreshed by observe and
+# may already describe a successor that resumed the session; it can refuse the
+# handover but must never authorize the exit text.
+test_helper_exit_authority_is_receipt_not_binding() {
+  local home incident mode calls successor successor_pid reserved_pid stage reason
+  for mode in successor-pid successor-session harness-mismatch; do
+    home=$(make_main_home "exit-authority-$mode")
+    incident="exit-authority-$mode"
+    calls="$home/herdr-calls"
+    successor="$home/codex"
+    cp "$(command -v sleep)" "$successor"
+    "$successor" 30 &
+    successor_pid=$!
+    sleep 30 &
+    reserved_pid=$!
+    mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch" \
+      "$home/state/primary-resource/outcomes" "$home/state/primary-resource/helper-ready"
+    case "$mode" in
+      successor-pid)
+        jq -nc --argjson p "$successor_pid" \
+          '{version:1, harness:"codex", pid:$p, sessionId:"sess-a", transcriptPath:"/dev/null", boundAt:1}' \
+          > "$home/state/primary-resource/binding.json"
+        jq -nc --arg id "$incident" --argjson spid "$reserved_pid" --arg ssid "sess-a" \
+          '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+            sourceHarness:"codex", destinationHarness:"codex"}' \
+          > "$home/state/primary-resource/receipts/$incident.json"
+        ;;
+      successor-session)
+        jq -nc --argjson p "$successor_pid" \
+          '{version:1, harness:"codex", pid:$p, sessionId:"sess-b", transcriptPath:"/dev/null", boundAt:1}' \
+          > "$home/state/primary-resource/binding.json"
+        jq -nc --arg id "$incident" --argjson spid "$successor_pid" --arg ssid "sess-a" \
+          '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+            sourceHarness:"codex", destinationHarness:"codex"}' \
+          > "$home/state/primary-resource/receipts/$incident.json"
+        ;;
+      harness-mismatch)
+        jq -nc --argjson p "$successor_pid" \
+          '{version:1, harness:"codex", pid:$p, sessionId:"sess-a", transcriptPath:"/dev/null", boundAt:1}' \
+          > "$home/state/primary-resource/binding.json"
+        jq -nc --arg id "$incident" --argjson spid "$successor_pid" --arg ssid "sess-a" \
+          '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+            sourceHarness:"claude", destinationHarness:"claude"}' \
+          > "$home/state/primary-resource/receipts/$incident.json"
+        ;;
+    esac
+    jq -nc --arg id "$incident" \
+      '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched",
+        helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
+      > "$home/state/primary-resource/outcomes/$incident.json"
+    printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+    printf 'idle\n' > "$home/busy"
+    cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$calls'
+case "\$*" in
+  *"pane process-info"*)
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":$$,"foreground_processes":[{"pid":$successor_pid,"name":"codex","argv0":"codex"}]}}}'
+    ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+EOF
+    chmod +x "$FAKEBIN/herdr"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SUPERVISOR_TARGET="sess:p0" FM_SUPERVISOR_BACKEND=herdr \
+      FM_PRIMARY_RESOURCE_BUSY_STATE_FILE="$home/busy" \
+      FM_PRIMARY_RESOURCE_HELPER_WAIT_SECS=2 \
+      PATH="$FAKEBIN:$PATH" \
+      "$PR" helper "$incident" >/dev/null 2>&1 || true
+    kill "$successor_pid" "$reserved_pid" 2>/dev/null || true
+    wait "$successor_pid" 2>/dev/null || true
+    wait "$reserved_pid" 2>/dev/null || true
+    stage=$(jq -r .stage "$home/state/primary-resource/outcomes/$incident.json")
+    reason=$(jq -r .reason "$home/state/primary-resource/outcomes/$incident.json")
+    assert_equals "failed" "$stage" "$mode must be a consumed failed attempt"
+    case "$mode" in
+      successor-session)
+        assert_equals "source-session-changed" "$reason" \
+          "$mode must refuse on binding session mismatch"
+        ;;
+      *)
+        assert_equals "occupant-changed" "$reason" \
+          "$mode must refuse on occupant mismatch with the receipt source"
+        ;;
+    esac
+    if grep -qE 'pane (send-text|send-keys)' "$calls"; then
+      fail "$mode must not send exit text to a process that is not the reserved source"
+    fi
+    assert_grep 'pane close helper:p1' "$calls" "$mode must still close the recorded helper pane"
+    rm -f "$FAKEBIN/herdr"
+  done
+  pass "helper exit authority is the immutable receipt, not binding.json"
+}
+
+# Round-2 mandated regression: a terminal helper result whose outcome recording
+# fails must still close the recorded helper pane (exact recorded pane only).
+test_outcome_write_failure_still_closes_helper_pane() {
+  local home incident calls stage reason
+  home=$(make_main_home outcome-write-fail)
+  incident=owf-1
+  calls="$home/herdr-calls"
+  mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch" \
+    "$home/state/primary-resource/outcomes" "$home/state/primary-resource/helper-ready"
+  jq -nc \
+    '{version:1, harness:"codex", pid:999999003, sessionId:"owf", transcriptPath:"/dev/null", boundAt:1}' \
+    > "$home/state/primary-resource/binding.json"
+  jq -nc --arg id "$incident" --argjson spid 999999003 --arg ssid "owf" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", destinationHarness:"codex"}' \
+    > "$home/state/primary-resource/receipts/$incident.json"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched",
+      helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
+    > "$home/state/primary-resource/outcomes/$incident.json"
+  printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+  printf 'idle\n' > "$home/busy"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$calls'
+printf '%s\n' '{"result":{}}'
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  chmod 0500 "$home/state/primary-resource/outcomes"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_SUPERVISOR_TARGET="sess:p0" FM_SUPERVISOR_BACKEND=herdr \
+    FM_PRIMARY_RESOURCE_BUSY_STATE_FILE="$home/busy" \
+    FM_PRIMARY_RESOURCE_HELPER_WAIT_SECS=2 \
+    PATH="$FAKEBIN:$PATH" \
+    "$PR" helper "$incident" >/dev/null 2>&1 || true
+  chmod 0700 "$home/state/primary-resource/outcomes"
+  rm -f "$FAKEBIN/herdr"
+  stage=$(jq -r .stage "$home/state/primary-resource/outcomes/$incident.json")
+  reason=$(jq -r .reason "$home/state/primary-resource/outcomes/$incident.json")
+  assert_equals "waiting-idle" "$stage" "outcome recording must have failed (file untouched)"
+  assert_equals "helper-launched" "$reason" "outcome recording must have failed (file untouched)"
+  assert_grep 'pane close helper:p1' "$calls" \
+    "failed outcome write must still close the recorded helper pane"
+  if grep -qE 'pane (send-text|send-keys)' "$calls"; then
+    fail "dead reserved pid must not receive exit text"
+  fi
+  pass "outcome write failure still closes the recorded helper pane"
 }
 
 test_incident_path_rejected_before_state_write() {
@@ -646,8 +793,9 @@ test_incident_path_rejected_before_state_write() {
     "commit traversal must leave the session lock byte-identical"
 
   mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch"
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+  jq -nc --arg id "$incident" --argjson spid "$$" --arg ssid "valid" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", destinationHarness:"codex"}' \
     > "$home/state/primary-resource/receipts/$incident.json"
   jq -nc --argjson p "$$" \
     '{version:1, harness:"codex", pid:$p, sessionId:"valid", transcriptPath:"/dev/null", boundAt:1}' \
@@ -1044,8 +1192,9 @@ test_herdr_helper_proves_occupant_and_closes_workspace() {
     jq -nc --argjson p "$$" \
       '{version:1, harness:"codex", pid:$p, sessionId:"herdr", transcriptPath:"/dev/null", boundAt:1}' \
       > "$home/state/primary-resource/binding.json"
-    jq -nc --arg id "$incident" \
-      '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+    jq -nc --arg id "$incident" --argjson spid "$$" --arg ssid "herdr" \
+      '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+        sourceHarness:"codex", destinationHarness:"codex"}' \
       > "$home/state/primary-resource/receipts/$incident.json"
     jq -nc --arg id "$incident" \
       '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched", helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
@@ -1059,8 +1208,8 @@ case "\$*" in
   *"pane process-info"*)
     case '$mode' in
       unreadable) exit 1 ;;
-      wrong-pane) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"other","shell_pid":1,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
-      wrong-pid) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":1,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
+      wrong-pane) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"other","shell_pid":$$,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
+      wrong-pid) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":$$,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
     esac
     ;;
   *) printf '%s\n' '{"result":{}}' ;;
@@ -1095,8 +1244,9 @@ EOF
   jq -nc --argjson p "$agent_pid" \
     '{version:1, harness:"codex", pid:$p, sessionId:"herdr", transcriptPath:"/dev/null", boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+  jq -nc --arg id "$incident" --argjson spid "$agent_pid" --arg ssid "herdr" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", destinationHarness:"codex"}' \
     > "$home/state/primary-resource/receipts/$incident.json"
   jq -nc --arg id "$incident" \
     '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched", helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
@@ -1195,8 +1345,9 @@ test_live_tmux_helper_exit_shell_successor() {
     '{version:1, harness:"codex", pid:$p, sessionId:"live", transcriptPath:"/dev/null", boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
   local incident=live-inc-1
-  jq -nc --arg id "$incident" \
-    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", sourceProvider:"codex",
+  jq -nc --arg id "$incident" --argjson spid "$agent_pid" --arg ssid "live" \
+    '{version:1, incidentId:$id, action:"context", sourcePid:$spid, sourceSessionId:$ssid,
+      sourceHarness:"codex", sourceProvider:"codex",
       destinationHarness:"codex", destinationProvider:"codex", generation:"live",
       stowReceiptPath:"", reservedAt:1}' \
     > "$home/state/primary-resource/receipts/$incident.json"
@@ -1281,6 +1432,8 @@ test_arm_requires_python3
 test_helper_busy_then_idle_fake_backend
 test_helper_no_pgrep_fallback_records_failure
 test_helper_occupant_changed_no_exit
+test_helper_exit_authority_is_receipt_not_binding
+test_outcome_write_failure_still_closes_helper_pane
 test_incident_path_rejected_before_state_write
 test_reconcile_stranded_helper_alert
 test_quota_axi_bounded_and_fresh

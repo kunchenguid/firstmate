@@ -42,5 +42,5 @@ Do not use prose substitutes.
 ## Alert-only wake (`primary-resource alert: ...`)
 
 Tell the captain in plain outcome language per `AGENTS.md` section 9.
-Translate the condition into the session consequence (context reading unavailable, quota high with no independent replacement, unsupported backend, Herdr handover unverified, stranded handover) and that the current session was kept.
+Translate the condition into the session consequence (context reading unavailable, quota high with no independent replacement, unsupported backend, stranded handover) and that the current session was kept.
 Do not expose internal paths, thresholds as mechanism jargon, or receipt filenames unless the captain needs them to act.
