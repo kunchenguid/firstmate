@@ -98,6 +98,45 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_pane_in_path: the first pane anywhere in <session> whose
+# current working directory resolves (pwd -P) to <path-abs> AND whose window
+# does not read `dead` through fm_backend_tmux_agent_state, printed as
+# `<session>:<window-name>.<pane-index>` with the window's verdict after a
+# space; prints nothing and returns 0 when no such pane exists, and returns 2
+# with nothing printed when the session's pane inventory cannot be read. The
+# agent-state classifier's `missing` verdict only proves that the exact
+# window NAME is absent from the inventory, so a window renamed away from
+# fm-<id> can still host a live agent in the task's worktree; a caller about
+# to recreate fm-<id> asks this first so it never lands a second agent beside
+# that one. A pane whose window reads `dead` is skipped on purpose: an idle
+# shell sitting in the worktree (the container-ensure's own first window when
+# the operator relaunches from inside the worktree, or the operator's own
+# shell when firstmate runs inside tmux) is not a second agent, while
+# `alive`, `ambiguous`, and `unreadable` all count because none of them
+# proves the pane agent-free. A pane whose path cannot be read is skipped:
+# an unreadable pane is not evidence of an occupant, but an unreadable
+# inventory is reported as such because it never licenses a duplicate.
+fm_backend_tmux_pane_in_path() {  # <session> <path-abs> -> prints "<pane-target> <verdict>" or nothing; 2 when panes unreadable
+  local ses=$1 want=$2 want_real panes pane_id pidx wname path path_real verdict
+  want_real=$(cd "$want" 2>/dev/null && pwd -P) || want_real=$want
+  panes=$(tmux list-panes -s -t "$ses" -F '#{pane_id} #{pane_index} #{window_name}' 2>/dev/null) \
+    || return 2
+  while read -r pane_id pidx wname; do
+    [ -n "$pane_id" ] && [ -n "$wname" ] || continue
+    path=$(fm_backend_tmux_current_path "$pane_id")
+    [ -n "$path" ] || continue
+    path_real=$(cd "$path" 2>/dev/null && pwd -P) || path_real=$path
+    [ "$path" = "$want" ] || [ "$path_real" = "$want_real" ] || continue
+    verdict=$(fm_backend_tmux_agent_state "$ses:$wname")
+    [ "$verdict" != dead ] || continue
+    printf '%s:%s.%s %s\n' "$ses" "$wname" "$pidx" "$verdict"
+    return 0
+  done <<EOF
+$panes
+EOF
+  return 0
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

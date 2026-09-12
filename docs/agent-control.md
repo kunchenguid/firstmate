@@ -69,7 +69,9 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
+   On tmux, a recorded endpoint that reads `missing` - the shared server died, or the exact window was killed - is treated here as already stopped, because there is no agent to stop; every other backend keeps refusing on `missing`.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   On tmux only, it first recreates a `missing` endpoint in the recorded worktree through the backend's own container-ensure and window-create functions; `bin/fm-spawn.sh`'s header owns the preconditions that recreate refuses on, each named in its refusal.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -99,7 +101,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free, so a replacement can never join a live agent.
+- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free (`dead`, or `missing` on tmux where it is recreated first), so a replacement can never join a live agent; `unreadable` and `ambiguous` always refuse.
   It also requires the shell to be in the recorded worktree: tmux refuses immediately when it is not, while Herdr sends one `cd` to the recorded path and refuses unless a subsequent path read confirms the move.
 
 ## Capability matrix
@@ -121,4 +123,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch-missing-endpoint.test.sh` - relaunch against a missing tmux endpoint on a private-socket real tmux server: window and whole-server recreation into the recorded worktree, and the worktree, collision, session, occupied-pane, and unreadable refusals (a dead shell in the worktree never blocks the recreate).
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
