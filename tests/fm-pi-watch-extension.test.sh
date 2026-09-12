@@ -1620,15 +1620,19 @@ await waitFor(
 if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallback: ${rows().join(" | ")}`);
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
-for (let i = 0; i < 500; i += 1) {
-  if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-if (rows().length !== 3) throw new Error(`late close did not restore one successor: ${rows().join(" | ")}`);
+await waitFor(() => rows().length >= 3, "late close did not restore one successor");
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (rows().length !== 3) throw new Error(`late close did not restore exactly one successor: ${rows().join(" | ")}`);
+// The original fallback is still queued and unconsumed, so a late actionable
+// close rides it instead of queueing a second follow-up; the message_end
+// rewrite of that host is what puts the late reason in front of the model.
+if (prompts.length !== 1) throw new Error(`late ${process.env.FM_LATE_KIND} close sent an extra wake: ${prompts.join(" | ")}`);
 if (process.env.FM_LATE_KIND === "actionable") {
-  if (prompts.length !== 2 || !prompts[1].includes("late wake")) throw new Error(`late actionable close was not delivered: ${prompts.join(" | ")}`);
-} else if (prompts.length !== 1) {
-  throw new Error(`late non-actionable close sent an extra wake: ${prompts.join(" | ")}`);
+  const rewritten = handlers.get("message_end")?.({ message: { role: "user", content: [{ type: "text", text: prompts[0] }] } }, {});
+  const text = rewritten?.message?.content?.[0]?.text ?? "";
+  if (!text.includes("original wake") || !text.includes("- signal: late wake")) {
+    throw new Error(`late actionable close did not ride the queued wake: ${text || prompts.join(" | ")}`);
+  }
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 await new Promise((resolve) => setTimeout(resolve, 80));
@@ -1639,6 +1643,285 @@ EOF
     [ -z "$out" ] || fail "Pi late-$kind test printed output: $out"
   done
   pass "Pi late unretired closes resume classified supervision"
+}
+
+test_pi_queued_wakes_coalesce_into_one_follow_up() {
+  local repo home plugin log handled stops out status
+  repo="$TMP_ROOT/pi-coalesce-root"
+  home="$TMP_ROOT/pi-coalesce-home"
+  log="$TMP_ROOT/pi-coalesce.log"
+  handled="$TMP_ROOT/pi-coalesce.handled"
+  stops="$TMP_ROOT/pi-coalesce-stops"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$stops"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # Every cycle reports ready, then closes with its own signal once the test
+  # releases it, so the test controls exactly when each actionable close lands.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handled\n' >> "${FM_HANDLED_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_DIR/stop.$count" ]; do sleep 0.02; done
+printf 'signal: synthetic close %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_HANDLED_LOG="$handled" FM_STOP_DIR="$stops" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  // A busy Pi queues the follow-up; nothing consumes it until the test says so.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const lines = (file) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : [];
+const rows = () => lines(process.env.FM_ARM_LOG);
+const handledCount = () => lines(process.env.FM_HANDLED_LOG).length;
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+async function fire(event, payload, ctx) {
+  let result;
+  for (const handler of handlers.get(event) ?? []) result = (await handler(payload, ctx)) ?? result;
+  return result;
+}
+const userMessage = (text) => ({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } });
+// Release cycle n; its successor must be armed and its handling confirmed before
+// the extension decides whether to queue a host or attach a rider.
+async function closeCycle(n) {
+  writeFileSync(`${process.env.FM_STOP_DIR}/stop.${n}`, "stop\n");
+  await waitFor(() => rows().length >= n + 1, `cycle ${n} did not restore a successor: ${rows().join(" | ")}`);
+  await waitFor(() => handledCount() >= n, `cycle ${n} handling was not confirmed`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
+await waitFor(() => rows().length >= 1, "first arm did not start");
+
+await closeCycle(1);
+await waitFor(() => prompts.length === 1, "first actionable close was not delivered");
+if (!prompts[0].includes("FIRSTMATE WATCHER WAKE: signal: synthetic close 1")) throw new Error(`first wake lost its reason: ${prompts[0]}`);
+await closeCycle(2);
+await closeCycle(3);
+if (prompts.length !== 1) throw new Error(`closes behind a queued wake were not coalesced: ${prompts.length} follow-ups`);
+
+// Pi delivers the queued host: its riders ride on that one user message.
+const delivered = await fire("message_end", userMessage(prompts[0]), {});
+const deliveredText = delivered?.message?.content?.[0]?.text ?? "";
+if (delivered?.message?.role !== "user") throw new Error(`delivered wake was not replaced as a user message: ${JSON.stringify(delivered)}`);
+for (const needle of ["FIRSTMATE WATCHER WAKE: signal: synthetic close 1", "coalesced into this one wake", "- signal: synthetic close 2", "- signal: synthetic close 3", "Run bin/fm-wake-drain.sh first"]) {
+  if (!deliveredText.includes(needle)) throw new Error(`delivered wake missed "${needle}": ${deliveredText}`);
+}
+if (!deliveredText.includes("(2)")) throw new Error(`delivered wake miscounted its riders: ${deliveredText}`);
+
+// Consumed: the next close is a fresh host carrying nothing already delivered.
+await closeCycle(4);
+await waitFor(() => prompts.length === 2, "close after delivery was not queued as a new wake");
+if (!prompts[1].includes("FIRSTMATE WATCHER WAKE: signal: synthetic close 4")) throw new Error(`second wake lost its reason: ${prompts[1]}`);
+if (prompts[1].includes("synthetic close 2") || prompts[1].includes("coalesced")) throw new Error(`already-delivered reasons leaked into a later wake: ${prompts[1]}`);
+
+// An unrelated user message never consumes the queued host or its riders.
+const untouched = await fire("message_end", userMessage("captain typed something"), {});
+if (untouched?.message) throw new Error("an unrelated user message was rewritten");
+await closeCycle(5);
+if (prompts.length !== 2) throw new Error(`an unrelated user message consumed the pending wake: ${prompts.length} follow-ups`);
+
+// Pi settled with the host still unconsumed and nothing queued: the follow-up
+// was dropped, so its reasons carry into the next host instead of vanishing.
+await fire("agent_settled", { type: "agent_settled" }, { hasPendingMessages: () => false });
+await closeCycle(6);
+await waitFor(() => prompts.length === 3, "close after a dropped wake was not delivered");
+for (const needle of ["FIRSTMATE WATCHER WAKE: signal: synthetic close 6", "- signal: synthetic close 4", "- signal: synthetic close 5"]) {
+  if (!prompts[2].includes(needle)) throw new Error(`dropped wake reasons were lost, missing "${needle}": ${prompts[2]}`);
+}
+// Settling while the host is still queued in Pi keeps it and its riders.
+await fire("agent_settled", { type: "agent_settled" }, { hasPendingMessages: () => true });
+await closeCycle(7);
+if (prompts.length !== 3) throw new Error(`a still-queued wake was treated as dropped: ${prompts.length} follow-ups`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must coalesce closes behind a queued wake into that one follow-up"
+  [ -z "$out" ] || fail "Pi coalescing test printed output: $out"
+  pass "Pi closes behind a queued wake ride it as one delivered follow-up"
+}
+
+test_pi_carried_reasons_survive_replacement_and_cleanup_failure() {
+  local repo home plugin log handled stops out status
+  repo="$TMP_ROOT/pi-carry-replacement-root"
+  home="$TMP_ROOT/pi-carry-replacement-home"
+  log="$TMP_ROOT/pi-carry-replacement.log"
+  handled="$TMP_ROOT/pi-carry-replacement.handled"
+  stops="$TMP_ROOT/pi-carry-replacement-stops"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$stops"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # Every cycle reports ready, then closes with its own signal once the test
+  # releases it, so the test controls exactly when each actionable close lands.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handled\n' >> "${FM_HANDLED_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_DIR/stop.$count" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_DIR/failure.$count" ]; then
+  printf 'watcher: FAILED - synthetic hostless failure\n'
+  touch "$FM_STOP_DIR/failed.$count"
+  exit 1
+fi
+printf 'signal: synthetic close %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_HANDLED_LOG="$handled" FM_STOP_DIR="$stops" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  // A busy Pi queues the follow-up; nothing consumes it until the test says so.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const lines = (file) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : [];
+const rows = () => lines(process.env.FM_ARM_LOG);
+const handledCount = () => lines(process.env.FM_HANDLED_LOG).length;
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+async function fire(event, payload, ctx) {
+  let result;
+  for (const handler of handlers.get(event) ?? []) result = (await handler(payload, ctx)) ?? result;
+  return result;
+}
+// Release cycle n; its successor must be armed and its handling confirmed before
+// the extension decides whether to queue a host or attach a rider.
+async function closeCycle(n) {
+  const expectedHandled = handledCount() + 1;
+  writeFileSync(`${process.env.FM_STOP_DIR}/stop.${n}`, "stop\n");
+  await waitFor(() => rows().length >= n + 1, `cycle ${n} did not restore a successor: ${rows().join(" | ")}`);
+  await waitFor(() => handledCount() >= expectedHandled, `cycle ${n} handling was not confirmed`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const coordinatorPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+const legacyCoordinator = {
+  receiver: () => {},
+  pending: [],
+  nextTokenId: 37,
+  deliveries: new Map(),
+};
+const legacyReceiver = legacyCoordinator.receiver;
+const legacyPending = legacyCoordinator.pending;
+const legacyDeliveries = legacyCoordinator.deliveries;
+globalThis.__firstmatePiWatchReplacements = new Map([[coordinatorPath, legacyCoordinator]]);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (globalThis.__firstmatePiWatchReplacements.get(coordinatorPath) !== legacyCoordinator ||
+    legacyCoordinator.receiver !== legacyReceiver || legacyCoordinator.pending !== legacyPending ||
+    legacyCoordinator.deliveries !== legacyDeliveries || legacyCoordinator.nextTokenId !== 37) {
+  throw new Error("reload replaced existing coordinator state");
+}
+mod.default(pi);
+await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
+await waitFor(() => rows().length >= 1, "first arm did not start");
+
+await closeCycle(1);
+await waitFor(() => prompts.length === 1, "first host");
+await closeCycle(2);
+await fire("agent_settled", {}, { hasPendingMessages: () => false });
+if (prompts.length !== 1) throw new Error("abort sent a follow-up");
+async function replace(label) {
+  await fire("session_shutdown", { reason: "new" }, {});
+  handlers.clear();
+  const replacement = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=${label}`);
+  replacement.default(pi);
+  await fire("session_start", { reason: "new" }, {});
+}
+await replace("dropped");
+await waitFor(() => rows().length === 4, "replacement arm");
+if (prompts.length !== 1) throw new Error("replacement sent deferred reasons without a host");
+await closeCycle(4);
+await waitFor(() => prompts.length === 2, "host after replacement");
+function once(text, needle) {
+  if (text.split(needle).length !== 2) throw new Error(`expected exactly one ${needle}: ${text}`);
+}
+once(prompts[1], "signal: synthetic close 1");
+once(prompts[1], "signal: synthetic close 2");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "99999999\n");
+writeFileSync(`${process.env.FM_STOP_DIR}/failure.5`, "fail\n");
+writeFileSync(`${process.env.FM_STOP_DIR}/stop.5`, "stop\n");
+await waitFor(() => existsSync(`${process.env.FM_STOP_DIR}/failed.5`), "failure close");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 2) throw new Error("hostless failure did not ride host");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await replace("hostless-rider");
+await waitFor(() => prompts.length === 3, "replayed host");
+once(prompts[2], "signal: synthetic close 4");
+once(prompts[2], "watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock");
+once(prompts[2], "signal: synthetic close 1");
+once(prompts[2], "signal: synthetic close 2");
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+const handoff = readFileSync(handoffPath, "utf8");
+if (!JSON.parse(handoff).pending[0].token.endsWith("-40")) {
+  throw new Error(`reload lost the existing token sequence: ${handoff}`);
+}
+writeFileSync(handoffPath, "malformed");
+await fire("agent_settled", {}, { hasPendingMessages: () => false });
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 3) throw new Error("abort cleanup failure sent a follow-up");
+writeFileSync(handoffPath, handoff);
+await closeCycle(6);
+await waitFor(() => prompts.length === 4, "next host after cleanup failure");
+once(prompts[3], "watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must retain carried reasons and defer abort cleanup failures: $out"
+  [ -z "$out" ] || fail "Pi replacement carry test printed output: $out"
+  pass "Pi replacement retains carried reasons and defers abort cleanup failures"
 }
 
 test_pi_empty_close_retries_instead_of_disappearing() {
@@ -2241,22 +2524,26 @@ writeFileSync(
 );
 releaseOldDelivery();
 await replacementStart;
-await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
-  "replacement-session successor actionable delivery",
-);
-if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
-  throw new Error(`settled old-session branch delivery was replayed: ${replacement.prompts.join(" | ")}`);
+// The malformed handoff is surfaced as the first main follow-up. While it is
+// queued and unconsumed, the carried successor outcome and the cleanup failure
+// ride it, so the delivered message is read through its message_end rewrite.
+await waitFor(() => replacement.prompts.length >= 1, "replacement-session first follow-up");
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement arm before carried delivery");
+await new Promise((resolve) => setTimeout(resolve, 1000));
+const rewrittenHost = replacement.handlers.get("message_end")?.({ message: { role: "user", content: [{ type: "text", text: replacement.prompts[0] }] } }, {});
+const delivered = [rewrittenHost?.message?.content?.[0]?.text ?? replacement.prompts[0], ...replacement.prompts.slice(1)].join(" | ");
+const deliveredCount = (text) => delivered.split(text).length - 1;
+if (deliveredCount("signal: replacement-race actionable outcome") !== 0) {
+  throw new Error(`settled old-session branch delivery was replayed: ${delivered}`);
 }
-if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
-  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
+if (deliveredCount("signal: replacement-successor actionable outcome") !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${delivered}`);
 }
-if (!replacement.prompts.some((message) => message.includes("could not clear a delivered replacement-session actionable wake"))) {
-  throw new Error(`handoff cleanup failure was not surfaced: ${replacement.prompts.join(" | ")}`);
+if (deliveredCount("could not clear a delivered replacement-session actionable wake") !== 1) {
+  throw new Error(`handoff cleanup failure was not surfaced exactly once: ${delivered}`);
 }
-await new Promise((resolve) => setTimeout(resolve, 700));
-if (replacement.prompts.filter((message) => message.includes("could not clear a delivered replacement-session actionable wake")).length !== 1) {
-  throw new Error(`persistent handoff cleanup failure repeated alerts: ${replacement.prompts.join(" | ")}`);
+if (replacement.prompts.length !== 1) {
+  throw new Error(`replacement session queued more than one follow-up: ${replacement.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
 const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
@@ -2442,9 +2729,11 @@ const pi = {
 // The running run reaching a queued follow-up: Pi emits the user message.
 const consumeQueued = (message) =>
   handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
-const arms = () => existsSync(process.env.FM_ARM_LOG)
-  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
+const armRows = (prefix) => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith(prefix)).length
   : 0;
+const arms = () => armRows("arm=");
+const confirmations = () => armRows("confirmed=");
 async function waitFor(pred, label) {
   for (let i = 0; i < 500; i += 1) {
     if (pred()) return;
@@ -2465,13 +2754,17 @@ await waitFor(() => prompts.length === 1, "first wake delivered while main strea
 if (wakes("signal: streaming chain wake 1") !== 1) throw new Error(`wrong first wake: ${prompts.join(" | ")}`);
 await waitFor(() => arms() === 2, "successor after the streaming-time delivery");
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
-await waitFor(() => prompts.length === 2, "second wake delivered while main still streams");
-if (wakes("signal: streaming chain wake 2") !== 1) throw new Error(`wrong second wake: ${prompts.join(" | ")}`);
 await waitFor(() => arms() === 3, "successor after the second streaming-time delivery");
+// Handling is confirmed right before the extension decides how to deliver the
+// second close: it rides the still-queued first wake rather than queueing a
+// second follow-up.
+await waitFor(() => confirmations() === 2, "second close handling confirmation");
+if (prompts.length !== 1) throw new Error(`second streaming-time close queued a second follow-up instead of riding the first: ${prompts.join(" | ")}`);
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
-// The run reaches the first queued follow-up; the second is still queued when
-// the captain replaces the session, so only the second rides the handoff.
+// The run reaches the queued follow-up, which consumes the host; its rider is
+// consumed only by the message_end rewrite, which never comes before the
+// captain replaces the session, so exactly the rider rides the handoff.
 consumeQueued(prompts[0]);
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
@@ -2483,8 +2776,8 @@ streaming = false;
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-chain`);
 replacementMod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(() => prompts.length === 3, "replacement replay of the unconsumed wake");
-if (wakes("signal: streaming chain wake 2") !== 2 || wakes("signal: streaming chain wake 1") !== 1) {
+await waitFor(() => prompts.length === 2, "replacement replay of the unconsumed rider");
+if (wakes("signal: streaming chain wake 2") !== 1 || wakes("signal: streaming chain wake 1") !== 1 || !prompts[1].includes("signal: streaming chain wake 2")) {
   throw new Error(`replacement replayed the wrong wakes: ${prompts.join(" | ")}`);
 }
 if (beforeAgentStarts !== 1) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
@@ -2682,16 +2975,18 @@ const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?r
 const replacement = makePi();
 replacementMod.default(replacement.pi);
 await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
-  "late actionable delivery to replacement",
-);
-const latePrompts = replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome"));
-if (latePrompts.length !== 1) {
-  throw new Error(`replacement did not receive exactly one late outcome: ${replacement.prompts.join(" | ")}`);
+// The blocked handoff directory is surfaced as the first main follow-up; the
+// late outcome rides that queued host, so it is read through the message_end
+// rewrite that delivers it.
+await waitFor(() => replacement.prompts.length >= 1, "replacement-session first follow-up");
+await new Promise((resolve) => setTimeout(resolve, 1000));
+const rewrittenHost = replacement.handlers.get("message_end")?.({ message: { role: "user", content: [{ type: "text", text: replacement.prompts[0] }] } }, {});
+const delivered = [rewrittenHost?.message?.content?.[0]?.text ?? replacement.prompts[0], ...replacement.prompts.slice(1)].join(" | ");
+if (delivered.split("signal: late retiring actionable outcome").length - 1 !== 1) {
+  throw new Error(`replacement did not receive exactly one late outcome: ${delivered}`);
 }
-if (!latePrompts[0].includes("watcher: FAILED - Pi extension could not persist a late replacement-session actionable wake")) {
-  throw new Error(`late handoff publication failure was not surfaced: ${latePrompts[0]}`);
+if (!delivered.includes("watcher: FAILED - Pi extension could not persist a late replacement-session actionable wake")) {
+  throw new Error(`late handoff publication failure was not surfaced: ${delivered}`);
 }
 process.exit(0);
 EOF
@@ -3993,6 +4288,8 @@ test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
+test_pi_queued_wakes_coalesce_into_one_follow_up
+test_pi_carried_reasons_survive_replacement_and_cleanup_failure
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock

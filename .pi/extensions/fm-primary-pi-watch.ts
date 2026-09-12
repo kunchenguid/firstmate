@@ -17,10 +17,15 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// not consumed. An idle main consumes the host at before_agent_start; a
+// streaming main consumes it at the user message_start carrying the exact wake
+// text. Either event finishes the host pending record; message_end also covers
+// a host whose start was not observed. Riders wait for the rewrite below.
+//
+// Coalescing contract: docs/watcher-continuity.md#actionable-wake-ordering.
+// Riders must remain pending until the message_end rewrite exposes them.
+// Carried reasons and hostless wakes survive in-process replacement in memory
+// only; keep them on the shared coordinator, not the session generation.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -79,8 +84,18 @@ type WatchToolRenderContext = {
 };
 
 type UnconsumedWake = {
+  role: "host" | "rider";
+  // The host's sent text; a rider carries its host's text so consumption
+  // matches both against the same user message.
   content: string;
-  pending: PendingActionableClose;
+  reason: string;
+  carried: string[];
+  pending?: PendingActionableClose;
+};
+
+type WakeRewrite = {
+  reason: string;
+  carried: string[];
 };
 
 type SessionGeneration = {
@@ -165,6 +180,7 @@ type ReplacementCoordinator = {
   pending: PendingActionableClose[];
   nextTokenId: number;
   deliveries: Map<string, ActionableDeliveryClaim>;
+  carriedReasons: string[];
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
   __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
@@ -173,17 +189,22 @@ const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
 const replacementCoordinators = replacementCoordinatorGlobal.__firstmatePiWatchReplacements ??= new Map<string, ReplacementCoordinator>();
 function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
   const existing = replacementCoordinators.get(handoff);
-  if (existing) return existing;
+  if (existing) {
+    existing.carriedReasons ??= [];
+    return existing;
+  }
   const created: ReplacementCoordinator = {
     receiver: null,
     pending: [],
     nextTokenId: 0,
     deliveries: new Map(),
+    carriedReasons: [],
   };
   replacementCoordinators.set(handoff, created);
   return created;
 }
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
+const carriedReasons = replacementCoordinator.carriedReasons;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
@@ -426,6 +447,22 @@ function createGeneration(): SessionGeneration {
   };
 }
 
+function wakeText(reason: string, extra: string[]): string {
+  const addendum = extra.length
+    ? `\n\nAdditional watcher closes since the last delivered wake (${extra.length}), coalesced into this one wake:\n${extra
+        .map((line) => `- ${line.replace(/\n/g, "\n  ")}`)
+        .join("\n")}`
+    : "";
+  return encodeFirstmateOperationalInput(
+    "watcher",
+    `FIRSTMATE WATCHER WAKE: ${reason}${addendum}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+  );
+}
+
+// Hosts Pi consumed whose message_end has not yet rewritten them, by sent text.
+const awaitingRewrite = new Map<string, WakeRewrite>();
+let nextHostlessToken = 0;
+
 function activateGeneration(generation: SessionGeneration): void {
   activeGeneration = generation;
 }
@@ -461,6 +498,12 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
   generation.replacement = replacement;
+  if (replacement) {
+    for (const wake of generation.unconsumedWakes.values()) {
+      carriedReasons.push(...wake.carried);
+      if (!wake.pending) carriedReasons.push(wake.reason);
+    }
+  }
   let persistedTokens = "";
   try {
     if (replacement && generation.pendingActionables.length > 0) {
@@ -518,15 +561,22 @@ export default function (pi: ExtensionAPI) {
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
-    const content = encodeFirstmateOperationalInput(
-      "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
-    );
-    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    const token = pending?.token ?? `hostless:${process.pid}:${++nextHostlessToken}`;
+    const host = [...owner.unconsumedWakes.values()].find((wake) => wake.role === "host");
+    if (host) {
+      // Rides the queued host: delivered with it, listed on it at its
+      // message_end rewrite, and consumed only there.
+      owner.unconsumedWakes.set(token, { role: "rider", content: host.content, reason: message, carried: [], pending });
+      return true;
+    }
+    const carried = carriedReasons.splice(0);
+    const content = wakeText(message, carried);
+    owner.unconsumedWakes.set(token, { role: "host", content, reason: message, carried, pending });
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch (error) {
-      if (pending) owner.unconsumedWakes.delete(pending.token);
+      owner.unconsumedWakes.delete(token);
+      carriedReasons.unshift(...carried);
       throw error;
     }
     // Accepted by Pi. A generation replaced while Pi was accepting it may
@@ -535,20 +585,69 @@ export default function (pi: ExtensionAPI) {
     return generationIsLive(owner);
   }
 
+  function finishConsumedWake(owner: SessionGeneration, wake: UnconsumedWake): void {
+    if (!wake.pending) return;
+    wake.pending.delivered = true;
+    try {
+      finishPendingActionable(owner, wake.pending);
+    } catch (error) {
+      surfaceCleanupFailure(owner, error);
+      schedulePendingCleanup(owner);
+    }
+  }
+
   // Pi consumed a main follow-up: an idle main at before_agent_start, a
   // streaming main at the user message_start that joins the running run.
+  // Only the host is consumed here; its riders wait for the message_end
+  // rewrite that actually puts them in front of the model.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
-      if (wake.content !== text) continue;
+      if (wake.role !== "host" || wake.content !== text) continue;
       owner.unconsumedWakes.delete(token);
+      awaitingRewrite.set(wake.content, { reason: wake.reason, carried: wake.carried });
+      finishConsumedWake(owner, wake);
+      return;
+    }
+  }
+
+  // Pi finalized the host's user message: rewrite it to list every rider,
+  // which consumes them. A host not yet consumed (no message_start seen) is
+  // consumed here too.
+  function rewriteDeliveredWake(owner: SessionGeneration, text: string): string | undefined {
+    consumeWake(owner, text);
+    const host = awaitingRewrite.get(text);
+    if (!host) return undefined;
+    awaitingRewrite.delete(text);
+    const riders: string[] = [];
+    for (const [token, wake] of owner.unconsumedWakes) {
+      if (wake.role !== "rider" || wake.content !== text) continue;
+      owner.unconsumedWakes.delete(token);
+      riders.push(wake.reason);
+      finishConsumedWake(owner, wake);
+    }
+    if (riders.length === 0) return undefined;
+    return wakeText(host.reason, [...host.carried, ...riders]);
+  }
+
+  // Pi settled with nothing queued while wakes were still unconsumed: the
+  // queue was cleared under them. Their reasons ride the next host.
+  function carryDroppedWakes(owner: SessionGeneration): void {
+    for (const [token, wake] of owner.unconsumedWakes) {
+      owner.unconsumedWakes.delete(token);
+      awaitingRewrite.delete(wake.content);
+      carriedReasons.push(...wake.carried, wake.reason);
+      if (!wake.pending) continue;
       wake.pending.delivered = true;
       try {
         finishPendingActionable(owner, wake.pending);
       } catch (error) {
-        surfaceCleanupFailure(owner, error);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (owner.cleanupFailure !== detail) {
+          owner.cleanupFailure = detail;
+          carriedReasons.push(`watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake\n${detail}`);
+        }
         schedulePendingCleanup(owner);
       }
-      return;
     }
   }
 
@@ -1096,6 +1195,17 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("message_start", (event) => {
     if (event.message.role !== "user") return;
     consumeWake(generation, userMessageText(event.message.content));
+  });
+  pi.on?.("message_end", (event) => {
+    if (event.message.role !== "user") return undefined;
+    const text = rewriteDeliveredWake(generation, userMessageText(event.message.content));
+    if (text === undefined) return undefined;
+    return { message: { ...event.message, content: [{ type: "text", text }] } };
+  });
+  pi.on?.("agent_settled", (_event, ctx) => {
+    if (generation.unconsumedWakes.size === 0) return;
+    if (ctx?.hasPendingMessages?.()) return;
+    carryDroppedWakes(generation);
   });
 
   pi.on?.("session_start", async () => {
