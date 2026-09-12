@@ -3083,6 +3083,24 @@ fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pendi
   printf '%s' "$verdict"
 }
 
+fm_backend_herdr_agy_composer_content() {  # <target> [expected-label]
+  local target=$1 cap capture_lines
+  fm_backend_herdr_parse_target "$target" || return 1
+  capture_lines=$(fm_composer_capture_lines_for_harness agy)
+  if cap=$(fm_backend_herdr_capture_ansi "$target" 2>/dev/null); then
+    fm_composer_extract_selected_content 'styled=1
+cursor=0
+identity=1
+rows='"$capture_lines" "$cap" '' agy compare
+  else
+    cap=$(fm_backend_herdr_capture "$target" "$capture_lines") || return 1
+    fm_composer_extract_selected_content 'styled=0
+cursor=0
+identity=1
+rows='"$capture_lines" "$cap" '' agy compare
+  fi
+}
+
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
 # RENDERED busy footer, the same delivery-only signal bin/fm-tmux-lib.sh's
 # fm_pane_busy_state reads, scanning the same 40-line tail folded to its last
@@ -3205,14 +3223,20 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered> [harness]
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} i=0 verdict baseline confirm_sleep after expected
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  if [ "$harness" = agy ] && ! fm_backend_agy_composer_matches herdr "$target" "$text"; then
-    printf 'agy-draft-conflict'
-    return 0
+  if [ "$harness" = agy ]; then
+    if ! after=$(fm_composer_agy_wait_stable fm_backend_herdr_agy_composer_content "$target" "$expected_label"); then
+      printf 'agy-preflight:unknown'
+      return 0
+    fi
+    expected=$(fm_composer_normalize_compare_text "$text")
+    after=$(fm_composer_normalize_compare_text "$after")
+    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+  else
+    sleep "$settle"
   fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
@@ -3241,7 +3265,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
       case "$verdict" in
         busy) printf 'empty'; return 0 ;;
-        unknown) printf 'unknown'; return 0 ;;
+        unknown)
+          if [ "$harness" = agy ] && [ "$(fm_backend_herdr_rendered_busy_state "$target" agy)" = busy ]; then
+            printf 'empty'
+          else
+            printf 'unknown'
+          fi
+          return 0
       esac
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.

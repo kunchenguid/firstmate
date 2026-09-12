@@ -550,6 +550,16 @@ fm_backend_zellij_composer_content() {  # <target> [expected-label] [harness] [c
   fm_composer_extract_selected_content "$caps" "$cap" '' "$harness" "$comparison"
 }
 
+fm_backend_zellij_agy_composer_content() {  # <target> [expected-label]
+  fm_backend_zellij_composer_content "$1" "${2:-}" agy compare
+}
+
+fm_backend_zellij_agy_delivery_busy() {  # <target> [expected-label]
+  local cap
+  cap=$(fm_backend_zellij_capture "$1" 40 "${2:-}") || return 1
+  printf '%s' "$cap" | fm_busy_lines_match agy
+}
+
 fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label] [harness]
   local target=$1 before=$2 text=$3 expected_label=${4:-} harness=${5:-} cap caps after expected capture_lines
   [ -n "$text" ] || return 1
@@ -588,7 +598,7 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
 # empty composer confirms delivery - a pane that merely CHANGED does not, so
 # the old heuristic's false "delivery confirmed" cannot recur.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} before
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} before after expected
   before=$(fm_backend_zellij_composer_content "$target" "$expected_label" "$harness") \
     || { printf 'send-failed'; return 0; }
   if [ "$harness" = agy ]; then
@@ -596,11 +606,21 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
     [ -z "$before" ] || { printf 'agy-preflight:pending'; return 0; }
   fi
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" "$harness" \
-    || { [ "$harness" = agy ] && printf 'agy-draft-conflict' || printf 'send-failed'; return 0; }
+  if [ "$harness" = agy ]; then
+    if ! after=$(fm_composer_agy_wait_stable fm_backend_zellij_agy_composer_content "$target" "$expected_label"); then
+      printf 'agy-preflight:unknown'
+      return 0
+    fi
+    expected=$(fm_composer_normalize_compare_text "$text")
+    after=$(fm_composer_normalize_compare_text "$after")
+    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+  else
+    sleep "$settle"
+    fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" "$harness" \
+      || { printf 'send-failed'; return 0; }
+  fi
   fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
-    "$target" "$retries" "$sleep_s" "$expected_label" "$harness"
+    "$target" "$retries" "$sleep_s" "$expected_label" "$harness" fm_backend_zellij_agy_delivery_busy
 }
 
 # fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors

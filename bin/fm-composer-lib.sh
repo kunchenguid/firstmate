@@ -1108,21 +1108,23 @@ _fm_composer_agy_boundary_row() {  # <trimmed-row>
 }
 
 _fm_composer_agy_busy_scope() {  # <plain-screen>
-  local screen=$1 line trimmed row=0 opening=-1 closing=-1 boundary_count=0 first first_trimmed
+  local screen=$1 line trimmed row=0 opening=-1 closing=-1 boundary_count=0 first first_trimmed opening_width boundary_width pair_width_valid=1
   while IFS= read -r line; do
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
-    if _fm_composer_agy_boundary_row "$trimmed"; then
+    if boundary_width=$(_fm_composer_agy_boundary_width "$trimmed"); then
       boundary_count=$((boundary_count + 1))
       if [ "$boundary_count" -eq 1 ]; then
         opening=$row
+        opening_width=$boundary_width
       elif [ "$boundary_count" -eq 2 ]; then
         closing=$row
+        [ "$boundary_width" = "$opening_width" ] || pair_width_valid=0
       fi
     fi
     row=$((row + 1))
   done <<< "$screen"
-  if [ "$boundary_count" -ne 2 ] || [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ]; then
+  if [ "$boundary_count" -ne 2 ] || [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ] || [ "$pair_width_valid" -ne 1 ]; then
     return 0
   fi
   first=$((opening + 1))
@@ -1139,6 +1141,27 @@ _fm_composer_agy_busy_scope() {  # <plain-screen>
     fi
     row=$((row + 1))
   done <<< "$screen"
+}
+
+fm_composer_agy_wait_stable() {  # <content-function> <target> [expected-label]
+  local content_fn=$1 target=$2 expected_label=${3:-} previous= current have_previous=0 i=0
+  while [ "$i" -le 16 ]; do
+    if current=$("$content_fn" "$target" "$expected_label" 2>/dev/null); then
+      if [ "$have_previous" -eq 1 ] && [ -n "$current" ] && [ "$current" = "$previous" ]; then
+        printf '%s' "$current"
+        return 0
+      fi
+      previous=$current
+      have_previous=1
+    else
+      previous=
+      have_previous=0
+    fi
+    i=$((i + 1))
+    [ "$i" -le 16 ] || break
+    sleep 0.25
+  done
+  return 1
 }
 
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
@@ -1613,16 +1636,32 @@ EOF
 # stays a loud refusal rather than a blind retry into an unreadable pane.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [harness]
-  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} harness=${7:-} i=0 state
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [harness] [busy-fn]
+  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} harness=${7:-} busy_fn=${8:-} i=0 state
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label" "$harness")
     case "$state" in
-      pending|pending-unproven) ;;
+      empty) printf 'empty'; return 0 ;;
+      pending) ;;
+      pending-unproven) printf 'pending-unproven'; return 0 ;;
+      unknown)
+        if [ "$harness" = agy ] && [ -n "$busy_fn" ] \
+          && "$busy_fn" "$target" "$expected_label"; then
+          printf 'empty'
+        else
+          printf 'unknown'
+        fi
+        return 0
+        ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
+    if [ "$harness" = agy ] && [ -n "$busy_fn" ] \
+      && "$busy_fn" "$target" "$expected_label"; then
+      printf 'empty'
+      return 0
+    fi
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
   done

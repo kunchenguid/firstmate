@@ -462,6 +462,47 @@ test_agy_boundary_pair_widths_must_match() {
   pass "fm_composer_classify_screen: AGY boundary pairs require equal widths"
 }
 
+test_agy_busy_scope_requires_matching_boundaries() {
+  local boundary72 boundary16 screen
+  boundary72=$(printf '─%.0s' {1..72})
+  boundary16=$(printf '─%.0s' {1..16})
+  screen="$boundary72"$'\n>\n'"$boundary16"$'\nesc to cancel  model · low'
+  printf '%s' "$screen" | fm_busy_lines_match agy \
+    && fail "an AGY busy scope with mismatched boundaries must fail closed"
+  screen="$boundary72"$'\n>\n'"$boundary72"$'\nesc to cancel  model · low'
+  printf '%s' "$screen" | fm_busy_lines_match agy \
+    || fail "an AGY busy scope with equal boundaries should detect busy"
+  pass "fm_busy_lines_match: AGY busy scopes require matching boundaries"
+}
+
+test_agy_submit_waits_for_stable_render() {
+  local dir count_file out
+  dir="$TMP_ROOT/agy-stable-render"; mkdir -p "$dir"
+  count_file="$dir/count"
+  : > "$count_file"
+  slow_content() {
+    local count
+    count=$(wc -c < "$count_file")
+    count=$((count + 1))
+    : > "$count_file"
+    printf '%s' "$count" > "$count_file"
+    if [ "$count" -eq 1 ]; then printf 'partial'; else printf 'settled'; fi
+  }
+  out=$(fm_composer_agy_wait_stable slow_content target)
+  [ "$out" = settled ] || fail "slow AGY rendering should wait for stable content, got '$out'"
+  pass "fm_composer_agy_wait_stable: slow rendering waits for two equal reads"
+}
+
+test_agy_busy_post_enter_confirms_delivery() {
+  local out
+  send_key() { :; }
+  state_fn() { printf 'unknown'; }
+  busy_fn() { return 0; }
+  out=$(fm_composer_submit_retry_core send_key state_fn target 1 0.01 '' agy busy_fn)
+  [ "$out" = empty ] || fail "an AGY busy post-Enter signal should confirm delivery, got '$out'"
+  pass "fm_composer_submit_retry_core: AGY busy confirms an otherwise unknown submit"
+}
+
 test_misaligned_box_is_unknown() {
   local dir fb capture out fixture
   dir="$TMP_ROOT/misaligned-box"; mkdir -p "$dir"
@@ -718,6 +759,9 @@ test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
 test_agy_boundary_pair_widths_must_match
+test_agy_busy_scope_requires_matching_boundaries
+test_agy_submit_waits_for_stable_render
+test_agy_busy_post_enter_confirms_delivery
 test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts

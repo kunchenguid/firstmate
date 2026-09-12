@@ -559,22 +559,40 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] [harness] -> emp
   printf '%s' "$verdict"
 }
 
+fm_backend_cmux_agy_composer_content() {  # <target> [expected-label]
+  local cap
+  cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}" agy) || return 1
+  fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps agy)" "$cap" '' agy compare
+}
+
+fm_backend_cmux_agy_delivery_busy() {  # <target> [expected-label]
+  local cap
+  cap=$(fm_backend_cmux_capture "$1" 40 "${2:-}") || return 1
+  printf '%s' "$cap" | fm_busy_lines_match agy
+}
+
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then drive the shared verify-and-retry-Enter
 # loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the
 # shared composer verdict. Echoes empty|pending|unknown|send-failed, a subset
 # of the proof-carrying submit vocabulary.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-}
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} after expected
   fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  if [ "$harness" = agy ] && ! fm_backend_agy_composer_matches cmux "$target" "$text" "$expected_label"; then
-    printf 'agy-draft-conflict'
-    return 0
+  if [ "$harness" = agy ]; then
+    if ! after=$(fm_composer_agy_wait_stable fm_backend_cmux_agy_composer_content "$target" "$expected_label"); then
+      printf 'agy-preflight:unknown'
+      return 0
+    fi
+    expected=$(fm_composer_normalize_compare_text "$text")
+    after=$(fm_composer_normalize_compare_text "$after")
+    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+  else
+    sleep "$settle"
   fi
   fm_composer_submit_retry_core fm_backend_cmux_send_key fm_backend_cmux_composer_state \
-    "$target" "$retries" "$sleep_s" "$expected_label" "$harness"
+    "$target" "$retries" "$sleep_s" "$expected_label" "$harness" fm_backend_cmux_agy_delivery_busy
 }
 
 # fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for

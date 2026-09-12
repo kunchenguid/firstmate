@@ -282,18 +282,35 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
+fm_backend_tmux_agy_composer_content() {  # <target> [expected-label]
+  local target=$1 cursor cap
+  cursor=$(fm_tmux_composer_cursor_row "$target") || return 1
+  case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+  cap=$(fm_tmux_composer_capture "$target") || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$cap" "$cursor" agy compare
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} baseline_idle='' baseline_state
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} baseline_idle='' baseline_state after expected
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target" "$harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  if [ "$harness" = agy ] && ! fm_backend_agy_composer_matches tmux "$target" "$text"; then
-    printf 'agy-draft-conflict'
-    return 0
+  if [ "$harness" = agy ]; then
+    if ! after=$(fm_composer_agy_wait_stable fm_backend_tmux_agy_composer_content "$target"); then
+      printf 'agy-preflight:unknown'
+      return 0
+    fi
+    expected=$(fm_composer_normalize_compare_text "$text")
+    after=$(fm_composer_normalize_compare_text "$after")
+    if [ "$after" != "$expected" ]; then
+      printf 'agy-draft-conflict'
+      return 0
+    fi
+  else
+    sleep "$settle"
   fi
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$harness"
 }

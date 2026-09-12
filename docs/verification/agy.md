@@ -289,6 +289,8 @@ env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH
 
 The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions are left in the executable guard for firstmate to run at both widths.
 
+No post-fix live output is recorded here; the placeholder below remains intentionally unfilled until firstmate runs the real-binary guard at both widths.
+
 Firstmate's 2026-09-12 AGY 1.2.2 narrow-pane rerun reached the new doorbell step but reported `doorbell instruction was not acted on`.
 The capture measured an 80-column boundary with two-column composer margins on both sides, so the available content width is 76 characters rather than 78; the wrap comparison now uses that measured width and the maximum observed row length fallback.
 

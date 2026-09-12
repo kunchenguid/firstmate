@@ -1169,8 +1169,10 @@ test_send_text_submit_agy_reconstructs_visual_wrap() {
   zellij_pane_response "$dir" 5 7 3
   printf '%s' "$typed" > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
+  printf '%s' "$typed" > "$dir/responses/8.out"
   zellij_pane_response "$dir" 9 7 3
-  printf '%s' "$empty" > "$dir/responses/10.out"
+  zellij_pane_response "$dir" 11 7 3
+  printf '%s' "$empty" > "$dir/responses/12.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1196,8 +1198,10 @@ test_send_text_submit_agy_reconstructs_word_wrap() {
   zellij_pane_response "$dir" 5 7 3
   printf '%s' "$typed" > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
+  printf '%s' "$typed" > "$dir/responses/8.out"
+  zellij_pane_response "$dir" 11 7 3
   zellij_pane_response "$dir" 9 7 3
-  printf '%s' "$empty" > "$dir/responses/10.out"
+  printf '%s' "$empty" > "$dir/responses/12.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1217,6 +1221,10 @@ test_send_text_submit_agy_preserves_significant_spaces() {
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
   printf '%s' "$typed" > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  printf '%s' "$typed" > "$dir/responses/8.out"
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' "$typed" > "$dir/responses/10.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \

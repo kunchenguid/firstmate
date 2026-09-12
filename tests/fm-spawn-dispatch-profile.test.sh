@@ -434,7 +434,7 @@ test_raw_launch_rejects_agy_marker_assignment() {
 
 test_raw_launch_rejects_agy_marker_in_nested_commands() {
   local rec id out status launch
-  for id in profile-raw-agy-env-z15b profile-raw-agy-export-z15c profile-raw-agy-env-append-z15e profile-raw-agy-export-append-z15f; do
+  for id in profile-raw-agy-env-z15b profile-raw-agy-export-z15c profile-raw-agy-env-append-z15e profile-raw-agy-export-append-z15f profile-raw-agy-export-bare-z15g; do
     rec=$(make_spawn_case "$id" claude "$id")
     read_case_record "$rec"
     enable_dispatch_profile "$HOME_DIR"
@@ -443,6 +443,7 @@ test_raw_launch_rejects_agy_marker_in_nested_commands() {
       profile-raw-agy-export-z15c) launch='sh -c "export ANTIGRAVITY_AGENT=1; custom-agent"' ;;
       profile-raw-agy-env-append-z15e) launch='env ANTIGRAVITY_AGENT+=1 custom-agent --flag' ;;
       profile-raw-agy-export-append-z15f) launch='sh -c "export ANTIGRAVITY_AGENT +=1; custom-agent"' ;;
+      profile-raw-agy-export-bare-z15g) launch='sh -c "export ANTIGRAVITY_AGENT; custom-agent"' ;;
     esac
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$launch")
