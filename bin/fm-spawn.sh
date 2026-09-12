@@ -213,13 +213,13 @@
 #   poll that reaches the settle bound holds the bound for one more poll, so
 #   the second read can confirm it or clear it); once entry is seen the
 #   pane's text is not read again, so the nested shell's own startup errors
-#   never count as a refusal. A
-#   shell that is back in the project directory after treehouse was seen
-#   running means treehouse exited without entering (the pool at its cap,
-#   say), and the spawn fails at once. Every refusal from this wait prints
-#   what the evidence shows - still running, exited without entering, printed
-#   an error, or unreadable - followed by the pane's foreground process and
-#   its last lines verbatim, so treehouse's own reason reaches the operator.
+#   never count as a refusal. A shell that is back in the project directory
+#   on two consecutive reads after treehouse was seen running means treehouse
+#   exited without entering (the pool at its cap, say), and the spawn fails
+#   at once. Every refusal from this wait prints what the evidence shows -
+#   still running, exited without entering, printed an error, or unreadable -
+#   followed by the pane's foreground process and its last lines verbatim, so
+#   treehouse's own reason reaches the operator.
 #   The per-project Treehouse lock (fm_treehouse_project_lock_path, taken
 #   before the task pane exists and released only after the launch) is held
 #   across that whole wait. While it is held, every sibling spawn for the
