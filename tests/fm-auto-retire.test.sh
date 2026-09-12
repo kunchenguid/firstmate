@@ -174,6 +174,36 @@ test_secondmate_and_reportless_scout_are_left_alone() {
   pass "secondmates and scouts without reports are left alone"
 }
 
+test_working_appended_during_forge_lookup_is_refused() {
+  local dir out
+  dir="$TMP_ROOT/race"
+  seed_home "$dir"
+  install_fakes "$dir"
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf 'working: continuing the next slice\n' >> "$dir/home/state/race-ship.status"
+printf 'MERGED\n'
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+  write_meta "$dir" race-ship ship 'https://github.com/example/repo/pull/1'
+  printf 'done: delivered\n' > "$dir/home/state/race-ship.status"
+  out=$(run_retire "$dir") || fail "race pass failed: $out"
+  assert_contains "$out" "refused: race-ship (status-moved)" \
+    "a status that moved during forge lookup was not refused"
+  assert_not_contains "$out" "retired: race-ship" \
+    "a status that moved during forge lookup was retired"
+  [ -f "$dir/home/state/race-ship.meta" ] || fail "race record was removed"
+  [ ! -e "$dir/teardown.log" ] || fail "teardown ran after the status moved"
+  grep -qx 'working: continuing the next slice' "$dir/home/state/race-ship.status" \
+    || fail "lookup mutation did not land on the status file"
+  : > "$dir/teardown.log"
+  out=$(run_retire "$dir") || fail "second race pass failed: $out"
+  [ -z "$out" ] || fail "working last-verb after the race was not skipped: $out"
+  [ ! -s "$dir/teardown.log" ] || fail "teardown ran on the post-race working status"
+  pass "a working line appended during forge lookup is refused and not retried while working"
+}
+
 test_watcher_surfaces_one_retirement() {
   local dir out
   dir="$TMP_ROOT/watch"
@@ -199,4 +229,5 @@ test_open_pr_and_working_ship_are_left_alone
 test_gh_fail_is_unclassified_and_untouched
 test_teardown_refusal_never_claims_retirement_or_a_decision
 test_secondmate_and_reportless_scout_are_left_alone
+test_working_appended_during_forge_lookup_is_refused
 test_watcher_surfaces_one_retirement

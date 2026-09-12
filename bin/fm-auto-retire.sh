@@ -9,6 +9,9 @@
 #   - a non-scout, non-secondmate task with pr= whose forge state is MERGED
 #     and whose last status verb is done
 #   - a scout whose last status verb is done and whose report.md is present
+# The done check snapshots the status file's byte length and mtime; if either
+# changed before retirement, the record is refused as status-moved and left
+# for a later cycle.
 # Every landed-work refusal still comes from teardown. One status line and one
 # Slack line are emitted per successful retirement. A refused retirement is
 # recorded once on the task status and is not retried. Unclassifiable records
@@ -30,7 +33,7 @@ SLACK_BIN="${FM_SLACK_POST_BIN:-$SCRIPT_DIR/fm-slack-post.sh}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
-  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -68,25 +71,43 @@ already_marked() {  # <id>
   [ -f "$path" ] && [ ! -L "$path" ]
 }
 
+# ponytail: size+mtime, content hash if same-second same-size rewrite matters
+status_fingerprint() {  # <file> -> bytes<TAB>mtime
+  local bytes mtime
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  bytes=$(wc -c < "$1" | tr -d '[:space:]')
+  mtime=$(/usr/bin/stat -f '%m' "$1" 2>/dev/null) || mtime=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
+  printf '%s\t%s\n' "$bytes" "$mtime"
+}
+
+status_unchanged() {  # <fingerprint> <file>
+  local now
+  now=$(status_fingerprint "$2") || return 1
+  [ "$1" = "$now" ]
+}
+
 forge_state() {  # <pr-url>
   local state
   state=$(gh pr view "$1" --json state -q .state 2>/dev/null) || return 1
   printf '%s\n' "$state"
 }
 
-classify() {  # <id> <meta> -> merged|scout|skip|unclassified
-  local id=$1 meta=$2 kind pr last verb report state
+classify() {  # <id> <meta> -> merged|scout|skip|unclassified|status-moved
+  local id=$1 meta=$2 kind pr last verb report state status fp
   kind=$(meta_field "$meta" kind)
   [ -n "$kind" ] || kind=ship
   case "$kind" in
     secondmate) printf 'skip\n'; return 0 ;;
   esac
-  last=$(last_status_line "$STATE/$id.status")
+  status="$STATE/$id.status"
+  last=$(last_status_line "$status")
   verb=$(status_line_verb "$last")
   [ "$verb" = "done" ] || { printf 'skip\n'; return 0; }
+  fp=$(status_fingerprint "$status") || { printf 'status-moved\n'; return 0; }
   if [ "$kind" = scout ]; then
     report="$DATA/$id/report.md"
     if [ -f "$report" ] && [ ! -L "$report" ]; then
+      status_unchanged "$fp" "$status" || { printf 'status-moved\n'; return 0; }
       printf 'scout\n'
     else
       printf 'skip\n'
@@ -104,7 +125,10 @@ classify() {  # <id> <meta> -> merged|scout|skip|unclassified
   fi
   state=$(forge_state "$pr") || { printf 'unclassified\n'; return 0; }
   case "$state" in
-    MERGED|merged) printf 'merged\n' ;;
+    MERGED|merged)
+      status_unchanged "$fp" "$status" || { printf 'status-moved\n'; return 0; }
+      printf 'merged\n'
+      ;;
     *) printf 'skip\n' ;;
   esac
 }
@@ -138,6 +162,7 @@ for meta in "$STATE"/*.meta; do
   case "$class" in
     merged) retire_one "$id" "merged PR" ;;
     scout) retire_one "$id" "done scout with report" ;;
+    status-moved) printf 'refused: %s (status-moved)\n' "$id" ;;
     skip) ;;
     unclassified)
       printf 'unclassified: %s\n' "$id" >&2
