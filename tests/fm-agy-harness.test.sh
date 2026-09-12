@@ -233,6 +233,49 @@ EOF
   pass "fm-teardown: the agy hooks exemption does not hide other uncommitted work"
 }
 
+test_spawn_refuses_a_symlinked_agents_parent() {
+  local rec dir home proj wt fakebin id out rc outside
+  id="agy-symlink-$$"
+  rec=$(make_case symlink "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  outside="$dir/outside"
+  mkdir -p "$outside"
+  ln -s "$outside" "$proj/.agents"
+  git -C "$proj" add .agents >/dev/null
+  git -C "$proj" commit -qm 'project tracks .agents as a symlink' >/dev/null
+  git -C "$proj" push -q origin HEAD
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "agy spawn followed a symlinked .agents parent"
+  assert_contains "$out" "inside the task worktree" "agy symlink refusal did not name the worktree boundary"
+  assert_absent "$outside/hooks.json" "agy spawn wrote its hook file outside the task worktree"
+  pass "fm-spawn: a symlinked .agents parent is refused instead of escaping the worktree"
+}
+
+test_teardown_never_follows_a_symlinked_agents_parent() {
+  local rec dir home proj wt fakebin id out rc outside
+  id="agy-symlink-teardown-$$"
+  rec=$(make_case symlink-teardown "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  outside="$dir/outside"
+  mkdir -p "$outside"
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off) \
+    || fail "agy spawn for the symlink teardown test failed"$'\n'"$out"
+  rm -rf "$wt/.agents"
+  printf '{"project":{}}\n' > "$outside/hooks.json"
+  ln -s "$outside" "$wt/.agents"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$BASE_PATH" "$TEARDOWN" "$id" --force 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "agy teardown should succeed"$'\n'"$out"
+  assert_present "$outside/hooks.json" "agy teardown deleted a file outside the task worktree"
+  pass "fm-teardown: a symlinked .agents parent is never followed out of the worktree"
+}
+
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks() {
   local rec dir home proj wt fakebin id out rc owned
   id="claude-hooks-$$"
@@ -263,3 +306,5 @@ test_teardown_removes_workspace_hooks
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks
 test_unforced_teardown_removes_workspace_hooks
 test_unforced_teardown_still_refuses_real_worktree_work
+test_spawn_refuses_a_symlinked_agents_parent
+test_teardown_never_follows_a_symlinked_agents_parent

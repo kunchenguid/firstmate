@@ -3357,8 +3357,12 @@ if [ "$KIND" != secondmate ]; then
       ;;
     agy)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
-        if [ -e "$WT/.agents/hooks.json" ] || [ -L "$WT/.agents/hooks.json" ]; then
-          echo "error: refusing agy spawn because $WT/.agents/hooks.json already exists; firstmate will not overwrite a workspace hook" >&2
+        AGY_HOOKS=$(fm_control_agy_hooks_path "$WT") || {
+          echo "error: refusing agy spawn because $WT/.agents does not resolve to a real directory inside the task worktree; firstmate writes the agy workspace hook only within the task's own worktree" >&2
+          exit 1
+        }
+        if [ -e "$AGY_HOOKS" ] || [ -L "$AGY_HOOKS" ]; then
+          echo "error: refusing agy spawn because $AGY_HOOKS already exists; firstmate will not overwrite a workspace hook" >&2
           exit 1
         fi
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
@@ -3372,7 +3376,7 @@ if [ "$KIND" != secondmate ]; then
         a_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true")
         a_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
         printf '{"fm-firstmate":{"PreInvocation":[{"type":"command","command":"%s"}],"Stop":[{"type":"command","command":"%s"}]}}\n' \
-          "$a_before" "$a_stop" > "$WT/.agents/hooks.json"
+          "$a_before" "$a_stop" > "$AGY_HOOKS"
       fi
       ;;
     kimi*)

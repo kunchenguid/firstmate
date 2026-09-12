@@ -211,6 +211,24 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# agy is the one adapter whose wiring lives inside the task worktree at a path
+# the project controls, so its location is a safety question rather than a
+# constant. Prints the hook path only when `.agents` is a real directory of
+# this worktree: a symlinked parent - or one resolving anywhere else - is
+# refused, so neither the spawn write nor any later removal can follow a
+# project-planted link out of the task's own disposable worktree.
+fm_control_agy_hooks_path() {  # <worktree>
+  local wt=${1-} wt_real agents_real
+  [ -n "$wt" ] || return 1
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 1
+  [ ! -L "$wt/.agents" ] || return 1
+  if [ -d "$wt/.agents" ]; then
+    agents_real=$(cd "$wt/.agents" 2>/dev/null && pwd -P) || return 1
+    [ "$agents_real" = "$wt_real/.agents" ] || return 1
+  fi
+  printf '%s\n' "$wt_real/.agents/hooks.json"
+}
+
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
@@ -248,7 +266,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
-    agy) printf '%s\n' "$wt/.agents/hooks.json" ;;
+    agy) fm_control_agy_hooks_path "$wt" || true ;;
   esac
 }
 
