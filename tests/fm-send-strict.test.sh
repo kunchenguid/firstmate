@@ -77,11 +77,7 @@ case "${1:-} ${2:-}" in
 esac
 SH
   chmod +x "$fb/herdr"
-  cat > "$fb/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fb/sleep"
+  fm_fake_exit0 "$fb" sleep
   printf '%s\n' "$fb"
 }
 

@@ -28,8 +28,8 @@
 #     is unchanged, and a launch never re-targets that copy.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 
@@ -323,15 +323,7 @@ make_fake_toolchain() {
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
+  fm_test_fake_gh_axi "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
@@ -354,38 +346,10 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.4' ;;
-  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
-  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tasks-axi"
+  fm_test_fake_gh "$fakebin"
+  fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_no_mistakes "$fakebin"
+  fm_test_fake_tasks_axi "$fakebin"
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -772,11 +736,7 @@ test_spawn_fast_forwards_before_launch() {
   # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" tmux
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
@@ -806,11 +766,7 @@ test_spawn_warns_when_sync_skipped_before_launch() {
   fakebin="$w/fakebin"
   err="$w/spawn.err"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" tmux
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
