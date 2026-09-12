@@ -453,8 +453,8 @@ test_inbox_ack_means_receipt_not_completion() {
     "inbox section no longer ties the move to receipt rather than completion"
   assert_grep "means received and understood, not done" "$brief" \
     "inbox section lost the explicit receipt-versus-done distinction"
-  assert_grep "which you track and finish yourself" "$brief" \
-    "inbox section no longer tells the worker to track outstanding work itself"
+  assert_grep "read and act on each message in numeric order" "$brief" \
+    "inbox section no longer tells the worker to act on each message, not merely read it"
   pass "fm-brief.sh: the instruction inbox section separates acknowledgement from completed work"
 }
 

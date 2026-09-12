@@ -29,8 +29,8 @@
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement;
-#                              it is due as soon as the record is read, and the
-#                              work it asks for proceeds on its own schedule
+#                              it is due as soon as the record is read, and
+#                              never waits on the work the record asks for
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
@@ -270,7 +270,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     *[![:print:]]*) return 1 ;;
   esac
   quoted=$(printf '%s' "$abs" | sed "s/'/'\\\\''/g")
-  printf ": Firstmate instruction waiting: list '%s'/*.msg and read them in numeric order, moving each to '%s'/handled/ as soon as you have read it, leaving none behind - that move only confirms receipt, so track and finish any work it asks for on your own schedule." \
+  printf ": Firstmate instruction waiting: list '%s'/*.msg and, in numeric order, read and act on each, moving it to '%s'/handled/ as soon as you have read it, leaving none behind - that move only confirms receipt, not that the work it asks for is done." \
     "$quoted" "$quoted"
 }
 
