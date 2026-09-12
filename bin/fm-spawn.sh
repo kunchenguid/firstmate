@@ -5071,7 +5071,32 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", (event: any) => {
+    execFile("touch", ["$TURNEND"]);
+    const parts: string[] = [];
+    const msg = event && event.message;
+    if (msg && msg.errorMessage) parts.push(String(msg.errorMessage));
+    const content = msg && msg.content;
+    if (typeof content === "string") parts.push(content);
+    else if (Array.isArray(content)) {
+      for (const c of content) {
+        if (c && c.text) parts.push(String(c.text));
+        if (c && c.error) parts.push(String(c.error));
+      }
+    }
+    if (Array.isArray(event && event.toolResults)) {
+      for (const t of event.toolResults) {
+        if (t && t.error) parts.push(String(t.error));
+        if (t && t.output) parts.push(String(t.output));
+      }
+    }
+    const text = parts.join("\n");
+    if (!text) return;
+    const child = execFile("$FM_ROOT/bin/fm-quota-refusal.sh", ["apply", "--task", "$ID"], {
+      env: { ...process.env, FM_HOME: "$FM_HOME", FM_STATE_OVERRIDE: "$STATE_REAL" },
+    });
+    child.stdin?.end(text);
+  });
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
   let lastProgress = 0;

@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. With crew-dispatch active, relaunch forwards --dispatch-resolved to spawn.
+#   8. --quota-fallback picks the next same-class profile, writes a progress
+#      note from status plus git, records lifecycle telemetry, and refuses when
+#      no eligible profile remains.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1662,6 +1666,68 @@ test_direct_spawn_relaunch_adopts_recorded_reader_access() {
   pass "fm-spawn relaunch: a recorded reader access axis is adopted without --access"
 }
 
+enable_dispatch_array() {
+  local dir=$1
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"default":[{"harness":"claude","model":"default","effort":"default","provider":"anthropic"},{"harness":"codex","model":"gpt-5","effort":"medium","provider":"openai"}]}' \
+    > "$dir/home/config/crew-dispatch.json"
+}
+
+test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active() {
+  local dir out rc
+  dir=$(new_case dispatch-attest rl-qa)
+  add_ship_task "$dir" rl-qa claude
+  enable_dispatch_array "$dir"
+
+  out=$(run_control "$dir" rl-qa relaunch --note "continue after quota" --dispatch-resolved); rc=$?
+  expect_code 0 "$rc" "relaunch should forward --dispatch-resolved"$'\n'"$out"
+  assert_contains "$out" "relaunched rl-qa" "attested relaunch should complete"
+  [ "$(meta_field "$dir" rl-qa dispatch)" = resolved ] \
+    || fail "spawn did not record dispatch=resolved (got $(meta_field "$dir" rl-qa dispatch))"
+  pass "fm-control relaunch: --dispatch-resolved is accepted and forwarded when crew-dispatch is active"
+}
+
+test_quota_fallback_picks_next_profile_and_writes_a_progress_note() {
+  local dir out rc wt brief
+  dir=$(new_case quota-fallback rl-qb)
+  add_ship_task "$dir" rl-qb claude
+  enable_dispatch_array "$dir"
+  wt=$(meta_field "$dir" rl-qb worktree)
+  printf 'dirty-file\n' > "$wt/wip.txt"
+  printf 'working: setup complete\nworking: reproduced the 429\n' > "$dir/home/state/rl-qb.status"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl-qb relaunch --quota-fallback); rc=$?
+  expect_code 0 "$rc" "quota fallback should relaunch onto the next profile"$'\n'"$out"
+  assert_contains "$out" "harness=codex" "fallback should pick the next same-class profile"
+  [ "$(meta_field "$dir" rl-qb harness)" = codex ] || fail "fallback did not record the successor harness"
+  [ "$(meta_field "$dir" rl-qb dispatch)" = resolved ] || fail "fallback did not attest dispatch=resolved"
+  brief=$(cat "$dir/home/data/rl-qb/brief.md")
+  assert_contains "$brief" "working: reproduced the 429" "note should carry recent status lines"
+  assert_contains "$brief" "wip.txt" "note should carry git status --short"
+  [ -f "$dir/home/data/telemetry/lifecycle.jsonl" ] || fail "quota fallback wrote no lifecycle telemetry"
+  jq -e 'select(.op=="quota-fallback" and .reason=="quota-exhausted" and .from=="claude/default" and .to=="codex/gpt-5")' \
+    "$dir/home/data/telemetry/lifecycle.jsonl" >/dev/null \
+    || fail "quota fallback telemetry row missing from/to/reason"
+  pass "fm-control relaunch: --quota-fallback keeps the copy, picks the next profile, and writes a progress note"
+}
+
+test_quota_fallback_refuses_when_no_eligible_profile_remains() {
+  local dir out rc
+  dir=$(new_case quota-none rl-qc)
+  add_ship_task "$dir" rl-qc claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"default":{"harness":"claude","model":"default","effort":"default","provider":"anthropic"}}' \
+    > "$dir/home/config/crew-dispatch.json"
+
+  out=$(run_control "$dir" rl-qc relaunch --quota-fallback); rc=$?
+  expect_code 1 "$rc" "quota fallback should refuse when no successor remains"$'\n'"$out"
+  assert_contains "$out" "no eligible" "refusal should name that no eligible profile remains"
+  [ "$(meta_field "$dir" rl-qc harness)" = claude ] || fail "a refused fallback changed the recorded harness"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused fallback stopped the running agent"
+  pass "fm-control relaunch: --quota-fallback refuses loudly when no eligible profile remains"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1717,3 +1783,6 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_recorded_reader_scout_relaunch_without_access_keeps_identity
 test_direct_spawn_relaunch_adopts_recorded_reader_access
+test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active
+test_quota_fallback_picks_next_profile_and_writes_a_progress_note
+test_quota_fallback_refuses_when_no_eligible_profile_remains

@@ -1230,7 +1230,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # classification, which is why the declaration is read before the afk branch
 # rather than after it.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared quota_text quota_rc
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
@@ -1271,6 +1271,19 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     fi
     handle_paused_stale "$win" "$task" "$h"
     return 0
+  fi
+  quota_text=$(fm_backend_capture "$(window_backend "$win")" "$win" 80 "$(window_label "$win")" 2>/dev/null) || quota_text=
+  if [ -n "$quota_text" ] && [ -n "$task" ]; then
+    quota_rc=0
+    printf '%s\n' "$quota_text" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-quota-refusal.sh" apply --task "$task" >/dev/null 2>&1 || quota_rc=$?
+    if [ "$quota_rc" -eq 0 ]; then
+      key=$(window_key "$win")
+      rm -f "$since_file" "$escalation_file"
+      clear_write_tracking "$key"
+      triage_log "quota exhausted on busy pane: $win"
+      return 0
+    fi
   fi
   wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
   return 1

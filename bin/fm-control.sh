@@ -7,6 +7,8 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#                                         [--dispatch-resolved | --dispatch-override-reason <why>]
+#                                         [--quota-fallback]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -46,6 +48,15 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              When config/crew-dispatch.json is active, relaunch forwards
+#              --dispatch-resolved or --dispatch-override-reason to
+#              bin/fm-spawn.sh --relaunch (the same attestation a fresh spawn
+#              needs). --quota-fallback picks the next same-class profile from
+#              that file that bin/fm-quota-cooldown.sh authorize still allows,
+#              generates the progress note from the last 5 status lines plus
+#              git status --short and git log --oneline -3 of the recorded
+#              worktree, and attests --dispatch-resolved. It refuses before
+#              stopping the agent when no eligible profile remains.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -132,6 +143,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -197,6 +210,14 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+DISPATCH_RESOLVED=0
+DISPATCH_OVERRIDE_REASON=
+DISPATCH_OVERRIDE_REASON_SET=0
+DISPATCH_PROVIDER=
+DISPATCH_PROVIDER_SET=0
+QUOTA_FALLBACK=0
+QUOTA_FALLBACK_FROM=
+QUOTA_FALLBACK_STARTED_MS=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -212,6 +233,10 @@ for control_arg in "$@"; do
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
+        ;;
+      dispatch-override-reason)
+        DISPATCH_OVERRIDE_REASON=$control_arg
+        DISPATCH_OVERRIDE_REASON_SET=1
         ;;
     esac
     control_want_value=
@@ -232,6 +257,13 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --dispatch-resolved) DISPATCH_RESOLVED=1 ;;
+    --dispatch-override-reason) control_want_value=dispatch-override-reason ;;
+    --dispatch-override-reason=*)
+      DISPATCH_OVERRIDE_REASON=${control_arg#--dispatch-override-reason=}
+      DISPATCH_OVERRIDE_REASON_SET=1
+      ;;
+    --quota-fallback) QUOTA_FALLBACK=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -242,7 +274,8 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$DISPATCH_RESOLVED" = 0 ] && [ "$DISPATCH_OVERRIDE_REASON_SET" = 0 ] && [ "$QUOTA_FALLBACK" = 0 ] \
+    || die "--harness, --model, --effort, --note, dispatch attestation, and --quota-fallback apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -251,6 +284,21 @@ case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
 esac
+[ "$DISPATCH_OVERRIDE_REASON_SET" = 0 ] || [ -n "$DISPATCH_OVERRIDE_REASON" ] \
+  || die "--dispatch-override-reason requires a non-empty value"
+case "$DISPATCH_OVERRIDE_REASON" in
+  *$'\n'*) die "--dispatch-override-reason must be a single line" ;;
+esac
+if [ "$DISPATCH_RESOLVED" = 1 ] && [ "$DISPATCH_OVERRIDE_REASON_SET" = 1 ]; then
+  die "pass exactly one of --dispatch-resolved or --dispatch-override-reason, not both"
+fi
+if [ "$QUOTA_FALLBACK" = 1 ]; then
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--quota-fallback chooses the successor profile and writes the progress note; do not also pass --harness, --model, --effort, or --note"
+  [ "$DISPATCH_OVERRIDE_REASON_SET" = 0 ] \
+    || die "--quota-fallback attests --dispatch-resolved; do not also pass --dispatch-override-reason"
+  DISPATCH_RESOLVED=1
+fi
 
 # --- exact task-id resolution ----------------------------------------------
 
@@ -611,6 +659,80 @@ relaunch_rollback() {
   return 0
 }
 
+quota_fallback_prepare() {
+  local dispatch_file matched profiles n i profile harness model effort provider current_h current_m rc status_tail git_status git_log
+  dispatch_file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/crew-dispatch.json"
+  [ -f "$dispatch_file" ] || die "quota fallback needs config/crew-dispatch.json"
+  case "$KIND" in
+    ship|scout) ;;
+    *) die "quota fallback applies to ship or scout tasks, not $KIND" ;;
+  esac
+  current_h=$(fm_meta_get "$META" harness)
+  current_m=$(fm_meta_get "$META" model)
+  [ -n "$current_m" ] || current_m=default
+  matched=$(fm_meta_get "$META" matched_rule)
+  profiles=$(jq -c --arg rule "$matched" '
+    def profiles($v):
+      if ($v | type) == "array" then $v
+      elif ($v | type) == "object" then [$v]
+      else [] end;
+    if $rule == "" or $rule == "default" then profiles(.default)
+    elif ($rule | test("^rule-[0-9]+$")) then
+      ($rule | ltrimstr("rule-") | tonumber) as $i
+      | if (.rules | type) == "array" and ($i < (.rules | length)) then profiles(.rules[$i].use) else [] end
+    else profiles(.default) end
+  ' "$dispatch_file") || die "quota fallback could not read $dispatch_file"
+  n=$(printf '%s\n' "$profiles" | jq 'length')
+  [ "$n" -gt 0 ] || die "no eligible same-class dispatch profile remains for $ID (quota fallback)"
+  NEW_HARNESS=
+  for i in $(seq 0 $((n - 1))); do
+    profile=$(printf '%s\n' "$profiles" | jq -c --argjson i "$i" '.[$i]')
+    harness=$(printf '%s\n' "$profile" | jq -r '.harness // empty')
+    model=$(printf '%s\n' "$profile" | jq -r '.model // "default"')
+    effort=$(printf '%s\n' "$profile" | jq -r '.effort // "default"')
+    provider=$(printf '%s\n' "$profile" | jq -r '.provider // empty')
+    [ -n "$harness" ] || continue
+    [ "$harness" = "$current_h" ] && [ "$model" = "$current_m" ] && continue
+    if [ -n "$provider" ]; then
+      rc=0
+      "$SCRIPT_DIR/fm-quota-cooldown.sh" authorize --harness "$harness" --provider "$provider" >/dev/null 2>&1 || rc=$?
+    else
+      rc=0
+      "$SCRIPT_DIR/fm-quota-cooldown.sh" authorize --harness "$harness" >/dev/null 2>&1 || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || continue
+    NEW_HARNESS=$harness
+    NEW_MODEL=$model
+    NEW_EFFORT=$effort
+    if [ -n "$provider" ]; then
+      DISPATCH_PROVIDER=$provider
+      DISPATCH_PROVIDER_SET=1
+    fi
+    break
+  done
+  [ -n "$NEW_HARNESS" ] || die "no eligible same-class dispatch profile remains for $ID (quota fallback)"
+  HARNESS_SET=1
+  MODEL_SET=1
+  EFFORT_SET=1
+  status_tail=$(tail -n 5 "$STATE/$ID.status" 2>/dev/null || true)
+  git_status=$(git -C "$WT" status --short 2>/dev/null || true)
+  git_log=$(git -C "$WT" log --oneline -3 2>/dev/null || true)
+  NOTE=$(printf '%s\n' \
+    "Quota exhausted on ${current_h}/${current_m}. Continue on ${NEW_HARNESS}/${NEW_MODEL}." \
+    "" \
+    "Last status:" \
+    "$status_tail" \
+    "" \
+    "git status --short:" \
+    "$git_status" \
+    "" \
+    "git log --oneline -3:" \
+    "$git_log")
+  NOTE_SET=1
+  QUOTA_FALLBACK_FROM="${current_h}/${current_m}"
+  DISPATCH_RESOLVED=1
+}
+
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
@@ -849,6 +971,10 @@ do_relaunch() {
   local -a spawn_args
 
   require_state_verified_backend relaunch
+  if [ "$QUOTA_FALLBACK" = 1 ]; then
+    QUOTA_FALLBACK_STARTED_MS=$(fm_telemetry_now_ms)
+    quota_fallback_prepare
+  fi
   resolve_relaunch_profile
 
   case "$KIND" in
@@ -893,6 +1019,12 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  if [ "$DISPATCH_RESOLVED" = 1 ]; then
+    spawn_args+=(--dispatch-resolved)
+  elif [ "$DISPATCH_OVERRIDE_REASON_SET" = 1 ]; then
+    spawn_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
+  fi
+  [ "$DISPATCH_PROVIDER_SET" = 0 ] || spawn_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -910,6 +1042,13 @@ do_relaunch() {
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$QUOTA_FALLBACK" = 1 ]; then
+    fm_telemetry_record lifecycle "$(jq -nc \
+      --arg from "$QUOTA_FALLBACK_FROM" \
+      --arg to "${TARGET_HARNESS}/${TARGET_MODEL}" \
+      --argjson elapsed "$(($(fm_telemetry_now_ms) - QUOTA_FALLBACK_STARTED_MS))" \
+      '{op:"quota-fallback",from:$from,to:$to,reason:"quota-exhausted",elapsedMs:$elapsed}')"
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------
