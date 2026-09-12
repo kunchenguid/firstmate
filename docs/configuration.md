@@ -1135,13 +1135,13 @@ The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardow
 
 ## Required project context
 
-Required development instructions reach every worker runtime through the common launch text.
+Required Rialto development instructions reach every worker runtime through the common launch text.
 Git remotes identifying `UseRialto/rialto-backend` or `UseRialto/rialto-frontend` require `config/rialto-project-context.paths`.
-This private source configuration follows the existing primary-authoritative secondmate inheritance and convergence path; inaccessible paired sources on a child host stop its worker launch.
-Use `bin/fm-project-context.sh --prepare-rialto "$BACKEND_CHECKOUT" "$FRONTEND_CHECKOUT" "$PRODUCT_AGENTS" > rialto-project-context.paths` to prepare a staging artifact without modifying a running home.
+This private source configuration follows the [primary-authoritative secondmate inheritance and convergence contract](../.agents/skills/secondmate-provisioning/SKILL.md); inaccessible paired sources on a child host stop its worker launch.
+Use the preparation command in [`fm-project-context.sh --help`](../bin/fm-project-context.sh) to create a staging artifact without modifying a running home.
 Supply the reviewed source checkouts and product instructions, review the emitted paths, and install configuration only through a separately authorized home operation.
 Private absolute paths are never shared defaults.
-See `bin/fm-project-context.sh --help` for its file format, checkout resolution, source hashes and missing-file behavior.
+The script header owns the source-file format and rendering interface; missing required configuration or unreadable sources stop launch before instruction delivery.
 After compaction, the generated instructions require rereading every source before further project work.
 Every configured path must therefore be readable by the worker's file tools under its unchanged workspace guard, not merely by the launch process.
 When paired checkouts are outside that boundary, prepare verified source copies inside the worker workspace, retain their original paths, Git identities and byte/hash receipts, and use `--prepare-rialto` with those accessible copies.
