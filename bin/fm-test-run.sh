@@ -286,7 +286,7 @@ family_for_basename() {
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-capture-visual-evidence-mechanism.test.sh|\
-    fm-pr-body.test.sh|fm-pr-body-template-mechanism.test.sh|\
+    fm-pr-body.test.sh|fm-pr-body-template-mechanism.test.sh|fm-pr-context.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|fm-idea.test.sh|\
     fm-ci-load-guard.test.sh|fm-canonical-guard-benchmark.test.sh|\
     fm-classify-decision-key.test.sh|\
@@ -782,6 +782,7 @@ tests/fm-pr-body.test.sh 570
 tests/fm-pr-check-security.test.sh 3778
 tests/fm-pr-comment-watch-mechanism.test.sh 205
 tests/fm-pr-comment-watch.test.sh 890
+tests/fm-pr-context.test.sh 2322
 tests/fm-pr-lib.test.sh 35
 tests/fm-pr-merge.test.sh 2675
 tests/fm-primary-scope-lib.test.sh 65

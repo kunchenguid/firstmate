@@ -190,6 +190,21 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# Both new and promoted PR deliveries persist the same context in the owning
+# home, not the disposable project checkout. The helper owns its file format.
+fm_dod_pr_context_block() {  # <task-id>
+  local id=$1 command context_home context_data
+  context_home=$(CDPATH='' cd -- "$FM_HOME" && pwd -P) || return 1
+  context_data=$(CDPATH='' cd -- "${DATA:?resolved data directory is required}" && pwd -P) || return 1
+  printf -v command 'FM_HOME=%q FM_DATA_OVERRIDE=%q %q' "$context_home" "$context_data" "$SCRIPT_DIR/fm-pr-context.sh"
+  cat <<EOF
+Before reporting a review-ready PR, save its exact-head evidence with \`$command write $id < context.json\`, using the input contract in \`$command --help\`.
+Then run \`$command validate $id\`; a missing head, named oracle, or other required evidence is not review-ready.
+If writing or validation fails, report the blocker and stop without a PR completion signal.
+This file preserves the handoff; it does not itself install monitoring or authorize early retirement.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -198,8 +213,12 @@ fm_dod_block() {  # <mode> <task-id>
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
+When it is implemented and committed, publish only your task branch with \`git push <fork-remote> HEAD:refs/heads/fm/$id\` and open a PR with \`gh-axi\`.
+EOF
+      fm_dod_pr_context_block "$id" || return 1
+      cat <<EOF
+After context validation succeeds and after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -245,7 +264,10 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+      fm_dod_pr_context_block "$id" || return 1
+      cat <<EOF
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) and context validation succeeds, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)
