@@ -114,6 +114,9 @@ case "${1:-}" in
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
       fi
+      if [ "$payload" = C-u ] && [ -n "${FM_FAKE_CLEAR_COMPOSER:-}" ]; then
+        printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$D/pane"
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
           : > "$D/muse-ack-pending"
@@ -205,6 +208,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_CLEAR_COMPOSER="${FM_FAKE_CLEAR_COMPOSER:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -839,23 +843,48 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
-test_agy_exit_refuses_pending_composer() {
+test_agy_exit_clears_pending_composer() {
   local dir out rc
   dir=$(new_case agy-pending-exit)
   add_task "$dir" t1 agy
   alive_as "$dir" agy
   printf '────────────────\n> draft\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+  out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 FM_FAKE_CLEAR_COMPOSER=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should clear an AGY pending composer"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = C-u ] || fail "pending AGY exit should clear with C-u"
+  [ "$(literals "$dir")" = /quit ] || fail "pending AGY exit should type /quit after clearing"
+  assert_grep 'note: exit cleared unsent composer text: draft' "$dir/home/state/t1.status" \
+    "pending AGY exit should record the cleared draft"
+  pass "fm-control exit: pending AGY composers are recorded, cleared, and exited"
+}
+
+test_agy_exit_refuses_unknown_composer() {
+  local dir out rc
+  dir=$(new_case agy-unknown-exit)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
   out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "exit should refuse an AGY pending composer"
-  assert_contains "$out" "exit-command=refused" \
-    "pending AGY exit should report refusal"
-  assert_contains "$out" "agy-preflight:pending" \
-    "pending AGY exit should report the preflight verdict"
-  [ -z "$(literals "$dir")" ] \
-    || fail "pending AGY exit must not type the lifecycle command"
-  [ -z "$(keys_sent "$dir")" ] \
-    || fail "pending AGY exit must not send lifecycle keys"
-  pass "fm-control exit: pending AGY composers refuse before typing"
+  expect_code 1 "$rc" "exit should refuse an unknown AGY composer"
+  assert_contains "$out" "agy-preflight:unknown" "unknown AGY exit should report the unreadable composer"
+  [ -z "$(literals "$dir")" ] || fail "unknown AGY exit must not type the lifecycle command"
+  [ -z "$(keys_sent "$dir")" ] || fail "unknown AGY exit must not send a clear key"
+  pass "fm-control exit: an unknown AGY composer remains a loud refusal"
+}
+
+test_agy_exit_refuses_uncleared_pending_composer() {
+  local dir out rc
+  dir=$(new_case agy-uncleared-exit)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  printf '────────────────\n> draft\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+  out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit should refuse an uncleared AGY pending composer"
+  assert_contains "$out" "agy-preflight:pending" "uncleared AGY exit should report the remaining pending composer"
+  [ -z "$(literals "$dir")" ] || fail "uncleared AGY exit must not type the lifecycle command"
+  [ "$(keys_sent "$dir")" = C-u ] || fail "uncleared AGY exit should attempt C-u once"
+  assert_grep 'note: exit cleared unsent composer text: draft' "$dir/home/state/t1.status" \
+    "uncleared AGY exit should retain the draft note"
+  pass "fm-control exit: an uncleared AGY composer remains a loud refusal"
 }
 
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
@@ -963,7 +992,9 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
-test_agy_exit_refuses_pending_composer
+test_agy_exit_clears_pending_composer
+test_agy_exit_refuses_unknown_composer
+test_agy_exit_refuses_uncleared_pending_composer
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker

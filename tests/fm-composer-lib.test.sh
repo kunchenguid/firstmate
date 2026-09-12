@@ -32,6 +32,12 @@ test_compare_normalizer_preserves_separators() {
   [ "$out" = 'foo bar' ] || fail "comparison normalization changed meaningful spaces: '$out'"
   out=$(fm_composer_normalize_compare_text $'foo\nbar')
   [ "$out" = 'foo bar' ] || fail "comparison normalization did not fold wrapping whitespace: '$out'"
+  [ "$(fm_composer_normalize_compare_text 'foo  bar')" = 'foo  bar' ] \
+    || fail "comparison normalization collapsed repeated spaces"
+  [ "$(fm_composer_normalize_compare_text 'a  b')" != "$(fm_composer_normalize_compare_text $'a\nb')" ] \
+    || fail "comparison normalization treated a wrapped line as an ordinary space"
+  [ "$(fm_composer_normalize_compare_text $'a\nb')" = "$(fm_composer_normalize_compare_text $'a\nb')" ] \
+    || fail "comparison normalization changed identical multiline text"
   [ "$(fm_composer_normalize_compare_text 'foobar')" != "$(fm_composer_normalize_compare_text 'foo bar')" ] \
     || fail "comparison normalization erased a meaningful separator"
   pass "fm_composer_normalize_compare_text: wrapping folds, meaningful separators survive"

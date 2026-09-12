@@ -1804,7 +1804,8 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 ## Antigravity CLI (`agy`) worker adapter
 
-As of 2026-09-11, Antigravity CLI 1.2.0 passes the worker-only liveness, composer draft, canonical lifecycle, and portable wiring guards on Linux.
+On 2026-09-12, Antigravity CLI 1.2.2 passed the worker-only liveness, marker, composer, and composer-clear measurements on Linux.
+The current AGY doorbell and canonical lifecycle guards remain unresolved in this environment, with their exact results recorded in [`docs/verification/agy.md`](agy.md).
 The adapter is CREWMATE and SCOUT only, and `bin/fm-spawn.sh` refuses its secondmate path because no primary supervision protocol is verified.
 The detailed dated commands and exact outputs are maintained in [`docs/verification/agy.md`](agy.md).
 Refresh the evidence with `FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh`, `FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh`, and `FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh`.

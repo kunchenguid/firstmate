@@ -323,6 +323,31 @@ busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
 
+prepare_agy_exit_composer() {
+  local verdict draft
+  verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
+  case "$verdict" in
+    empty)
+      ;;
+    pending)
+      draft=$(fm_backend_agy_composer_content "$BACKEND" "$T" "$LABEL") || draft=
+      [ -n "$draft" ] || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; the unsent composer text could not be extracted"
+      printf 'note: exit cleared unsent composer text: %s\n' "$draft" >> "$STATE/$ID.status" \
+        || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; the unsent composer note could not be recorded"
+      fm_control_backend_supports_key "$BACKEND" C-u \
+        || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; backend $BACKEND cannot deliver AGY's measured composer-clear key C-u"
+      fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
+        || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; C-u did not reach the composer"
+      verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
+      [ "$verdict" = empty ] \
+        || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:${verdict}; C-u did not clear the composer"
+      ;;
+    *)
+      die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:${verdict:-unknown}; no exit input was sent"
+      ;;
+  esac
+}
+
 # wait_agent_state <wanted...> <timeout>: poll until agent_state prints one of
 # the wanted values. Prints the final observed state; returns 0 on a match.
 wait_agent_state() {  # <timeout> <wanted>...
@@ -490,6 +515,7 @@ do_exit() {
       ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
+  [ "$HARNESS" != agy ] || prepare_agy_exit_composer
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the

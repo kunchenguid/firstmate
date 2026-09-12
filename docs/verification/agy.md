@@ -29,7 +29,7 @@ Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain u
 ## Current measurement: Antigravity CLI 1.2.2
 
 The current live measurements were taken on 2026-09-12 UTC on Linux with Antigravity CLI 1.2.2 from `~/.local/bin/agy`.
-The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, so the 1.2.0 measurements below remain historical evidence.
+The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, and the 1.2.0 measurements are kept in the historical section above.
 
 Command:
 
@@ -46,18 +46,6 @@ Output:
 The AGY portion of the current composer-matrix guard passed for both a real idle composer and a real unsent draft.
 The measured boundary on 1.2.2 remained a 72-character U+2500 BOX DRAWINGS LIGHT HORIZONTAL row, with exactly two boundary rows per composer.
 The aggregate composer-matrix guard also exercises installed non-AGY harnesses and failed on their unrelated trust screens; that exact failure is retained below rather than being masked.
-
-Command:
-
-```text
-~/.local/bin/agy --version
-```
-
-Output:
-
-```text
-1.2.0
-```
 
 ## CLI surface
 
@@ -115,61 +103,61 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 Command:
 
 ```text
-bash tests/fm-composer-lib.test.sh | tail -1
+bash tests/fm-composer-lib.test.sh >/dev/null && printf 'exit=0\n'
 ```
 
 Output:
 
 ```text
-ok - fm_composer_queued_enter_verdict: only proven pending is converted
+exit=0
 ```
 
 Command:
 
 ```text
-bash tests/fm-busy-adapter-wiring.test.sh | tail -1
+bash tests/fm-busy-adapter-wiring.test.sh >/dev/null && printf 'exit=0\n'
 ```
 
 Output:
 
 ```text
-all fm-busy-adapter-wiring tests passed
+exit=0
 ```
 
 Command:
 
 ```text
-bash tests/fm-control.test.sh | tail -1
+bash tests/fm-control.test.sh >/dev/null && printf 'exit=0\n'
 ```
 
 Output:
 
 ```text
-ok - fm-control's arrival leaves fm-send's from-firstmate marking untouched
+exit=0
 ```
 
 Command:
 
 ```text
-bash tests/fm-send-settle.test.sh | tail -1
+bash tests/fm-send-settle.test.sh >/dev/null && printf 'exit=0\n'
 ```
 
 Output:
 
 ```text
-ok - fm-send: an agy Escape with no acknowledgement records unknown, not idle
+exit=0
 ```
 
 Command:
 
 ```text
-bash tests/fm-control-relaunch.test.sh | tail -1
+bash tests/fm-control-relaunch.test.sh >/dev/null && printf 'exit=0\n'
 ```
 
 Output:
 
 ```text
-ok - relaunch heals an item that drifted out of In flight while the task stayed live
+exit=0
 ```
 
 These suites cover the shared classifier, generated hook lifecycle, stale-generation wake rejection, teardown retirement, non-agy cleanup refusal, control interruption, and data-plane interruption.
@@ -254,8 +242,10 @@ Output:
 ok - harness liveness: agy 1.2.2 classifies alive
 ok - harness marker: agy 1.2.2 exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process
 # checked 3 installed harness(es)
-FM_TEST_END 2026-09-12T09:25:13Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=21117 gate_skip=false
+FM_TEST_END 2026-09-12T10:44:46Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=23421 gate_skip=false
 ```
+
+The liveness and marker guard passed against AGY 1.2.2 on 2026-09-12.
 
 Composer-matrix command:
 
@@ -272,8 +262,11 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 not ok - claude (2.1.269 (Claude Code)): idle composer never classified empty (last verdict: pending)
 not ok - codex (codex-cli 0.153.4): idle composer never classified empty (last verdict: unknown)
 not ok - live composer-matrix guard observed failures above
-FM_TEST_END 2026-09-12T09:27:03Z tests/fm-composer-matrix-live-e2e.test.sh exit=1 duration_ms=106186 gate_skip=false
+FM_TEST_END 2026-09-12T10:46:31Z tests/fm-composer-matrix-live-e2e.test.sh exit=1 duration_ms=98455 gate_skip=false
 ```
+
+AGY's two composer checks passed on 2026-09-12, while Claude and Codex were blocked by their trust dialogs in this environment.
+The firstmate 2026-09-12 run supplied the installed Claude and Codex passing lines: `ok - claude (2.1.269 (Claude Code)): real idle composer classifies empty` and `ok - codex (codex-cli 0.153.4): real idle composer classifies empty`.
 
 Inbox doorbell command, restricted to the AGY worker:
 
@@ -285,8 +278,10 @@ Output:
 
 ```text
 not ok - agy (1.2.2): doorbell not honored within 240s (acted=no acked=no)
-FM_TEST_END 2026-09-12T08:56:05Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=262154 gate_skip=false
+FM_TEST_END 2026-09-12T10:51:49Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=243192 gate_skip=false
 ```
+
+The AGY doorbell guard still failed on 2026-09-12 because the real worker did not act or acknowledge the durable request within 240 seconds.
 
 Canonical lifecycle command:
 
@@ -297,9 +292,32 @@ env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm
 Output:
 
 ```text
-not ok - agy (1.2.2): exit command failed
-FM_TEST_END 2026-09-12T09:24:46Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=218247 gate_skip=false
+error: could not resolve origin's current default branch for pooled worktree '/home/ubuntu/.treehouse/project-17a045/1/project'; refusing to launch from a potentially stale base
+not ok - agy (1.2.2): canonical fm-spawn could not launch
+FM_TEST_END 2026-09-12T10:46:45Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=3232 gate_skip=false
 ```
+
+The lifecycle guard reached no AGY lifecycle step on this run because the external Treehouse pool rejected its stale origin metadata before spawn.
+
+Real-binary composer-clear measurement, run on 2026-09-12 against AGY 1.2.2:
+
+```text
+tmux new-session -d -s agyclear -x 220 -y 50 -c "$PWD" -- agy --dangerously-skip-permissions --effort low
+tmux send-keys -t agyclear:0 -l AGY_CTRL_U_MEASURED_DRAFT
+tmux send-keys -t agyclear:0 C-u
+fm_tmux_composer_state agyclear:0 agy
+```
+
+Output:
+
+```text
+version=1.2.2
+before_clear=pending
+clear_key=C-u
+after_clear=empty
+```
+
+C-u is the measured AGY composer-clear key and the pending-to-empty transition passed in the isolated tmux lab.
 
 ## Repository gates
 

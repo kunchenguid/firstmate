@@ -327,9 +327,21 @@ EOF
   grep -Fq 'unknown fm-interrupt' "$state/$task.busy-state" 2>/dev/null || \
     grep -Fq 'state=unknown' "$state/$task.busy-state" \
     || die "agy ($version): data-plane interrupt did not preserve unknown semantic state"
+  lifecycle_exit_draft='AGY_EXIT_UNSENT_DRAFT'
+  TMUX_TMPDIR="$lab/tmux" tmux send-keys -t "$target" -l "$lifecycle_exit_draft" \
+    || die "agy ($version): could not leave an unsent composer draft before exit"
+  for _ in $(seq 1 30); do
+    verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
+    [ "$verdict" = pending ] && break
+    sleep 1
+  done
+  [ "$verdict" = pending ] || die "agy ($version): exit draft did not reach a proven pending composer"
   TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-control.sh" "$task" exit >/dev/null 2>&1 \
     || die "agy ($version): exit command failed"
+  grep -Fq "note: exit cleared unsent composer text: $lifecycle_exit_draft" "$status" \
+    || die "agy ($version): exit did not record the cleared composer draft"
   mkdir -p "$home/data/$task"
   : > "$home/data/$task/report.md"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-decision-hold.sh" complete "$task" --none \

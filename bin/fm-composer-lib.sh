@@ -172,17 +172,14 @@ fm_composer_normalize_trim_var() {  # <varname>
 
 fm_composer_normalize_compare_text() {
   local text=$1
-  fm_composer_normalize_trim_var text
+  fm_composer_normalize_spaces_var text
   text=${text//$'\n'/ }
   text=${text//$'\r'/ }
   text=${text//$'\t'/ }
   text=${text//$'\v'/ }
   text=${text//$'\f'/ }
-  while [[ "$text" == *'  '* ]]; do
-    text=${text//'  '/ }
-  done
-  text="${text#"${text%%[! ]*}"}"
-  text="${text%"${text##*[! ]}"}"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
   printf '%s' "$text"
 }
 
