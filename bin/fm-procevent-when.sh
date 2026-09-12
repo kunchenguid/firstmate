@@ -171,7 +171,8 @@ cmd_arm() {
   done
 
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
-  fm_procevent_source_lock_acquire "$sid" || die "cannot lock the watch source"
+  fm_procevent_source_lock_acquire "$sid" \
+    || die "cannot lock the watch source: ${FM_PROCEVENT_LOCK_ERROR:-unknown lock failure}"
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
   for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \

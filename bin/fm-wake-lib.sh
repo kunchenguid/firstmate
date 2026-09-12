@@ -550,6 +550,18 @@ fm_lock_remove_path() {
   rmdir "$lockdir" 2>/dev/null
 }
 
+# fm_lock_dir_writable <dir>
+# Probe rather than test -w: -w reports true for root on a mode-0500 directory
+# and false for an ACL that does permit writing, and a lock is only ever as
+# real as the file the caller can actually create there.
+fm_lock_dir_writable() {
+  local dir=$1 probe
+  [ -d "$dir" ] || return 1
+  probe=$(mktemp "$dir/.lock-write.XXXXXX" 2>/dev/null) || return 1
+  rm -f "$probe" 2>/dev/null || return 1
+  return 0
+}
+
 fm_lock_mid_acquire_is_fresh() {
   local lockdir=$1 pid=$2 mid_acquire_stale
   case "$pid" in
@@ -890,14 +902,48 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# fm_lock_try_acquire <lockdir>
+#
+# Non-blocking acquisition. On failure it classifies why in FM_LOCK_FAILURE so
+# a caller can tell a wait that will clear from one that never can:
+#
+#   held        another live process owns the lock; FM_LOCK_HELD_PID names it
+#   unwritable  no lock can be created here; FM_LOCK_FAILURE_PATH names the
+#               directory that refused it
+#   contended   a transient loss; retrying is the right response
+#
+# The classification is only meaningful on failure.
+#
+# Stale-lock recovery arbitrates through one `<lockdir>.steal` lock and stops
+# there. It used to recurse into `.steal.steal...` without a depth bound, so a
+# directory that could hold no lock at all - a sandboxed claim root, a
+# read-only state directory - grew the lock name until the path overflowed and
+# bash died with a segfault rather than reporting the permission problem.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  _fm_lock_try_acquire "$1" 0
+}
+
+_fm_lock_try_acquire() {
+  local lockdir=$1 depth=$2 pid steal cur rc steal_owner steal_failure primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_FAILURE=contended
+  FM_LOCK_FAILURE_PATH=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    # Creation failed with no lock present, so this was never contention.
+    if ! fm_lock_dir_writable "$(dirname "$lockdir")"; then
+      FM_LOCK_FAILURE=unwritable
+      # shellcheck disable=SC2034 # Read by callers after acquisition fails.
+      FM_LOCK_FAILURE_PATH=$(dirname "$lockdir")
+      return 1
+    fi
+    return 1
   fi
 
   fm_current_pid current || return 1
@@ -920,17 +966,38 @@ fm_lock_try_acquire() {
   fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    FM_LOCK_FAILURE=held
+    return 1
+  fi
+
+  if [ "$depth" -ge 1 ]; then
+    # Depth 1 IS the arbitration lock, so there is no further level to
+    # arbitrate with. Reaching here means its own recorded owner is dead and
+    # past the mid-acquire window, so reclaim it directly. `ln -s` stays the
+    # atomic arbiter: two reclaimers can both remove the stale link, but only
+    # one can recreate it, and the loser's primary claim is then refused by
+    # fm_lock_claim_blocked_by_steal.
+    fm_lock_remove_path "$lockdir" || true
+    if fm_lock_try_create "$lockdir"; then
+      return 0
+    fi
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! _fm_lock_try_acquire "$steal" $((depth + 1)); then
+    # The nested call has already reset FM_LOCK_FAILURE; carry its class out
+    # unchanged, because an unwritable directory refuses both locks alike.
+    steal_failure=${FM_LOCK_FAILURE:-contended}
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=$steal_failure
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -940,12 +1007,14 @@ fm_lock_try_acquire() {
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
@@ -990,9 +1059,25 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# fm_lock_acquire_wait <lockdir>
+#
+# Waits out contention, including a lock a live process legitimately holds:
+# that always clears, so blocking is safe and callers may rely on this
+# returning only once the lock is held.
+#
+# A lock that can never be created is not contention, and no amount of waiting
+# makes an unwritable directory writable. That case fails closed here - a named
+# diagnostic and a nonzero exit - rather than returning, because most callers
+# do not check the return value and none can safely continue without the lock
+# they asked for.
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    if [ "${FM_LOCK_FAILURE:-}" = unwritable ]; then
+      printf 'error: cannot create lock %s: directory not writable: %s\n' \
+        "$lockdir" "${FM_LOCK_FAILURE_PATH:-$(dirname "$lockdir")}" >&2
+      exit 1
+    fi
     sleep 0.1
   done
 }
