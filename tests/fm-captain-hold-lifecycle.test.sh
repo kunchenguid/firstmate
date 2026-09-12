@@ -526,6 +526,10 @@ EOF
   id=fm-stub-held-row
   fb=$(fm_fakebin "$home")
   log="$home/tasks-axi-calls"
+  cat > "$home/initial-body" <<'EOF'
+First line with a quoted "route" and a literal backslash: \ before the end.
+Second line after the encoded newline.
+EOF
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "@LOG@"
@@ -589,10 +593,12 @@ case "${1:-}" in
       '  hold_kind: captain'
     if [ -f "@HOME@/last-body" ]; then
       printf '%s' '  body: '
-      perl -MJSON::PP -e 'local $/; print encode_json(<STDIN>)' < "@HOME@/last-body"
+      perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "@HOME@/last-body"
       printf '\n'
     else
-      printf '%s\n' '  body: ""'
+      printf '%s' '  body: '
+      perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "@HOME@/initial-body"
+      printf '\n'
     fi
     ;;
   *) exit 1 ;;
@@ -609,6 +615,10 @@ SH
     || fail "holding on a beads-configured home failed without a markdown backlog"
   assert_grep "hold $id" "$log" \
     "the captain-hold mutation never reached the configured backend"
+  assert_grep 'First line with a quoted "route" and a literal backslash: \ before the end.' "$home/last-body" \
+    "the captain hold corrupted JSON escapes in a quoted tasks-axi scalar"
+  assert_grep 'Second line after the encoded newline.' "$home/last-body" \
+    "the captain hold corrupted a multiline quoted tasks-axi scalar"
 
   decision="$home/captain-decision.txt"
   printf 'Ship the gold-only plan.\n' > "$decision"

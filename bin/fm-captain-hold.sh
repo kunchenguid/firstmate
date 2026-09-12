@@ -18,6 +18,8 @@
 # All backlog reads and mutations address the active home's configured data
 # directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
 # and secondmate-home ownership aligned with the work that discovered the call.
+# Scalar fields quoted by `tasks-axi show` are decoded as JSON strings through
+# JSON::PP's public non-reference API; unquoted fields remain verbatim.
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
@@ -367,7 +369,7 @@ decode_shown_value() {  # <shown-field>
     \"*\")
       printf '%s' "$value" | perl -MJSON::PP -e '
         local $/;
-        my $value = decode_json(<STDIN>);
+        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
         binmode STDOUT, ":raw";
         utf8::encode($value) if utf8::is_utf8($value);
         print $value;
