@@ -161,15 +161,37 @@ fm_test_reap_procevent_homes() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
+fm_test_reap_network_workers() {  # <dir>
+  local d=$1 f pid
+  [ -n "$d" ] && [ -d "$d" ] || return 0
+  find "$d" -name ".startup-network.status" -type f 2>/dev/null | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    pid=$(sed -n 's/^pid=//p' "$f" 2>/dev/null)
+    case "$pid" in
+      '' | *[!0-9]* | 0 | 1) ;;
+      *)
+        kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    if [ -n "$d" ] && [ -d "$d" ]; then
+      fm_test_reap_network_workers "$d"
+      rm -rf "$d"
+    fi
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      if [ -n "$d" ] && [ -d "$d" ]; then
+        fm_test_reap_network_workers "$d"
+        rm -rf "$d"
+      fi
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi

@@ -656,6 +656,20 @@ network_stage_report() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-startup-network.sh" report
 }
 
+stop_network_worker() {  # <home>
+  local home=$1 status_file pid
+  status_file="$home/state/.startup-network.status"
+  [ -f "$status_file" ] || return 0
+  pid=$(sed -n 's/^pid=//p' "$status_file" 2>/dev/null)
+  case "$pid" in
+    '' | *[!0-9]* | 0 | 1) ;;
+    *)
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      ;;
+  esac
+}
+
 hash_file_for_test() {
   local file=$1
   if command -v shasum >/dev/null 2>&1; then
@@ -2302,6 +2316,8 @@ EOF
 $(hash_file_for_test "$root/AGENTS.md")" ] \
     || fail "a wrong-session baseline was rewritten during a rebuild"
 
+  stop_network_worker "$home"
+
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
@@ -2337,6 +2353,8 @@ EOF
   [ "$(cat "$home/state/.session-start-complete")" = "$completion_before" ] \
     || fail "read-only compact mutated startup completion state"
 
+  stop_network_worker "$home"
+
   pass "read-only Pi compact refreshes against the rebuilding session identity without mutation"
 }
 
@@ -2363,6 +2381,8 @@ EOF
     "Codex compact claimed an instruction-refresh channel unavailable to the tracked transport"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
     || fail "an unsupported Codex rebuild rewrote the true-start baseline"
+
+  stop_network_worker "$home"
 
   pass "Codex reset sources do not claim an unavailable instruction-refresh channel"
 }
@@ -2402,6 +2422,8 @@ SH
     "startup published completion despite the atomic completion write failure"
   assert_absent "$home/state/.session-start-agents-baseline" \
     "startup recorded an instruction baseline after completion publication failed"
+  rm -f "$fakebin/mv"
+  stop_network_worker "$home"
 
   pass "instruction baselines require SHA-256 and successful startup completion"
 }
