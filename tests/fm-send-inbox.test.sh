@@ -22,6 +22,9 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  10. An empty or whitespace-only text steer is refused before anything is
+#      marked, recorded, or typed - on the marked secondmate path that means
+#      no marker-only record and no pending-reply expectation.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -338,6 +341,44 @@ test_unwritable_inbox_fails_loudly() {
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
+test_empty_message_refused() {
+  local dir err rc
+  # The lived defect: an empty marked secondmate steer used to deliver a
+  # marker+corr record with no body and mint a pending-reply expectation the
+  # parent could never see resolved.
+  dir=$(setup_case empty-marked); err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  run_send "$dir" "$err" -- fm-domain; rc=$?
+  [ "$rc" -ne 0 ] || fail "an empty secondmate steer should refuse"
+  assert_contains "$(cat "$err")" "nonempty message" \
+    "the empty-message refusal should be explicit"
+  [ ! -d "$dir/home/state/domain.inbox" ] || fail "an empty steer still wrote an inbox record"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
+    || fail "an empty steer still minted a pending-reply expectation"
+  [ ! -s "$dir/send.log" ] || fail "an empty steer still typed something:"$'\n'"$(cat "$dir/send.log")"
+
+  # An explicit empty-string argument is the same refusal.
+  dir=$(setup_case empty-string-arg); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 ""; rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit empty-string message should refuse"
+  assert_contains "$(cat "$err")" "nonempty message" \
+    "the empty-string refusal should be explicit"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "an empty-string steer still wrote an inbox record"
+
+  # A whitespace-only message is equally contentless and refuses.
+  dir=$(setup_case whitespace-only); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "   "; rc=$?
+  [ "$rc" -ne 0 ] || fail "a whitespace-only message should refuse"
+  assert_contains "$(cat "$err")" "nonempty message" \
+    "the whitespace-only refusal should be explicit"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a whitespace-only steer still wrote an inbox record"
+
+  # The --key lifecycle path is unaffected: it takes no text at all.
+  dir=$(setup_case keypath-after-refusal); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should still succeed"
+  pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -350,3 +391,4 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_empty_message_refused
