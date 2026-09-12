@@ -664,7 +664,7 @@ bin/fm-test-run.sh tests/fm-backend-herdr.test.sh tests/fm-backend-herdr-agent-n
 ```text
 ok - Herdr task agent names are role-specific, stable, cross-home unique, normalized, and bounded
 ok - fm_backend_herdr_name_task_agent waits for auto-detection, renames the exact pane, and verifies the visible identity
-ok - full fm-spawn gives a shell-launched Pi worker a stable task-derived Herdr agent name
+ok - full fm-spawn names a Herdr-detected Pi behind a prefixed raw command
 ok - Herdr's agent get and Agents list agree on the exact named worker pane
 FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0
 ```

@@ -407,12 +407,13 @@ fm_backend_herdr_task_agent_name() {  # <task-id> <ship|scout|secondmate> <targe
 
 # fm_backend_herdr_name_task_agent: wait for Herdr to auto-detect the harness
 # now running in <target>, assign its task-derived display name, and verify the
-# exact pane reports it. This runs after launch delivery for every supported
-# harness. A missing registration, collision, rejected rename, or mismatched
-# read refuses the spawn instead of leaving a misleading generic agent behind.
-fm_backend_herdr_name_task_agent() {  # <target> <task-id> <kind> <target-home>
-  local target=$1 id=$2 kind=$3 home=$4 name out code pane current attempt=0
+# exact pane reports it. A collision, rejected rename, or mismatched read
+# refuses the spawn instead of leaving a misleading generic agent behind.
+fm_backend_herdr_name_task_agent() {  # <target> <task-id> <kind> <target-home> [optional]
+  local target=$1 id=$2 kind=$3 home=$4 requirement=${5:-required}
+  local name out code pane current attempt=0
   local max_attempts=100 poll_sleep=0.1
+  case "$requirement" in required|optional) ;; *) return 1 ;; esac
   name=$(fm_backend_herdr_task_agent_name "$id" "$kind" "$home") || {
     echo "error: could not derive a valid herdr agent name for task $id" >&2
     return 1
@@ -451,6 +452,7 @@ fm_backend_herdr_name_task_agent() {  # <target> <task-id> <kind> <target-home>
     [ "$attempt" -lt "$max_attempts" ] || break
     sleep "$poll_sleep"
   done
+  [ "$requirement" != optional ] || return 2
   echo "error: herdr did not detect task $id's agent before the naming deadline" >&2
   return 1
 }

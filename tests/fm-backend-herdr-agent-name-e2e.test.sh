@@ -35,13 +35,16 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-agent-name)
 export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH
 
 cleanup() {
-  local status=$? cleanup_status=0
+  local status=$? cleanup_status=0 teardown_out
   if [ -f "$HOME_ROOT/state/worker-label.meta" ]; then
-    env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
+    teardown_out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
       PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" \
-      FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
+      FM_HOME="$HOME_ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
       FM_DATA_OVERRIDE="$HOME_ROOT/data" FM_CONFIG_OVERRIDE="$HOME_ROOT/config" \
-      "$ROOT/bin/fm-teardown.sh" worker-label >/dev/null 2>&1 || cleanup_status=1
+      "$ROOT/bin/fm-teardown.sh" worker-label 2>&1) || {
+        printf 'cleanup: worker teardown failed:\n%s\n' "$teardown_out" >&2
+        cleanup_status=1
+      }
   fi
   env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=1
   fm_test_cleanup
@@ -85,9 +88,9 @@ git -C "$PROJECT" remote add origin "file://$TMP_ROOT/firstmate.origin.git"
 SPAWN_OUT=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" \
   FM_SPAWN_NO_GUARD=1 FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_ROOT" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" worker-label "$PROJECT" 'pi --no-context-files --no-session' \
+  "$ROOT/bin/fm-spawn.sh" worker-label "$PROJECT" 'env FOO=1 pi --no-context-files --no-session' \
   --mode no-mistakes --yolo off --backend herdr 2>&1) || fail "full Herdr worker spawn failed:$NL$SPAWN_OUT"
-assert_contains "$SPAWN_OUT" "spawned worker-label harness=pi" "full spawn did not report its Pi worker"
+assert_contains "$SPAWN_OUT" "spawned worker-label harness=env" "full spawn did not report its prefixed raw worker"
 
 META="$HOME_ROOT/state/worker-label.meta"
 [ -f "$META" ] || fail "full spawn did not publish worker metadata"
@@ -112,5 +115,5 @@ LIST_NAME=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent list | jq -r --ar
 [ "$LIST_NAME" = "$NAME" ] \
   || fail "the Agents list did not expose the exact verified task-derived name: '$LIST_NAME'"
 
-pass "full fm-spawn gives a shell-launched Pi worker a stable task-derived Herdr agent name"
+pass "full fm-spawn names a Herdr-detected Pi behind a prefixed raw command"
 pass "Herdr's agent get and Agents list agree on the exact named worker pane"

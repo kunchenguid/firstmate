@@ -64,7 +64,7 @@ With presentation spaces disabled, a crewmate or scout is created in the exact w
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
 
-Every Herdr-detected harness launched through `fm-spawn.sh` receives a stable custom Herdr agent name after Herdr detects it and before spawn reports success.
+Every harness Herdr detects through a canonical or raw `fm-spawn.sh` launch receives a stable custom agent name before spawn reports success.
 Ship workers use a `crew-<task>` identity, scouts use `scout-<task>`, and second mates use `secondmate-<id>`.
 A short identity digest derived from the target home, role, and task keeps the readable task stem unique across homes and stable across relaunches after normalization and truncation to Herdr's 32-byte limit.
 The exact primary agent is outside this worker-launch path and retains its genuine Firstmate name.
