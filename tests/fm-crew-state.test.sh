@@ -378,25 +378,6 @@ outcome: passed
 EOF
 }
 
-# A passed pipeline can include an authorized skipped CI step when its gate
-# cannot return a valid verdict, so the outcome does not establish forge state.
-run_passed_ci_skipped() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: completed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/423"
-  findings: none
-outcome: passed
-steps[3]{step,status,findings,duration_ms}:
-  test,completed,0,0
-  ci,skipped,0,0
-  push,completed,0,0
-EOF
-}
-
 run_checks_passed() {  # <branch>
   cat <<EOF
 run:
@@ -987,19 +968,19 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
-test_terminal_passed_with_skipped_ci_does_not_claim_pr_landed() {
+test_terminal_passed_does_not_claim_pr_landed() {
   reset_fakes
-  local d; d=$(new_case passed-ci-skipped)
-  make_repo_on_branch "$d/wt" fm/feat-passed-ci-skipped
+  local d; d=$(new_case passed-pr-claim)
+  make_repo_on_branch "$d/wt" fm/feat-passed-pr-claim
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-passed-ci-skipped.meta" "window=fm:fm-feat-passed-ci-skipped" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_passed_ci_skipped fm/feat-passed-ci-skipped)"
-  local out; out=$(run_crew_state "$d" feat-passed-ci-skipped)
-  assert_contains "$out" "state: done" "passed run with skipped CI remains terminal"
-  assert_contains "$out" "source: run-step" "passed run with skipped CI remains run-step sourced"
-  assert_not_contains "$out" "PR merged/closed" "passed run with skipped CI must not claim the PR landed"
+  fm_write_meta "$d/state/feat-passed-pr-claim.meta" "window=fm:fm-feat-passed-pr-claim" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-passed-pr-claim)"
+  local out; out=$(run_crew_state "$d" feat-passed-pr-claim)
+  assert_contains "$out" "state: done" "passed run remains terminal"
+  assert_contains "$out" "source: run-step" "passed run remains run-step sourced"
+  assert_not_contains "$out" "PR merged/closed" "passed run must not claim the PR landed"
   assert_contains "$out" "run passed: PR merge unconfirmed; check forge" "passed run must direct the supervisor to verify merge state"
-  pass "passed run with skipped CI does not claim the PR landed"
+  pass "passed run does not claim the PR landed"
 }
 
 test_terminal_checks_passed_does_not_claim_pr_ready() {
@@ -2569,7 +2550,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
-test_terminal_passed_with_skipped_ci_does_not_claim_pr_landed
+test_terminal_passed_does_not_claim_pr_landed
 test_terminal_checks_passed_does_not_claim_pr_ready
 test_terminal_failed
 test_terminal_failed_ci_orphan_after_green_reads_done

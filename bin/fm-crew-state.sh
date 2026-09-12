@@ -65,6 +65,12 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#      A terminal outcome maps to `done` as a statement about the PIPELINE
+#      only: this reader never queries the forge, so it cannot report that a
+#      PR merged, closed, or is reviewable now. `passed` does not even
+#      establish green checks - a step whose gate cannot return a valid
+#      verdict may be SKIPPED with authorization and the run still ends
+#      passed - so both terminal details report PR state as unconfirmed.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
