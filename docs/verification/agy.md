@@ -170,6 +170,16 @@ ok - harness liveness: agy 1.2.0 classifies alive
 FM_TEST_END 2026-09-11T03:08:58Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=1084 gate_skip=false
 ```
 
+Marker-proof command, recorded 2026-09-12:
+
+Command:
+
+```text
+FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh | grep -E 'harness marker: agy'
+```
+
+The real `agy 1.2.1` process reached the liveness check, but its tool invocation did not complete the marker probe within 180 seconds, so no passing marker output is recorded from this host.
+
 Command:
 
 ```text
