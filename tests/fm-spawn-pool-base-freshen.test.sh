@@ -121,6 +121,24 @@ test_custom_crew_branch_never_targets_requested_base() {
   pass "spawn refuses a custom crew branch equal to the requested base"
 }
 
+test_implicit_crew_branch_never_targets_requested_base() {
+  local rec id out status
+  id='pool-implicit-crew-base-collision-r2'
+  rec=$(make_case implicit-crew-base-collision "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch "fm/$id" "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" push --quiet origin "refs/heads/fm/$id:refs/heads/fm/$id"
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch "fm/$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the implicit crew branch equal to the requested base"
+  assert_contains "$out" "uses crew branch fm/$id, which is the requested base branch" \
+    "implicit crew-base collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "implicit crew-base collision published task metadata"
+  pass "spawn refuses the implicit crew branch equal to the requested base"
+}
+
 scaffold_scout_brief() {
   local id=$1 base_branch=${2:-}
   local -a args=("$id" test-project --scout)
@@ -1191,6 +1209,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_custom_crew_branch_never_targets_requested_base
+test_implicit_crew_branch_never_targets_requested_base
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
