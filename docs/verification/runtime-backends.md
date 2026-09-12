@@ -1213,7 +1213,7 @@ The command run against each client was `<client> pane --help`, which is client-
 process-info  Show pane process information
 ```
 
-This proves subcommand presence in the client only, not the server response shape, which is measured only on 0.9.0 above.
+This proves subcommand presence in the client only, not the server response shape, which is measured on 0.9.0 above and, for the per-process `name`, `argv`, `cmdline`, `cwd`, and `pid` fields, on 0.8.2 under "Worktree acquisition foreground" below.
 
 The live guard that refreshes this record runs by default wherever Herdr and Pi are installed, spends no model token, and fails naming both versions:
 
@@ -1234,6 +1234,55 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-backend-herdr.test.sh` pins the logic portably with canned `process-info` bodies over real processes, driving the signals apart: the identical shell-only foreground reads `stale-agent` for a childless shell and `live` when an agent-named process is still a descendant of that shell, a `working`, `done`, or `blocked` record over a shell-only pane reads the same as `idle`, an unreadable process view reads `unknown` and refuses husk closing, a transient prompt helper beside the shell settles into `stale-agent` on the next shell-only sample while a foreground that never settles within the bound still reads `live`, and `busy_state` verifies a `working` record before reporting busy.
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
+
+### Worktree acquisition foreground
+
+Measured 2026-09-11 on nixos-calgary (NixOS) against Herdr 0.8.2 (client and server) and treehouse v2.3.0 in an isolated `fm-diag` session, with the pane in the project clone.
+
+`treehouse get` runs `git fetch origin` before it enters the worktree subshell, so for the whole fetch the pane's `foreground_cwd` still reads the project directory, exactly as it does after treehouse refuses and exits.
+`fm_backend_herdr_foreground_processes` in `bin/backends/herdr.sh` therefore reads `pane process-info`, and the post-`treehouse get` wait in `bin/fm-spawn.sh` keeps waiting past its path-settle bound only while that view names treehouse or a child of it.
+Reproduced by sending the command and reading the foreground group ten seconds later, while the fetch was still running:
+
+```sh
+herdr --session fm-diag pane run w2:p2 'treehouse get'
+herdr --session fm-diag pane process-info --pane w2:p2 --session fm-diag
+```
+
+Output, trimmed inside the third process:
+
+```text
+{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":1247610,"foreground_processes":[{"argv":["treehouse","get"],"cmdline":"treehouse get","cwd":"/home/lucius/Work/fm-homes/calgary/projects/umami","name":"treehouse","pid":1247610},{"argv":["git","fetch","origin"],"cmdline":"git fetch origin","cwd":"/home/lucius/Work/fm-homes/calgary/projects/umami","name":"git","pid":1247642},{"argv":["/run/current-system/sw/bin/ssh","-o","SendEnv=GIT_PROTOCOL","git@github.com-...
+```
+
+During the same ten seconds `herdr pane get w2:p2` reported `.result.pane.foreground_cwd` as the project directory on every one-second read.
+`ps -o pid,ppid,pgid,tpgid,stat,args` on the treehouse pid showed `treehouse get` as the leader of the group that held the terminal (pgid equal to tpgid), with its child `git fetch origin` in the same group.
+So the process-info response on 0.8.2 carries per-process `name`, `argv`, `cmdline`, `cwd`, and `pid`, and a slow fetch keeps the whole group in the project directory until treehouse enters the worktree.
+
+The cwd reader the wait settles on was checked in the same session against a nested shell:
+
+```sh
+herdr --session fm-diag pane run w1:p2 'cd /tmp && zsh'
+herdr --session fm-diag pane get w1:p2 --session fm-diag | jq -r .result.pane.foreground_cwd
+```
+
+Read once per second, `foreground_cwd` was `/tmp` on the first read one second later and on every later read, while the pane's `.result.pane.cwd` stayed at the project directory.
+So the `foreground_cwd` read in `fm_backend_herdr_current_path` follows the subshell `treehouse get` opens, and the project reads during the fetch above come from the fetch, not from the reader.
+
+`tests/fm-backend-herdr.test.sh` pins the reader portably with a canned `process-info` body in this shape (`test_foreground_processes_reads_process_info`): one `name`, `cwd`, `cmdline` line per foreground process, an empty field kept as its own slot, `cmdline` falling back to the joined `argv`, and nothing printed for another pane or a failed read.
+`tests/fm-spawn-worktree-settle.test.sh` pins the wait that consumes it.
+The live guard that refreshes this record runs wherever Herdr and jq are installed, touches no treehouse pool and no network (the `treehouse` it runs is a symlink to `sleep` on a temporary PATH), and fails naming the installed Herdr version when `pane process-info` stops carrying the name, `cwd`, or `cmdline` the reader depends on:
+
+```sh
+tests/fm-backend-herdr-foreground-smoke.test.sh
+```
+
+Observed 2026-09-11 on macOS aarch64 against Herdr 0.8.2 (the kernel name of a symlink to `sleep` is `sleep` on macOS, so the process is named by its command line there, as the spawn wait allows):
+
+```text
+ok - real herdr 0.8.2: the foreground reader names a running treehouse process (name=sleep) with its cwd and cmdline
+ok - real herdr 0.8.2: the idle shell pane is reported without naming treehouse
+ok - real herdr: a pane the session does not have prints nothing
+```
 
 ### Away-mode transport
 

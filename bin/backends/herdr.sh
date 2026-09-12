@@ -2949,6 +2949,47 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_foreground_processes: every process in the live pane's
+# foreground process group, one per line as `<name>TAB<cwd>TAB<cmdline>`, or
+# nothing at all when the view is unreadable (nonzero status on a failed
+# read, empty output on a pane the response does not describe).
+#
+# This is the reader fm-spawn.sh's post-`treehouse get` wait uses to tell an
+# acquisition still under way from a shell that has already returned.
+# foreground_cwd alone cannot: `treehouse get` runs `git fetch origin` BEFORE
+# it enters the worktree subshell, so for the whole fetch the cwd still reads
+# the project directory, exactly as it does after treehouse refuses (pool at
+# max_trees) and exits. Measured on herdr 0.8.2 during a slow fetch: the group
+# was `treehouse get` -> `git fetch origin` -> `ssh`, every cwd still the
+# project, and `.result.pane.foreground_cwd` only moved once the fetch
+# finished and the subshell opened.
+#
+# `pane process-info --pane <id>` returns
+# `.result.process_info.foreground_processes[]` with `pid`, `name`,
+# `cmdline`, and `cwd` (verified on herdr 0.8.2). The name is the load-bearing
+# half; `cwd` and `cmdline` print empty rather than failing the read on a
+# release that omits them, and `cmdline` falls back to the joined `argv`.
+# Tabs and newlines inside a field become spaces so one process is always
+# exactly one line.
+fm_backend_herdr_foreground_processes() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local info
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -r --arg pane "$FM_BACKEND_HERDR_PANE" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.foreground_processes
+    | select(type == "array")
+    | .[]
+    | [
+        (.name // ""),
+        (.cwd // ""),
+        (.cmdline // ((.argv // []) | map(tostring) | join(" ")))
+      ]
+    | map(tostring | gsub("[\t\n\r]"; " "))
+    | join("\t")
+  ' 2>/dev/null
+}
+
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types

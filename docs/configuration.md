@@ -1071,6 +1071,7 @@ FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, 
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_SPAWN_ACQUIRE_TIMEOUT=600             # seconds fm-spawn.sh keeps waiting while a foreground reader shows `treehouse get` (or its git fetch) holding the task pane's foreground; every other poll counts against the 60s path-settle bound, because the per-project Treehouse lock is held across the wait; non-numeric or zero uses the default; the fm-spawn.sh header owns the wait
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

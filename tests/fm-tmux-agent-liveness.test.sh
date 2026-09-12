@@ -372,5 +372,43 @@ fi
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
+# --- the treehouse acquisition foreground reader ------------------------------
+# fm-spawn.sh's post-`treehouse get` wait reads fm_backend_tmux_foreground_processes
+# to tell a fetch still under way from a shell that has already returned. The
+# reader must name a real `treehouse` process in the pane's foreground group by
+# its kernel name or its argv, whichever surface this platform preserves for a
+# symlink, and must report an idle shell pane without naming treehouse.
+ln -s "$SLEEP_BIN" "$LAB/bin/treehouse"
+new_window acquiring "$LAB/bin/treehouse" 900
+fg_report=
+for _ in $(seq 1 100); do
+  fg_report=$(fm_backend_tmux_foreground_processes "$SESSION:acquiring")
+  case "$fg_report" in *treehouse*) break ;; esac
+  sleep 0.1
+done
+case "$fg_report" in
+  *treehouse*) ;;
+  *) fail "the foreground reader never named the running treehouse process; report=[$(printf '%s' "$fg_report" | tr '\n\t' ' ,')]" ;;
+esac
+line_count=$(printf '%s\n' "$fg_report" | grep -c .)
+[ "$line_count" -ge 1 ] || fail "the foreground reader printed no process lines for a running treehouse"
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "$line" in
+    *$'\t'*$'\t'*) ;;
+    *) fail "a foreground report line must carry three tab-separated fields, got '$line'" ;;
+  esac
+done <<EOF
+$fg_report
+EOF
+pass "foreground reader: a running treehouse process is named in the pane's foreground group"
+
+idle_report=$(fm_backend_tmux_foreground_processes "$SESSION:idle")
+[ -n "$idle_report" ] || fail "the foreground reader printed nothing for the idle shell pane"
+case "$idle_report" in
+  *treehouse*) fail "the idle shell pane must not name treehouse; report=[$(printf '%s' "$idle_report" | tr '\n\t' ' ,')]" ;;
+esac
+pass "foreground reader: an idle shell pane is reported without naming treehouse"
+
 cleanup_all
 trap - EXIT

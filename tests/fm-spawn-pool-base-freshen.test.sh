@@ -149,7 +149,7 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
       # own project comparison, and the repository primary (named directly or
       # through a symlink) fails the isolation screen the poll shares with the
       # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "did not enter an isolated worktree" \
+      assert_contains "$out" "no isolated worktree appeared" \
         "spawn did not explain its isolation refusal"
       assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
