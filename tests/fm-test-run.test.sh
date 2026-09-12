@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -1047,7 +1047,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1060,6 +1060,16 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
+  # The guard sorts its listings with LC_ALL=C and then diffs them with comm.
+  # comm honors the AMBIENT locale, so a caller running under a collation that
+  # orders punctuation differently used to be told its own C-sorted input was
+  # unsorted ("comm: file 2 is not in sorted order") and the guard failed on a
+  # perfectly consistent map. Both sides must agree on one collation.
+  if locale -a 2>/dev/null | grep -Fqx 'en_US.utf8'; then
+    out=$(LC_ALL=en_US.UTF-8 "$RUNNER" --check-coverage 2>&1)
+    assert_contains "$out" "FM_TEST_COVERAGE ok" \
+      "coverage guard must hold under a non-C ambient collation"
+  fi
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
@@ -1475,6 +1485,111 @@ SH
   pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
 }
 
+# A concurrent worker runs each script against ITS OWN fixtures, so an ambient
+# Firstmate override inherited from the caller's shell is contamination, not an
+# input. The worker already scrubbed the FM_HOME/FM_*_OVERRIDE/FM_BACKEND set;
+# the crew-state path overrides (FM_CREW_STATE_META_OVERRIDE and
+# FM_CREW_STATE_STATUS_OVERRIDE) belong in the same scrub, because an inherited
+# one redirects every fm-crew-state read inside a test at an unrelated task's
+# metadata path.
+test_ambient_firstmate_overrides_never_reach_a_script() {
+  local tmp repo runner a b var rc leaked
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-env.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  # The fixture reports what it actually inherited, so the assertion is about
+  # the environment a script runs in, not about the runner's source text.
+  cat >"$repo/$a" <<'SH'
+#!/usr/bin/env bash
+for var in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+  FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND \
+  FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE; do
+  if [ -n "${!var:-}" ]; then
+    printf 'inherited %s=%s\n' "$var" "${!var}"
+  fi
+done
+echo "ok - env fixture"
+SH
+  cp "$repo/$a" "$repo/$b"
+  chmod +x "$runner" "$repo/$a" "$repo/$b"
+
+  # Export every scrubbed override, pointing at paths that do not exist so an
+  # inherited value could only ever corrupt a run.
+  for var in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+    FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND \
+    FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE; do
+    export "$var=$tmp/ambient-$var"
+  done
+
+  # Concurrent path (two proven-isolated names).
+  set +e
+  "$runner" --jobs 2 "$a" "$b" >"$tmp/jobs" 2>"$tmp/jobs.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/jobs" "$tmp/jobs.err"; rm -rf "$tmp"; fail "concurrent env fixture run failed"; }
+  ! grep -q '^inherited ' "$tmp/jobs" \
+    || { leaked=$(grep '^inherited ' "$tmp/jobs"); rm -rf "$tmp"; fail "concurrent run leaked ambient overrides: $leaked"; }
+
+  for var in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+    FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND \
+    FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE; do
+    unset "$var"
+  done
+  rm -rf "$tmp"
+  pass "ambient Firstmate overrides never reach a concurrent worker's script"
+}
+
+# JOBS defaults to 1, so a focused single-script run executes on the serial path
+# and never enters a concurrent worker. A shell started inside a live Firstmate
+# session carries exported crew-state path overrides (observed pointing at a
+# deleted /tmp path), and bin/fm-crew-state.sh resolves its metadata from them:
+# an unscrubbed serial run reports "no metadata" for a crew whose fixture
+# metadata is right there, which fails one assertion and satisfies a weaker
+# "state: unknown" assertion elsewhere for the wrong reason.
+test_serial_run_never_inherits_crew_state_overrides() {
+  local tmp repo runner a id rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-serial-crew.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  a=tests/fm-brief.test.sh
+  id=serialenvcrew1
+  mkdir -p "$repo/bin" "$repo/tests" "$tmp/state"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  printf 'worktree=%s\nkind=ship\nharness=claude\n' "$tmp/gone" >"$tmp/state/$id.meta"
+  # The fixture asks the REAL fm-crew-state.sh about a crew whose metadata it
+  # owns, so the assertion is about which metadata a serial run resolves.
+  cat >"$repo/$a" <<SH
+#!/usr/bin/env bash
+printf 'crew-state: %s\n' "\$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$tmp/state" "$ROOT/bin/fm-crew-state.sh" "$id")"
+echo "ok - serial crew-state fixture"
+SH
+  chmod +x "$runner" "$repo/$a"
+
+  export FM_CREW_STATE_META_OVERRIDE="$tmp/ambient-$id.meta"
+  export FM_CREW_STATE_STATUS_OVERRIDE="$tmp/ambient-$id.status"
+  set +e
+  "$runner" "$a" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  unset FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE
+  out=$(cat "$tmp/out")
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "serial crew-state fixture run failed"; }
+  rm -rf "$tmp"
+  case "$out" in
+    *"no metadata for $id"*)
+      fail "serial run let an ambient crew-state override replace fixture metadata: $out" ;;
+  esac
+  assert_contains "$out" "worktree gone" \
+    "serial run must resolve the fixture's own crew metadata"
+  pass "a serial single-script run resolves fixture crew metadata, not ambient overrides"
+}
+
 test_jobs_parallel_scheduler_and_failure_propagation() {
   local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
@@ -1720,6 +1835,8 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
+test_ambient_firstmate_overrides_never_reach_a_script
+test_serial_run_never_inherits_crew_state_overrides
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
