@@ -16,6 +16,11 @@
 # bin/fm-inactive-reconcile.sh parses it anchored as `done: PR <url>[ checks
 # green]`; bin/fm-brief.sh restates both forms in the status protocol, which is
 # where the worker actually composes the line.
+# FM_DONE_FORM_COMMITTED and FM_DONE_FORM_CI_GREEN below are the single owner of
+# those two literals. Every site that spells one - the Definition of done here,
+# its closing CI-ready sentence, and the status-protocol restatement in
+# bin/fm-brief.sh - renders it from these, so no copy can drift and leave one
+# generated brief stating two different sets of valid forms.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -33,6 +38,9 @@
 # secondmate charter. Like fm_brief_intent_overlay it is a distinctly titled
 # launch section that states its own precedence for Firstmate tasks, so a brief
 # that authors its own role wording is superseded rather than duplicated.
+
+FM_DONE_FORM_COMMITTED='done: implementation committed, not yet validated'
+FM_DONE_FORM_CI_GREEN='done: PR {url} checks green'
 
 fm_brief_worker_role() {
   cat <<'EOF'
@@ -226,8 +234,8 @@ EOF
 Delivery contract: mode=no-mistakes
 A green local suite - your own tests, lint, typecheck, build, budget - is where validation STARTS, not the finish; this task is not done until the no-mistakes pipeline has raised a PR and CI is green on it.
 So \`done:\` has exactly two valid forms here, in this order, and no others:
-1. \`done: implementation committed, not yet validated\` - that literal line, never a summary of your own results. Append it once the work is committed, then stop; firstmate replies by instructing you to run /no-mistakes.
-2. \`done: PR {url} checks green\` - the finish, reachable only through the pipeline.
+1. \`$FM_DONE_FORM_COMMITTED\` - that literal line, never a summary of your own results. Append it once the work is committed, then stop; firstmate replies by instructing you to run /no-mistakes.
+2. \`$FM_DONE_FORM_CI_GREEN\` - the finish, reachable only through the pipeline.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -252,7 +260,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green, append form 2 above and stop. That is the CI-ready return point: do not keep monitoring in the background until merge. You are finished.
+After /no-mistakes reports CI green, append \`$FM_DONE_FORM_CI_GREEN\` (form 2 above) and stop. That is the CI-ready return point: do not keep monitoring in the background until merge. You are finished.
 EOF
       ;;
     *)

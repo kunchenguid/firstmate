@@ -378,7 +378,7 @@ test_no_mistakes_dod_wording() {
 # terminal one must carry the PR URL. This is mode-conditional: direct-PR and
 # local-only own their own ready signals and must not inherit the pipeline forms.
 test_no_mistakes_done_forms_are_stated_in_the_status_protocol() {
-  local home id brief protocol mode
+  local home id brief protocol dod mode
   home="$TMP_ROOT/done-forms-home"
   mkdir -p "$home/data"
   id="brief-done-forms-b1"
@@ -403,9 +403,27 @@ test_no_mistakes_done_forms_are_stated_in_the_status_protocol() {
     *) fail "the no-mistakes status protocol does not rule out a green local suite" ;;
   esac
 
+  # The restatement is only useful while it agrees with the Definition of done
+  # that owns the forms: a one-sided edit would have one brief state two
+  # different "exactly two valid forms, and no others" sets. Both literals must
+  # also appear in the DOD section, including its closing CI-ready sentence,
+  # which is the line bin/fm-inactive-reconcile.sh parses anchored.
+  dod=$(sed -n '/^# Definition of done$/,$p' "$brief")
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
+  case "$dod" in
+    *'`done: implementation committed, not yet validated`'*) ;;
+    *) fail "the Definition of done and the status protocol state different pre-validation done forms" ;;
+  esac
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
+  case "$dod" in
+    *'`done: PR {url} checks green`'*'`done: PR {url} checks green`'*) ;;
+    *) fail "the Definition of done must spell the PR-URL done form both as form 2 and in its closing CI-ready sentence" ;;
+  esac
+
   for mode in direct-PR local-only; do
     id="brief-done-forms-$mode"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    assert_present "$home/data/$id/brief.md" "$mode brief was not scaffolded"
     protocol=$(awk '/^4\. Report status by appending one line:/,/^5\. /' "$home/data/$id/brief.md")
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
     case "$protocol" in

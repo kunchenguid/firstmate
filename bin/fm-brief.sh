@@ -449,10 +449,12 @@ case "$MODE" in
     # two valid forms are restated at that exact moment. Five no-mistakes tasks
     # reported `done:` on a green LOCAL suite, never having started the
     # pipeline; the Definition of done owns the forms, this is the one
-    # deliberate reinforcement at the point of the mistake.
+    # deliberate reinforcement at the point of the mistake. The literals come
+    # from their single owner in bin/fm-dod-lib.sh so this restatement cannot
+    # drift out of step with the Definition of done rendered below it.
     RULE4_DONE="
    For this task \`done:\` has exactly two valid forms, both fixed by Definition of done:
-   \`done: implementation committed, not yet validated\`, then \`done: PR {url} checks green\`.
+   \`$FM_DONE_FORM_COMMITTED\`, then \`$FM_DONE_FORM_CI_GREEN\`.
    A green local suite is neither: if the \`done:\` line you are about to write reports your own
    tests, lint, typecheck or build passing, it is the wrong line."
     ;;
