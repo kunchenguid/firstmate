@@ -25,7 +25,10 @@
 #
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
-#   clear, compact          `--reemit` digest only when this lock owner recorded
+#   clear                   `--reemit` digest only when this lock owner recorded
+#                           a completed full startup; otherwise a full digest,
+#                           so a startup killed mid-sweep is finished first
+#   compact                 `--delta` digest only when this lock owner recorded
 #                           a completed full startup; otherwise a full digest,
 #                           so a startup killed mid-sweep is finished first
 #   resume, reload, fork    delegate to the nudge wrapper. Prior context is
@@ -131,7 +134,14 @@ case "$SOURCE" in
   resume|reload|fork)
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
-  clear|compact)
+  compact)
+    if session_start_completed; then
+      "$SCRIPT_DIR/fm-session-start.sh" --delta --source "$SOURCE" || true
+    else
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+    fi
+    ;;
+  clear)
     if session_start_completed; then
       "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
     else

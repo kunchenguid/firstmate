@@ -2138,6 +2138,87 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+test_delta_skips_mutating_sweeps_and_static_context_while_preserving_completion() {
+  local rec root home fakebin network_report delta sequence generation completion_pid
+  rec=$(new_world delta)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'window=fm-sess:live-task\nkind=ship\n' > "$home/state/task-live.meta"
+  printf 'working: initial step\n' > "$home/state/task-live.status"
+  printf '# Projects\n- proj [test] (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '# Captain\nCaptain instructions\n' > "$home/data/captain.md"
+  mkdir -p "$home/other-secondmate/state"
+  fm_write_secondmate_meta "$home/state/sm-d.meta" "$home/other-secondmate" "firstmate:fm-sm-d" alpha
+  append_wake "$home/state" signal task-d "done: queued after startup" || fail "seed wake failed"
+
+  # A full startup reconciles the secondmate sweep and sets completion.
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  wait_for_network_stage "$home" "$root" \
+    || fail "the full startup fixture's deferred network stage never published"
+  network_report=$(network_stage_report "$home" "$root")
+  assert_contains "$network_report" "SECONDMATE_LIVENESS" \
+    "the full startup fixture did not exercise a mutating sweep"
+  assert_present "$home/state/.session-start-complete" "startup did not publish completion proof"
+  completion_pid=$(cat "$home/state/.session-start-complete")
+  [ "$completion_pid" = "$$" ] || fail "completion record did not match harness pid"
+
+  append_wake "$home/state" signal task-d "done: queued after delta too" || fail "seed second wake failed"
+  delta=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --delta)
+
+  assert_contains "$delta" "SESSION START (COMPACT DELTA RECOVERY) - $home" "--delta did not label itself"
+  assert_not_contains "$delta" "SECONDMATE_LIVENESS" "--delta repeated a mutating sweep startup already ran"
+  assert_contains "$delta" "done: queued after delta too" "--delta did not drain the wake queue"
+  [ -s "$home/state/.wake-queue" ] || fail "--delta removed the wake before its handling acknowledgement"
+  sequence=$(printf '%s\n' "$delta" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
+  generation=$(printf '%s\n' "$delta" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "--delta omitted the generation-bound wake acknowledgement"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation" || fail "--delta wake acknowledgement failed"
+  [ ! -s "$home/state/.wake-queue" ] || fail "--delta acknowledgement left queued wakes behind"
+
+  # Active fleet state still printed
+  assert_contains "$delta" "FLEET STATE" "--delta dropped the fleet-state digest"
+  assert_contains "$delta" "--- task-live ---" "--delta dropped active tasks"
+
+  # Static context files omitted with an explicit pointer statement
+  assert_contains "$delta" "Static context files (data/projects.md, data/secondmates.md, data/captain.md" \
+    "--delta did not print static context omission disclosure"
+  assert_not_contains "$delta" "Captain instructions" "--delta printed data/captain.md content"
+  assert_not_contains "$delta" "- proj [test]" "--delta printed data/projects.md content"
+
+  # Completion file preserved
+  assert_present "$home/state/.session-start-complete" "--delta removed completion proof"
+  [ "$(cat "$home/state/.session-start-complete")" = "$completion_pid" ] \
+    || fail "--delta mutated completion file"
+
+  assert_contains "$delta" "NEXT STEP" "--delta dropped the closing reminder"
+
+  pass "--delta skips mutating sweeps and static context while preserving completion and draining wakes"
+}
+
+test_flags_reemit_and_delta_mutually_exclusive() {
+  local rec root home fakebin out status=0
+  rec=$(new_world flag-mutex)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit --delta 2>&1) || status=$?
+  expect_code 2 "$status" "--reemit + --delta should fail with code 2"
+  assert_contains "$out" "mutually exclusive" "--reemit + --delta did not reject mutual exclusion"
+  pass "fm-session-start.sh rejects --reemit and --delta together"
+}
+
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
   rec=$(new_world agents-refresh)
@@ -2714,6 +2795,8 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_delta_skips_mutating_sweeps_and_static_context_while_preserving_completion
+test_flags_reemit_and_delta_mutually_exclusive
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

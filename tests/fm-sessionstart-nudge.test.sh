@@ -206,6 +206,7 @@ run_hook_pi() {  # <root> [args...]
 # was won in the test environment.
 FULL_BANNER="SESSION START - "
 REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
+DELTA_BANNER="SESSION START (COMPACT DELTA RECOVERY) - "
 
 test_run_startup_runs_the_full_digest() {
   local root="$TMP_ROOT/run-startup" out status=0
@@ -216,28 +217,52 @@ test_run_startup_runs_the_full_digest() {
   assert_contains "$out" "lock acquired: harness pid" \
     "the portable startup fixture did not supply a real harness process"
   assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
+  assert_not_contains "$out" "$DELTA_BANNER" "startup was misrouted to a compact delta recovery"
   assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
   assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
   pass "run wrapper: startup runs the full digest and never also nudges"
 }
 
-test_run_clear_and_compact_reemit() {
-  local root out source status
-  for source in clear compact; do
-    root="$TMP_ROOT/run-$source"
-    make_run_primary "$root"
-    run_hook "$root" --source startup </dev/null >/dev/null
-    assert_present "$root/state/.session-start-complete" \
-      "startup did not publish the completion proof needed by $source"
-    status=0
-    out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
-    expect_code 0 "$status" "run wrapper $source"
-    assert_contains "$out" "$REEMIT_BANNER$root" "$source did not re-emit the digest"
-    assert_contains "$out" "are NOT repeated" "$source did not report the skipped startup sweeps"
-    assert_contains "$out" "Queued wakes ARE still drained" "$source did not preserve the wake-queue drain"
-    assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
-  done
-  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+test_run_clear_reemit() {
+  local root out status=0
+  root="$TMP_ROOT/run-clear"
+  make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof needed by clear"
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear"
+  assert_contains "$out" "$REEMIT_BANNER$root" "clear did not re-emit the digest"
+  assert_not_contains "$out" "$DELTA_BANNER" "clear was misrouted to compact delta"
+  assert_contains "$out" "are NOT repeated" "clear did not report the skipped startup sweeps"
+  assert_contains "$out" "Queued wakes ARE still drained" "clear did not preserve the wake-queue drain"
+  assert_not_contains "$out" "FIRSTMATE_OP" "a clear open also emitted the nudge instruction"
+  pass "run wrapper: clear re-emits the full context digest without repeating startup sweeps"
+}
+
+test_run_compact_delta() {
+  local root out status=0
+  root="$TMP_ROOT/run-compact"
+  make_run_primary "$root"
+  printf 'window=fm-sess:live-task\nkind=ship\n' > "$root/state/task-live.meta"
+  printf 'working: initial step\n' > "$root/state/task-live.status"
+  printf '# Projects\n- proj [test] (added 2026-01-01)\n' > "$root/data/projects.md"
+  printf '# Captain\nCaptain instructions\n' > "$root/data/captain.md"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof needed by compact"
+  out=$(run_hook "$root" --source compact </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper compact"
+  assert_contains "$out" "$DELTA_BANNER$root" "compact did not run delta recovery"
+  assert_not_contains "$out" "$REEMIT_BANNER" "compact was misrouted to full reemit"
+  assert_contains "$out" "FLEET STATE" "compact delta dropped fleet state"
+  assert_contains "$out" "--- task-live ---" "compact delta dropped active task"
+  assert_contains "$out" "Static context files (data/projects.md, data/secondmates.md, data/captain.md" \
+    "compact delta did not disclose static context omission"
+  assert_not_contains "$out" "Captain instructions" "compact delta leaked captain.md body"
+  assert_not_contains "$out" "- proj [test]" "compact delta leaked projects.md body"
+  assert_not_contains "$out" "FIRSTMATE_OP" "a compact open also emitted the nudge instruction"
+  pass "run wrapper: compact uses delta recovery without repeating startup sweeps or static context"
 }
 
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
@@ -950,7 +975,7 @@ test_run_reads_source_from_the_hook_payload() {
   out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
     run_hook "$root") || status=$?
   expect_code 0 "$status" "run wrapper payload compact"
-  assert_contains "$out" "$REEMIT_BANNER$root" "a compact hook payload was not routed to a re-emit"
+  assert_contains "$out" "$DELTA_BANNER$root" "a compact hook payload was not routed to compact delta recovery"
 
   # A fresh root, because the compact case above legitimately took the lock and
   # an owned lock is exactly when the nudge is supposed to stay silent.
@@ -1023,7 +1048,8 @@ test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
-test_run_clear_and_compact_reemit
+test_run_clear_reemit
+test_run_compact_delta
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup

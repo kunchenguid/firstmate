@@ -450,6 +450,11 @@ inbox_steer_check() {  # <window> <task>
       inbox_steer_escalate_unavailable "$w" "$task" "$rec"
       return 0
       ;;
+    working|busy)
+      # The worker agent is actively executing a turn, tool, or subagent.
+      # Defer ringing until the agent settles to avoid doorbell storms in stdin.
+      return 0
+      ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then

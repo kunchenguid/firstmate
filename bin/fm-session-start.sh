@@ -185,14 +185,14 @@
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
-# Usage: fm-session-start.sh [--reemit] [--source <source>]
+# Usage: fm-session-start.sh [--reemit|--delta] [--source <source>]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
-#             only lost its context (a /clear or a compaction). Skip the
+#             only lost its context (e.g. a /clear). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
 #             projection cleanup and bootstrap's six mutating sweeps (fleet
 #             sync, same-home backlog reconciliation, secondmate convergence and
@@ -206,6 +206,13 @@
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
 #             produces the ordinary read-only path.
+#
+#   --delta   This process ALREADY took the helm at its own startup and has
+#             only lost its recent conversational context (compaction). Lock
+#             authority is re-verified, active tasks and queued wakes are
+#             refreshed, instruction hash is evaluated, but static context
+#             (projects.md, secondmates.md, captain.md, captain-shared.md,
+#             learnings.md) and startup mutating sweeps are omitted.
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -230,11 +237,16 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 
 REEMIT=0
+DELTA=0
 SESSION_SOURCE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --reemit)
       REEMIT=1
+      shift
+      ;;
+    --delta)
+      DELTA=1
       shift
       ;;
     --source)
@@ -251,11 +263,22 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit|--delta] [--source <source>]\n' >&2
       exit 2
       ;;
   esac
 done
+
+if [ "$REEMIT" -eq 1 ] && [ "$DELTA" -eq 1 ]; then
+  printf 'fm-session-start: --reemit and --delta are mutually exclusive\n' >&2
+  printf 'usage: fm-session-start.sh [--reemit|--delta] [--source <source>]\n' >&2
+  exit 2
+fi
+
+SKIP_STARTUP_SWEEPS=0
+if [ "$REEMIT" -eq 1 ] || [ "$DELTA" -eq 1 ]; then
+  SKIP_STARTUP_SWEEPS=1
+fi
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child
@@ -294,6 +317,16 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
       fm_run_timed "$SESSION_START_BUDGET" \
         env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
         "$SCRIPT_DIR/fm-session-start.sh" --reemit
+    fi
+  elif [ "$DELTA" -eq 1 ]; then
+    if [ -n "$SESSION_SOURCE" ]; then
+      fm_run_timed "$SESSION_START_BUDGET" \
+        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+        "$SCRIPT_DIR/fm-session-start.sh" --delta --source "$SESSION_SOURCE"
+    else
+      fm_run_timed "$SESSION_START_BUDGET" \
+        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+        "$SCRIPT_DIR/fm-session-start.sh" --delta
     fi
   elif [ -n "$SESSION_SOURCE" ]; then
     fm_run_timed "$SESSION_START_BUDGET" \
@@ -609,11 +642,17 @@ EOF
 }
 
 AGENTS_START_HASH=
-if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
+if [ "$REEMIT" -eq 0 ] && [ "$DELTA" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
 fi
 
-if [ "$REEMIT" -eq 1 ]; then
+if [ "$DELTA" -eq 1 ]; then
+  section "SESSION START (COMPACT DELTA RECOVERY) - $FM_HOME"
+  printf 'This session already took the helm at its own startup and has only lost its\n'
+  printf 'recent conversational context (compaction). Lock ownership is re-verified,\n'
+  printf 'active tasks and queued wakes are updated, but static context and mutating sweeps\n'
+  printf 'are omitted to minimize token overhead.\n'
+elif [ "$REEMIT" -eq 1 ]; then
   section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
@@ -651,27 +690,29 @@ REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
 if [ "$READ_ONLY" -eq 0 ]; then
-  if [ "$REEMIT" -eq 0 ]; then
+  if [ "$SKIP_STARTUP_SWEEPS" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
   # A full locked start publishes this home's current structured summary.
   # Publication is side-band and best-effort, so it can never change the
-  # session-start result. A context re-emit is not another session start.
-  if [ "$REEMIT" -eq 0 ]; then
+  # session-start result. A context re-emit or delta recovery is not another
+  # session start.
+  if [ "$SKIP_STARTUP_SWEEPS" -eq 0 ]; then
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   fi
   # Every network call and the potentially slow inactive-outcome startup scan
   # are launched HERE, detached and bounded, so they run concurrently with the
   # whole digest below instead of in front of it. Step 7 harvests whatever has
   # finished, without ever waiting.
-  # --reemit passes --locked 0 for the same reason it runs bootstrap detect-only:
-  # this process already ran the mutating sweeps at its own startup, so only the
-  # read-only GitHub-auth probe is owed. A read-only session starts nothing at
-  # all: it holds no mutation authority for the sweeps, and it must not spawn,
-  # steer, or merge anyway, so it has no action left for an auth verdict to gate.
+  # --reemit and --delta pass --locked 0 for the same reason they run bootstrap
+  # detect-only: this process already ran the mutating sweeps at its own
+  # startup, so only the read-only GitHub-auth probe is owed. A read-only session
+  # starts nothing at all: it holds no mutation authority for the sweeps, and
+  # it must not spawn, steer, or merge anyway, so it has no action left for an
+  # auth verdict to gate.
   NETWORK_STAGE_LOCKED=1
-  [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
+  [ "$SKIP_STARTUP_SWEEPS" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
@@ -685,7 +726,7 @@ subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
-elif [ "$REEMIT" -eq 1 ]; then
+elif [ "$SKIP_STARTUP_SWEEPS" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
@@ -943,11 +984,17 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ "$DELTA" -eq 1 ]; then
+  printf 'Static context files (data/projects.md, data/secondmates.md, data/captain.md,\n'
+  printf 'data/captain-shared.md, data/learnings.md) omitted on compact delta recovery.\n'
+  printf 'Read on demand if needed.\n'
+else
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
@@ -993,7 +1040,7 @@ The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
 
-if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+if [ "$READ_ONLY" -eq 0 ] && [ "$SKIP_STARTUP_SWEEPS" -eq 0 ]; then
   COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$COMPLETION_PID" in
