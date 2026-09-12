@@ -61,6 +61,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Ship and scout Rules each carry the no-agent-co-author rule as its own hard
+# rule, because a crewmate worktree never reads AGENTS.md's copy of it; the
+# attribution-off launch settings in bin/fm-spawn.sh are the mechanical half.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -410,6 +413,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never add an agent name as a commit co-author on any scratch commit you make here.
 
 $INBOX_SECTION
 
@@ -501,6 +505,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never add an agent name as a commit co-author on any commit you make here.
 
 $INBOX_SECTION
 

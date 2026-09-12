@@ -424,6 +424,43 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
+# Every crewmate brief must carry the no-agent-co-author rule as its own top-level
+# hard rule, not as a clause buried in another rule or in captain-only instructions
+# a crewmate worktree never reads. Parsed from the generated brief's Rules section
+# as numbered rules so the assertion is about the delivered contract's structure,
+# and matched on the prohibition itself so permissive wording or a rule that
+# drops the agent-name qualification stops counting instead of passing silently.
+count_coauthor_rules() {  # <brief>
+  awk '
+    $0 == "# Rules" { in_rules = 1; next }
+    in_rules && /^# / { in_rules = 0 }
+    in_rules && /^[0-9]+\. Never add an agent name as a commit co-author/ { n++ }
+    END { print n + 0 }
+  ' "$1"
+}
+
+test_every_worker_brief_forbids_an_agent_co_author() {
+  local home id brief mode n
+  home="$TMP_ROOT/coauthor-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-coauthor-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "ship brief ($mode) was not scaffolded"
+    n=$(count_coauthor_rules "$brief")
+    [ "$n" = 1 ] || fail "ship brief ($mode) must carry exactly one co-author hard rule (found $n)"
+  done
+  id="brief-coauthor-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  n=$(count_coauthor_rules "$brief")
+  [ "$n" = 1 ] || fail "scout brief must carry exactly one co-author hard rule (found $n)"
+  pass "fm-brief.sh: ship and scout briefs forbid an agent commit co-author as a hard rule"
+}
+test_every_worker_brief_forbids_an_agent_co_author
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
