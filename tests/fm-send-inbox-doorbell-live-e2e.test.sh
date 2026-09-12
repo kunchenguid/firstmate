@@ -222,7 +222,7 @@ if [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" != 1 ]; then
 fi
 
 run_agy_canonical_lifecycle() (
-  local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
+  local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line initial_task_done
   local doorbell_inbox doorbell_acted doorbell_marker doorbell_brief ring_count record
   local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
@@ -299,6 +299,16 @@ EOF
     sleep 1
   done
   [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
+  initial_task_done=0
+  for _ in $(seq 1 240); do
+    capture=$(TMUX_TMPDIR="$lab/tmux" tmux capture-pane -p -t "$target" 2>/dev/null || true)
+    if ! printf '%s\n' "$capture" | grep -Fq '1 task(s)' 2>/dev/null; then
+      initial_task_done=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$initial_task_done" -eq 1 ] || die "agy ($version): initial brief did not finish before the doorbell"
   doorbell_inbox="$state/$task.inbox"
   doorbell_acted="$lab/AGY_DOORBELL_RESULT"
   doorbell_marker="AGY_DOORBELL_$(date +%s)-$$"
@@ -317,7 +327,7 @@ EOF
     || die "agy ($version): doorbell steer left no durable inbox record"
   ring_count=$(cat "$RING_COUNTER_FILE" 2>/dev/null || printf '0')
   [ "$ring_count" = 1 ] || die "agy ($version): fm-send rang the doorbell $ring_count times, expected exactly once"
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do
     if [ -f "$doorbell_acted" ] && grep -Fqx "$doorbell_marker" "$doorbell_acted" 2>/dev/null \
       && [ -f "$doorbell_inbox/handled/001.msg" ]; then
       break
