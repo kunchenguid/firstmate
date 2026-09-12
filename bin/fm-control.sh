@@ -779,9 +779,10 @@ record_note() {
         echo "and act on them in numeric order, and mv each into"
         echo "$STATE/$ID.inbox/handled/ as soon as you have read it, leaving none"
         echo "behind - that only confirms receipt, not that the requested work is done."
-        echo "Then read the most recent records in $STATE/$ID.inbox/handled/ as well:"
-        echo "the previous worker acknowledged each on reading it, so a steer it had"
-        echo "received but not yet carried out is sitting there, not in the list above."
+        echo "If $STATE/$ID.inbox/handled/ exists and holds recent records, skim"
+        echo "those too: the previous worker acknowledged each on reading it, so one"
+        echo "may name work it had received but not finished. They may equally be done"
+        echo "already - check the current repo and task state before redoing anything."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

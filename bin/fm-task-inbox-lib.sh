@@ -20,8 +20,9 @@
 # empty or already handled), and a swallowed doorbell is detected by the
 # absence of the worker's acknowledgement and re-rung on a bounded schedule.
 # That detection only holds because the acknowledgement means received: a
-# worker that withheld it until the requested work finished would look stuck
-# for the whole legitimate duration of that work.
+# worker that withheld it until the requested work finished would keep drawing
+# re-rings and, once the ladder is spent against an idle pane, escalate as
+# stuck while its wait was legitimate all along.
 # A positively dead or missing endpoint bypasses that schedule without being
 # typed into, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
