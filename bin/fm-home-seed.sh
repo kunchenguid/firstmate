@@ -1005,6 +1005,15 @@ seed_home() {
   fi
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
+  if [ -x "$FM_ROOT/bin/fm-review-watches.sh" ]; then
+    review_watches_out=$("$FM_ROOT/bin/fm-review-watches.sh" install "$home" "$charter_scope")
+    printf '%s\n' "$review_watches_out"
+    case "$review_watches_out" in
+      installed:*)
+        "$FM_ROOT/bin/fm-review-watches.sh" retire "$FM_HOME"
+        ;;
+    esac
+  fi
   SEED_COMMITTED=1
   seed_registry_lock_release
   trap - EXIT

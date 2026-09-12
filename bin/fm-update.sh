@@ -119,6 +119,30 @@ selector_claimed() {  # <selector>
   return 1
 }
 
+# Install the review watches only in the home whose registry scope owns
+# colleague-PR reviews. Retire the old parent copies after both target checks
+# are registered, so one home remains the sole source of these wake events.
+review_watches_sync() {  # <id> <home>
+  local id=$1 home=$2 scope output
+  [ -x "$SCRIPT_DIR/fm-review-watches.sh" ] || return 0
+  scope=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted {
+    sub(/^.*; scope: /, "")
+    sub(/; projects:.*$/, "")
+    print
+    exit
+  }' "$SECONDMATES_MD" 2>/dev/null || true)
+  [ -n "$scope" ] || return 0
+  if output=$("$SCRIPT_DIR/fm-review-watches.sh" install "$home" "$scope"); then
+    case "$output" in
+      installed:*)
+        "$SCRIPT_DIR/fm-review-watches.sh" retire "$FM_HOME" >/dev/null
+        ;;
+    esac
+  else
+    printf 'review watches: could not install for home %s\n' "$id" >&2
+  fi
+}
+
 # Route one secondmate whose home this pass left on the target commit. Restart is
 # the outcome unless its runtime cannot prove one, in which case it keeps the
 # re-read steer and is reported as a nudge rather than as a reload. A stopped
@@ -137,6 +161,7 @@ claim_settled_secondmate() {  # <id>
 # bin/fm-ff-lib.sh calls this for each local home it left AT the base with a live
 # endpoint - status "updated" or "current" alike. A skipped home never gets here.
 fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
+  review_watches_sync "$1" "$2"
   claim_settled_secondmate "$1"
 }
 
