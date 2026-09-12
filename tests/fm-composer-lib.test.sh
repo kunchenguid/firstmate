@@ -707,6 +707,29 @@ test_agy_prompt_requires_footer_proof_without_cursor() {
   pass "fm_composer_classify_screen: cursorless agy uses positional boundary proof"
 }
 
+test_agy_rejects_generic_box_without_measured_pair() {
+  local screen out baseline boundary box_boundary box_content
+  screen=$'╭────────────────╮\n│ ❯              │\n╰────────────────╯'
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' agy)
+  [ "$out" = unknown ] \
+    || fail "AGY must reject a generic boxed composer without its measured pair, got '$out'"
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' codex)
+  [ "$out" = empty ] \
+    || fail "non-AGY boxed composer behavior changed, got '$out'"
+  boundary=$(printf '─%.0s' {1..16})
+  box_boundary=$(printf '─%.0s' {1..24})
+  printf -v box_content '%-24s' hello
+  screen="$boundary"$'\n>\n'"$boundary"$'\n╭'"$box_boundary"$'╮\n│ '"$box_content"$'│\n╰'"$box_boundary"$'╯'
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' agy)
+  [ "$out" = empty ] \
+    || fail "AGY must keep its measured pair ahead of a lower generic box, got '$out'"
+  baseline=$(fm_composer_classify_screen 'styled=0' "$screen")
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' codex)
+  [ "$out" = "$baseline" ] \
+    || fail "non-AGY generic box behavior changed below an AGY-shaped pair: baseline '$baseline', got '$out'"
+  pass "fm_composer_classify_screen: AGY requires its measured pair before generic candidates"
+}
+
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   local cursor_caps=$'styled=1\ncursor=1' cursorless_caps='styled=0' out screen extract
   screen=$'────────────────\n> first line\n  second line\n────────────────\nGemini 3.8 Flash · low'
@@ -1034,6 +1057,7 @@ test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
+test_agy_rejects_generic_box_without_measured_pair
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_preserves_structural_draft_rows
 test_agy_ignores_incomplete_boxes_inside_pair

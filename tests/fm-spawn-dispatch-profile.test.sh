@@ -455,6 +455,23 @@ test_raw_launch_rejects_agy_marker_in_nested_commands() {
   pass "raw launches reject nested AGY identity assignments"
 }
 
+test_raw_launch_allows_marker_name_argument() {
+  local rec id out status launch
+  id=profile-raw-marker-name-z15d
+  rec=$(make_spawn_case profile-raw-marker-name claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --label ANTIGRAVITY_AGENT")
+  status=$?
+  expect_code 0 "$status" "raw marker-name argument should be allowed"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "env -u ANTIGRAVITY_AGENT custom-agent --label ANTIGRAVITY_AGENT" ] \
+    || fail "raw marker-name argument launch changed: $launch"
+  pass "raw launches allow ANTIGRAVITY_AGENT as a non-assignment argument"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1413,6 +1430,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_rejects_agy_marker_assignment
 test_raw_launch_rejects_agy_marker_in_nested_commands
+test_raw_launch_allows_marker_name_argument
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

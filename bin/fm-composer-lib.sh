@@ -1327,6 +1327,16 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+_fm_composer_select_agy_cursorless() {
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$FM_COMPOSER_SCAN_AGY_BOUNDARY" ] \
+     || [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$FM_COMPOSER_SCAN_AGY_BOUNDARY" ]; then
+    return 1
+  fi
+  FM_COMPOSER_SELECTED_KIND=agy
+  FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
+  FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
+}
+
 fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row] [harness]
   local caps=$1 screen=$2 cursor=${3:-} harness=${4:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
@@ -1341,6 +1351,9 @@ EOF
   if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
     return 0
   fi
+  if [ "$harness" = agy ] && [ "$FM_COMPOSER_SCAN_AGY_ROW" -lt 0 ]; then
+    return 1
+  fi
   if [ -n "$cursor" ] \
      && [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
      && [ "$cursor" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
@@ -1348,6 +1361,8 @@ EOF
     FM_COMPOSER_SELECTED_KIND=agy
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
+  elif [ "$harness" = agy ]; then
+    _fm_composer_select_agy_cursorless || return 1
   else
     _fm_composer_select_cursorless "$plain" || return 1
   fi
@@ -1439,6 +1454,10 @@ EOF
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy" '' "$harness"
+  if [ "$harness" = agy ] && [ "$FM_COMPOSER_SCAN_AGY_ROW" -lt 0 ]; then
+    printf 'unknown'
+    return 0
+  fi
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
@@ -1506,7 +1525,12 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain"; then
+  if [ "$harness" = agy ]; then
+    _fm_composer_select_agy_cursorless || {
+      printf 'unknown'
+      return 0
+    }
+  elif ! _fm_composer_select_cursorless "$plain"; then
     printf 'unknown'
     return 0
   fi

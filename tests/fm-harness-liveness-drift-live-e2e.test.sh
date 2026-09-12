@@ -154,9 +154,12 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
     printf -v marker_prompt \
       "Use your shell tool to run exactly: env | grep -c ANTIGRAVITY_AGENT=1 > %q; %q > %q; then reply with only the number it printed." \
       "$marker_count" "$ROOT/bin/fm-harness.sh" "$marker_harness"
+    unset ANTIGRAVITY_AGENT
+    [ -z "${ANTIGRAVITY_AGENT:-}" ] \
+      || fail "agy ($version): marker probe guard retained ANTIGRAVITY_AGENT"
     (
       cd "$LAB/wt" || exit 1
-      "$bin_path" --dangerously-skip-permissions --model gemini-3.8-flash-low \
+      env -u ANTIGRAVITY_AGENT "$bin_path" --dangerously-skip-permissions --model gemini-3.8-flash-low \
         --print "$marker_prompt" > "$marker_reply" 2>&1
     ) || fail "agy ($version): print-mode marker probe failed"
     marker_value=$(tr -d '[:space:]' < "$marker_count" 2>/dev/null || true)

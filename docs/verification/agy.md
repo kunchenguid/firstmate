@@ -175,7 +175,7 @@ Marker-proof command, recorded 2026-09-12:
 Command:
 
 ```text
-FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh | grep -E 'harness marker: agy'
+env -u ANTIGRAVITY_AGENT FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh | grep -E 'harness marker: agy'
 ```
 
 The binary auto-updated from 1.2.0 to 1.2.2 during verification.
