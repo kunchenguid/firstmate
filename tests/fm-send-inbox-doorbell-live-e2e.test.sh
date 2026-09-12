@@ -60,8 +60,21 @@ trap cleanup EXIT
 SHIM_DIR="$LAB/shim"
 mkdir -p "$SHIM_DIR"
 REAL_TMUX=$(command -v tmux)
+RING_COUNTER_FILE="$LAB/doorbell-ring.count"
+: > "$RING_COUNTER_FILE"
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = send-keys ]; then
+  for arg in "\$@"; do
+    case "\$arg" in
+      *"Firstmate instruction waiting:"*)
+        count=\$(cat "$RING_COUNTER_FILE" 2>/dev/null || printf '0')
+        printf '%s\n' "\$((count + 1))" > "$RING_COUNTER_FILE"
+        break
+        ;;
+    esac
+  done
+fi
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
@@ -210,7 +223,7 @@ fi
 
 run_agy_canonical_lifecycle() (
   local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
-  local doorbell_record doorbell_acted doorbell_brief doorbell_ring_rc=0
+  local doorbell_inbox doorbell_acted doorbell_marker doorbell_brief ring_count record
   local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
   die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
@@ -286,27 +299,34 @@ EOF
     sleep 1
   done
   [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
-  . "$ROOT/bin/fm-backend.sh"
-  doorbell_acted="$lab/AGY_DOORBELL_ACTED"
-  doorbell_brief="Run the exact shell command \`touch $doorbell_acted\` once, then stop."
+  doorbell_inbox="$state/$task.inbox"
+  doorbell_acted="$lab/AGY_DOORBELL_RESULT"
+  doorbell_marker="AGY_DOORBELL_$(date +%s)-$$"
+  if [ -d "$doorbell_inbox" ]; then
+    for record in "$doorbell_inbox"/*.msg "$doorbell_inbox"/handled/*.msg; do
+      [ ! -e "$record" ] || die "agy ($version): doorbell inbox was not empty before the steer"
+    done
+  fi
+  [ ! -e "$doorbell_acted" ] || die "agy ($version): doorbell action artifact already existed"
+  : > "$RING_COUNTER_FILE"
+  doorbell_brief="Run the exact shell command \`printf '%s\\n' '$doorbell_marker' > '$doorbell_acted'\` once, then stop."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" "$doorbell_brief" >/dev/null 2>&1 \
     || die "agy ($version): doorbell steer could not be recorded"
-  doorbell_record="$state/$task.inbox/001.msg"
-  [ -f "$doorbell_record" ] || [ -f "$state/$task.inbox/handled/001.msg" ] \
+  [ -f "$doorbell_inbox/001.msg" ] || [ -f "$doorbell_inbox/handled/001.msg" ] \
     || die "agy ($version): doorbell steer left no durable inbox record"
-  fm_task_inbox_ring tmux "$target" "$doorbell_record" "fm-$task" || doorbell_ring_rc=$?
-  if [ "$doorbell_ring_rc" -gt 1 ] && [ ! -f "$state/$task.inbox/handled/001.msg" ]; then
-    die "agy ($version): explicit doorbell ring failed"
-  fi
+  ring_count=$(cat "$RING_COUNTER_FILE" 2>/dev/null || printf '0')
+  [ "$ring_count" = 1 ] || die "agy ($version): fm-send rang the doorbell $ring_count times, expected exactly once"
   for _ in $(seq 1 120); do
-    if [ -e "$doorbell_acted" ] && [ -f "$state/$task.inbox/handled/001.msg" ]; then
+    if [ -f "$doorbell_acted" ] && grep -Fqx "$doorbell_marker" "$doorbell_acted" 2>/dev/null \
+      && [ -f "$doorbell_inbox/handled/001.msg" ]; then
       break
     fi
     sleep 1
   done
-  [ -e "$doorbell_acted" ] || die "agy ($version): doorbell instruction was not acted on"
-  [ -f "$state/$task.inbox/handled/001.msg" ] \
+  [ -f "$doorbell_acted" ] && grep -Fqx "$doorbell_marker" "$doorbell_acted" \
+    || die "agy ($version): doorbell instruction was not acted on"
+  [ -f "$doorbell_inbox/handled/001.msg" ] \
     || die "agy ($version): doorbell instruction was not acknowledged"
   rm -f "$state/$task.progress"
   lifecycle_progress_brief='Run the exact shell command "printf AGY_TOOL_PROGRESS" once, then stop.'

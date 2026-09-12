@@ -289,6 +289,12 @@ env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH
 
 The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions are left in the executable guard for firstmate to run at both widths.
 
+Post-fix output placeholder for firstmate's credentialed runs:
+
+```text
+<replace with the exact default-width and FM_AGY_LIFECYCLE_TMUX_WIDTH=80 outputs>
+```
+
 Output from firstmate's 2026-09-12 pre-doorbell-assertion lifecycle run:
 
 ```text
