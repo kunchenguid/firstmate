@@ -62,10 +62,13 @@
 # Nothing this script writes - log line, status append, error text - carries it.
 #
 # Alarms are appended to state/<task>.status, which is firstmate's wake channel,
-# under this watchdog's own decision key so they can never take over or clear a
-# crewmate's decision on the same channel, and rate-limited per condition so an
-# unattended alarm cannot flood it. The full trail is
-# state/<task>.runpod-watch.log.
+# under a decision key of this watchdog's own per condition so they can never
+# take over or clear a crewmate's decision on the same channel, and rate-limited
+# per condition so an unattended alarm cannot flood it. What it opens it closes:
+# a condition that clears is resolved under the same key, and a verified stop is
+# reported as a `note:`, which the drain surfaces but which opens no decision -
+# an alarm nothing can close would leave the task permanently stuck. The full
+# trail is state/<task>.runpod-watch.log.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +101,16 @@ die() {
 # spin. Every such flag checks for its value first.
 need_value() {
   [ "$1" -gt 1 ] || die "$2 needs a value" 2
+}
+
+# A pid this script is willing to signal. `kill -0 0` succeeds because 0 names
+# the CALLER's process group, so a corrupt pid file must never reach kill(1):
+# `disarm` would tear down the harness that invoked it.
+pid_live() {
+  local pid=${1:-}
+  is_safe_uint "$pid" || return 1
+  [ "$pid" -gt 1 ] || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 task_id_valid() {
@@ -272,41 +285,123 @@ log_line() {
   printf '%s %s\n' "$stamp" "$text" >> "$(log_path "$task")" 2>/dev/null || true
 }
 
+# Every line this watchdog writes to the status channel carries a key of its
+# own, one per condition. An unkeyed `blocked:` line folds under the shared
+# `default` key in bin/fm-classify-lib.sh, so it would drop a crewmate's open
+# decision on the same status file - and a crewmate's unrelated `resolved:`
+# would clear a still-true alarm about a pod that is still billing. Keying per
+# condition, rather than per task, is what lets the condition that actually
+# cleared close its own alarm without closing the others.
+decision_key() { printf 'runpod-watch-%s-%s' "$1" "$2"; }
+
+status_append() {
+  local task=$1 line=$2
+  printf '%s\n' "$line" >> "$(status_path "$task")" 2>/dev/null || true
+}
+
+# A completed action, not an open question: `note:` is surfaced by the wake
+# drain's unread-status section and never folds into an open decision, so a
+# verified stop cannot leave behind a blocker only a human could close.
+notify() {
+  local task=$1 text=$2
+  log_line "$task" "note $text"
+  if [ -n "$KEY_SCRUB" ]; then
+    text=${text//"$KEY_SCRUB"/[redacted]}
+  fi
+  status_append "$task" "note: $text"
+}
+
 # Alarms wake firstmate through the task's own status channel. One alarm per
 # distinct condition per ALARM_REPEAT_SECONDS: an unattended watchdog that
 # alarms every poll would bury the fleet, and one that alarms once would be
 # missed if that wake was lost.
-#
-# They carry this watchdog's own decision key. An unkeyed `blocked:` line folds
-# under the shared `default` key in bin/fm-classify-lib.sh, so it would drop a
-# crewmate's open decision on the same status file - and a crewmate's unrelated
-# `resolved:` would clear a still-true alarm about a pod that is still billing.
 alarm() {
   local task=$1 condition=$2 text=$3 ledger last now
   ledger=$(alarm_path "$task")
-  now=$(now_epoch) || now=0
+  now=$(now_epoch) || now=
   last=$(grep -F -- "$condition	" "$ledger" 2>/dev/null | tail -1 | cut -f2) || last=
   log_line "$task" "alarm[$condition] $text"
-  if is_safe_uint "$last" && is_safe_uint "$now" && [ "$((now - last))" -lt "$ALARM_REPEAT_SECONDS" ]; then
+  # A clock that cannot be read, or that stepped backwards, cannot establish
+  # that this condition was reported recently. Going silent is the wrong way to
+  # fail on the channel that says a pod may still be billing, so only a strictly
+  # forward delta inside the window suppresses.
+  if is_safe_uint "$now" && is_safe_uint "$last" && [ "$now" -gt "$last" ] \
+    && [ "$((now - last))" -lt "$ALARM_REPEAT_SECONDS" ]; then
     return 0
   fi
   if [ -n "$KEY_SCRUB" ]; then
     text=${text//"$KEY_SCRUB"/[redacted]}
   fi
-  printf 'blocked [key=runpod-watch-%s]: %s\n' "$task" "$text" \
-    >> "$(status_path "$task")" 2>/dev/null || true
+  status_append "$task" "blocked [key=$(decision_key "$task" "$condition")]: $text"
   printf '%s\t%s\n' "$condition" "$now" >> "$ledger" 2>/dev/null || true
+}
+
+# An alarm this watchdog raised is an alarm this watchdog closes. Dropping the
+# condition from the ledger both closes the decision exactly once and lets the
+# same condition open again if it recurs.
+clear_alarm() {
+  local task=$1 condition=$2 text=$3 ledger tmp
+  ledger=$(alarm_path "$task")
+  grep -qF -- "$condition	" "$ledger" 2>/dev/null || return 0
+  tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
+  grep -vF -- "$condition	" "$ledger" > "$tmp" 2>/dev/null || true
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
+  log_line "$task" "cleared[$condition] $text"
+  if [ -n "$KEY_SCRUB" ]; then
+    text=${text//"$KEY_SCRUB"/[redacted]}
+  fi
+  status_append "$task" "resolved [key=$(decision_key "$task" "$condition")]: $text"
+}
+
+# Every way this watch ends - the pod leaving, a verified stop, a disarm, a
+# re-arm - retires the watch, and a retired watch must not leave a blocker only
+# a human could close. Closes whatever conditions are still open and drops the
+# ledger with them.
+retire_alarms() {
+  local task=$1 text=$2 ledger condition rest seen=''
+  ledger=$(alarm_path "$task")
+  [ -f "$ledger" ] || return 0
+  while IFS="$(printf '\t')" read -r condition rest || [ -n "$condition" ]; do
+    [ -n "$condition" ] || continue
+    case " $seen " in *" $condition "*) continue ;; esac
+    seen="$seen $condition"
+    log_line "$task" "cleared[$condition] $text"
+    status_append "$task" "resolved [key=$(decision_key "$task" "$condition")]: $text"
+  done < "$ledger"
+  rm -f -- "$ledger" 2>/dev/null || true
 }
 
 # --- RunPod API -------------------------------------------------------------
 
-load_key() {
-  local file=$1
+# Reads one assignment out of a .env-style file WITHOUT executing it, on the
+# same terms as fmx_env_get (bin/fm-x-lib.sh): last assignment wins, a leading
+# `export ` and surrounding whitespace are tolerated, and one layer of matching
+# quotes is stripped. .env is the home's shared multi-key operator file, so
+# sourcing it would let an unrelated value's apostrophe or unquoted space empty
+# this key - and because the loop re-reads it every poll, an edit made after
+# arming would silently disarm a live killswitch.
+env_value() {
+  local key=$1 file=$2 line val
   [ -f "$file" ] || return 1
-  # shellcheck disable=SC1090 # operator-provided gitignored .env
-  RUNPOD_API_KEY=$(set -a; . "$file" >/dev/null 2>&1; set +a; printf '%s' "${RUNPOD_API_KEY:-}") || return 1
-  [ -n "$RUNPOD_API_KEY" ] || return 1
-  KEY_SCRUB=$RUNPOD_API_KEY
+  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 1
+  [ -n "$line" ] || return 1
+  val=${line#*=}
+  val=${val#"${val%%[![:space:]]*}"}
+  val=${val%"${val##*[![:space:]]}"}
+  case "$val" in
+    \"*\") val=${val#\"}; val=${val%\"} ;;
+    \'*\') val=${val#\'}; val=${val%\'} ;;
+  esac
+  printf '%s' "$val"
+}
+
+load_key() {
+  local file=$1 value
+  value=$(env_value RUNPOD_API_KEY "$file") || return 1
+  [ -n "$value" ] || return 1
+  RUNPOD_API_KEY=$value
+  KEY_SCRUB=$value
   return 0
 }
 
@@ -333,12 +428,14 @@ request_file() {
 #   2 = could not establish either way; the caller must not conclude anything
 # Sets POD_START_EPOCH to the instant the pod started when the same response
 # carries it, and to empty when it does not. The start instant rides along with
-# the presence check rather than costing a second request.
+# the presence check rather than costing a second request. `uptimeInSeconds` is
+# the only source for it: it can only be read off a RUNNING pod, so it cannot
+# anchor a spend ceiling to a moment the pod was not accruing uptime.
 POD_START_EPOCH=
 pod_present() {
-  local pod=$1 req resp uptime started now
+  local pod=$1 req resp uptime now
   POD_START_EPOCH=
-  req=$(request_file 'query { myself { pods { id lastStartedAt runtime { uptimeInSeconds } } } }') || return 2
+  req=$(request_file 'query { myself { pods { id runtime { uptimeInSeconds } } } }') || return 2
   resp=$(graphql "$req" 2>/dev/null) || { rm -f "$req"; return 2; }
   rm -f "$req"
   [ -n "$resp" ] || return 2
@@ -350,13 +447,6 @@ pod_present() {
     || uptime=
   if is_safe_uint "$uptime" && now=$(now_epoch) && [ "$now" -gt "$uptime" ]; then
     POD_START_EPOCH=$((now - uptime))
-    return 0
-  fi
-  started=$(printf '%s' "$resp" \
-    | jq -r --arg id "$pod" '[.data.myself.pods[] | select(.id == $id) | .lastStartedAt][0] // empty' 2>/dev/null) \
-    || started=
-  if [ -n "$started" ]; then
-    POD_START_EPOCH=$(parse_when "$started") || POD_START_EPOCH=
   fi
   return 0
 }
@@ -442,7 +532,8 @@ cmd_arm() {
   record_read "$record" || die 'arm: the published record did not read back'
 
   stop_existing "$task"
-  rm -f -- "$(alarm_path "$task")" "$(observed_path "$task")" 2>/dev/null || true
+  retire_alarms "$task" "the pod watchdog for $task was re-armed; its earlier alarms are superseded"
+  rm -f -- "$(observed_path "$task")" 2>/dev/null || true
   log_line "$task" "armed pod=$pod deadline=$declared ceiling_seconds=${seconds:-none}"
 
   # Own session, no controlling terminal, no shared descriptors: this is what
@@ -468,7 +559,7 @@ wait_for_start() {
   local task=$1 mark=$2 i=0 pid
   while [ "$i" -lt 100 ]; do
     pid=$(cat "$(pid_path "$task")" 2>/dev/null || true)
-    if is_uint "$pid" && kill -0 "$pid" 2>/dev/null; then
+    if pid_live "$pid"; then
       return 0
     fi
     if tail -c "+$((mark + 1))" "$(log_path "$task")" 2>/dev/null \
@@ -484,8 +575,7 @@ wait_for_start() {
 stop_existing() {
   local task=$1 pid i=0
   pid=$(cat "$(pid_path "$task")" 2>/dev/null || true)
-  is_uint "$pid" || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
+  pid_live "$pid" || return 0
   kill -TERM "$pid" 2>/dev/null || true
   while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
@@ -513,7 +603,8 @@ cmd_disarm() {
   done
   task_id_valid "$task" || die 'disarm: --task is required' 2
   stop_existing "$task"
-  rm -f -- "$(record_path "$task")" "$(pid_path "$task")" "$(alarm_path "$task")" \
+  retire_alarms "$task" "the pod watchdog for $task was disarmed; its alarms no longer stand"
+  rm -f -- "$(record_path "$task")" "$(pid_path "$task")" \
     "$(observed_path "$task")" 2>/dev/null || true
   log_line "$task" 'disarmed'
   printf 'disarmed: %s\n' "$task"
@@ -538,7 +629,7 @@ cmd_status() {
     fi
     pid=$(cat "$(pid_path "$id")" 2>/dev/null || true)
     live=stopped
-    if is_uint "$pid" && kill -0 "$pid" 2>/dev/null; then live=running; fi
+    if pid_live "$pid"; then live=running; fi
     # Only the loop knows the pod's start instant, so only the loop can say
     # which instant is in force. Until it has, the declared deadline is the
     # only thing being enforced and this says exactly that rather than
@@ -640,6 +731,8 @@ cmd_run() {
       nap "$POLL_SECONDS"
       continue
     fi
+    clear_alarm "$task" key-unreadable \
+      "the pod watchdog for $task can read its RunPod credential again"
 
     if ! record_read "$record"; then
       # The record is the only thing that says which pod may be stopped and
@@ -649,6 +742,8 @@ cmd_run() {
       nap "$POLL_SECONDS"
       continue
     fi
+    clear_alarm "$task" record-unreadable \
+      "the pod watchdog for $task can read the run's deadline record again"
 
     if ! now=$(now_epoch); then
       alarm "$task" clock-unreadable \
@@ -656,6 +751,8 @@ cmd_run() {
       nap "$POLL_SECONDS"
       continue
     fi
+    clear_alarm "$task" clock-unreadable \
+      "the pod watchdog for $task can read the clock again"
 
     # Sightings and the anchor belong to one pod id. A record that names a
     # different pod is a different watch and starts from nothing observed.
@@ -669,6 +766,10 @@ cmd_run() {
     present_rc=$?
     case "$present_rc" in
       0)
+        clear_alarm "$task" api-unreachable \
+          "the pod watchdog for $task can reach RunPod again"
+        [ "$ever_seen" -eq 1 ] || clear_alarm "$task" pod-never-seen \
+          "the pod watchdog for $task has now seen pod $REC_POD in the account's pod list"
         ever_seen=1
         # First sighting wins: a pod that restarts reports fresh uptime, and
         # re-anchoring on that would push the ceiling later than the spend it
@@ -689,6 +790,8 @@ cmd_run() {
           nap "$POLL_SECONDS"
           continue
         fi
+        retire_alarms "$task" \
+          "the pod watchdog for $task has finished: pod $REC_POD has left the account's pod list and there is nothing left to guard"
         log_line "$task" "pod $REC_POD is no longer listed; nothing left to guard"
         rm -f -- "$record" "$(observed_path "$task")" 2>/dev/null || true
         return 0
@@ -705,6 +808,8 @@ cmd_run() {
     if [ -n "$REC_CEILING_SECONDS" ]; then
       if [ -n "$pod_start" ]; then
         anchor='pod-start'
+        clear_alarm "$task" ceiling-anchor-unknown \
+          "the pod watchdog for $task can read when pod $REC_POD started, so the ceiling is in force again"
         ceiling_deadline=$((pod_start + REC_CEILING_SECONDS))
         if [ "$ceiling_deadline" -lt "$effective" ]; then
           effective=$ceiling_deadline
@@ -727,7 +832,12 @@ cmd_run() {
     # an affirmative comparison authorizes a termination.
     if [ "$now" -ge "$effective" ] 2>/dev/null; then
       terminate_and_verify "$task" "$REC_POD"
-      alarm "$task" terminated \
+      retire_alarms "$task" \
+        "the pod watchdog for $task has finished: pod $REC_POD is stopped and its absence is confirmed"
+      # A completed stop is an event, not a blocker: reporting it as one would
+      # leave an open decision on this task that only this watchdog could close,
+      # and it exits here.
+      notify "$task" \
         "rented pod $REC_POD passed the deletion deadline this run declared (in force: $source) and has been stopped; absence confirmed by listing the account's pods"
       rm -f -- "$record" "$(observed_path "$task")" 2>/dev/null || true
       log_line "$task" 'watchdog exiting after verified termination'

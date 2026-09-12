@@ -32,7 +32,8 @@ bin/fm-runpod-watchdog.sh arm \
 There is no default: this watchdog enforces the deadline a run declared and refuses to invent one.
 
 `--ceiling-usd` with `--rate-usd-hr` is optional.
-When both are given, `arm` converts the ceiling into a **duration of uptime** - never into an instant - and the loop anchors that duration to the instant the API reports the pod started, read in the same request it already makes to check the pod is there.
+When both are given, `arm` converts the ceiling into a **duration of uptime** - never into an instant - and the loop anchors that duration to the pod's own start, derived from the `runtime { uptimeInSeconds }` the pod list already returns in the request it makes to check the pod is there.
+That is the only anchor source: uptime can only be read off a *running* pod, so it cannot anchor a spend ceiling to a moment the pod was not accruing.
 The watchdog then enforces whichever instant comes first.
 Anchoring to the pod rather than to arming is what makes the bound mean what it says: a ceiling converted at arm time would start counting when someone got round to arming, so arming an hour late, or re-arming, would quietly raise it.
 Note that a derived figure is not a billing statement; the ceiling deadline bounds uptime at the rate you declared, not settled charges.
@@ -65,7 +66,19 @@ A successful `podTerminate` response is not evidence of anything.
 The loop lists the account's pods afterwards and reports the pod stopped only once it is absent from that list.
 A termination the listing does not confirm raises an alarm saying the pod may still be billing, and keeps retrying; it is never reported as stopped.
 
-Alarms are appended to `state/<task-id>.status`, which is the channel that wakes Firstmate, under this watchdog's own decision key (`runpod-watch-<task-id>`) so they cannot take over or clear a crewmate's decision on the same file, and rate-limited per condition so an unattended alarm cannot flood the fleet.
+### What it writes to the status channel
+
+Everything this watchdog appends to `state/<task-id>.status` - the channel that wakes Firstmate - carries a decision key of its own, one per condition (`runpod-watch-<task-id>-<condition>`), so it can neither take over nor clear a crewmate's decision on the same file. Alarms are rate-limited per condition so an unattended alarm cannot flood the fleet.
+
+| Event | Line | Effect on open decisions |
+| --- | --- | --- |
+| A condition the watchdog cannot act through (API unreachable, record unreadable, credential unreadable, clock unreadable, pod never seen, ceiling unanchorable, termination unverified) | `blocked [key=runpod-watch-<task>-<condition>]: …` | opens that condition's decision |
+| That same condition clearing | `resolved [key=runpod-watch-<task>-<condition>]: …` | closes it, and lets it open again if it recurs |
+| The watch retiring - the pod leaving, a verified stop, `disarm`, a re-arm | `resolved […]` for every condition still open | closes them all |
+| A verified stop | `note: … has been stopped; absence confirmed by listing the account's pods` | none; the wake drain surfaces `note:` lines without opening a decision |
+
+A completed stop is reported as an event rather than a blocker on purpose: the watchdog exits immediately afterwards, so a `blocked:` line there would leave a decision open that only this watchdog could have closed.
+
 The full trail, including every termination attempt and verification result, is `state/<task-id>.runpod-watch.log`.
 
 ## What it will not do
@@ -93,12 +106,13 @@ A failed pod-list read is never read as "the pod is gone", and a comparison that
 It never parses the run's own prose run-state file, and the loop never writes the record it was given, so it cannot race the agent that wrote it.
 What the loop derives - the instant in force and the anchor behind it - it republishes separately, at `state/<task-id>.runpod-watch.observed`, which is the only thing `status` reads for those figures.
 
-**It will not expose the credential.**
+**It will not expose the credential, or execute the file holding it.**
 `RUNPOD_API_KEY` is handed to `curl` through a config file on stdin, so it never appears in argv and therefore never in `ps`.
 Nothing the script writes carries it, and anything it logs is scrubbed of it.
+The value is *parsed* out of `.env` on the same terms as `fmx_env_get`, never sourced: `.env` is the home's shared multi-key operator file, and the loop re-reads it every poll, so an apostrophe or an unquoted space in an unrelated neighbour's value must not be able to empty this key and silently disarm a live killswitch.
 
 ## Verification
 
 `tests/fm-runpod-watchdog.test.sh` covers both halves: a passed deadline that terminates and is verified by listing, and a record that cannot be read that terminates nothing.
-It also pins the states in between - a live deadline, an accepted termination the listing does not confirm, an unreadable pod list, a pod id that was never in the account, a ceiling anchored to the pod's own start that re-arming cannot extend, a ceiling whose anchor cannot be read and is therefore not enforced, alarms that leave a crewmate's open decision intact, the credential never reaching a written file, and the armed watchdog surviving the death of the shell that armed it.
+It also pins the states in between - a live deadline, an accepted termination the listing does not confirm, an unreadable pod list, a pod id that was never in the account, a ceiling anchored to the pod's own start that re-arming cannot extend, a ceiling whose anchor cannot be read and is therefore not enforced, alarms that leave a crewmate's open decision intact, a verified stop that leaves no open decision at all, an alarm the watchdog raises and then closes itself once the API comes back, a shared `.env` whose neighbouring values cannot take the credential away, a corrupt pid file that cannot signal the caller's process group, the credential never reaching a written file, and the armed watchdog surviving the death of the shell that armed it.
 The RunPod API is faked at the process boundary, so the suite never touches a real account and never rents anything.

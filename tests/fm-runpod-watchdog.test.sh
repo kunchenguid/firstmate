@@ -6,8 +6,8 @@
 # that MUST NOT terminate anything. Both are asserted here, plus the states in
 # between: a live deadline, a termination the API accepted but the pod list does
 # not confirm, a pod id that was never in the account, a ceiling anchored to the
-# pod's own start rather than to arm time, and the credential never reaching any
-# file the script writes.
+# pod's own start rather than to arm time, alarms this watchdog raises and then
+# closes itself, and the credential never reaching any file the script writes.
 #
 # The RunPod API is faked at the process boundary with a PATH curl shim, so
 # every assertion runs through the real executable and no test ever touches a
@@ -34,9 +34,10 @@ new_home() {
 # Fake RunPod GraphQL endpoint. Reads the request body from the --data-binary
 # file, records the call, and answers from files the test controls:
 #   api/pods           one pod id per line; the account's current pod list
-#   api/pods.fail      present => the list read fails (transport error)
+#   api/pods.fail      present => every list read fails (transport error)
+#   api/pods.fail-until  the list read fails for this many reads, then succeeds
 #   api/uptime         runtime.uptimeInSeconds reported for every listed pod
-#   api/uptime.null    present => pods report no runtime and no lastStartedAt
+#   api/uptime.null    present => pods report no runtime at all
 #   api/vanish-after   drop api/vanish-pod from the list after this many reads
 #   api/terminate.out  raw response body for podTerminate
 #   api/terminate.keep present => podTerminate does NOT remove the pod from
@@ -70,18 +71,20 @@ case "$query" in
     ;;
   *myself*)
     printf 'list\n' >> "$API/calls.log"
+    reads=$(cat "$API/list-reads" 2>/dev/null || echo 0)
+    reads=$((reads + 1))
+    printf '%s\n' "$reads" > "$API/list-reads"
     if [ -e "$API/pods.fail" ]; then
       echo 'curl: (7) simulated transport failure' >&2
       exit 7
     fi
-    if [ -e "$API/vanish-after" ]; then
-      reads=$(cat "$API/list-reads" 2>/dev/null || echo 0)
-      reads=$((reads + 1))
-      printf '%s\n' "$reads" > "$API/list-reads"
-      if [ "$reads" -gt "$(cat "$API/vanish-after")" ]; then
-        grep -vxF -- "$(cat "$API/vanish-pod")" "$API/pods" > "$API/pods.tmp" 2>/dev/null || :
-        mv -f "$API/pods.tmp" "$API/pods"
-      fi
+    if [ -e "$API/pods.fail-until" ] && [ "$reads" -le "$(cat "$API/pods.fail-until")" ]; then
+      echo 'curl: (7) simulated transport failure' >&2
+      exit 7
+    fi
+    if [ -e "$API/vanish-after" ] && [ "$reads" -gt "$(cat "$API/vanish-after")" ]; then
+      grep -vxF -- "$(cat "$API/vanish-pod")" "$API/pods" > "$API/pods.tmp" 2>/dev/null || :
+      mv -f "$API/pods.tmp" "$API/pods"
     fi
     uptime=$(cat "$API/uptime" 2>/dev/null || echo 3600)
     {
@@ -90,10 +93,9 @@ case "$query" in
       while IFS= read -r id || [ -n "$id" ]; do
         [ -n "$id" ] || continue
         if [ -e "$API/uptime.null" ]; then
-          printf '%s{"id":"%s","lastStartedAt":null,"runtime":null}' "$sep" "$id"
+          printf '%s{"id":"%s","runtime":null}' "$sep" "$id"
         else
-          printf '%s{"id":"%s","lastStartedAt":null,"runtime":{"uptimeInSeconds":%s}}' \
-            "$sep" "$id" "$uptime"
+          printf '%s{"id":"%s","runtime":{"uptimeInSeconds":%s}}' "$sep" "$id" "$uptime"
         fi
         sep=,
       done < "$API/pods" 2>/dev/null
@@ -203,7 +205,10 @@ assert_grep 'has been stopped' "$H/state/t1.status" \
 assert_grep 'absence confirmed by listing' "$H/state/t1.status" \
   'passed deadline: the stop was reported without naming the listing as the proof'
 assert_grep 'pod-other' "$H/api/pods" 'passed deadline: another account pod was removed'
-pass 'a run whose deadline has passed is terminated and the termination is verified by listing'
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_equals '' "$OPEN" \
+  'passed deadline: a completed stop left an open decision on the task nothing can close'
+pass 'a run whose deadline has passed is terminated, verified by listing, and leaves no open decision'
 
 # --- an unreadable record NEVER terminates
 for CASE in absent malformed truncated oversized-deadline; do
@@ -318,6 +323,77 @@ assert_not_contains "$OPEN" 'fp8 or int4' \
 assert_contains "$OPEN" 'cannot reach RunPod' \
   "decision key: a crewmate's unrelated resolution closed the still-true watchdog alarm"
 pass 'watchdog alarms own their decision key instead of sharing the unkeyed default'
+
+# --- an alarm the watchdog raised is closed by the watchdog when it clears
+H=$TMP_ROOT/alarm-cleared
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+printf '2\n' > "$H/api/pods.fail-until"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 6 "$FB" >/dev/null
+assert_grep 'cannot reach RunPod' "$H/state/t1.status" \
+  'cleared alarm: the unreachable API never alarmed, so this case would pass vacuously'
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_not_contains "$OPEN" 'cannot reach RunPod' \
+  'cleared alarm: the API came back but the watchdog left its own blocker open'
+assert_equals '' "$OPEN" 'cleared alarm: something the watchdog opened is still open'
+pass 'an alarm the watchdog raised is closed under its own key once the condition clears'
+
+# --- an unrelated .env value cannot take the credential away
+H=$TMP_ROOT/envparse
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+printf '{"data":{"podTerminate":null}}' > "$H/api/terminate.out"
+# A shared operator .env carries other people's values; an apostrophe in one of
+# them must not be able to disarm a live killswitch.
+{
+  printf "FM_NOTE=don't stop the C6 sweep\n"
+  printf 'RUNPOD_API_KEY=%s\n' "$FAKE_KEY"
+  printf 'FM_TRAILING=unquoted value with spaces\n'
+} > "$H/.env"
+chmod 0600 "$H/.env"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
+RC=$(run_loop "$H" t1 20 "$FB")
+expect_code 0 "$RC" 'shared .env: the watchdog did not complete its stop'
+assert_contains "$(calls "$H")" terminate \
+  'shared .env: an unrelated value in the shared .env took the credential away'
+assert_grep "$FAKE_KEY" "$H/api/curl-stdin.log" 'shared .env: the key never reached the API'
+if [ -e "$H/state/t1.status" ]; then
+  assert_no_grep 'cannot read its RunPod credential' "$H/state/t1.status" \
+    'shared .env: the credential read failed on a neighbouring value'
+fi
+pass 'the credential is parsed out of the shared .env rather than executed with it'
+
+# --- a corrupt pid file cannot signal the caller's process group
+H=$TMP_ROOT/pidzero
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+# pid 0 names the CALLER's process group, so `kill -TERM 0` from disarm would
+# take down whatever invoked it - here, a sentinel sharing that group.
+printf '0\n' > "$H/state/t1.runpod-watch.pid"
+cat > "$TMP_ROOT/pidzero.sh" <<'SH'
+set -u
+sleep 30 &
+printf '%s
+' "$!" > "$3"
+"$1" disarm --task t1 >/dev/null 2>&1
+printf '%s
+' "$?" > "$2"
+SH
+setsid env FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" FM_RUNPOD_ENV_FILE="$H/.env" \
+  PATH="$FB:$PATH" \
+  bash "$TMP_ROOT/pidzero.sh" "$WATCHDOG" "$TMP_ROOT/pidzero.rc" "$TMP_ROOT/pidzero.pid" \
+  >/dev/null 2>&1 || true
+SENTINEL=$(cat "$TMP_ROOT/pidzero.pid" 2>/dev/null || true)
+case "$SENTINEL" in '' | *[!0-9]*) fail 'pid zero: the sentinel never started' ;; esac
+kill -0 "$SENTINEL" 2>/dev/null \
+  || fail "pid zero: disarm signalled its own process group and killed the sentinel"
+kill -TERM "$SENTINEL" 2>/dev/null || true
+assert_equals 0 "$(cat "$TMP_ROOT/pidzero.rc" 2>/dev/null || true)" \
+  'pid zero: disarm did not complete'
+assert_absent "$H/state/t1.runpod-watch" 'pid zero: disarm left the record behind'
+pass 'a corrupt pid file cannot make the watchdog signal the process group that invoked it'
 
 # --- the credential never reaches anything the script writes
 H=$TMP_ROOT/secret
