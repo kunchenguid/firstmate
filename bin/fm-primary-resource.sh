@@ -84,7 +84,6 @@
 #   FM_PRIMARY_RESOURCE_HELPER_WAIT_SECS   bound helper idle waits (default 30)
 #   FM_PRIMARY_RESOURCE_RECONCILE_SECS     stranded-helper alert bound (default 120)
 #   FM_PRIMARY_RESOURCE_BUSY_STATE_FILE    override busy|idle|unknown for helper
-#   FM_PRIMARY_RESOURCE_QUOTA_INTERVAL     gate live quota-axi re-reads (default 60)
 #   FM_PRIMARY_RESOURCE_ROUTE_ENV_FILE     inject NUL-delimited environ for route checks
 #   FM_PRIMARY_RESOURCE_ARGV_FILE         inject NUL-delimited argv for commit capture (tests)
 
@@ -104,11 +103,6 @@ CONTEXT_THRESHOLD=175000
 QUOTA_THRESHOLD=97
 SCHEMA_VERSION=1
 MAX_LINE=240
-QUOTA_RECORD="$PR_DIR/quota-record"
-QUOTA_INTERVAL=${FM_PRIMARY_RESOURCE_QUOTA_INTERVAL:-60}
-case "$QUOTA_INTERVAL" in
-  ''|*[!0-9]*) QUOTA_INTERVAL=60 ;;
-esac
 QUOTA_BUDGET_SECS=${FM_PRIMARY_RESOURCE_QUOTA_BUDGET_SECS:-20}
 case "$QUOTA_BUDGET_SECS" in
   ''|*[!0-9]*) QUOTA_BUDGET_SECS=20 ;;
@@ -626,39 +620,6 @@ pr_quota_budget_secs() {
   fi
 }
 
-pr_quota_record_write() {  # <json>
-  local tmp body=$1
-  pr_ensure_dir || return 1
-  tmp=$(mktemp "$QUOTA_RECORD.XXXXXX") || return 1
-  {
-    printf 'epoch=%s\n' "$(pr_now)"
-    printf 'body=%s\n' "$(printf '%s' "$body" | jq -c . 2>/dev/null || printf '%s' "$body")"
-  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$QUOTA_RECORD" || { rm -f -- "$tmp"; return 1; }
-}
-
-pr_quota_record_read_body() {
-  local epoch=0 body='' line
-  [ -f "$QUOTA_RECORD" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      epoch=*) epoch=${line#epoch=} ;;
-      body=*) body=${line#body=} ;;
-    esac
-  done < "$QUOTA_RECORD"
-  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$body" ] || return 1
-  if [ "$QUOTA_INTERVAL" -ne 0 ]; then
-    local now
-    now=$(pr_now)
-    if [ "$now" -ge "$epoch" ] && [ $((now - epoch)) -lt "$QUOTA_INTERVAL" ]; then
-      printf '%s\n' "$body"
-      return 0
-    fi
-  fi
-  return 1
-}
-
 pr_load_quota_json() {
   local out budget
   if [ -n "${FM_PRIMARY_RESOURCE_QUOTA_JSON:-}" ]; then
@@ -669,17 +630,12 @@ pr_load_quota_json() {
     cat -- "$FM_PRIMARY_RESOURCE_QUOTA_FILE"
     return 0
   fi
-  if out=$(pr_quota_record_read_body); then
-    printf '%s\n' "$out"
-    return 0
-  fi
   if ! command -v quota-axi >/dev/null 2>&1; then
     return 1
   fi
   budget=$(pr_quota_budget_secs)
   out=$(fm_run_timed "$budget" quota-axi --json 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  pr_quota_record_write "$out" || true
   printf '%s\n' "$out"
   return 0
 }
@@ -903,12 +859,9 @@ pr_reconcile_stranded() {
       started)
         # Success requires a new binding generation after reservation; absent that,
         # a login-prompt or non-working successor is only caught here.
-        local receipt_at bind_at
-        receipt_at=$(jq -r '.reservedAt // 0' "$PR_DIR/receipts/$incident.json" 2>/dev/null || printf 0)
-        bind_at=$(jq -r '.boundAt // 0' "$PR_DIR/binding.json" 2>/dev/null || printf 0)
-        case "$receipt_at" in ''|*[!0-9]*) receipt_at=0 ;; esac
-        case "$bind_at" in ''|*[!0-9]*) bind_at=0 ;; esac
-        if [ "$bind_at" -le "$receipt_at" ]; then
+        local bind_gen
+        bind_gen=$(jq -r '.sessionId // "unknown"' "$PR_DIR/binding.json" 2>/dev/null || printf unknown)
+        if [ "$bind_gen" = "$gen" ]; then
           pr_alert_once "$gen" "stalled-successor-$incident" \
             "primary-resource alert: successor never became a working session for $incident; session kept; no auto-retry" || true
         fi

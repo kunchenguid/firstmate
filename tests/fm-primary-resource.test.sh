@@ -539,8 +539,8 @@ test_reconcile_stranded_helper_alert() {
   pass "stranded helper reconciliation alerts once and keeps receipt"
 }
 
-test_quota_axi_bounded_and_interval_gated() {
-  local home calls out
+test_quota_axi_bounded_and_fresh() {
+  local home calls out started elapsed
   home=$(make_main_home qbound)
   write_claude_transcript "$home/tx.jsonl" 1000
   bind_home "$home" claude sess-qb "$home/tx.jsonl"
@@ -554,31 +554,58 @@ cat <<'JSON'
 JSON
 EOF
   chmod +x "$FAKEBIN/quota-axi"
-  out=$(FM_CHECK_TIMEOUT=30 FM_PRIMARY_RESOURCE_QUOTA_INTERVAL=3600 \
+  out=$(FM_CHECK_TIMEOUT=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_PRIMARY_RESOURCE_FORCE_OWNER=1 FM_SUPERVISOR_BACKEND=tmux \
     PATH="$FAKEBIN:$PATH" "$PR" check 2>/dev/null || true)
-  FM_CHECK_TIMEOUT=30 FM_PRIMARY_RESOURCE_QUOTA_INTERVAL=3600 \
+  FM_CHECK_TIMEOUT=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_PRIMARY_RESOURCE_FORCE_OWNER=1 FM_SUPERVISOR_BACKEND=tmux \
     PATH="$FAKEBIN:$PATH" "$PR" check >/dev/null 2>&1 || true
   local n
   n=$(wc -l < "$calls" | tr -d ' ')
-  [ "$n" -eq 1 ] || fail "quota-axi must be interval-gated (got $n calls)"
-  rm -f "$home/state/primary-resource/quota-record"
+  [ "$n" -eq 2 ] || fail "quota-axi must re-read live quota (got $n calls)"
   : > "$calls"
   cat > "$FAKEBIN/quota-axi" <<'EOF'
 #!/usr/bin/env bash
-sleep 30
+exec sleep 5
 echo '{}'
 EOF
   chmod +x "$FAKEBIN/quota-axi"
+  started=$(date +%s)
   FM_CHECK_TIMEOUT=8 FM_PRIMARY_RESOURCE_QUOTA_BUDGET_SECS=2 \
-    FM_PRIMARY_RESOURCE_QUOTA_INTERVAL=0 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_PRIMARY_RESOURCE_FORCE_OWNER=1 FM_SUPERVISOR_BACKEND=tmux \
     PATH="$FAKEBIN:$PATH" "$PR" check >/dev/null 2>&1 || true
-  pass "quota-axi bounded and interval-gated"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 5 ] || fail "quota-axi must honor the bounded budget (took ${elapsed}s)"
+  pass "quota-axi bounded and always fresh"
+}
+
+test_reconcile_same_second_successor() {
+  local home out incident
+  home=$(make_main_home same-second)
+  write_claude_transcript "$home/tx.jsonl" 1000
+  bind_home "$home" claude successor "$home/tx.jsonl"
+  incident=same-second-1
+  mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/outcomes"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, action:"context", generation:"source", reservedAt:100}' \
+    > "$home/state/primary-resource/receipts/$incident.json"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, stage:"started", reason:"successor-alive", updatedAt:1}' \
+    > "$home/state/primary-resource/outcomes/$incident.json"
+  out=$(FM_PRIMARY_RESOURCE_RECONCILE_SECS=1 FM_PRIMARY_RESOURCE_NOW=100 \
+    FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json claude 50)" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>&1 || true)
+  case "$out" in *'successor never became'*) fail "changed generation in the same second must not alert" ;; esac
+
+  bind_home "$home" claude source "$home/tx.jsonl"
+  out=$(FM_PRIMARY_RESOURCE_RECONCILE_SECS=1 FM_PRIMARY_RESOURCE_NOW=100 \
+    FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json claude 50)" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>&1 || true)
+  assert_contains "$out" "successor never became" "unchanged generation must remain stranded"
+  pass "same-second successor binding reconciles by generation"
 }
 
 test_commit_endpoint_on_outcome_not_receipt() {
@@ -956,7 +983,8 @@ test_helper_busy_then_idle_fake_backend
 test_helper_no_pgrep_fallback_records_failure
 test_helper_occupant_changed_no_exit
 test_reconcile_stranded_helper_alert
-test_quota_axi_bounded_and_interval_gated
+test_quota_axi_bounded_and_fresh
+test_reconcile_same_second_successor
 test_commit_endpoint_on_outcome_not_receipt
 test_custom_route_gateway_refuses_quota_replacement
 test_quota_episode_blocks_second_window
