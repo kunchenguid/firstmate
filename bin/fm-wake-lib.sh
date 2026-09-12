@@ -1239,15 +1239,15 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # so Treehouse's own state is the one ownership record and no Firstmate-side
 # marker sits beside it (bin/fm-home-seed.sh leases secondmate homes under the
 # secondmate id the same way; their retirement return carries no holder check
-# yet). The interactive pane-driven `treehouse get` that crewmate
-# spawns used before recorded only a process lease (owner_pid plus
-# owner_started_at), which Treehouse reads as free the moment that process is
-# gone; measured on Treehouse v2.1.1, killing the get process and its subshell
-# left the slot reading available and the next `get --lease` was handed that
-# same slot. A slot taken that way carries no durable lease, so the helpers
-# below read it as unleased and its callers keep the record-scan protection
-# such a slot had before, rather than refusing every task in flight across the
-# change.
+# yet). The interactive pane-driven `treehouse get` that crewmate spawns used
+# before recorded only a process lease, which Treehouse reads as free the
+# moment that process is gone; docs/verification/runtime-backends.md
+# "Treehouse" records the dated v2.1.1 measurements of that and of every
+# other Treehouse behaviour this contract rests on, and names the live guard
+# that refreshes them. A slot taken that way carries no durable lease, so the
+# helpers below read it as unleased and its callers keep the record-scan
+# protection such a slot had before, rather than refusing every task in flight
+# across the change.
 #
 # The ownership read is Treehouse's own answer through `treehouse status
 # --json`, parsed with node from the universal toolchain rather than jq, which

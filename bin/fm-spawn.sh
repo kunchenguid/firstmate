@@ -129,7 +129,13 @@
 #   that return relies on Treehouse's own holder check alone (its stated
 #   contract), and the operator is told the slot was returned rather than to
 #   close it by hand. An abort that leaves the record in place leaves the lease
-#   to the record, which teardown returns.
+#   to the record, which teardown returns. A spawn killed outright (SIGKILL, or
+#   the host going down) between the lease and publication runs no EXIT trap,
+#   so its slot stays leased under a task id no home's record describes and
+#   nothing reclaims it, because teardown and relaunch both start from the
+#   record: such a slot is a hard-kill leftover to release by hand from the
+#   project with `treehouse return --force --if-lease-holder <task-id> <slot>`,
+#   never a live task.
 #   A relaunch leases nothing: it reads the recorded slot's lease and refuses
 #   when another holder has it, relaunches a slot with no lease on the record
 #   alone, and refuses an unreadable lease state.

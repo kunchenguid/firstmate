@@ -1314,6 +1314,70 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+## Treehouse
+
+### Durable slot lease
+
+Measured 2026-09-12 on macOS aarch64 with Treehouse v2.1.1 and node v22.21.1, in a scratch pool whose `treehouse.toml` set `max_trees = 2` and rooted the pool under a temporary directory, running every command from the project clone.
+These are the observations the crewmate slot lease contract in `bin/fm-wake-lib.sh` rests on; that comment points here rather than restating them.
+Treehouse prints its banners and its update notice on stderr, so every stdout read below is the bare value.
+
+A durable lease is taken under a holder label and reported by `status --json`:
+
+```sh
+treehouse get --lease --lease-holder task-a
+treehouse status --json
+```
+
+Observed output (stdout, temporary pool prefix replaced by `<pool>`):
+
+```text
+<pool>/1/project
+[{"name":"1","path":"<pool>/1/project","status":"leased","lease_id":"b43687fdd757eb020f2240add27bef12","lease_holder":"task-a","leased_at":"2026-09-12T22:47:49.705437+02:00","processes":[]}]
+```
+
+A leased slot with no live process (`"processes":[]`) is never handed on: a second `treehouse get --lease --lease-holder task-b` printed `<pool>/2/project`, and with both slots leased and no process in either, `treehouse get --lease --lease-holder fourth` exited 1 with `all 2 worktrees are in use or dirty (max_trees = 2). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml`.
+In that same state `treehouse prune --yes` printed `🌳 No stale worktrees pruned.` and left both leases in place.
+
+`return --if-lease-holder` is checked whatever `--force` says, against slot 1 while it was leased to `task-a`:
+
+```sh
+treehouse return --force --if-lease-holder task-b <pool>/1/project
+treehouse return --force --if-lease-holder task-a <pool>/1/project
+treehouse return --force --if-lease-holder task-a <pool>/1/project
+treehouse return --force <pool>/2/project
+```
+
+Observed, in order:
+
+```text
+failed to return worktree: lease precondition failed: lease holder does not match worktree <pool>/1/project
+🌳 Worktree returned to pool.
+failed to return worktree: lease precondition failed: worktree <pool>/1/project is not leased
+🌳 Worktree returned to pool.
+```
+
+The first exited 1 and `status --json` still listed slot 1 as `"status":"leased","lease_holder":"task-a"`; the second exited 0 and the slot read `"status":"available","lease_id":"","lease_holder":"","leased_at":null`; the third exited 1 because a holder check on an unleased slot is refused, which is why a slot read as `unleased` is returned without one; the fourth, a bare return with no holder check, exited 0 and released `task-b`'s lease.
+
+The pane-driven interactive `get` records only a process lease, so before spawns leased durably a worker that died left its slot free for the next task:
+
+```sh
+SHELL=<script that records its pid and execs sleep 600> treehouse get </dev/null
+treehouse status --json
+kill -9 <get pid> <subshell pid>
+treehouse status --json
+treehouse get --lease --lease-holder newcomer
+```
+
+Observed: the interactive `get` printed `🌳 Entered worktree at <pool>/1/project. Type 'exit' to return.`; while the subshell lived, slot 1 read `"status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":<pid>,"name":"sleep"}]`; one second after the kill it read `"status":"available"` with `"processes":[]`; and the next `get --lease` printed `<pool>/1/project`, that same slot.
+
+```sh
+tests/fm-treehouse-lease-e2e.test.sh
+```
+
+That live guard refreshes this record against the installed `treehouse` and `tmux` binaries: it runs by default wherever both are installed, `FM_LIVE_TREEHOUSE=1` forces it (an absent tool then fails rather than skips), and it lives in the real-herdr-gated family only because that is the CI lane that installs the pinned Treehouse.
+On 2026-09-12 with Treehouse v2.1.1 and tmux 3.7b it passed all five checks and ended with `# all fm-treehouse-lease-e2e tests passed (treehouse v2.1.1)`.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
