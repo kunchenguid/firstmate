@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
-# For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Ship and scout `# Task` sections have two subsections Firstmate
-# fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
-# own ask plus the context needed to read it, including the substance of any
-# report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
-# under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
-# subsections feed; bin/fm-spawn.sh refuses leftover placeholders. Secondmate
-# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
-# sections when the task genuinely deviates (e.g. working an existing external
-# PR instead of shipping a new one).
+# For ordinary tasks, the standard Setup/Rules/General-guidelines/Definition-of-done
+# contract is filled in. Every crewmate brief carries the fleet-wide engineering
+# guidelines, since a worker in another project's worktree never loads
+# firstmate's own AGENTS.md; a scout brief carries only the subset that governs
+# a report, since a scout ships no code. Ship and scout `# Task` sections have two
+# subsections Firstmate fills before dispatch: `{TASK}` under `## Captain's
+# intent` (the captain's own ask plus the context needed to read it, including
+# the substance of any report, decision, or PR the ask refers to) and
+# `{FIRSTMATE_SPEC}` under `## Firstmate spec` (build instructions, which are
+# never the captain's intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent`
+# contract those subsections feed; bin/fm-spawn.sh refuses leftover
+# placeholders. Secondmate charters still use a single `{TASK}` charter fill.
+# Firstmate may adjust other sections when the task genuinely deviates (e.g.
+# working an existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
@@ -61,6 +64,13 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Both crewmate scaffolds also require every status line appended while work is
+# under way to carry the worker's own stopwatch: the measured wall-clock seconds
+# of the slowest step it has finished, and how many more runs of that step it
+# expects. Those two numbers are what firstmate multiplies into the estimate it
+# gives the captain, and only the worker can measure them. They ride the existing
+# status line as ordinary prose, so bin/fm-classify-lib.sh parses these lines
+# unchanged.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -355,6 +365,61 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# The worker's stopwatch, carried identically by both crewmate scaffolds.
+# Firstmate's captain-facing estimate is arithmetic over the two numbers only the
+# worker can measure: what one slow step actually cost, and how many runs of it
+# are left. Written as prose inside the note of a status line that already exists,
+# so no second channel, artifact, or parser is introduced. The quoted heredoc
+# keeps the example's backticks literal; the value is then interpolated into the
+# generated brief, where it is inserted verbatim rather than re-evaluated.
+# .agents/skills/firstmate-codexapp/SKILL.md restates this requirement by hand,
+# because a Codex Desktop thread never receives a generated brief and so cannot be
+# sent a pointer to one. tests/fm-brief.test.sh maps that copy onto this wording and
+# fails when the two disagree, so edit both together.
+IFS= read -r -d '' STOPWATCH_CONTRACT <<'EOF' || true
+   Every line you do append while the work is still under way carries your own stopwatch:
+   name the slowest step you have already finished and the wall-clock seconds it really took,
+   then say how many more runs of that step you still expect. Write both into the sentence
+   rather than into a form, for example
+   `working: fault reproduced, the full test run took 512s, 2 more runs expected`.
+   Time the step rather than estimating it, and when nothing long has run yet write
+   "no long step yet" instead of inventing a number.
+   Firstmate cannot see your clock and multiplies those two numbers into the estimate it
+   gives the captain, so a line without them leaves that estimate a guess.
+EOF
+STOPWATCH_CONTRACT=${STOPWATCH_CONTRACT%$'\n'}
+
+# Fleet-wide engineering guidelines, mirroring AGENTS.md's "General Guidelines
+# for all crewmates, including firstmate" section. A crewmate works in a
+# worktree of some other project and never loads firstmate's AGENTS.md, so the
+# brief is the only place these rules reach it. Secondmates are excluded: their
+# home carries its own AGENTS.md. Keep these blocks short; every brief pays for
+# them. tests/fm-brief.test.sh maps each line back to the AGENTS.md sentence it
+# mirrors and fails when the two disagree.
+IFS= read -r -d '' GENERAL_GUIDELINES_SHIP <<'EOF' || true
+# General guidelines
+- Never use the em dash character; write a plain dash "-" instead.
+- Never add an agent name as a commit co-author.
+- Put each full sentence on its own line in long Markdown or TeX files.
+- Weigh quality, simplicity, robustness, scalability, and long-term maintainability far above development cost.
+- Reproduce a bug end to end the way a user would hit it before fixing it, so the fix lands on the real cause.
+- Be picky about the UI you see while testing, down to the pixel; if something looks off, get it fixed along the way.
+- Hold that same bar for lint failures, test failures, and flaky tests you run into, even ones your task did not cause.
+EOF
+GENERAL_GUIDELINES_SHIP=${GENERAL_GUIDELINES_SHIP%$'\n'}
+
+# A scout's deliverable is a report and never a code change, so it receives only
+# the guidelines that govern what it actually produces. Anything directing a
+# worker to fix code, UI, lint, or tests, and the commit co-author rule, are
+# deliberately absent: the scout worktree is scratch and makes no commits.
+IFS= read -r -d '' GENERAL_GUIDELINES_SCOUT <<'EOF' || true
+# General guidelines
+- Never use the em dash character; write a plain dash "-" instead.
+- Put each full sentence on its own line in long Markdown or TeX files.
+- Reproduce a bug end to end the way a user would hit it before drawing conclusions about it, so your findings rest on the real cause.
+EOF
+GENERAL_GUIDELINES_SCOUT=${GENERAL_GUIDELINES_SCOUT%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -384,6 +449,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+$STOPWATCH_CONTRACT
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
@@ -412,6 +478,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$GENERAL_GUIDELINES_SCOUT
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -474,6 +542,7 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+$STOPWATCH_CONTRACT
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
@@ -503,6 +572,8 @@ $ASK_USER_BLOCK
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$GENERAL_GUIDELINES_SHIP
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

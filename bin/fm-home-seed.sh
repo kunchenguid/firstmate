@@ -7,8 +7,13 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
-#       from the active home into the secondmate home's projects/ directory.
+#       "treehouse return". Each listed project is resolved against the active
+#       home's projects/ directory and cloned into the secondmate home's one.
+#       Every registered delivery mode may be seeded. A clone is made from the
+#       project's own origin, so the secondmate clone is a sibling of this home's
+#       clone rather than a copy of it; a local-only project's origin is the
+#       folder that holds the project, and an absent origin is refused with that
+#       gap named instead of being guessed at.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
@@ -49,6 +54,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-project-origin-lib.sh
+. "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -352,31 +359,40 @@ validate_project_destination() {
   printf '%s\n' "$abs_dst"
 }
 
+# Which origins name a filesystem path is bin/fm-project-origin-lib.sh's to say,
+# so ask it rather than deciding again here. A file: URL already names an absolute
+# path, so it is the one path-shaped spelling with nothing to anchor.
 normalize_origin_url() {
-  local repo=$1 url=$2 prefix
+  local repo=$1 url=$2
   case "$url" in
-    file://*|*://*)
+    file://*)
       printf '%s\n' "$url"
       return
       ;;
-    *:*)
-      prefix=${url%%:*}
-      case "$prefix" in
-        */*) ;;
-        *)
-          printf '%s\n' "$url"
-          return
-          ;;
-      esac
-      ;;
   esac
+  if ! fm_project_origin_is_path_form "$url"; then
+    printf '%s\n' "$url"
+    return
+  fi
   ( cd "$repo" && canonical_path_for_check "$url" )
 }
 
+# A project's clone in a secondmate home is a sibling of this home's clone, not a
+# copy of it, so every mode seeds from the same origin this home already uses. A
+# local-only project's origin is the folder that holds the project rather than a
+# forge, which is why an absent origin is reported as the concrete gap it is.
 source_origin_url() {
   local project=$1 mode=$2 src=$3 url
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+  if [ -z "$url" ]; then
+    if [ "$mode" = local-only ]; then
+      echo "error: project $project is local-only and $src has no origin remote, so there is no folder to seed from and nowhere for a landing to return to" >&2
+      echo "       point that clone at the folder holding the project first: git -C $src remote add origin <folder>" >&2
+    else
+      echo "error: project $project is $mode but has no origin remote" >&2
+    fi
+    return 1
+  fi
   normalize_origin_url "$src" "$url"
 }
 
@@ -465,10 +481,6 @@ clone_project() {
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
@@ -485,19 +497,14 @@ EOF
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
-  [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
+  source_origin_url "$project" "$mode" "$src" >/dev/null
 }
 
 SEED_ROLLBACK_ACTIVE=0

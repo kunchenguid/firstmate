@@ -441,6 +441,132 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The fleet-wide engineering guidelines in AGENTS.md's "General Guidelines for
+# all crewmates, including firstmate" section reach an ordinary crewmate only
+# through the brief: its worktree belongs to some other project, so it never
+# loads firstmate's own AGENTS.md. Both crewmate scaffolds carry a copy, without
+# any captain-personal material. A secondmate charter must not: that home has its
+# own AGENTS.md, which would make the block a second copy.
+test_briefs_carry_fleet_general_guidelines() {
+  local home ship scout charter brief
+  home="$TMP_ROOT/general-guidelines-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-guides-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-guides-s2/brief.md"
+
+  for brief in "$ship" "$scout"; do
+    assert_present "$brief" "brief was not scaffolded"
+    assert_grep "# General guidelines" "$brief" \
+      "$brief: brief lost the fleet-wide general guidelines section"
+    assert_no_grep "VOICE.md" "$brief" \
+      "$brief: brief leaked the captain-personal voice-profile instruction"
+  done
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-guides-s3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  charter="$home/data/brief-guides-s3/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "# General guidelines" "$charter" \
+    "secondmate charter must inherit the guidelines from its own AGENTS.md, not carry a second copy"
+  pass "fm-brief.sh: crewmate briefs carry the fleet-wide general guidelines"
+}
+
+# Print AGENTS.md's general-guidelines section body, the source the generated
+# briefs mirror.
+agents_general_guidelines_section() {
+  awk '
+    /^## General Guidelines for all crewmates, including firstmate$/ { inside = 1; next }
+    inside && /^## / { exit }
+    inside { print }
+  ' "$ROOT/AGENTS.md"
+}
+
+# Write the mirror map: one row per AGENTS.md sentence, as
+# <AGENTS.md fragment>|<ship brief fragment>|<scout brief fragment>.
+# An empty scout field means the scout brief must NOT carry that guideline,
+# because its deliverable is a report and it makes no commits and no code change.
+write_general_guidelines_map() {
+  cat > "$1" <<'MAP'
+Never use the em dash|Never use the em dash character|Never use the em dash character
+Use plain dash|write a plain dash "-" instead|write a plain dash "-" instead
+NEVER auto-add your agent name as co-author|Never add an agent name as a commit co-author.|
+put each full sentence on its own line|Put each full sentence on its own line in long Markdown or TeX files.|Put each full sentence on its own line in long Markdown or TeX files.
+do not give much weight to development costs|far above development cost|
+prefer quality, simplicity, robustness, scalability, and long term maintainability|Weigh quality, simplicity, robustness, scalability, and long-term maintainability|
+reproducing the bug in an E2E setting|Reproduce a bug end to end the way a user would hit it|Reproduce a bug end to end the way a user would hit it
+find the real problem|so the fix lands on the real cause|so your findings rest on the real cause
+be picky about the UI you see and be obsessed with pixel perfection|Be picky about the UI you see while testing, down to the pixel|
+try to get it fixed along the way|if something looks off, get it fixed along the way|
+lint, test failures, and test flakiness|lint failures, test failures, and flaky tests|
+still get it fixed|even ones your task did not cause|
+MAP
+}
+
+# A crewmate in another project's worktree cannot follow a cross-reference into
+# firstmate's AGENTS.md, so the brief scaffold carries a copy of that section
+# rather than a pointer. Nothing but this test keeps the two in step, and the
+# copies are deliberately different subsets, so each is checked against the
+# AGENTS.md sentence it mirrors instead of against one whole-text match. The map
+# is also checked for completeness in the other direction: a guideline added to
+# AGENTS.md that no brief line claims fails here rather than silently never
+# reaching a worker.
+test_brief_guidelines_track_agents_md_section() {
+  local home ship scout section section_file map fragment ship_line scout_line line claimed
+  home="$TMP_ROOT/guidelines-drift-home"
+  mkdir -p "$home/data"
+  map="$TMP_ROOT/general-guidelines-map.txt"
+  write_general_guidelines_map "$map"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-drift-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-drift-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-drift-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-drift-s2/brief.md"
+
+  section_file="$TMP_ROOT/general-guidelines-section.txt"
+  agents_general_guidelines_section > "$section_file"
+  section=$(cat "$section_file")
+  [ -n "$section" ] \
+    || fail "AGENTS.md has no \"General Guidelines for all crewmates, including firstmate\" section, but bin/fm-brief.sh mirrors it into every crewmate brief"
+
+  while IFS='|' read -r fragment ship_line scout_line; do
+    [ -n "$fragment" ] || continue
+    case "$section" in
+      *"$fragment"*) : ;;
+      *) fail "drift: AGENTS.md's general-guidelines section no longer says \"$fragment\", but bin/fm-brief.sh's GENERAL_GUIDELINES_SHIP still mirrors it as \"$ship_line\" - update both together" ;;
+    esac
+    assert_grep "$ship_line" "$ship" \
+      "drift: AGENTS.md's general-guidelines section says \"$fragment\", but the ship brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SHIP) does not carry \"$ship_line\""
+    if [ -n "$scout_line" ]; then
+      assert_grep "$scout_line" "$scout" \
+        "drift: AGENTS.md's general-guidelines section says \"$fragment\", but the scout brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SCOUT) does not carry \"$scout_line\""
+    else
+      assert_no_grep "$ship_line" "$scout" \
+        "scope: the scout brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SCOUT) carries \"$ship_line\", which a report-only scout never acts on - keep that guideline in GENERAL_GUIDELINES_SHIP alone"
+    fi
+  done < "$map"
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    claimed=0
+    while IFS='|' read -r fragment ship_line scout_line; do
+      [ -n "$fragment" ] || continue
+      case "$line" in *"$fragment"*) claimed=1 ;; esac
+    done < "$map"
+    [ "$claimed" -eq 1 ] \
+      || fail "drift: AGENTS.md's general-guidelines section states \"$line\", which no line of bin/fm-brief.sh's brief copy mirrors - add it to GENERAL_GUIDELINES_SHIP (and GENERAL_GUIDELINES_SCOUT if a report-only scout acts on it) and to this test's map"
+  done < "$section_file"
+
+  pass "fm-brief.sh: ship and scout guideline copies track the AGENTS.md section they mirror"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -798,6 +924,123 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# Firstmate's captain-facing estimate is arithmetic over two numbers only the
+# worker can measure, so both crewmate scaffolds must demand them on the status
+# line that already exists. A secondmate charter is a standing domain rather than
+# a task with a slow step, and must not carry the block.
+test_briefs_require_the_worker_stopwatch() {
+  local home ship scout charter brief example log parsed
+  home="$TMP_ROOT/stopwatch-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-clock-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-clock-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-clock-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-clock-s2/brief.md"
+
+  for brief in "$ship" "$scout"; do
+    assert_present "$brief" "brief was not scaffolded"
+    assert_grep "carries your own stopwatch" "$brief" \
+      "$brief: brief did not require the worker to report its own clock"
+    assert_grep "the wall-clock seconds it really took" "$brief" \
+      "$brief: brief did not require a measured cost for the slowest finished step"
+    assert_grep "how many more runs of that step you still expect" "$brief" \
+      "$brief: brief did not require a remaining count firstmate can multiply"
+    assert_grep "Time the step rather than estimating it" "$brief" \
+      "$brief: brief did not forbid an estimated figure in place of a measured one"
+    assert_grep '"no long step yet" instead of inventing a number' "$brief" \
+      "$brief: brief did not give a worker with no long step an honest answer"
+    assert_grep "Firstmate cannot see your clock" "$brief" \
+      "$brief: brief did not state why the measurement is wanted"
+    assert_grep "Write both into the sentence" "$brief" \
+      "$brief: brief no longer prefers a sentence a careless worker can write over a form"
+    assert_grep 'took 512s, 2 more runs expected' "$brief" \
+      "$brief: brief example no longer shows a measured cost beside a remaining count"
+    grep -q '^   States: working, needs-decision, blocked, .*, done, failed\.$' "$brief" \
+      || fail "$brief: the stopwatch requirement changed the status states list"
+
+    # The two numbers ride the note of a status line that already exists, so the
+    # line the scaffold teaches must still fold as an ordinary working event:
+    # the verb parses, and nothing in the measurement opens a decision. Driven
+    # through the real shared classifier in a subshell, so its globals stay out
+    # of the rest of this file.
+    # shellcheck disable=SC2016 # Literal sed script: the backticks and \1 must not expand.
+    example=$(sed -n 's/^ *`\(working: fault reproduced.*\)`\.$/\1/p' "$brief")
+    [ -n "$example" ] || fail "$brief: could not find the taught status line to parse"
+    log="$home/${brief##*/}.taught.status"
+    printf '%s\n' "$example" > "$log"
+    parsed=$(
+      # shellcheck source=bin/fm-classify-lib.sh
+      . "$ROOT/bin/fm-classify-lib.sh"
+      printf '%s|%s' "$(status_line_verb "$example")" "$(status_open_decisions "$log")"
+    )
+    [ "$parsed" = "working|" ] \
+      || fail "$brief: the taught status line no longer folds as a plain working event (got '$parsed')"
+  done
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-clock-s3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  charter="$home/data/brief-clock-s3/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "carries your own stopwatch" "$charter" \
+    "a standing secondmate domain must not be asked for a task-step stopwatch"
+  pass "fm-brief.sh: crewmate briefs require a measured cost and a remaining count"
+}
+
+# The Codex Desktop backend hands a worker its status instruction inline,
+# because a Desktop-owned thread never receives a generated brief and so cannot
+# be sent a pointer to one. That makes the status block in
+# .agents/skills/firstmate-codexapp/SKILL.md a hand-written copy of the
+# stopwatch requirement bin/fm-brief.sh owns, and nothing but this test keeps
+# the two in step: editing the scaffold's wording would otherwise leave the
+# Codex Desktop copy quietly teaching something else. Each surface is worded for
+# its own reader, so every claim is checked as the fragment it takes in each
+# place rather than as one whole-text match, while the worked example - the one
+# line a careless worker actually copies - must read identically in both.
+write_codexapp_stopwatch_map() {
+  cat > "$1" <<'MAP'
+While the work is still under way|while the work is still under way carries your own stopwatch
+the slowest step you already finished|name the slowest step you have already finished
+with the wall-clock seconds it really took|the wall-clock seconds it really took
+how many more runs of that step you expect|how many more runs of that step you still expect
+working: fault reproduced, the full test run took 512s, 2 more runs expected|working: fault reproduced, the full test run took 512s, 2 more runs expected
+Time that step rather than estimating it|Time the step rather than estimating it
+write "no long step yet" when nothing long has run|"no long step yet" instead of inventing a number
+MAP
+}
+
+test_codexapp_status_block_tracks_the_brief_stopwatch() {
+  local home ship skill map codex_line brief_line
+  home="$TMP_ROOT/codexapp-stopwatch-home"
+  mkdir -p "$home/data"
+  skill="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
+  map="$TMP_ROOT/codexapp-stopwatch-map.txt"
+  write_codexapp_stopwatch_map "$map"
+
+  # One shared STOPWATCH_CONTRACT renders into both crewmate scaffolds, and
+  # test_briefs_require_the_worker_stopwatch already proves the scout carries
+  # it, so the ship brief is the whole of what the Codex copy has to track.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-codex-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-codex-s1/brief.md"
+  assert_present "$ship" "brief was not scaffolded"
+
+  while IFS='|' read -r codex_line brief_line; do
+    [ -n "$codex_line" ] || continue
+    assert_grep "$brief_line" "$ship" \
+      "drift: the Codex Desktop status block says \"$codex_line\", but the brief bin/fm-brief.sh generates (STOPWATCH_CONTRACT) no longer says \"$brief_line\" - update both together"
+    assert_grep "$codex_line" "$skill" \
+      "drift: the brief bin/fm-brief.sh generates says \"$brief_line\", but .agents/skills/firstmate-codexapp/SKILL.md no longer says \"$codex_line\" - a Codex Desktop thread receives no brief, so that block is the only place this requirement reaches it"
+  done < "$map"
+
+  assert_grep "owns that stopwatch requirement for every generated brief" "$skill" \
+    "the Codex Desktop status block no longer names bin/fm-brief.sh as the owner of the requirement it copies"
+  pass "fm-brief.sh: the Codex Desktop status block tracks the scaffold's stopwatch requirement"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -913,6 +1156,8 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_briefs_carry_fleet_general_guidelines
+test_brief_guidelines_track_agents_md_section
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
@@ -922,6 +1167,8 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_briefs_require_the_worker_stopwatch
+test_codexapp_status_block_tracks_the_brief_stopwatch
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

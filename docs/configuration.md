@@ -91,6 +91,15 @@ Cancelling the model picker cancels the whole command and changes neither choice
 Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
 Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
+## Captain reply-shape reminder (config/plainenglish)
+
+Firstmate injects a one-line reminder of its captain-facing reply shape into every primary turn, so the rule arrives before a reply is composed rather than being remembered.
+[`bin/fm-plainenglish-hook.sh`](../bin/fm-plainenglish-hook.sh) prints that line at prompt submission and `.claude/settings.json` registers it; `.agents/skills/plainenglish/SKILL.md` owns the contract itself.
+Write `off` into the local, gitignored `config/plainenglish` to switch the reminder off for this home.
+An absent file, an empty file, or any other value means on, and the value is read whitespace-stripped and case-folded like the other scalar config items.
+The change takes effect on the next captain message with no restart, and the preference is local to each home rather than inherited by secondmate homes.
+Switching the reminder off stops the injection only; `AGENTS.md` section 9 still governs captain communication.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -275,7 +284,7 @@ A project-less seed requires no existing project clones or `data/projects.md` en
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
+A local secondmate route covers every registered delivery mode; a whole-home remote route still refuses a `local-only` project, whose origin is a folder only this machine can reach.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it refuses In flight, Done, or non-secondmate homes, and its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and retries.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.

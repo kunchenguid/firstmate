@@ -282,6 +282,7 @@ family_for_basename() {
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-harness-adapter-references.test.sh|\
+    fm-plainenglish-hook.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -347,6 +348,7 @@ family_for_basename() {
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
+    fm-plainenglish-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -363,7 +365,8 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-check-unregister.test.sh|fm-merge-local.test.sh|\
+    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -1464,6 +1467,10 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      # bin/fm-watch.sh sources bin/fm-pr-lib.sh and runs its PR-poll
+      # retirement recovery as soon as it holds the watcher lock, so the
+      # watcher suites exercise this code too.
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
@@ -1538,6 +1545,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    GROK_BOT.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;

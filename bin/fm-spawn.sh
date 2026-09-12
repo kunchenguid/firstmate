@@ -338,6 +338,13 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Its shape is s<epoch-seconds>.<pid>.<random>, and the leading epoch second is the
+# moment this incarnation was dispatched. The `updatethecaptain` worker report reads
+# that prefix as each worker's running clock, so it is a durable contract and not an
+# implementation detail: a change to the token's shape has to keep it or update that
+# skill. A relaunch driven by bin/fm-control.sh additionally records
+# control_relaunch_tx=; preserve_relaunch_meta drops it on every later incarnation,
+# so its presence means this incarnation is that relaunch and the clock restarted there.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
