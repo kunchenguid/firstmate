@@ -38,10 +38,15 @@
 # got around to arming a watchdog. `arm` therefore converts the ceiling into a
 # DURATION of uptime and the loop anchors that duration to the start instant the
 # API reports for the pod, in the same request it already makes to check the pod
-# is there. Arming late, or re-arming, therefore cannot extend the ceiling. When
-# the start instant cannot be read the ceiling is not enforced at all and says
-# so: the declared deadline still is, and an unreadable anchor alarms rather than
-# being guessed from a local clock.
+# is there. The anchor is then PERSISTED beside the pod id it belongs to and
+# reused by any later process watching that same pod, because otherwise a pod
+# whose runtime restarts reports fresh uptime and a re-arm would re-derive a
+# later anchor - buying the ceiling all the spend that came before it. Arming
+# late, or re-arming, therefore cannot extend the ceiling. A different pod does
+# take a fresh anchor, which is the only thing it could take. When the start
+# instant cannot be read the ceiling is not enforced at all and says so: the
+# declared deadline still is, and an unreadable anchor alarms rather than being
+# guessed from a local clock.
 #
 # FAIL TOWARD NOT KILLING.
 # Terminating a healthy run destroys work and money already spent, so every
@@ -73,8 +78,9 @@
 # reported as a `note:`, which the drain surfaces but which opens no decision -
 # an alarm nothing can close would leave the task permanently stuck. The one
 # exception is the never-sighted pod: retiring the watch does not make that
-# warning untrue, so only an actual sighting closes it. The full trail is
-# state/<task>.runpod-watch.log.
+# warning untrue, so only an actual sighting OF THAT POD closes it - every
+# ledger row records the pod it is about, so news of one pod can never answer
+# for another. The full trail is state/<task>.runpod-watch.log.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -246,12 +252,20 @@ record_read() {
 # POD started, which only the loop observes. The loop republishes what it is
 # actually enforcing here, by rename, so `status` reports the instant in force
 # and the anchor it came from instead of a figure nobody is enforcing.
+#
+# It also carries the POD the anchor belongs to, and it outlives the loop
+# process. "First sighting wins" is a claim about the pod's own uptime, so it
+# has to hold across a re-arm too: a pod whose runtime restarted reports fresh
+# uptime, and re-deriving the anchor from that would buy the ceiling the whole
+# spend that came before. A stored anchor is reused for the SAME pod and
+# discarded for a different one.
 
 observed_write() {
-  local task=$1 start=$2 anchor=$3 effective=$4 source=$5 stamp=$6 tmp
+  local task=$1 pod=$2 start=$3 anchor=$4 effective=$5 source=$6 stamp=$7 tmp
   tmp=$(mktemp "$STATE/.fm-runpod-observed.XXXXXX" 2>/dev/null) || return 0
   {
     printf '%s\n' "$OBSERVED_TAG"
+    printf 'pod=%s\n' "$pod"
     [ -z "$start" ] || printf 'pod_start_epoch=%s\n' "$start"
     printf 'anchor=%s\n' "$anchor"
     printf 'effective_deadline_epoch=%s\n' "$effective"
@@ -260,6 +274,16 @@ observed_write() {
   } > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 0; }
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$(observed_path "$task")" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+}
+
+observed_anchor() {  # <task> <pod> -> the stored anchor for THIS pod, if any
+  local task=$1 pod=$2 file stored start
+  file=$(observed_path "$task")
+  stored=$(observed_get "$file" pod) || return 1
+  [ "$stored" = "$pod" ] || return 1
+  start=$(observed_get "$file" pod_start_epoch) || return 1
+  is_safe_uint "$start" || return 1
+  printf '%s' "$start"
 }
 
 observed_get() {
@@ -317,15 +341,30 @@ notify() {
   status_append "$task" "note: $text"
 }
 
+# The alarm ledger. One row per open condition, as
+# "<condition>\t<epoch>\t<subject>", where the subject names the thing the alarm
+# is ABOUT - the pod id, for a condition that is about a pod. Binding the row to
+# its subject is what stops a later sighting of a DIFFERENT pod from answering
+# for it: a warning raised about pod A must outlive any amount of news about
+# pod B. Conditions that are about the task rather than a pod carry no subject.
+ledger_last() {  # <ledger> <condition> <subject> -> newest matching epoch
+  local ledger=$1 condition=$2 subject=$3 c t s last=''
+  [ -f "$ledger" ] || return 1
+  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
+    if [ "$c" = "$condition" ] && [ "${s:-}" = "$subject" ]; then last=${t:-}; fi
+  done < "$ledger"
+  printf '%s' "$last"
+}
+
 # Alarms wake firstmate through the task's own status channel. One alarm per
 # distinct condition per ALARM_REPEAT_SECONDS: an unattended watchdog that
 # alarms every poll would bury the fleet, and one that alarms once would be
 # missed if that wake was lost.
 alarm() {
-  local task=$1 condition=$2 text=$3 ledger last now
+  local task=$1 condition=$2 text=$3 subject=${4:-} ledger last now
   ledger=$(alarm_path "$task")
   now=$(now_epoch) || now=
-  last=$(grep -F -- "$condition	" "$ledger" 2>/dev/null | tail -1 | cut -f2) || last=
+  last=$(ledger_last "$ledger" "$condition" "$subject") || last=
   log_line "$task" "alarm[$condition] $text"
   # A clock that cannot be read, or that stepped backwards, cannot establish
   # that this condition was reported recently. Going silent is the wrong way to
@@ -339,20 +378,37 @@ alarm() {
     text=${text//"$KEY_SCRUB"/[redacted]}
   fi
   status_append "$task" "blocked [key=$(decision_key "$task" "$condition")]: $text"
-  printf '%s\t%s\n' "$condition" "$now" >> "$ledger" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$condition" "$now" "$subject" >> "$ledger" 2>/dev/null || true
 }
 
-# An alarm this watchdog raised is an alarm this watchdog closes. Dropping the
-# condition from the ledger both closes the decision exactly once and lets the
-# same condition open again if it recurs.
+# An alarm this watchdog raised is an alarm this watchdog closes - but only the
+# rows for the subject that actually cleared. One decision key covers the whole
+# condition, so it closes when the LAST subject holding it open clears; while
+# another still holds it, the row goes but the decision stays open.
 clear_alarm() {
-  local task=$1 condition=$2 text=$3 ledger tmp
+  local task=$1 condition=$2 text=$3 subject=${4:-} ledger tmp c t s dropped=0 remaining=0
   ledger=$(alarm_path "$task")
-  grep -qF -- "$condition	" "$ledger" 2>/dev/null || return 0
+  [ -f "$ledger" ] || return 0
   tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
-  grep -vF -- "$condition	" "$ledger" > "$tmp" 2>/dev/null || true
+  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
+    [ -n "$c" ] || continue
+    if [ "$c" = "$condition" ]; then
+      if [ "${s:-}" = "$subject" ]; then
+        dropped=1
+        continue
+      fi
+      remaining=1
+    fi
+    printf '%s\t%s\t%s\n' "$c" "${t:-}" "${s:-}" >> "$tmp" 2>/dev/null || true
+  done < "$ledger"
+  if [ "$dropped" -eq 0 ]; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    return 0
+  fi
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
+  [ -s "$ledger" ] || rm -f -- "$ledger" 2>/dev/null || true
+  [ "$remaining" -eq 0 ] || return 0
   log_line "$task" "cleared[$condition] $text"
   if [ -n "$KEY_SCRUB" ]; then
     text=${text//"$KEY_SCRUB"/[redacted]}
@@ -365,23 +421,23 @@ clear_alarm() {
 # a human could close. Closes whatever conditions are still open and drops the
 # ledger with them.
 retire_alarms() {
-  local task=$1 text=$2 ledger tmp condition rest seen=''
+  local task=$1 text=$2 ledger tmp c t s seen=''
   ledger=$(alarm_path "$task")
   [ -f "$ledger" ] || return 0
   tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
-  while IFS="$(printf '\t')" read -r condition rest || [ -n "$condition" ]; do
-    [ -n "$condition" ] || continue
+  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
+    [ -n "$c" ] || continue
     # The one alarm retiring never closes. It says a rented pod may be billing
     # under an id this watchdog was never given, and retiring the watch does not
-    # make that untrue - only sighting the pod does.
-    if [ "$condition" = pod-never-seen ]; then
-      printf '%s\t%s\n' "$condition" "$rest" >> "$tmp" 2>/dev/null || true
+    # make that untrue - only sighting THAT pod does.
+    if [ "$c" = pod-never-seen ]; then
+      printf '%s\t%s\t%s\n' "$c" "${t:-}" "${s:-}" >> "$tmp" 2>/dev/null || true
       continue
     fi
-    case " $seen " in *" $condition "*) continue ;; esac
-    seen="$seen $condition"
-    log_line "$task" "cleared[$condition] $text"
-    status_append "$task" "resolved [key=$(decision_key "$task" "$condition")]: $text"
+    case " $seen " in *" $c "*) continue ;; esac
+    seen="$seen $c"
+    log_line "$task" "cleared[$c] $text"
+    status_append "$task" "resolved [key=$(decision_key "$task" "$c")]: $text"
   done < "$ledger"
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
@@ -549,7 +605,10 @@ cmd_arm() {
 
   stop_existing "$task"
   retire_alarms "$task" "the pod watchdog for $task was re-armed; its earlier alarms are superseded"
-  rm -f -- "$(observed_path "$task")" 2>/dev/null || true
+  # Re-arming the SAME pod must not hand it a fresh anchor, or a re-arm after a
+  # runtime restart would silently buy more ceiling than the run declared.
+  observed_anchor "$task" "$pod" >/dev/null \
+    || rm -f -- "$(observed_path "$task")" 2>/dev/null || true
   log_line "$task" "armed pod=$pod deadline=$declared ceiling_seconds=${seconds:-none}"
 
   # Own session, no controlling terminal, no shared descriptors: this is what
@@ -620,8 +679,10 @@ cmd_disarm() {
   task_id_valid "$task" || die 'disarm: --task is required' 2
   stop_existing "$task"
   retire_alarms "$task" "the pod watchdog for $task was disarmed; its alarms no longer stand"
-  rm -f -- "$(record_path "$task")" "$(pid_path "$task")" \
-    "$(observed_path "$task")" 2>/dev/null || true
+  # The observed anchor is a fact about the POD's uptime, not about this watch,
+  # so retiring the watch does not invalidate it. Only arming a different pod
+  # does, and that is where it is discarded.
+  rm -f -- "$(record_path "$task")" "$(pid_path "$task")" 2>/dev/null || true
   log_line "$task" 'disarmed'
   printf 'disarmed: %s\n' "$task"
 }
@@ -651,9 +712,12 @@ cmd_status() {
     # only thing being enforced and this says exactly that rather than
     # printing a ceiling nothing is applying.
     obs=$(observed_path "$id")
-    effective=$(observed_get "$obs" effective_deadline_epoch) || effective=
-    source=$(observed_get "$obs" effective_source) || source=
-    anchor=$(observed_get "$obs" anchor) || anchor=
+    effective='' source='' anchor=''
+    if [ "$(observed_get "$obs" pod 2>/dev/null || printf '')" = "$REC_POD" ]; then
+      effective=$(observed_get "$obs" effective_deadline_epoch) || effective=
+      source=$(observed_get "$obs" effective_source) || source=
+      anchor=$(observed_get "$obs" anchor) || anchor=
+    fi
     if ! is_safe_uint "$effective"; then
       effective=$REC_DEADLINE
       source=declared
@@ -702,6 +766,8 @@ terminate_and_verify() {
     while [ "$i" -lt "$VERIFY_ATTEMPTS" ]; do
       pod_present "$pod"
       rc=$?
+      [ "$rc" -eq 2 ] || clear_alarm "$task" api-unreachable \
+        "the pod watchdog for $task can reach RunPod again"
       case "$rc" in
         1)
           log_line "$task" "verified absent from the pod list pod=$pod"
@@ -774,8 +840,10 @@ cmd_run() {
     # different pod is a different watch and starts from nothing observed.
     if [ "$REC_POD" != "$watched_pod" ]; then
       watched_pod=$REC_POD
-      pod_start=''
       ever_seen=0
+      pod_start=$(observed_anchor "$task" "$REC_POD") || pod_start=''
+      [ -z "$pod_start" ] \
+        || log_line "$task" "pod $REC_POD anchor carried over from $(iso_utc "$pod_start")"
     fi
 
     pod_present "$REC_POD"
@@ -787,7 +855,8 @@ cmd_run() {
     case "$present_rc" in
       0)
         [ "$ever_seen" -eq 1 ] || clear_alarm "$task" pod-never-seen \
-          "the pod watchdog for $task has now seen pod $REC_POD in the account's pod list"
+          "the pod watchdog for $task has now seen pod $REC_POD in the account's pod list" \
+          "$REC_POD"
         ever_seen=1
         # First sighting wins: a pod that restarts reports fresh uptime, and
         # re-anchoring on that would push the ceiling later than the spend it
@@ -804,7 +873,8 @@ cmd_run() {
         # an id this watchdog was never given.
         if [ "$ever_seen" -eq 0 ]; then
           alarm "$task" pod-never-seen \
-            "the pod watchdog for $task has never seen pod $REC_POD in the account's pod list, so it is guarding nothing and will terminate nothing - the pod id may be wrong or stale while a rented pod keeps billing; check the account by hand"
+            "the pod watchdog for $task has never seen pod $REC_POD in the account's pod list, so it is guarding nothing and will terminate nothing - the pod id may be wrong or stale while a rented pod keeps billing; check the account by hand" \
+            "$REC_POD"
           nap "$POLL_SECONDS"
           continue
         fi
@@ -853,7 +923,7 @@ cmd_run() {
         fi
       fi
     fi
-    observed_write "$task" "$pod_start" "$anchor" "$effective" "$source" "$now"
+    observed_write "$task" "$REC_POD" "$pod_start" "$anchor" "$effective" "$source" "$now"
 
     # An evaluation that could not be made is not a deadline that passed: only
     # an affirmative comparison authorizes a termination.

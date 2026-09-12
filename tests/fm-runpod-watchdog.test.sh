@@ -329,6 +329,25 @@ assert_contains "$OPEN" 'never seen pod pod-alpha' \
   'never seen: disarming the watch closed the warning that a rented pod may still be billing'
 pass 'disarming a watch that never sighted its pod leaves that warning standing'
 
+# --- and sighting a DIFFERENT pod does not close it either
+H=$TMP_ROOT/never-seen-other-pod
+FB=$(new_home "$H")
+printf 'pod-beta\n' > "$H/api/pods"
+write_record "$H" t1 "pod=pod-typo" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 4 "$FB" >/dev/null
+assert_contains "$(open_decisions "$H/state/t1.status")" 'never seen pod pod-typo' \
+  'cross-pod clear: the warning about the typo\'"'"'d pod never opened, so this case would pass vacuously'
+# The operator retires that watch and re-arms the task on the pod that is real.
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+write_record "$H" t1 "pod=pod-beta" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 4 "$FB" >/dev/null
+assert_grep 'pod pod-beta started at' "$H/state/t1.runpod-watch.log" \
+  'cross-pod clear: the second watch never sighted pod-beta, so this case would pass vacuously'
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_contains "$OPEN" 'never seen pod pod-typo' \
+  'cross-pod clear: sighting pod-beta closed the warning that a GPU may be billing under pod-typo'
+pass 'a never-sighted warning about one pod is not closed by sighting another'
+
 # --- alarms carry their own decision key and cannot clobber a crewmate's
 H=$TMP_ROOT/decision-key
 FB=$(new_home "$H")
@@ -497,6 +516,47 @@ EFF2=$(status_deadline_epoch "$OUT")
 watchdog_status "$H" --task t1 >/dev/null
 FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
 pass 'the declared ceiling is anchored to the pod start, and re-arming cannot extend it'
+
+# --- the anchor survives a re-arm even when the pod's runtime restarted
+H=$TMP_ROOT/anchor-persists
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+printf '7200\n' > "$H/api/uptime"
+ARM_EPOCH=$(date -u +%s)
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$(( ARM_EPOCH + 21600 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm.out" 2>&1 \
+  || fail "anchor: arm failed: $(cat "$H/arm.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "anchor: the watchdog never resolved the pod start anchor: $OUT"
+EFF=$(status_deadline_epoch "$OUT")
+[ -n "$EFF" ] || fail "anchor: status did not print a readable deadline: $OUT"
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+# The pod's runtime restarts, so RunPod now reports it as freshly started. A
+# watch that re-derived its anchor from that would hand the run the whole
+# ceiling a second time, on top of the two hours already burned.
+printf '5\n' > "$H/api/uptime"
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$(( ARM_EPOCH + 43200 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm2.out" 2>&1 \
+  || fail "anchor: re-arm failed: $(cat "$H/arm2.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "anchor: the re-armed watchdog never resolved the pod start anchor: $OUT"
+EFF2=$(status_deadline_epoch "$OUT")
+[ -n "$EFF2" ] || fail "anchor: status did not print a readable deadline after re-arming: $OUT"
+[ "$EFF2" -le "$(( EFF + 120 ))" ] \
+  || fail "anchor: a runtime restart plus a re-arm moved the ceiling deadline from $EFF to $EFF2"
+# A DIFFERENT pod is a different watch and correctly takes a fresh anchor.
+printf 'pod-gamma\n' > "$H/api/pods"
+arm_watchdog "$H" "$FB" --task t1 --pod pod-gamma --deadline "$(( ARM_EPOCH + 43200 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm3.out" 2>&1 \
+  || fail "anchor: arm on a new pod failed: $(cat "$H/arm3.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "anchor: the watchdog never resolved an anchor for the new pod: $OUT"
+EFF3=$(status_deadline_epoch "$OUT")
+[ -n "$EFF3" ] || fail "anchor: status did not print a readable deadline for the new pod: $OUT"
+[ "$EFF3" -gt "$(( EFF + 120 ))" ] \
+  || fail "anchor: a different pod inherited the previous pod's anchor ($EFF3 vs $EFF)"
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+pass 'a pod-start anchor survives a re-arm for the same pod and is not inherited by another'
 
 # --- a ceiling whose anchor cannot be read is NOT enforced, and says so
 H=$TMP_ROOT/ceiling-unanchored

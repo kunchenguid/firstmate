@@ -41,7 +41,11 @@ Note that a derived figure is not a billing statement; the ceiling deadline boun
 `arm` publishes one small record at `state/<task-id>.runpod-watch` by rename, then starts the loop with `setsid` in its own session and returns.
 
 Re-arming replaces the record and the process, so a deadline the captain **extends** is picked up by arming again with the new instant.
-Re-arming cannot extend the ceiling: the ceiling is measured from the pod's own start, so a second arm re-derives the same bound rather than buying more of it.
+
+Re-arming cannot extend the ceiling.
+The anchor a watch observes is stored beside the pod id it belongs to, at `state/<task-id>.runpod-watch.observed`, and any later watch on that **same** pod reuses it instead of deriving a new one.
+That is what makes the guarantee hold even when the pod's runtime restarts: a restarted pod reports fresh `uptimeInSeconds`, so a re-derived anchor would hand the run its whole ceiling again on top of everything already burned.
+Arming a **different** pod discards the stored anchor and takes a fresh one, which is the only thing it could take.
 
 ## Checking and retiring
 
@@ -55,6 +59,7 @@ The declared deadline is always printed alongside it, so a ceiling the watchdog 
 A record it cannot read is reported as unreadable rather than summarised, because such a watchdog will not terminate anything.
 
 `disarm` stops the process and removes the record.
+It keeps the stored pod-start anchor, because that is a fact about the pod's uptime rather than about this watch; arming a different pod is what discards it.
 Disarm when the run has ended and the pod is already gone; there is no need to disarm a watchdog that has already finished, since it exits on its own once a pod it has seen leaves the account's pod list.
 
 ## What it will do
@@ -82,7 +87,8 @@ Everything this watchdog appends to `state/<task-id>.status` - the channel that 
 A completed stop is reported as an event rather than a blocker on purpose: the watchdog exits immediately afterwards, so a `blocked:` line there would leave a decision open that only this watchdog could have closed.
 
 `pod-never-seen` is the one alarm retiring does not close, including on `disarm`.
-It says a rented pod may be billing under an id this watchdog was never given, and retiring the watch does not make that untrue; only an actual sighting of the pod closes it.
+It says a rented pod may be billing under an id this watchdog was never given, and retiring the watch does not make that untrue; only an actual sighting of **that** pod closes it.
+Every alarm the watchdog records carries the pod it is about, so re-arming the task on a corrected pod id and sighting that one cannot answer for the warning raised about the first: news of one pod never closes a decision opened about another.
 If you retire such a watch after checking the account yourself, close it yourself with `resolved [key=runpod-watch-<task>-pod-never-seen]: …`.
 
 The full trail, including every termination attempt and verification result, is `state/<task-id>.runpod-watch.log`.
