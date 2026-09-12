@@ -2918,6 +2918,8 @@ EOF
       echo "watcher: secondmate home liveness observation failed" >&2
       exit 1
     }
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-zombie-sweep.sh" --apply >/dev/null 2>&1 || true
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
