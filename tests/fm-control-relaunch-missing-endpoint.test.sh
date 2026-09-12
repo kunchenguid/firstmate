@@ -22,7 +22,11 @@
 #   (g) `interrupt` and `exit` keep refusing on `missing`;
 #   (h) a window renamed away from fm-<id> that still hosts a live agent in
 #       the recorded worktree reads `missing` yet refuses, naming the pane,
-#       so a second fm-<id> window (and a second agent) is never created.
+#       so a second fm-<id> window (and a second agent) is never created;
+#   (i) a relaunch run from inside the recorded worktree after the server
+#       died still succeeds: the recreated session's own first window is an
+#       idle shell rooted there, and a dead shell is not a second agent;
+#   (j) a pane inventory that cannot be read refuses rather than recreating.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -58,7 +62,9 @@ trap cleanup_all EXIT
 # server was started with (this shim directory first) on macOS and Linux alike.
 # When FM_FAKE_TMUX_UNREADABLE names an existing file, the shim turns every
 # window inventory into an error tmux does not emit for an absent session, which
-# is exactly the `unreadable` verdict case (e).
+# is exactly the `unreadable` verdict case (e); FM_FAKE_TMUX_PANES_UNREADABLE
+# does the same for the pane inventory alone, so the window inventory (and the
+# `missing` verdict) stays intact while the occupied-pane guard cannot read (j).
 mkdir -p "$LAB/shim" "$LAB/agentbin"
 cat > "$LAB/tmux.conf" <<'CONF'
 set -g default-shell /bin/bash
@@ -69,6 +75,11 @@ cat > "$LAB/shim/tmux" <<SH
 if [ -n "\${FM_FAKE_TMUX_UNREADABLE:-}" ] && [ -e "\$FM_FAKE_TMUX_UNREADABLE" ] \\
    && [ "\${1:-}" = list-windows ]; then
   echo "injected inventory failure" >&2
+  exit 1
+fi
+if [ -n "\${FM_FAKE_TMUX_PANES_UNREADABLE:-}" ] && [ -e "\$FM_FAKE_TMUX_PANES_UNREADABLE" ] \\
+   && [ "\${1:-}" = list-panes ]; then
+  echo "injected pane inventory failure" >&2
   exit 1
 fi
 exec "$REAL_TMUX" -L "$SOCKET" -f "$LAB/tmux.conf" "\$@"
@@ -148,6 +159,7 @@ run_env() {
     FM_SPAWN_NO_GUARD=1 \
     FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=1 FM_CONTROL_LAUNCH_WAIT=30 \
     FM_FAKE_TMUX_UNREADABLE="${FM_FAKE_TMUX_UNREADABLE:-}" \
+    FM_FAKE_TMUX_PANES_UNREADABLE="${FM_FAKE_TMUX_PANES_UNREADABLE:-}" \
     "$@" 2>&1
 }
 
@@ -344,13 +356,6 @@ test_interrupt_and_exit_keep_refusing_on_missing() {
   pass "fm-control: interrupt and exit keep refusing on a missing tmux endpoint"
 }
 
-test_relaunch_recreates_a_killed_window
-test_relaunch_recreates_session_and_window_after_server_death
-test_relaunch_refuses_when_the_recorded_worktree_is_missing
-test_spawn_relaunch_refuses_when_the_recorded_worktree_is_not_a_git_work_tree
-test_relaunch_refuses_a_worktree_two_tasks_record
-test_relaunch_still_refuses_an_unreadable_endpoint
-test_relaunch_refuses_a_record_in_another_session
 # --- (h) renamed window still hosting the agent ------------------------------
 
 # wait_state <target> <state>: poll the liveness probe until it reads <state>.
@@ -378,8 +383,8 @@ test_relaunch_refuses_when_a_renamed_pane_still_sits_in_the_worktree() {
     || fail "precondition: the recorded name must read missing once the window is renamed away"
   out=$(run_control "$dir" mw9 relaunch --note "server hiccup"); rc=$?
   expect_code 1 "$rc" "a relaunch must refuse while a pane still sits in the recorded worktree"$'\n'"$out"
-  assert_contains "$out" "pane firstmate:detached-name.0 already sits in its recorded worktree '$dir/wt'" \
-    "the refusal should name the occupying pane and the worktree"
+  assert_contains "$out" "pane firstmate:detached-name.0 already sits in its recorded worktree '$dir/wt' and reads 'alive'" \
+    "the refusal should name the occupying pane, the worktree, and the pane's verdict"
   private_tmux list-windows -t firstmate -F '#{window_name}' | grep -qx fm-mw9 \
     && fail "no second fm-mw9 window may be created beside the renamed one"
   [ "$(private_tmux list-windows -t firstmate -F '#{window_name}' | wc -l | tr -d ' ')" = 2 ] \
@@ -394,5 +399,50 @@ test_relaunch_refuses_when_a_renamed_pane_still_sits_in_the_worktree() {
   pass "fm-control relaunch: a window renamed away from fm-<id> that still sits in the worktree refuses, naming the pane"
 }
 
+# --- (i) relaunch run from inside the worktree after server death -----------
+
+test_relaunch_from_inside_the_worktree_after_server_death() {
+  local dir out rc first_window first_path
+  stop_server
+  dir=$(new_case from-worktree mwa)
+  out=$(cd "$dir/wt" && run_control "$dir" mwa relaunch --note "server died"); rc=$?
+  expect_code 0 "$rc" "a relaunch run from inside the recorded worktree must succeed after the server died"$'\n'"$out"
+  first_window=$(private_tmux list-windows -t firstmate -F '#{window_name}' | head -1)
+  first_path=$(pane_path "firstmate:$first_window")
+  [ "$(real_path "$first_path")" = "$(real_path "$dir/wt")" ] \
+    || fail "precondition: the recreated session's first window must be rooted in the caller's cwd, the worktree, got '$first_path'"
+  [ "$(fm_backend_agent_state tmux "firstmate:$first_window")" = dead ] \
+    || fail "precondition: the recreated session's first window must be an idle shell"
+  assert_relaunched_into_recorded_worktree "$dir" mwa "$out"
+  pass "fm-control relaunch: an idle shell in the worktree (the recreated session's own first window) never blocks the recreate"
+}
+
+# --- (j) pane inventory unreadable ------------------------------------------
+
+test_relaunch_refuses_when_the_pane_inventory_cannot_be_read() {
+  local dir out rc
+  start_server
+  dir=$(new_case panes-unreadable mwb)
+  : > "$dir/panes-unreadable.flag"
+  [ "$(FM_FAKE_TMUX_PANES_UNREADABLE="$dir/panes-unreadable.flag" fm_backend_agent_state tmux firstmate:fm-mwb)" = missing ] \
+    || fail "precondition: the window inventory must still read missing while only the pane inventory fails"
+  out=$(FM_FAKE_TMUX_PANES_UNREADABLE="$dir/panes-unreadable.flag" run_control "$dir" mwb relaunch --note "server hiccup"); rc=$?
+  expect_code 1 "$rc" "a relaunch must refuse when the pane inventory cannot be read"$'\n'"$out"
+  assert_contains "$out" "could not inventory panes of session firstmate" "the refusal should name the unreadable pane inventory"
+  rm -f "$dir/panes-unreadable.flag"
+  private_tmux list-windows -t firstmate -F '#{window_name}' | grep -qx fm-mwb \
+    && fail "an unreadable pane inventory must never license a recreate"
+  pass "fm-control relaunch: an unreadable pane inventory refuses rather than recreating"
+}
+
+test_relaunch_recreates_a_killed_window
+test_relaunch_recreates_session_and_window_after_server_death
+test_relaunch_refuses_when_the_recorded_worktree_is_missing
+test_spawn_relaunch_refuses_when_the_recorded_worktree_is_not_a_git_work_tree
+test_relaunch_refuses_a_worktree_two_tasks_record
+test_relaunch_still_refuses_an_unreadable_endpoint
+test_relaunch_refuses_a_record_in_another_session
 test_interrupt_and_exit_keep_refusing_on_missing
 test_relaunch_refuses_when_a_renamed_pane_still_sits_in_the_worktree
+test_relaunch_from_inside_the_worktree_after_server_death
+test_relaunch_refuses_when_the_pane_inventory_cannot_be_read

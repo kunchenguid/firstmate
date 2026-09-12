@@ -50,10 +50,12 @@
 #   the recorded window= is exactly `<session>:fm-<id>` for the session the
 #   container-ensure resolves to (a record in another session is never
 #   silently renamed), no other task's record names the same worktree
-#   (both tasks are named), and no pane anywhere in that session already
-#   sits in the recorded worktree (the pane is named: `missing` only proves
-#   the window NAME is gone, and a window renamed away from fm-<id> can still
-#   host the live agent). herdr and every other backend keep the plain
+#   (both tasks are named), and no pane anywhere in that session both sits
+#   in the recorded worktree and reads other than `dead` (the pane and its
+#   verdict are named: `missing` only proves the window NAME is gone, and a
+#   window renamed away from fm-<id> can still host the live agent, while an
+#   idle shell in the worktree is not a second agent; an inventory that
+#   cannot be read refuses too). herdr and every other backend keep the plain
 #   refusal on `missing`; recreating their endpoints is out of scope here.
 #   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
@@ -1396,9 +1398,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # is a git work tree, the recorded window is the one this home's container
     # would create for the task, no other task claims the same worktree (two
     # tasks recorded on one copy is exactly the collision a recreated window
-    # must never paper over), and no pane in that container already sits in
-    # the worktree (`missing` only proves the window name is gone; a window
-    # renamed away from fm-<id> may still host the live agent).
+    # must never paper over), and no non-dead pane in that container already
+    # sits in the worktree (`missing` only proves the window name is gone; a
+    # window renamed away from fm-<id> may still host the live agent, while
+    # an idle shell there - the container-ensure's own first window when the
+    # operator relaunches from inside the worktree - is not one).
     [ "$(git -C "$RELAUNCH_WT" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || {
       echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is not a git work tree; refusing to recreate its endpoint over a copy whose work cannot be accounted for" >&2
       exit 1
@@ -1424,9 +1428,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID records endpoint '$RELAUNCH_TARGET', but this home's tmux container resolves to session '$RELAUNCH_RECREATE_SES', so the recreated window would be '$RELAUNCH_RECREATE_SES:fm-$ID'; refusing to recreate an endpoint under a different name than the record" >&2
       exit 1
     }
-    relaunch_occupant=$(fm_backend_tmux_pane_in_path "$RELAUNCH_RECREATE_SES" "$RELAUNCH_WT")
+    relaunch_occupant_rc=0
+    relaunch_occupant=$(fm_backend_tmux_pane_in_path "$RELAUNCH_RECREATE_SES" "$RELAUNCH_WT") || relaunch_occupant_rc=$?
+    [ "$relaunch_occupant_rc" -eq 0 ] || {
+      echo "error: task $ID's endpoint '$RELAUNCH_TARGET' reads 'missing', but the panes of session '$RELAUNCH_RECREATE_SES' could not be inventoried (could not inventory panes of session $RELAUNCH_RECREATE_SES); refusing to recreate an endpoint without proving no pane already hosts the task's agent in '$RELAUNCH_WT'" >&2
+      exit 1
+    }
     [ -z "$relaunch_occupant" ] || {
-      echo "error: task $ID's endpoint '$RELAUNCH_TARGET' reads 'missing', but pane $relaunch_occupant already sits in its recorded worktree '$RELAUNCH_WT' and may still host its agent; refusing to recreate a second window over that worktree - reconcile that pane first" >&2
+      echo "error: task $ID's endpoint '$RELAUNCH_TARGET' reads 'missing', but pane ${relaunch_occupant%% *} already sits in its recorded worktree '$RELAUNCH_WT' and reads '${relaunch_occupant#* }' rather than agent-free; refusing to recreate a second window over that worktree - reconcile that pane first" >&2
       exit 1
     }
   fi
