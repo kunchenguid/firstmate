@@ -132,7 +132,11 @@ new_home() {
 
 make_package() {  # <dir> <id> <adapter> [fixed-scenario] [required-consent]
   local dir=$1 id=$2 adapter=$3 fixed=${4:-good} consent=${5:-} required
-  mkdir -p "$dir"
+  # A package root is operator-supplied code the host executes, so the host
+  # refuses a group- or other-writable one outright rather than tightening it.
+  # Pin the fixture's mode instead of inheriting the host umask, or a umask-002
+  # host produces 775 here and every case below dies on that refusal.
+  (umask 022; mkdir -p "$dir")
   if [ -n "$consent" ]; then
     required=$(printf '["%s"]' "$consent")
   else
