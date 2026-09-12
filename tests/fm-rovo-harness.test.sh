@@ -5,7 +5,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# bin/fm-harness.sh checks verified ENV markers before ancestry, but that
+# ordering settles the marker layer only: a structural (comm-strength)
+# ancestor of a different harness still outranks either marker. A suite run
 # from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
 # the fake ancestry the detection cases set up. Drop the ambient markers so the
 # asserted verdict does not depend on which harness launched the suite.
@@ -386,8 +388,15 @@ SH
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = rovo ] || fail "rovo's ROVODEV_CLI marker did not outrank an inherited CLAUDECODE, got '$out'"
 
+  # CLAUDECODE alone, with no rovo marker, is a marker-layer question, not an
+  # ancestry one: blind the walk so the rovo-resolving fake ps above (needed
+  # for the markerless-ancestry and marker+ancestry cases) cannot also decide
+  # this assertion, matching the sibling-file pattern.
+  local blind_fakebin
+  blind_fakebin=$(fm_fakebin "$dir/blind-ancestry")
+  fm_fake_blind_ancestry "$blind_fakebin"
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+    CLAUDECODE=1 PATH="$blind_fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: rovo's markers outrank an inherited CLAUDECODE, and markerless ancestry still resolves rovo"
 }

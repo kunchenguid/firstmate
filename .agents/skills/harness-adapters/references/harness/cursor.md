@@ -28,6 +28,7 @@ The slash popup consumes the first Enter; that Enter closes it and a genuine sec
 Cursor does not clear inherited `CLAUDECODE`, so a Cursor worker under Claude carries both markers.
 `../../../bin/fm-harness.sh` tests Cursor first, and launch also clears foreign markers.
 Both remain necessary: sanitization covers Firstmate launches, ordering covers hand-started sessions.
+That ordering settles the marker layer only, and a nearer Claude ancestor still outranks a retained Cursor marker.
 
 Cursor is a bundled Node script, so tmux can report bare `node` while `ps -o comm=` carries its install path.
 Bare `node` matches nothing; `../../../bin/fm-cursor-lib.sh` proves identity from Cursor's name or install tree in path or argv zero.
