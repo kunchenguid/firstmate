@@ -62,9 +62,11 @@ Disarm when the run has ended and the pod is already gone; there is no need to d
 It terminates on exactly one condition: the effective deadline has passed on the wall clock.
 
 It then verifies the result rather than trusting the call.
-A successful `podTerminate` response is not evidence of anything.
+A successful `podTerminate` response is not evidence of anything, and neither is `pod not found to terminate`: that answer cannot tell "already gone" from "never existed", so it is recorded as a failed call, not a stop.
 The loop lists the account's pods afterwards and reports the pod stopped only once it is absent from that list.
 A termination the listing does not confirm raises an alarm saying the pod may still be billing, and keeps retrying; it is never reported as stopped.
+
+Absence is proof of a stop only for a pod this watch saw alive first - see "It will not end the watch on a pod it never saw" below.
 
 ### What it writes to the status channel
 
@@ -74,10 +76,14 @@ Everything this watchdog appends to `state/<task-id>.status` - the channel that 
 | --- | --- | --- |
 | A condition the watchdog cannot act through (API unreachable, record unreadable, credential unreadable, clock unreadable, pod never seen, ceiling unanchorable, termination unverified) | `blocked [key=runpod-watch-<task>-<condition>]: …` | opens that condition's decision |
 | That same condition clearing | `resolved [key=runpod-watch-<task>-<condition>]: …` | closes it, and lets it open again if it recurs |
-| The watch retiring - the pod leaving, a verified stop, `disarm`, a re-arm | `resolved […]` for every condition still open | closes them all |
+| The watch retiring - the pod leaving, a verified stop, `disarm`, a re-arm | `resolved […]` for every condition still open **except `pod-never-seen`** | closes them all but that one |
 | A verified stop | `note: … has been stopped; absence confirmed by listing the account's pods` | none; the wake drain surfaces `note:` lines without opening a decision |
 
 A completed stop is reported as an event rather than a blocker on purpose: the watchdog exits immediately afterwards, so a `blocked:` line there would leave a decision open that only this watchdog could have closed.
+
+`pod-never-seen` is the one alarm retiring does not close, including on `disarm`.
+It says a rented pod may be billing under an id this watchdog was never given, and retiring the watch does not make that untrue; only an actual sighting of the pod closes it.
+If you retire such a watch after checking the account yourself, close it yourself with `resolved [key=runpod-watch-<task>-pod-never-seen]: …`.
 
 The full trail, including every termination attempt and verification result, is `state/<task-id>.runpod-watch.log`.
 
@@ -91,10 +97,12 @@ A utilization-driven watchdog would terminate healthy runs mid-pack.
 When the pod's start instant cannot be read, the ceiling is not applied at all: the declared deadline stays in force, `status` reports the anchor as `unknown`, and an alarm says the ceiling is not being enforced.
 A ceiling guessed from this process's own clock would be the same silent over-count that anchoring to the pod exists to prevent.
 
-**It will not end the watch on a pod it never saw.**
+**It will not end the watch on a pod it never saw, and will not evaluate a deadline for one.**
 A pod that was listed and then disappears is the normal ending, and the loop exits.
 A pod id that has never appeared in the account is the opposite: nothing is being guarded, and a real rented pod may be billing under an id this watchdog was never given.
 That case alarms, says the id may be wrong or stale, and keeps watching rather than retiring quietly.
+While no sighting has happened the deadline is not evaluated on any path - not when the pod is absent, not when a read fails, not once the deadline has passed.
+A pod that was never sighted cannot be stopped, so a passed deadline plus a transient transport failure can never produce a `podTerminate` call, and its absence from the pod list can never be read back as "absence confirmed".
 
 **It will not terminate when it cannot establish that a deadline passed.**
 Terminating a healthy run destroys work and money already spent, which is worse than no watchdog at all.

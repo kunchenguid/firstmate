@@ -51,10 +51,14 @@
 # condition that authorizes termination is a deadline that has provably passed on
 # the wall clock, which needs no inference.
 #
-# DELETION IS VERIFIED, NEVER ASSUMED.
-# A successful podTerminate response is not evidence. The loop lists the
-# account's pods afterwards and only reports the pod stopped once it is absent
-# from that list; an unverified termination alarms and keeps retrying forever.
+# DELETION IS VERIFIED, NEVER ASSUMED, AND ONLY FOR A POD IT SAW ALIVE.
+# A successful podTerminate response is not evidence, and neither is "pod not
+# found to terminate", which cannot tell "already gone" from "never existed".
+# The loop lists the account's pods afterwards and only reports the pod stopped
+# once it is absent from that list; an unverified termination alarms and keeps
+# retrying forever. Absence is proof of a stop ONLY for a pod this watch sighted
+# alive first: for one it never saw, absence is the original symptom, so no
+# deadline is evaluated for it at all and no stop is ever reported.
 #
 # THE KEY NEVER APPEARS ANYWHERE.
 # RUNPOD_API_KEY is read from the gitignored .env and handed to curl through a
@@ -67,8 +71,10 @@
 # per condition so an unattended alarm cannot flood it. What it opens it closes:
 # a condition that clears is resolved under the same key, and a verified stop is
 # reported as a `note:`, which the drain surfaces but which opens no decision -
-# an alarm nothing can close would leave the task permanently stuck. The full
-# trail is state/<task>.runpod-watch.log.
+# an alarm nothing can close would leave the task permanently stuck. The one
+# exception is the never-sighted pod: retiring the watch does not make that
+# warning untrue, so only an actual sighting closes it. The full trail is
+# state/<task>.runpod-watch.log.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -359,17 +365,27 @@ clear_alarm() {
 # a human could close. Closes whatever conditions are still open and drops the
 # ledger with them.
 retire_alarms() {
-  local task=$1 text=$2 ledger condition rest seen=''
+  local task=$1 text=$2 ledger tmp condition rest seen=''
   ledger=$(alarm_path "$task")
   [ -f "$ledger" ] || return 0
+  tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
   while IFS="$(printf '\t')" read -r condition rest || [ -n "$condition" ]; do
     [ -n "$condition" ] || continue
+    # The one alarm retiring never closes. It says a rented pod may be billing
+    # under an id this watchdog was never given, and retiring the watch does not
+    # make that untrue - only sighting the pod does.
+    if [ "$condition" = pod-never-seen ]; then
+      printf '%s\t%s\n' "$condition" "$rest" >> "$tmp" 2>/dev/null || true
+      continue
+    fi
     case " $seen " in *" $condition "*) continue ;; esac
     seen="$seen $condition"
     log_line "$task" "cleared[$condition] $text"
     status_append "$task" "resolved [key=$(decision_key "$task" "$condition")]: $text"
   done < "$ledger"
-  rm -f -- "$ledger" 2>/dev/null || true
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
+  [ -s "$ledger" ] || rm -f -- "$ledger" 2>/dev/null || true
 }
 
 # --- RunPod API -------------------------------------------------------------
@@ -451,8 +467,11 @@ pod_present() {
   return 0
 }
 
-# terminate_call <pod-id> -> 0 when the API accepted it or already had no such
-# pod, 1 otherwise. Never treated as proof; pod_present is the proof.
+# terminate_call <pod-id> -> 0 when the API accepted the mutation, 1 otherwise.
+# Never treated as proof either way; pod_present is the proof. "pod not found to
+# terminate" is NOT read as success: it cannot tell "already gone" from "never
+# existed", and the latter is exactly the wrong id this watchdog must not report
+# a stop for. A pod that really had gone still verifies absent on the read below.
 TERMINATE_DETAIL=
 terminate_call() {
   local pod=$1 req resp
@@ -462,10 +481,7 @@ terminate_call() {
   rm -f "$req"
   if printf '%s' "$resp" | jq -e '.errors' >/dev/null 2>&1; then
     TERMINATE_DETAIL=$(printf '%s' "$resp" | jq -r '[.errors[].message] | join("; ")' 2>/dev/null | tr -d '\n')
-    case "$TERMINATE_DETAIL" in
-      *'not found to terminate'*) return 0 ;;
-      *) return 1 ;;
-    esac
+    return 1
   fi
   printf '%s' "$resp" | jq -e 'has("data")' >/dev/null 2>&1 || { TERMINATE_DETAIL='unparseable response'; return 1; }
   return 0
@@ -764,10 +780,12 @@ cmd_run() {
 
     pod_present "$REC_POD"
     present_rc=$?
+    # A list read that parsed is proof the API is reachable, whether or not this
+    # pod was in it. Only the read failing leaves that alarm standing.
+    [ "$present_rc" -eq 2 ] || clear_alarm "$task" api-unreachable \
+      "the pod watchdog for $task can reach RunPod again"
     case "$present_rc" in
       0)
-        clear_alarm "$task" api-unreachable \
-          "the pod watchdog for $task can reach RunPod again"
         [ "$ever_seen" -eq 1 ] || clear_alarm "$task" pod-never-seen \
           "the pod watchdog for $task has now seen pod $REC_POD in the account's pod list"
         ever_seen=1
@@ -801,6 +819,15 @@ cmd_run() {
           "the pod watchdog for $task cannot reach RunPod to check pod $REC_POD; it keeps waiting and will not terminate anything on a failed read"
         ;;
     esac
+
+    # A pod this watch has never sighted cannot be stopped, because there is
+    # nothing here to stop: its absence is the original symptom, not proof of a
+    # stop. No deadline is evaluated for it on ANY path, so a passed deadline
+    # plus a transient read failure can never be read as a completed stop.
+    if [ "$ever_seen" -eq 0 ]; then
+      nap "$POLL_SECONDS"
+      continue
+    fi
 
     effective=$REC_DEADLINE
     source=declared

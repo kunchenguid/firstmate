@@ -286,12 +286,18 @@ assert_absent "$H/state/t1.runpod-watch" 'pod gone: the record was left behind'
 assert_absent "$H/state/t1.runpod-watch.observed" 'pod gone: the derived-state file was left behind'
 pass 'a pod that was seen and then disappears ends the watch cleanly'
 
-# --- a pod id that was NEVER in the account keeps the watch alive and says so
+# --- a pod id that was NEVER in the account keeps the watch alive and says so,
+# --- even once its deadline has passed and a read has failed in between
 H=$TMP_ROOT/never-seen
 FB=$(new_home "$H")
 printf 'pod-other\n' > "$H/api/pods"
+# The deadline has already passed, and the first read fails at the transport.
+# A not-found podTerminate reply would look like a stop to anything that read
+# absence as proof, so this is the sequence that must produce no stop at all.
+printf '1\n' > "$H/api/pods.fail-until"
+printf '{"errors":[{"message":"pod not found to terminate"}]}' > "$H/api/terminate.out"
 write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
-RC=$(run_loop "$H" t1 6 "$FB")
+RC=$(run_loop "$H" t1 8 "$FB")
 assert_not_equals 0 "$RC" \
   'never seen: an id that was never in the account must not end the watch as if the run had finished'
 assert_not_contains "$(calls "$H")" terminate \
@@ -300,9 +306,28 @@ assert_grep 'never seen pod pod-alpha' "$H/state/t1.status" \
   'never seen: firstmate was not told the pod id may be wrong while a rented pod bills on'
 assert_no_grep 'has been stopped' "$H/state/t1.status" \
   'never seen: the watchdog credited itself with a stop it did not make'
+assert_no_grep 'absence confirmed' "$H/state/t1.status" \
+  'never seen: absence was reported as proof of a stop for a pod never sighted'
 assert_grep 'pod=pod-alpha' "$H/state/t1.runpod-watch" \
   'never seen: the record was deleted, retiring a watch that never guarded anything'
-pass 'a pod id that was never in the account alarms and keeps watching instead of ending silently'
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_contains "$OPEN" 'never seen pod pod-alpha' \
+  'never seen: the standing warning that a rented pod may be billing was closed'
+assert_not_contains "$OPEN" 'cannot reach RunPod' \
+  'never seen: a list read that succeeded left a false unreachable-API blocker open'
+pass 'a pod never sighted is never stopped, never reported stopped, and keeps alarming past its deadline'
+
+# --- retiring the watch does not close the never-sighted warning
+H=$TMP_ROOT/never-seen-disarm
+FB=$(new_home "$H")
+printf 'pod-other\n' > "$H/api/pods"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 4 "$FB" >/dev/null
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_contains "$OPEN" 'never seen pod pod-alpha' \
+  'never seen: disarming the watch closed the warning that a rented pod may still be billing'
+pass 'disarming a watch that never sighted its pod leaves that warning standing'
 
 # --- alarms carry their own decision key and cannot clobber a crewmate's
 H=$TMP_ROOT/decision-key
