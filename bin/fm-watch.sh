@@ -2444,11 +2444,13 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake. While the away posture stands, the interval is
-  # pinned to the base HEARTBEAT and the away branch holds the streak at zero:
-  # the away-mode daemon consumes every heartbeat, an away fleet is exactly when
-  # an expired external wait must surface within one base cadence rather than
-  # the idle ceiling, and a decayed schedule must not survive the return.
+  # pinned to the base HEARTBEAT and the away branch seeds the streak at -1 so
+  # wake()'s heartbeat increment lands on 0: the away-mode daemon consumes every
+  # heartbeat, an away fleet is exactly when an expired external wait must
+  # surface within one base cadence rather than the idle ceiling, and a decayed
+  # schedule must not survive the return.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
@@ -2462,10 +2464,12 @@ EOF
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if [ "$afk_hb" = 1 ]; then
-      # Hold the streak at zero before wake() adds its one: the pinned interval
+      # Seed -1 so wake()'s heartbeat increment lands on 0: the pinned interval
       # makes an accumulated streak meaningless while away, and a grown streak
-      # must not delay the first post-return heartbeat.
-      echo 0 > "$STATE/.heartbeat-streak"
+      # must not delay the first post-return heartbeat. The interval read above
+      # sanitizes any -1 a crashed exit leaves behind, so the negative seed is
+      # only ever observed by wake()'s increment.
+      echo -1 > "$STATE/.heartbeat-streak"
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

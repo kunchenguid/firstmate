@@ -4531,8 +4531,8 @@ test_afk_heartbeat_cadence_pins_backoff_and_holds_streak_reset() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a grown streak delayed the away heartbeat past the base cadence"; }
   grep -Fx "heartbeat" "$out" >/dev/null || fail "away watcher exited without a heartbeat wake: $(cat "$out")"
-  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" = 1 ] \
-    || fail "away heartbeat left the streak grown at $(cat "$state/.heartbeat-streak" 2>/dev/null) instead of holding it at wake's single increment"
+  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "away heartbeat left the streak grown at $(cat "$state/.heartbeat-streak" 2>/dev/null) instead of landing on zero, so the first post-return heartbeat would run at a decayed cadence"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the pinned away heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "pinned away heartbeat was not queued for the daemon"
   pass "the away posture pins the heartbeat cadence and a grown streak cannot survive it"
