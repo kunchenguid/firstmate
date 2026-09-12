@@ -1142,4 +1142,7 @@ Use `bin/fm-project-context.sh --prepare-rialto "$BACKEND_CHECKOUT" "$FRONTEND_C
 Supply the reviewed source checkouts and product instructions, review the emitted paths, and install configuration only through a separately authorized home operation.
 Private absolute paths are never shared defaults.
 See `bin/fm-project-context.sh --help` for its file format, checkout resolution, source hashes and missing-file behavior.
-The same command reloads the sources after compaction; the generated instructions require that reload before further project work.
+After compaction, the generated instructions require rereading every source before further project work.
+Every configured path must therefore be readable by the worker's file tools under its unchanged workspace guard, not merely by the launch process.
+When paired checkouts are outside that boundary, prepare verified source copies inside the worker workspace, retain their original paths, Git identities and byte/hash receipts, and use `--prepare-rialto` with those accessible copies.
+Successful launch-time rendering alone does not prove post-compaction access.
