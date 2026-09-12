@@ -212,7 +212,7 @@ IFS= read -r -d '' INBOX_SECTION <<EOF || true
 Firstmate steers you through durable message files in $INBOX_DIR.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg and read and act on each message in numeric order.
 Acknowledge each message as soon as you have read and understood it, by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
-That move means received and understood, not done: it never waits on any work the message asks for, which you carry out separately from the move.
+That move means received and understood, not done: it never waits on any work the message asks for.
 Without the move firstmate rings again and eventually treats you as stuck, even while that work is still legitimately outstanding. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
