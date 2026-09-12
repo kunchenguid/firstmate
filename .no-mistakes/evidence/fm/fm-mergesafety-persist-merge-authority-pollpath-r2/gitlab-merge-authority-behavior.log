@@ -1,0 +1,15 @@
+ok - GitLab accepted merge persists authority under lifecycle lock before queued confirmation
+
+=== GitLab observable product state ===
+merge stderr: verified: https://gitlab.example/group/subgroup/project/-/merge_requests/7 is open and mergeable, with a successful pipeline at head 0123456789abcdef0123456789abcdef01234567 
+forge calls:
+mr view 7 -R https://gitlab.example/group/subgroup/project -F json
+mr merge 7 -R https://gitlab.example/group/subgroup/project --sha 0123456789abcdef0123456789abcdef01234567 --yes
+mr view 7 -R https://gitlab.example/group/subgroup/project -F json
+persisted authority record:
+fm-merge-authority-v1
+gitlab
+gitlab.example
+group/subgroup/project
+7
+attended

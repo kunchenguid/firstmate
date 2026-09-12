@@ -1,0 +1,52 @@
+ok - queued merges retain yolo and away-grant after captain return
+ok - poll distinguishes attended authorization from external landing
+ok - accepted merge authority refuses rebound task metadata
+ok - accepted merge authority persists under the lifecycle lock
+ok - teardown cannot race merged-poll authority consumption
+ok - poll retirement preserves a replacement authority record
+
+=== observable product state ===
+
+[queued-merge-authority-yolo]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+ledger: check: merge landed: task-a https://github.com/o/r/pull/1 yolo
+bound identity: pr=https://github.com/o/r/pull/1
+
+[queued-merge-authority-grant]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+ledger: check: merge landed: task-a https://github.com/o/r/pull/1 away-grant
+bound identity: pr=https://github.com/o/r/pull/1
+
+[queued-merge-authority-attended]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+ledger: check: merge landed: task-a https://github.com/o/r/pull/1
+bound identity: pr=https://github.com/o/r/pull/1
+
+[merged-poll-authority-external]
+ledger: check: merge landed: task-a https://github.com/o/r/pull/1 external
+bound identity: pr=https://github.com/o/r/pull/1
+
+[merge-authority-rebound-metadata]
+merge CLI: armed: state/task-a.check.sh 
+bound identity: pr=https://github.com/o/r/pull/2
+
+[merge-authority-control-lock]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+persisted authority record:
+fm-merge-authority-v1
+github
+github.com
+o/r
+1
+attended
+bound identity: pr=https://github.com/o/r/pull/1
+
+[merge-authority-teardown-race]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+ledger: check: merge landed: task-a https://github.com/o/r/pull/1 yolo
+bound identity: pr=https://github.com/o/r/pull/1
+
+[merge-authority-retirement-replacement]
+merge CLI: armed: state/task-a.check.sh verified: https://github.com/o/r/pull/1 is queued (state=OPEN, merged=false, isInMergeQueue=true) 
+ledger: check: merge landed: task-a https://github.com/o/r/pull/2
+bound identity: pr=https://github.com/o/r/pull/2
