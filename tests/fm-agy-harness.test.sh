@@ -116,7 +116,12 @@ EOF
   assert_contains "$launch" "$home/.local/bin/agy" "agy launch did not use the resolved executable"
   assert_not_contains "$launch" "$fakebin/agy" "agy launch used the Antigravity IDE wrapper found on PATH"
   assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch omitted the requested model"
-  assert_contains "$launch" "--effort 'high'" "agy launch omitted the supported effort"
+  # agy encodes effort in the model id and defines no --effort flag: verified on
+  # agy 1.2.2, `--model gemini-3.8-flash-low --effort high` is refused outright
+  # in -p mode and, in the -i mode launched here, agy discards BOTH flags and
+  # silently runs the host's persisted default model instead of the requested
+  # one. Pairing the two axes is therefore never delivered.
+  assert_not_contains "$launch" '--effort' "agy launch paired --effort with --model, which agy refuses or silently drops"
   assert_contains "$launch" '--dangerously-skip-permissions' "agy launch omitted permission bypass"
   # Without --add-dir, real agy 1.2.1 runs every tool in its own scratch
   # directory and never fires the worktree's .agents/hooks.json, and it stops
@@ -147,24 +152,26 @@ EOF
   meta="$home/state/$id.meta"
   assert_grep 'model=gemini-3.8-flash-low' "$meta" "agy metadata lost the model"
   assert_grep 'effort=high' "$meta" "agy metadata lost the effort"
-  pass "fm-spawn: agy writes task-local hooks and resolves interactive model/effort launch flags"
+  pass "fm-spawn: agy writes task-local hooks and resolves the interactive model launch flag"
 }
 
-test_unsupported_effort_is_recorded_and_omitted() {
+test_effort_is_recorded_and_omitted() {
   local rec dir home proj wt fakebin id out rc launch
   id="agy-effort-$$"
   rec=$(make_case effort "$id")
   IFS='|' read -r dir home proj wt fakebin <<EOF
 $rec
 EOF
+  # A bare effort is the other shape real agy refuses ("--effort is not
+  # supported for the current model"), so no effort level reaches the CLI.
   out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode no-mistakes --yolo off --effort xhigh)
+    --mode no-mistakes --yolo off --effort high)
   rc=$?
   expect_code 0 "$rc" "agy spawn should tolerate record-and-omit effort"
   launch=$(<"$dir/launch.log")
-  assert_not_contains "$launch" '--effort' "agy launch passed an unsupported effort"
-  assert_grep 'effort=xhigh' "$home/state/$id.meta" "agy metadata did not retain the unsupported effort"
-  pass "fm-spawn: agy records unsupported effort while omitting it from the CLI"
+  assert_not_contains "$launch" '--effort' "agy launch passed an effort flag agy does not define"
+  assert_grep 'effort=high' "$home/state/$id.meta" "agy metadata did not retain the requested effort"
+  pass "fm-spawn: agy records the requested effort while omitting it from the CLI"
 }
 
 test_secondmate_is_refused_and_control_is_verified() {
@@ -374,7 +381,7 @@ EOF
 }
 
 test_spawn_writes_hooks_and_resolves_launch_axes
-test_unsupported_effort_is_recorded_and_omitted
+test_effort_is_recorded_and_omitted
 test_secondmate_is_refused_and_control_is_verified
 test_teardown_removes_workspace_hooks
 test_spawn_refuses_when_only_the_ide_wrapper_is_installed

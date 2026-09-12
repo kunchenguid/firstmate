@@ -1625,7 +1625,16 @@ launch_template() {
     # and hooks inside it, and admits the folder without the dialog and without
     # appending the disposable path to the machine-global trustedWorkspaces list
     # in ~/.gemini/antigravity-cli/settings.json that answering the dialog writes.
-    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI __AGYBIN__ --add-dir __WORKTREE__ __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy encodes effort in the model id (its catalog is gemini-3.8-flash-low|
+    # medium|high, gemini-3.1-pro-low|high, and fixed-effort claude/gpt-oss
+    # entries), and --effort is not a defined flag: verified on agy 1.2.2, a
+    # --model/--effort pair is refused outright in -p mode ("--model
+    # gemini-3.8-flash-low conflicts with --effort=high") and, in the -i mode
+    # launched here, agy silently discards BOTH flags and runs the host's
+    # persisted default model. So no effort placeholder belongs here; the
+    # requested effort stays in task metadata under the record-and-omit
+    # contract and reaches agy only through the model id.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI __AGYBIN__ --add-dir __WORKTREE__ __MODELFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2013,13 +2022,6 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
-    agy)
-      # agy 1.2.1 accepts only the shared low|medium|high effort values.
-      # xhigh, max, and other values remain in metadata but are omitted.
-      case "$effort" in
-        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
     # --config-override, but that flag is single-value (see
     # rovo_config_override_flag below) so it is built there, merged with the
@@ -2030,7 +2032,8 @@ effort_flag_for_harness() {
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # effort flag, and agy does the same with ids such as gemini-3.8-flash-low
+    # (see its launch template above for the verified refusal).
   esac
 }
 
