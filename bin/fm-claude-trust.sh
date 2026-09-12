@@ -253,7 +253,10 @@ command -v node >/dev/null 2>&1 || refuse "node is required to record workspace 
 # tests COMMON_TOOLS with command -v as well. Executing the interpreter is the
 # only check that distinguishes a broken one from a working one, and it is named
 # separately from the missing case because the two have different remedies.
-node -e '' >/dev/null 2>&1 || refuse "node is on PATH but failed to execute, so workspace trust cannot be recorded; check the interpreter itself with: node --version"
+# The probe runs in a subshell that exits with node's status so that when node
+# dies by signal, bash's own "Abort trap" job report lands on the subshell's
+# redirected stderr and the operator sees only the named refusal below.
+( node -e ''; exit $? ) >/dev/null 2>&1 || refuse "node is on PATH but failed to execute, so workspace trust cannot be recorded; check the interpreter itself with: node --version"
 
 STORE="$CONFIG_DIR_REAL/.claude.json"
 # A dotfile manager or a synced folder legitimately symlinks this store, so the

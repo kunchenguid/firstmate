@@ -402,8 +402,6 @@ test_missing_node_is_refused() {
   pass "fm-claude-trust.sh: a missing node is refused rather than degraded"
 }
 
-# A missing interpreter must not soften the scope boundary, which
-# git and the filesystem decide on their own.
 test_broken_node_is_refused() {
   local rec out bindir
   rec=$(make_case broken-node)
@@ -412,6 +410,12 @@ test_broken_node_is_refused() {
   out=$(PATH="$bindir" run_trust "$CONFIG" "$WT" "$PROJ")
   expect_code 1 $? "a node that cannot execute must refuse rather than let the spawn proceed: $out"
   assert_contains "$out" "failed to execute" "the refusal did not name the interpreter as the failure"
+  # The refusal is the whole report: bash's own job-signal line for the
+  # aborted probe ("Abort trap" here, "Aborted" on Linux) must not reach the
+  # operator ahead of it, or the first line they read names neither node nor
+  # the trust step.
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the refusal must be the only line of output, but the probe's signal report leaked: $out"
   assert_not_trusted "$CONFIG/.claude.json" "$WT" "a worktree was trusted although the store could not be written"
   case "$out" in
     *"trusted:"*) fail "a registration was claimed although none could be written: $out" ;;
@@ -419,6 +423,8 @@ test_broken_node_is_refused() {
   pass "fm-claude-trust.sh: a node that is present but cannot execute is refused"
 }
 
+# A missing interpreter must not soften the scope boundary, which
+# git and the filesystem decide on their own.
 test_scope_refusal_stays_fail_closed_without_node() {
   local rec out bindir
   rec=$(make_case no-node-refusal)
