@@ -287,6 +287,16 @@ fm_test_run_spawn() {
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
+  # A claude spawn also refuses when the machine has not accepted Claude's
+  # bypass-permissions confirmation (bin/fm-claude-ready.sh). The throwaway HOME
+  # stands in for a provisioned machine so every spawn case here exercises what
+  # it is actually about; the refusal itself is covered in
+  # tests/fm-claude-ready.test.sh.
+  if [ "${FM_TEST_CLAUDE_BYPASS_UNREADY:-0}" != 1 ]; then
+    mkdir -p "${FM_TEST_CLAUDE_CONFIG_DIR:-$spawn_home/.claude}"
+    printf '{"skipDangerousModePermissionPrompt":true}\n' \
+      > "${FM_TEST_CLAUDE_CONFIG_DIR:-$spawn_home/.claude}/settings.json"
+  fi
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

@@ -2661,6 +2661,27 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
   exit 1
 fi
 
+# Claude bypass-permissions readiness. This is the second dialog firstmate
+# cannot answer, and unlike workspace trust it is attended and per-machine, so
+# it cannot be provisioned during a spawn at all: a worker launched without it
+# stops on the confirmation until the watcher reports it wedged and the task is
+# relaunched on another runtime. Refusing here, beside the repository check and
+# before any endpoint exists, is what turns fifteen minutes of escalation into
+# one setup instruction. bin/fm-claude-ready.sh owns the check and that
+# instruction. Only a bypass-mode launch meets the dialog:
+# config/claude-permission-mode=auto does not request bypass mode.
+if [ "$CLAUDE_PERMISSION_MODE" = bypass ]; then
+  case "$HARNESS" in
+    claude*)
+      if ! CLAUDE_READY_REPORT=$("$FM_ROOT/bin/fm-claude-ready.sh" check "$PROJ_ABS" 2>&1); then
+        echo "error: $CLAUDE_READY_REPORT" >&2
+        echo "error: refusing to dispatch $ID on claude, because it would stop on a dialog firstmate cannot answer" >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3280,6 +3301,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
 fi
+
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
