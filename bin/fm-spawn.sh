@@ -3973,6 +3973,15 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
+# Pin the pane to the same tasks-axi build this spawn resolved
+# (bin/fm-tasks-axi-lib.sh): the pane shell is interactive, and its rc files can
+# reorder PATH so a bare `tasks-axi` names a different install than the primary
+# sees. The resolved build's directory goes first on the pane PATH, which the
+# launch-env floor below forwards, and FM_TASKS_AXI_BIN lets every fm script the
+# crew runs re-resolve to that exact build without probing.
+if [ -n "${FM_TASKS_AXI_BIN:-}" ]; then
+  spawn_send_text_line "$T" "export FM_TASKS_AXI_BIN=$(shell_quote "$FM_TASKS_AXI_BIN") PATH=$(shell_quote "$(dirname -- "$FM_TASKS_AXI_BIN")"):\"\$PATH\""
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
