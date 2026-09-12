@@ -20,7 +20,9 @@
 #   7. With crew-dispatch active, relaunch forwards --dispatch-resolved to spawn.
 #   8. --quota-fallback picks the next same-class profile, writes a progress
 #      note from status plus git, records lifecycle telemetry, and refuses when
-#      no eligible profile remains.
+#      no eligible profile remains. An override with no matched_rule recovers
+#      the class array from kind+repo (and records the rule). An operational
+#      hold is lifted before relaunch and restored if launch fails.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -329,6 +331,15 @@ seed_backlog() {  # <case-dir> <id> <queued|in_flight>
 backlog_state() {  # <case-dir> <id>
   tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
+}
+
+backlog_field() {  # <case-dir> <id> <field>
+  tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
+    sed -n "s/^  $3: *//p" | head -1
+}
+
+hold_backlog() {  # <case-dir> <id> <kind> <reason>
+  tasks-axi hold "$2" --kind "$3" --reason "$4" --file "$1/home/data/backlog.md" >/dev/null
 }
 
 # Shadow tasks-axi so every `start` fails and every other verb is real. A
@@ -1712,6 +1723,66 @@ test_quota_fallback_picks_next_profile_and_writes_a_progress_note() {
   pass "fm-control relaunch: --quota-fallback keeps the copy, picks the next profile, and writes a progress note"
 }
 
+test_quota_fallback_recovers_an_override_profile_array() {
+  local dir out rc
+  dir=$(new_case quota-override rl-qbo)
+  add_ship_task "$dir" rl-qbo claude
+  mkdir -p "$dir/home/config"
+  # Override-dispatched work records no matched_rule. The Firstmate bounded
+  # class lives in rules[0]; .default is empty so collapsing to it is red.
+  printf '%s\n' '{"rules":[{"when":"The target project is the Firstmate repository itself and the work is bounded implementation.","use":[{"harness":"claude","model":"default"},{"harness":"codex","model":"gpt-5"}]}],"default":[]}' \
+    > "$dir/home/config/crew-dispatch.json"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-qbo relaunch --quota-fallback); rc=$?
+  expect_code 0 "$rc" "quota fallback should recover the kind+repo class array"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-qbo harness)" = codex ] || fail "override fallback did not choose the non-current profile"
+  [ "$(meta_field "$dir" rl-qbo matched_rule)" = rule-0 ] \
+    || fail "override fallback did not record the recovered rule (got $(meta_field "$dir" rl-qbo matched_rule))"
+  pass "fm-control relaunch: --quota-fallback recovers a profile array for override-dispatched work"
+}
+
+test_quota_fallback_lifts_an_operational_hold() {
+  local dir out rc
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so operational-hold lift is inert"
+    return 0
+  }
+  dir=$(new_case quota-hold rl-qbh)
+  add_ship_task "$dir" rl-qbh claude
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-qbh in_flight
+  hold_backlog "$dir" rl-qbh parked "parked by firstmate"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-qbh relaunch --quota-fallback); rc=$?
+  expect_code 0 "$rc" "quota fallback should lift an operational hold"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-qbh harness)" = codex ] || fail "hold-lift fallback did not relaunch"
+  [ "$(backlog_field "$dir" rl-qbh held)" = no ] \
+    || fail "operational hold should stay lifted after a successful fallback"
+  pass "fm-control relaunch: --quota-fallback lifts an operational hold before relaunch"
+}
+
+test_quota_fallback_restores_an_operational_hold_on_failure() {
+  local dir out rc
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so operational-hold restore is inert"
+    return 0
+  }
+  dir=$(new_case quota-hold-fail rl-qbf)
+  add_ship_task "$dir" rl-qbf claude
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-qbf in_flight
+  hold_backlog "$dir" rl-qbf parked "parked by firstmate"
+  # Launch owner refuses after the previous agent is stopped.
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  out=$(run_control "$dir" rl-qbf relaunch --quota-fallback); rc=$?
+  expect_code 1 "$rc" "quota fallback should fail closed after a launch refusal"$'\n'"$out"
+  [ "$(backlog_field "$dir" rl-qbf held)" = yes ] \
+    || fail "operational hold should be restored when fallback launch fails"
+  [ "$(backlog_field "$dir" rl-qbf hold_kind)" = parked ] \
+    || fail "restored hold should keep kind parked"
+  pass "fm-control relaunch: --quota-fallback restores an operational hold when launch fails"
+}
+
 test_quota_fallback_refuses_when_no_eligible_profile_remains() {
   local dir out rc
   dir=$(new_case quota-none rl-qc)
@@ -1785,4 +1856,7 @@ test_recorded_reader_scout_relaunch_without_access_keeps_identity
 test_direct_spawn_relaunch_adopts_recorded_reader_access
 test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active
 test_quota_fallback_picks_next_profile_and_writes_a_progress_note
+test_quota_fallback_recovers_an_override_profile_array
+test_quota_fallback_lifts_an_operational_hold
+test_quota_fallback_restores_an_operational_hold_on_failure
 test_quota_fallback_refuses_when_no_eligible_profile_remains

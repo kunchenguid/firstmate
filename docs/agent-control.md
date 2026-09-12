@@ -121,6 +121,8 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 When `config/crew-dispatch.json` is active, `relaunch` forwards `--dispatch-resolved` or `--dispatch-override-reason` to `bin/fm-spawn.sh --relaunch`.
 `--quota-fallback` picks the next same-class profile from that file that `bin/fm-quota-cooldown.sh authorize` still allows, generates the required progress note from the task's last 5 status lines plus `git status --short` and `git log --oneline -3` of its worktree, and attests `--dispatch-resolved`.
+When `matched_rule` is absent, it recovers the class array from the recorded profile plus the task's repo and records the rule it used.
+It lifts an operational backlog hold (`hold_kind` `external` or `parked`) before relaunch and restores that hold if launch fails.
 It refuses before the agent is stopped when no eligible profile remains.
 
 ### Failure and rollback
@@ -170,6 +172,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, dispatch attestation forwarding, quota-fallback successor selection, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, dispatch attestation forwarding, quota-fallback successor selection, override class recovery, operational-hold lift and restore, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-quota-refusal.test.sh` - provider quota-refusal detection and the apply path that writes the blocked status, records a cooldown, and posts Slack.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

@@ -55,8 +55,12 @@
 #              that file that bin/fm-quota-cooldown.sh authorize still allows,
 #              generates the progress note from the last 5 status lines plus
 #              git status --short and git log --oneline -3 of the recorded
-#              worktree, and attests --dispatch-resolved. It refuses before
-#              stopping the agent when no eligible profile remains.
+#              worktree, and attests --dispatch-resolved. When matched_rule is
+#              absent (an override), it recovers the class array from the
+#              recorded profile plus the task's repo and records that rule.
+#              It lifts an operational backlog hold (kind external or parked)
+#              before relaunch and restores it if launch fails. It refuses
+#              before stopping the agent when no eligible profile remains.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -149,6 +153,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -171,6 +179,9 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if declare -F quota_fallback_restore_hold >/dev/null 2>&1; then
+    quota_fallback_restore_hold || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -218,6 +229,10 @@ DISPATCH_PROVIDER_SET=0
 QUOTA_FALLBACK=0
 QUOTA_FALLBACK_FROM=
 QUOTA_FALLBACK_STARTED_MS=0
+QUOTA_FALLBACK_RULE=
+QUOTA_FALLBACK_HOLD_LIFTED=0
+QUOTA_FALLBACK_HOLD_KIND=
+QUOTA_FALLBACK_HOLD_REASON=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -659,8 +674,42 @@ relaunch_rollback() {
   return 0
 }
 
+quota_fallback_restore_hold() {
+  [ "${QUOTA_FALLBACK_HOLD_LIFTED:-0}" = 1 ] || return 0
+  QUOTA_FALLBACK_HOLD_LIFTED=0
+  fm_backlog_mutate "$DATA" hold "$ID" \
+    --reason "$QUOTA_FALLBACK_HOLD_REASON" \
+    --kind "$QUOTA_FALLBACK_HOLD_KIND" >/dev/null 2>&1 || true
+}
+
+quota_fallback_maybe_lift_hold() {
+  local show reason
+  [ -f "$DATA/backlog.md" ] || return 0
+  fm_backlog_row_probe "$DATA" "$ID" || return 0
+  case "$FM_BACKLOG_ROW_HOLD_KIND" in
+    external|parked)
+      show=$(fm_backlog_row_show "$DATA" "$ID") \
+        || die "quota fallback could not read $ID's backlog hold"
+      reason=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: *//p' | head -1)
+      case "$reason" in
+        ''|'"-"'|-) reason="parked by firstmate" ;;
+      esac
+      fm_backlog_mutate "$DATA" unhold "$ID" \
+        || die "quota fallback could not lift $ID's operational hold ($FM_BACKLOG_TRANSITION_ERROR)"
+      QUOTA_FALLBACK_HOLD_LIFTED=1
+      QUOTA_FALLBACK_HOLD_KIND=$FM_BACKLOG_ROW_HOLD_KIND
+      QUOTA_FALLBACK_HOLD_REASON=$reason
+      fm_backlog_row_probe "$DATA" "$ID" \
+        || die "quota fallback could not re-read $ID's backlog item after lifting its hold"
+      ;;
+  esac
+  if ! fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE"; then
+    die "this home's backlog item $ID is not dispatchable in state $FM_BACKLOG_ROW_STATE"
+  fi
+}
+
 quota_fallback_prepare() {
-  local dispatch_file matched profiles n i profile harness model effort provider current_h current_m rc status_tail git_status git_log
+  local dispatch_file matched profiles n i profile harness model effort provider current_h current_m rc status_tail git_status git_log project repo resolved
   dispatch_file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/crew-dispatch.json"
   [ -f "$dispatch_file" ] || die "quota fallback needs config/crew-dispatch.json"
   case "$KIND" in
@@ -670,18 +719,39 @@ quota_fallback_prepare() {
   current_h=$(fm_meta_get "$META" harness)
   current_m=$(fm_meta_get "$META" model)
   [ -n "$current_m" ] || current_m=default
+  project=$(fm_meta_get "$META" project)
+  repo=
+  [ -z "$project" ] || repo=$(basename -- "$project")
   matched=$(fm_meta_get "$META" matched_rule)
-  profiles=$(jq -c --arg rule "$matched" '
+  resolved=$(jq -c --arg rule "$matched" --arg harness "$current_h" --arg model "$current_m" --arg repo "$repo" '
     def profiles($v):
       if ($v | type) == "array" then $v
       elif ($v | type) == "object" then [$v]
       else [] end;
-    if $rule == "" or $rule == "default" then profiles(.default)
-    elif ($rule | test("^rule-[0-9]+$")) then
-      ($rule | ltrimstr("rule-") | tonumber) as $i
-      | if (.rules | type) == "array" and ($i < (.rules | length)) then profiles(.rules[$i].use) else [] end
-    else profiles(.default) end
+    def contains_current($use):
+      profiles($use) | any(.harness == $harness and (.model // "default") == $model);
+    def from_default:
+      {rule:"default", profiles: profiles(.default)};
+    def from_rule($i):
+      if (.rules | type) == "array" and ($i < (.rules | length)) then
+        {rule: ("rule-" + ($i | tostring)), profiles: profiles(.rules[$i].use)}
+      else {rule:"default", profiles: []} end;
+    if $rule == "default" then from_default
+    elif ($rule | test("^rule-[0-9]+$")) then from_rule($rule | ltrimstr("rule-") | tonumber)
+    elif $rule == "" then
+      ([.rules // [] | to_entries[] | select(.value | contains_current(.use))]) as $hits
+      | if ($hits | length) == 0 then from_default
+        else
+          (if $repo == "" then []
+           else [$hits[] | select(.value.when != null and (.value.when | ascii_downcase | contains($repo | ascii_downcase)))]
+           end) as $repo_hits
+          | (if ($repo_hits | length) > 0 then $repo_hits[0] else $hits[0] end) as $pick
+          | {rule: ("rule-" + ($pick.key | tostring)), profiles: profiles($pick.value.use)}
+        end
+    else from_default end
   ' "$dispatch_file") || die "quota fallback could not read $dispatch_file"
+  profiles=$(printf '%s\n' "$resolved" | jq -c '.profiles')
+  QUOTA_FALLBACK_RULE=$(printf '%s\n' "$resolved" | jq -r '.rule')
   n=$(printf '%s\n' "$profiles" | jq 'length')
   [ "$n" -gt 0 ] || die "no eligible same-class dispatch profile remains for $ID (quota fallback)"
   NEW_HARNESS=
@@ -731,6 +801,7 @@ quota_fallback_prepare() {
   NOTE_SET=1
   QUOTA_FALLBACK_FROM="${current_h}/${current_m}"
   DISPATCH_RESOLVED=1
+  quota_fallback_maybe_lift_hold
 }
 
 resolve_relaunch_profile() {
@@ -1025,6 +1096,7 @@ do_relaunch() {
     spawn_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
   fi
   [ "$DISPATCH_PROVIDER_SET" = 0 ] || spawn_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
+  [ -z "$QUOTA_FALLBACK_RULE" ] || spawn_args+=(--matched-rule "$QUOTA_FALLBACK_RULE")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -1041,6 +1113,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
+  QUOTA_FALLBACK_HOLD_LIFTED=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
   if [ "$QUOTA_FALLBACK" = 1 ]; then
     fm_telemetry_record lifecycle "$(jq -nc \
