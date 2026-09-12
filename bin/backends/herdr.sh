@@ -2977,10 +2977,6 @@ fm_backend_herdr_normalize_key() {  # <key>
     Enter|enter) printf 'enter' ;;
     Escape|escape|Esc|esc) printf 'escape' ;;
     C-c|c-c|ctrl+c|Ctrl+C) printf 'ctrl+c' ;;
-    # C-d is reachable only through `fm-send.sh --key`: no adapter returns it
-    # for interrupt or exit (agy exits with the /quit composer command), and
-    # fm_control_backend_supports_key omits it. Not empirically verified here.
-    C-d|c-d|ctrl+d|Ctrl+D) printf 'ctrl+d' ;;
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.
     C-u|c-u|ctrl+u|Ctrl+U) printf 'ctrl+u' ;;
