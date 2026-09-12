@@ -133,6 +133,7 @@ All five runs used plain `--changed` with no `--jobs` flag, exercised the produc
 - Date: 2026-09-03
 - Command: `bin/fm-test-isolation-proof.sh --pool pr-forge --jobs 4`
 - Result: two consecutive runs, 6 candidates, 0 failures.
+- Stale timings: `fm-pr-check-security` (198.5s below) predates the noacl/posix=0 mode-capability fix, which added new test functions and per-test fakebin setup to `tests/fm-pr-check-security.test.sh`. The pass/fail admission still holds, but re-run this proof to refresh the family's wall-clock figures.
 
 | Run | Summary |
 |---|---|
