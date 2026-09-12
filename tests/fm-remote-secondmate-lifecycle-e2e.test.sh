@@ -27,6 +27,10 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
+# The lifecycle arms a reply listener in the parent home. The EXIT path below
+# sweeps it; declaring the home is what retires it when the run is interrupted
+# instead, because that path runs tests/lib.sh's own signal teardown.
+fm_test_track_procevent_home "$PARENT" "$CLAIMS"
 cleanup() {
   local worker_pid='' wait_attempt=0
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \

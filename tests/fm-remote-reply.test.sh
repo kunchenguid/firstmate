@@ -14,6 +14,10 @@ REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
+# The reply relay arms a listener in the parent home. The EXIT path below sweeps
+# it; declaring the home is what retires it when the run is interrupted instead,
+# because that path runs tests/lib.sh's own signal teardown.
+fm_test_track_procevent_home "$PARENT" "$CLAIMS"
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 # The recorded worker pid is the serving child, not its restart supervisor, so

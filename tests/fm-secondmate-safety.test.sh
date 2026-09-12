@@ -2520,6 +2520,7 @@ SH
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-absent-fake/pane.txt" \
     XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
+    FM_PROCEVENT_CLAIM_ROOT="$claim_root" \
     FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
   # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.

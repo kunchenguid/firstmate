@@ -82,9 +82,10 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT/INT/TERM. A test file that needs extra teardown (e.g. killing a
-# daemon) should define its own EXIT trap and call fm_test_cleanup from inside
-# it so registered dirs are still removed.
+# on EXIT/INT/TERM/HUP/QUIT. A test file that needs extra teardown (e.g. stopping
+# an owned child before its fixture disappears) should route EXIT and those
+# signal traps through that teardown, then call fm_test_cleanup before deleting
+# fixture directories. See tests/fm-test-fixture-cleanup.test.sh.
 #
 # The call site is almost always `TMP_ROOT=$(fm_test_tmproot prefix)`, which
 # forks a subshell to capture stdout. Anything that function does to the
@@ -115,15 +116,25 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 #
 # A process-event runner is detached into its own process group and reparents to
 # init, so removing a fixture directory does not stop one: only sweeping the home
-# that owns it does. Registration goes through a `$$`-keyed registry file for the
-# same reason the temp roots do - a fixture home is almost always built inside a
-# command substitution (`home=$(make_home x)`), and an array append there never
-# reaches the caller, so a suite that tracked its homes in a shell array was
-# silently tracking nothing and left every runner it started behind.
+# that owns it does. That is why the sweep runs from every teardown path here
+# rather than from a suite's happy path - a listener armed by a case that then
+# fails, or by a run that is signalled part way through, is exactly the one that
+# survives to poll a target that no longer exists.
 #
-# The sweep is scoped to the exact home (and its claim root when the suite uses a
-# private one). It never matches on a script or process name, which would reach
-# into another home's live runners.
+# Reaping is declaration-driven and opt-in: a home is swept only when the suite
+# named it through fm_test_track_procevent_home. Pass the claim root used to arm
+# that home's sources; omitting it uses the FM_PROCEVENT_CLAIM_ROOT environment
+# value at cleanup time. Nothing is discovered, and nothing matches on a script
+# or process name, which would reach into another home's live runners.
+# Registration goes through a `$$`-keyed registry file for the same reason the
+# temp roots do - a fixture home is almost always built inside a command
+# substitution (`home=$(make_home x)`), and an array append there never reaches
+# the caller, so a suite that tracked its homes in a shell array was silently
+# tracking nothing and left every runner it started behind.
+#
+# A suite that forgets to declare still leaks its runner. What bounds that leak
+# is the claim root this library defaults FM_PROCEVENT_CLAIM_ROOT to, below,
+# once fm_test_tmproot is defined.
 
 FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
 
@@ -189,6 +200,24 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# The machine-wide claim root, defaulted into a fixture root this run owns. A
+# suite that neither declares its home nor names its own claim root would
+# otherwise resolve to the developer's real
+# ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims and write
+# claims into, and take locks in, the store the live boards' runners use. Taking
+# it from fm_test_tmproot keeps one owner for it: it is registered for teardown
+# like every other fixture root, carries the marker identifying this shell, and
+# is reaped as a stale orphan by a later run if this one is killed outright.
+# A value already set when this library is sourced, including one inherited
+# from a parent test process, is used without registering its path for removal.
+if [ -z "${FM_PROCEVENT_CLAIM_ROOT:-}" ]; then
+  FM_PROCEVENT_CLAIM_ROOT=$(fm_test_tmproot fm-test-procevent-claims) || {
+    rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"
+    return 1
+  }
+fi
+export FM_PROCEVENT_CLAIM_ROOT
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
@@ -209,6 +238,8 @@ fm_test_reap_orphans() {
   now=$(date +%s)
   for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
     [ -e "$marker" ] || continue
+    mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
+    [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
     case "$owner_pid" in
@@ -220,8 +251,6 @@ fm_test_reap_orphans() {
         fi
         ;;
     esac
-    mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
-    [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
     if [ -d "$dir" ] && [ ! -L "$dir" ]; then
       find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
