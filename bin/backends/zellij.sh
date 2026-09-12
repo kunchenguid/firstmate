@@ -63,7 +63,7 @@
 #      contradicts the design report's assumption ("acceptable for tmux and
 #      zellij") and required a different implementation strategy - see
 #      fm_backend_zellij_current_path below and docs/zellij-backend.md
-#      "Worktree-path discovery: pane_cwd does not track a subshell".
+#      "Current operation and safety" (the pane_cwd note).
 #   5. `new-tab` DOES steal focus from an attached client with NO flag to
 #      suppress it (unlike herdr's --no-focus and tmux's new-window -d).
 #      Mitigated (fm_backend_zellij_create_task): capture the previously
@@ -391,8 +391,8 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # Mirrors tmux's pane_current_path poll used for pane-arrival detection after
 # fm-spawn.sh leases a slot and has the pane open a nested shell in it.
 #
-# Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
-# does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
+# Verified pitfall (docs/zellij-backend.md "Current operation and safety",
+# the pane_cwd note): `list-panes --json`'s `pane_cwd` DOES reflect a
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN at
 # whatever directory the pane's shell was in when it launched a nested shell
 # (the spawn shape) or an interactive `treehouse get` or `treehouse enter`
@@ -404,7 +404,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # (unlike herdr's `foreground_cwd`), so passive JSON polling cannot solve
 # this. Active probe instead: print the pane's `$PWD` with a unique marker
 # (atomically submitted, mirroring send_text_line), briefly settle, then capture
-# and read only that marker line. Scoped to fm-spawn.sh's own worktree-discovery
+# and read only that marker line. Scoped to fm-spawn.sh's own pane-arrival
 # poll loop (the only caller of this op), where injecting a harmless extra
 # command before the harness ever launches is an acceptable trade for a reliable
 # answer.

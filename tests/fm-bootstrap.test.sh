@@ -41,7 +41,10 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease, and its `return --help`
-# --if-lease-holder, only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# --if-lease-holder, only when FM_FAKE_TREEHOUSE_LEASE_HELP=1; with
+# FM_FAKE_TREEHOUSE_LEASE_HELP=get-only it advertises --lease alone, the shape
+# of a Treehouse older than v2.1.0 (durable get without the holder-checked
+# return) that the floor must report as MISSING.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -67,11 +70,10 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
-  else
-    printf '%s\n' 'Usage: treehouse get'
-  fi
+  case "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" in
+    1|get-only) printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]' ;;
+    *) printf '%s\n' 'Usage: treehouse get' ;;
+  esac
   exit 0
 fi
 if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
@@ -308,6 +310,7 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+treehouse with get --lease but no return --if-lease-holder reports an upgrade^get-only^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
