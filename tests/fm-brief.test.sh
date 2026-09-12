@@ -615,6 +615,10 @@ test_secondmate_marked_request_reporting_contract() {
 
   assert_grep 'A marked request requires one correlated answer after the work' "$brief" \
     "secondmate charter did not require the correlated answer after the work"
+  assert_grep 'At every turn boundary, check this inbox before choosing or dispatching new work, refilling capacity, or handling a routine supervision wake.' "$brief" \
+    "secondmate charter did not prioritize parent instructions ahead of recurring local work"
+  assert_grep 'do not let repeated local wake/refill cycles starve it' "$brief" \
+    "secondmate charter did not close the observed parent-control starvation path"
   assert_grep 'does not require a separate receipt or start acknowledgement' "$brief" \
     "secondmate charter did not reject a separate receipt/start acknowledgement"
   assert_grep "Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started." "$brief" \
