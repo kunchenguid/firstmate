@@ -923,6 +923,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 RELAUNCH_REPLACEMENT_PENDING=0
+SPAWN_FRESH_AGY_HOOKS=
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
@@ -982,6 +983,19 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  # agy's hook file is the one worktree-resident wiring git can see, and no task
+  # record names it until publication, so a fresh spawn that aborts before that
+  # must take it back out: left behind it is untracked work in a pooled
+  # worktree, which refuses the NEXT spawn of ANY harness
+  # (freshen_spawn_worktree_base). Publication hands the removal to teardown and
+  # clears the path; a relaunch's record already exists, so its own incarnation
+  # unwinds through clear_relaunch_harness_wiring above instead.
+  if [ -n "$SPAWN_FRESH_AGY_HOOKS" ]; then
+    if ! rm -f -- "$SPAWN_FRESH_AGY_HOOKS"; then
+      echo "warning: could not remove the agy workspace hook at $SPAWN_FRESH_AGY_HOOKS after aborting the spawn of $ID" >&2
+    fi
+    SPAWN_FRESH_AGY_HOOKS=
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -3380,6 +3394,7 @@ if [ "$KIND" != secondmate ]; then
         a_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
         printf '{"fm-firstmate":{"PreInvocation":[{"type":"command","command":"%s"}],"Stop":[{"type":"command","command":"%s"}]}}\n' \
           "$a_before" "$a_stop" > "$AGY_HOOKS"
+        [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_AGY_HOOKS=$AGY_HOOKS
       fi
       ;;
     kimi*)
@@ -3839,6 +3854,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  SPAWN_FRESH_AGY_HOOKS=
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created

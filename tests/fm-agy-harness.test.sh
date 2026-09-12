@@ -289,6 +289,50 @@ EOF
   pass "fm-teardown: a symlinked .agents parent is never followed out of the worktree"
 }
 
+test_prelaunch_abort_removes_the_workspace_hooks() {
+  local rec dir home proj wt fakebin id second out rc
+  id="agy-abort-$$"
+  second="claude-after-abort-$$"
+  rec=$(make_case prelaunch-abort "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  # Fail the first command the spawn runs after writing the hooks file and
+  # before publishing the task record, so the abort lands in exactly the window
+  # where no record yet names that file.
+  cat > "$fakebin/date" <<'SH'
+#!/bin/sh
+if [ -e "${FM_FAKE_DATE_ABORT_AFTER:-}" ] && [ ! -e "$FM_FAKE_DATE_ABORT_FLAG" ]; then
+  : > "$FM_FAKE_DATE_ABORT_FLAG"
+  exit 1
+fi
+exec /bin/date "$@"
+SH
+  chmod +x "$fakebin/date"
+  export FM_FAKE_DATE_ABORT_AFTER="$wt/.agents/hooks.json"
+  export FM_FAKE_DATE_ABORT_FLAG="$dir/date-aborted"
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  rc=$?
+  unset FM_FAKE_DATE_ABORT_AFTER FM_FAKE_DATE_ABORT_FLAG
+  rm -f "$fakebin/date"
+  [ "$rc" -ne 0 ] || fail "the injected pre-publication failure did not abort the agy spawn"$'\n'"$out"
+  assert_present "$dir/date-aborted" "the pre-publication failure was never injected"
+  assert_absent "$home/state/$id.meta" "an aborted agy spawn published a task record"
+  [ ! -s "$dir/launch.log" ] || fail "an aborted agy spawn still delivered a launch command"$'\n'"$(<"$dir/launch.log")"
+  assert_absent "$wt/.agents/hooks.json" "an aborted agy spawn left its workspace hooks file behind"
+  [ -z "$(git -C "$wt" status --porcelain)" ] \
+    || fail "an aborted agy spawn left untracked work in the worktree: $(git -C "$wt" status --porcelain)"
+  # The hooks file is git-visible, so a leftover refuses the NEXT spawn into the
+  # reused worktree for every harness, not just agy.
+  fm_fake_exit0 "$fakebin" claude
+  mkdir -p "$home/data/$second"
+  cp "$home/data/$id/brief.md" "$home/data/$second/brief.md"
+  out=$(run_spawn_as "$dir" "$home" "$proj" "$wt" "$fakebin" "$second" claude --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 0 "$rc" "a later spawn into the reused worktree was refused after an aborted agy spawn"$'\n'"$out"
+  pass "fm-spawn: an agy spawn aborted before publication removes its workspace hooks"
+}
+
 test_spawn_refuses_when_only_the_ide_wrapper_is_installed() {
   local rec dir home proj wt fakebin id out rc
   id="agy-missing-cli-$$"
@@ -334,6 +378,7 @@ test_unsupported_effort_is_recorded_and_omitted
 test_secondmate_is_refused_and_control_is_verified
 test_teardown_removes_workspace_hooks
 test_spawn_refuses_when_only_the_ide_wrapper_is_installed
+test_prelaunch_abort_removes_the_workspace_hooks
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks
 test_unforced_teardown_removes_workspace_hooks
 test_unforced_teardown_still_refuses_real_worktree_work
