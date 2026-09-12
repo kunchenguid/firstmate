@@ -75,15 +75,21 @@ EOF
   printf '%s|%s|%s|%s|%s\n' "$dir" "$home" "$proj" "$wt" "$fakebin"
 }
 
-run_spawn() {
-  local dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
-  shift 6
+run_spawn_as() {
+  local dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 harness=$7
+  shift 7
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX='fake,1,0' \
     FM_FAKE_LAUNCH_LOG="$dir/launch.log" PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness agy "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness "$harness" "$@" 2>&1
+}
+
+run_spawn() {
+  local dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
+  run_spawn_as "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" agy "$@"
 }
 
 test_spawn_writes_hooks_and_resolves_launch_axes() {
@@ -161,7 +167,7 @@ EOF
   assert_contains "$out" 'crewmate/scout adapter only' "agy secondmate refusal did not explain the boundary"
   [ "$(fm_control_harness_family agy)" = agy ] || fail "agy recorded family did not resolve"
   fm_control_harness_family agyd && fail "an agy-containing command must not claim the agy adapter family"
-  [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy interrupt key was not Escape"
+  [ "$(fm_control_interrupt_key agy)" = C-c ] || fail "agy interrupt key was not Ctrl+C"
   [ "$(fm_control_exit_command agy)" = C-d ] || fail "agy exit command was not Ctrl+D"
   fm_control_harness_supports_kind agy ship || fail "agy should support ship tasks"
   fm_control_harness_supports_kind agy scout || fail "agy should support scout tasks"
@@ -188,7 +194,31 @@ EOF
   pass "fm-teardown: agy removes its task-local hooks file"
 }
 
+test_teardown_leaves_a_non_agy_tasks_workspace_hooks() {
+  local rec dir home proj wt fakebin id out rc owned
+  id="claude-hooks-$$"
+  owned='{"project-owned":{"Stop":[]}}'
+  rec=$(make_case foreign-hooks "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_fake_exit0 "$fakebin" claude
+  out=$(run_spawn_as "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" claude --mode no-mistakes --yolo off) \
+    || fail "claude spawn for the foreign hooks test failed"$'\n'"$out"
+  mkdir -p "$wt/.agents"
+  printf '%s\n' "$owned" > "$wt/.agents/hooks.json"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$BASE_PATH" "$TEARDOWN" "$id" --force 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "claude teardown should succeed"$'\n'"$out"
+  assert_present "$wt/.agents/hooks.json" "a non-agy task's workspace hooks file was deleted by teardown"
+  [ "$(<"$wt/.agents/hooks.json")" = "$owned" ] \
+    || fail "a non-agy task's workspace hooks file was rewritten by teardown"
+  pass "fm-teardown: a non-agy task's .agents/hooks.json survives teardown"
+}
+
 test_spawn_writes_hooks_and_resolves_launch_axes
 test_unsupported_effort_is_recorded_and_omitted
 test_secondmate_is_refused_and_control_is_key_based
 test_teardown_removes_workspace_hooks
+test_teardown_leaves_a_non_agy_tasks_workspace_hooks

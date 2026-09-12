@@ -17,11 +17,11 @@ agy is not verified or supported as a primary or secondmate harness.
 | Hook location | agy discovers `.agents/hooks.json` by walking from its cwd to the enclosing git repository, so `bin/fm-spawn.sh` writes this one file inside the task's isolated worktree and `bin/fm-teardown.sh` removes it. |
 | Hook scope | The workspace-local hook is the only approved agy worktree write, and Firstmate never edits the shared `~/.gemini/config/hooks.json`. |
 | Interactive limitation | `PreInvocation` and populated `workspacePaths` were verified in interactive mode, while headless `PreInvocation` and task-identifying `workspacePaths` were not established and are irrelevant because the worker launch is interactive. |
-| Interrupt | One `Ctrl+C` cancels the active turn and leaves the session alive for the next prompt. |
+| Interrupt | One `Ctrl+C` cancels the active turn and leaves the session alive for the next prompt, and it is what `fm_control_interrupt_key` returns; Escape was not observed to cancel a turn and is not used. |
 | Exit | `Ctrl+D` exits cleanly, and double `Ctrl+C` is also supported by agy; the control plane uses `Ctrl+D` as the deterministic exit key. |
 | Resume | agy accepts `--continue`/`-c` and `--conversation <id>`, and prints a conversation id in its exit resume hint. |
 | Trust | No separate trust-dialog path was observed, and `--dangerously-skip-permissions` is required for unattended tool work. |
-| Detection | No agy-specific environment marker was established, so Firstmate detects the exact `agy` process name in ancestry and liveness classification. |
+| Detection | The installed `agy` is a native Mach-O arm64 executable rather than a node bundle, so its process `comm` is the literal `agy`, and no agy-specific environment marker was established. agy does not export `GEMINI_CLI`, which it carries only as a surface enum value alongside `ANTIGRAVITY`, so gemini's marker never precedes agy's ancestry match. Firstmate therefore detects the exact `agy` process name in ancestry and liveness classification. |
 
 ## Launch and lifecycle wiring
 
@@ -29,7 +29,7 @@ The launch template keeps agy interactive and supplies the initial brief with `-
 The hook file uses agy's direct command-hook schema with `PreInvocation` and `Stop` arrays.
 Each generated command is bound to the task id, state directory, and minted busy generation.
 An existing `.agents/hooks.json` is preserved and causes the canonical agy spawn to refuse rather than overwrite an unknown workspace hook.
-The generated file is excluded through the worktree's git info exclude and is removed before a pooled worktree is returned.
+The generated file is left untracked rather than added to the shared repository's git info exclude, which every worktree including the primary checkout would see, and it is removed at teardown - only for a task whose recorded harness is agy - before a pooled worktree is returned.
 
 ## Known gaps
 

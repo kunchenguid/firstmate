@@ -3373,7 +3373,6 @@ if [ "$KIND" != secondmate ]; then
         a_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
         printf '{"fm-firstmate":{"PreInvocation":[{"type":"command","command":"%s"}],"Stop":[{"type":"command","command":"%s"}]}}\n' \
           "$a_before" "$a_stop" > "$WT/.agents/hooks.json"
-        exclude_path '.agents/hooks.json'
       fi
       ;;
     kimi*)

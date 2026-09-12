@@ -53,7 +53,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
-    agy) printf 'C-d\tEscape\t1\t\n' ;;
+    agy) printf 'C-d\tC-c\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
