@@ -325,7 +325,7 @@ foreground_arm='$ bin/fm-watch-arm.sh'
 if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
 fi
-arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
+arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (spawned|started|unchanged|not armed|read-only)' || true)
 [ "$arm_tool_result_count" -eq 1 ] || fail "Pi model re-armed from memory instead of the extension (tool-result count $arm_tool_result_count)"
 
 pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)

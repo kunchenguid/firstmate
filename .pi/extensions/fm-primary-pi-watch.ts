@@ -918,6 +918,15 @@ export default function (pi: ExtensionAPI) {
         current = latest;
         continue;
       }
+      const restoredChild = restoration.armChild;
+      const supersedingPending = restoredChild ? armPendingActionable.get(restoredChild) : undefined;
+      if (restoredChild && supersedingPending) {
+        const closed = armClose.get(restoredChild);
+        if (closed) await closed;
+        if (!generationIsLive(owner)) return restoration;
+        current = beginActionableRestoration(owner, supersedingPending);
+        continue;
+      }
       const repairChild = owner.child;
       if (!repairChild || repairChild === restoration.armChild) return restoration;
       const ready = await waitForReadiness(repairChild);

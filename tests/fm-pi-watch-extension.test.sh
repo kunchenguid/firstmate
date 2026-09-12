@@ -429,12 +429,14 @@ EOF
 }
 
 test_pi_three_overlapping_actionable_closes_restore_latest_liveness() {
-  local order repo home plugin log trigger ready stop live out status
+  local order repo home plugin log trigger output close ready stop live out status
   for order in a-first b-first; do
     repo="$TMP_ROOT/pi-actionable-overlap-$order-root"
     home="$TMP_ROOT/pi-actionable-overlap-$order-home"
     log="$TMP_ROOT/pi-actionable-overlap-$order.log"
     trigger="$TMP_ROOT/pi-actionable-overlap-$order.trigger"
+    output="$TMP_ROOT/pi-actionable-overlap-$order.output"
+    close="$TMP_ROOT/pi-actionable-overlap-$order.close"
     ready="$TMP_ROOT/pi-actionable-overlap-$order.ready"
     stop="$TMP_ROOT/pi-actionable-overlap-$order.stop"
     live="$TMP_ROOT/pi-actionable-overlap-$order.live"
@@ -478,6 +480,11 @@ if [ "$count" -le 3 ]; then
     *) label=C ;;
   esac
   printf 'signal: overlap wake %s\n' "$label"
+  if [ "$count" -eq 3 ]; then
+    sleep 0.1
+    printf '%s\n' "$$" > "$FM_OUTPUT_FILE"
+    while [ ! -e "$FM_CLOSE_FILE" ]; do sleep 0.02; done
+  fi
   exit 0
 fi
 printf '%s\n' "$$" > "${FM_LIVE_FILE:?}"
@@ -488,7 +495,8 @@ while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
-      FM_TRIGGER_FILE="$trigger" FM_READY_FILE="$ready" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+      FM_TRIGGER_FILE="$trigger" FM_OUTPUT_FILE="$output" FM_CLOSE_FILE="$close" \
+      FM_READY_FILE="$ready" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
       FM_REAL_WATCH_ARM="$ROOT/bin/fm-watch-arm.sh" FM_REAL_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
       FM_REAL_WATCH_PATH="$ROOT/bin/fm-watch.sh" \
       FM_SETTLE_ORDER="$order" \
@@ -588,12 +596,17 @@ if (process.env.FM_SETTLE_ORDER === "b-first") {
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close B\n");
 await waitFor(() => armRows().length === 3, "successor C");
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close C\n");
-await waitFor(() => armRows().length === 4 && existsSync(process.env.FM_LIVE_FILE), "successor D before A settlement");
+await waitFor(() => existsSync(process.env.FM_OUTPUT_FILE), "successor C actionable output");
+settlements.A.resolve();
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (offers.join("") !== "A") throw new Error(`wake B escaped before successor C closed: ${offers.join(",")}`);
+if (prompts.length !== 0) throw new Error(`pre-close restoration leaked to main: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_CLOSE_FILE, "close C\n");
+await waitFor(() => armRows().length === 4 && existsSync(process.env.FM_LIVE_FILE), "successor D after C close");
 const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
 if (!pidAlive(livePid)) throw new Error(`successor D was not alive: ${livePid}`);
-if (offers.join("") !== "A") throw new Error(`later wake delivery escaped serialization before A settled: ${offers.join(",")}`);
+if (offers.join("") !== "A") throw new Error(`later wake delivery escaped before D readiness: ${offers.join(",")}`);
 acknowledgeRecovery();
-settlements.A.resolve();
 await new Promise((resolve) => setTimeout(resolve, 80));
 if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(livePid)) {
   throw new Error("stale restoration retired successor D before its readiness result");
