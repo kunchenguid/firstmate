@@ -1005,7 +1005,7 @@ test_run_gate_and_scope_are_silent() {
   pass "run wrapper: ordinary ineligible opens stay silent-zero and Pi preflight gets an explicit silent stand-down"
 }
 
-# --- the pre-compact stow gate (bin/fm-precompact-stow.sh) ---------------------
+# --- the pre-compact stow runner (bin/fm-precompact-stow.sh) -------------------
 
 run_gate() {  # <root> [args...]
   local root=$1
@@ -1014,93 +1014,211 @@ run_gate() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$GATE" "$@"
 }
 
-test_precompact_gate_blocks_manual_once_claude() {
+# A stub headless agent: every invocation appends one line naming its cwd and
+# argv (the marked prompt rides as the final argument), so the tests assert
+# what the detached pass actually received through the public override.
+make_stub_agent() {  # <root>
+  local dir=$1/stubbin
+  mkdir -p "$dir"
+  cat > "$dir/stub-agent" <<'SH'
+#!/usr/bin/env bash
+printf 'call cwd=%s argv=%s\n' "$(pwd)" "$*" >> "${STOW_CALLS_FILE:?}"
+exit "${STOW_AGENT_RC:-0}"
+SH
+  chmod +x "$dir/stub-agent"
+}
+
+wait_for_stub_calls() {  # <root> <count>
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ "$(grep -c . "$1/stow-calls" 2>/dev/null || echo 0)" -ge "$2" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+wait_for_file() {  # <path> <seconds>
+  local i waited=0 deadline=$(( $2 * 5 ))
+  while [ "$waited" -lt "$deadline" ]; do
+    [ -s "$1" ] && return 0
+    sleep 0.2
+    waited=$(( waited + 1 ))
+  done
+  [ -s "$1" ]
+}
+
+test_precompact_gate_performs_stow_manual_claude() {
   local root="$TMP_ROOT/gate-manual" out status=0
   make_run_primary "$root"
-  out=$(printf '{"hook_event_name":"PreCompact","trigger":"manual"}' \
-    | run_gate "$root" --claude 2>&1 >/dev/null) || status=$?
-  expect_code 2 "$status" "the first manual compaction must block on claude"
-  assert_contains "$out" "/stow" "the block message did not ask for a /stow pass"
-  [ -f "$root/state/.precompact-stow-gate" ] \
-    || fail "the blocked manual compaction did not arm its one-shot marker"
-  status=0
-  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --claude 2>&1) || status=$?
-  expect_code 0 "$status" "the manual compaction retry must pass"
-  [ -z "$out" ] || fail "the passed retry printed output: $out"
-  [ ! -f "$root/state/.precompact-stow-gate" ] \
-    || fail "the retry did not consume the one-shot marker"
-  pass "pre-compact gate: a manual compaction blocks once with the /stow ask, then the retry passes"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
+  out=$(printf '{"hook_event_name":"PreCompact","trigger":"manual","session_id":"sess-manual-1"}' \
+    | run_gate "$root" --claude 2>&1) || status=$?
+  expect_code 0 "$status" "a manual compaction must never be blocked on claude"
+  [ -z "$out" ] || fail "the stow runner printed output: $out"
+  wait_for_stub_calls "$root" 1 \
+    || fail "the manual compaction did not launch the detached stow pass"
+  assert_contains "$(cat "$root/stow-calls")" "cwd=$root" \
+    "the stow pass did not run from the home root"
+  assert_contains "$(cat "$root/stow-calls")" "FIRSTMATE_OP" \
+    "the stow prompt was not marked as firstmate operational input"
+  assert_contains "$(cat "$root/stow-calls")" "/stow skill" \
+    "the stow prompt did not instruct the skill pass"
+  wait_for_file "$root/state/.precompact-stow-last" 10 \
+    || fail "a completed stow pass did not record its cooldown timestamp"
+  [ ! -f "$root/state/.precompact-stow-run" ] \
+    || fail "the stow pass left its live-run marker behind"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a manual compaction performs the stow pass itself on claude and never blocks"
 }
 
-test_precompact_gate_codex_json_blocks_once() {
+test_precompact_gate_codex_agent_invoked() {
   local root="$TMP_ROOT/gate-codex" out status=0
   make_run_primary "$root"
-  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --codex) || status=$?
-  expect_code 0 "$status" "the codex gate must exit 0 while blocking"
-  assert_contains "$out" '"continue":false' "the codex block did not return continue:false"
-  assert_contains "$out" 'stopReason' "the codex block did not carry a stopReason"
-  [ -f "$root/state/.precompact-stow-gate" ] \
-    || fail "the codex block did not arm its one-shot marker"
-  status=0
-  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --codex) || status=$?
-  expect_code 0 "$status" "the codex retry must pass"
-  [ -z "$out" ] || fail "the codex retry printed output: $out"
-  pass "pre-compact gate: codex manual compactions get one continue:false round then pass"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
+  out=$(printf '{"trigger":"manual","session_id":"sess-codex-1"}' \
+    | run_gate "$root" --codex 2>&1) || status=$?
+  expect_code 0 "$status" "a manual compaction must never be blocked on codex"
+  [ -z "$out" ] || fail "the codex stow runner printed output: $out"
+  wait_for_stub_calls "$root" 1 \
+    || fail "the codex compaction did not launch the detached stow pass"
+  wait_for_file "$root/state/.precompact-stow-last" 10 \
+    || fail "the codex stow pass did not record its cooldown timestamp"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a codex compaction performs the stow pass and never blocks"
 }
 
-test_precompact_gate_auto_never_blocks() {
+test_precompact_gate_cooldown_and_stale_rearm() {
+  local root="$TMP_ROOT/gate-cooldown" out status=0 back
+  make_run_primary "$root"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  wait_for_stub_calls "$root" 1 || fail "the first compaction launched no stow pass"
+  wait_for_file "$root/state/.precompact-stow-last" 10 || fail "no cooldown timestamp landed"
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  sleep 1
+  [ "$(grep -c . "$root/stow-calls" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "a compaction inside the cooldown window relaunched the stow pass"
+  back=$(( $(date +%s) - 7200 ))
+  if [ "$(uname)" = Darwin ]; then printf '%s\n' "$back" > "$root/state/.precompact-stow-last"
+    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$root/state/.precompact-stow-last"
+  else printf '%s\n' "$back" > "$root/state/.precompact-stow-last"
+    touch -m -d "@$back" "$root/state/.precompact-stow-last"; fi
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  wait_for_stub_calls "$root" 2 \
+    || fail "a stale cooldown timestamp silenced a new compaction instead of re-arming the pass"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: the cooldown window holds and a stale timestamp re-arms the stow pass"
+}
+
+test_precompact_gate_auto_also_performs_stow() {
   local root="$TMP_ROOT/gate-auto" out status=0
   make_run_primary "$root"
-  status=0
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
   out=$(printf '{"trigger":"auto"}' | run_gate "$root" --claude 2>&1) || status=$?
   expect_code 0 "$status" "an auto compaction must never block on claude"
-  [ -z "$out" ] || fail "the claude auto path printed output: $out"
-  out=$(printf '{"trigger":"auto"}' | run_gate "$root" --codex) || status=$?
+  [ -z "$out" ] || fail "the auto path printed output: $out"
+  out=$(printf '{"trigger":"auto"}' | run_gate "$root" --codex 2>&1) || status=$?
   expect_code 0 "$status" "an auto compaction must never block on codex"
-  assert_contains "$out" 'systemMessage' "the codex auto advisory was missing"
-  assert_not_contains "$out" 'continue":false' "the codex auto path blocked compaction"
-  [ ! -f "$root/state/.precompact-stow-gate" ] \
-    || fail "an auto compaction armed the one-shot marker"
-  pass "pre-compact gate: auto compactions pass on both harnesses without arming the gate"
+  [ -z "$out" ] || fail "the codex auto path printed output: $out"
+  wait_for_stub_calls "$root" 1 \
+    || fail "an auto compaction launched no stow pass: an auto compaction is still a preCompact"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: auto compactions perform the stow pass without ever blocking"
 }
 
-test_precompact_gate_stale_marker_rearms() {
-  local root="$TMP_ROOT/gate-stale" out status=0 back
+test_precompact_gate_live_run_not_stacked() {
+  local root="$TMP_ROOT/gate-live-run" sleeper out status=0
   make_run_primary "$root"
-  back=$(( $(date +%s) - 7200 ))
-  if [ "$(uname)" = Darwin ]; then printf '%s\n' "$back" > "$root/state/.precompact-stow-gate"
-    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$root/state/.precompact-stow-gate"
-  else printf '%s\n' "$back" > "$root/state/.precompact-stow-gate"
-    touch -m -d "@$back" "$root/state/.precompact-stow-gate"; fi
-  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --claude 2>&1 >/dev/null) || status=$?
-  expect_code 2 "$status" "a marker past the gate window must not satisfy a new request"
-  pass "pre-compact gate: a stale marker re-arms instead of silencing later compactions"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
+  sleeper="$root/stubbin/sleeper"
+  cat > "$sleeper" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$sleeper"
+  "$sleeper" & sleeper=$!
+  printf '%s\n' "$sleeper" > "$root/state/.precompact-stow-run"
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  sleep 1
+  [ ! -f "$root/stow-calls" ] || [ -z "$(cat "$root/stow-calls")" ] \
+    || fail "a still-running stow pass was stacked onto"
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a still-running stow pass is not stacked onto"
+}
+
+test_precompact_gate_failed_pass_retries_next_compaction() {
+  local root="$TMP_ROOT/gate-failed" status=0
+  make_run_primary "$root"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" \
+    STOW_CALLS_FILE="$root/stow-calls" STOW_AGENT_RC=1
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  wait_for_stub_calls "$root" 1 || fail "the first compaction launched no stow pass"
+  sleep 1
+  [ ! -f "$root/state/.precompact-stow-last" ] \
+    || fail "a failed stow pass wrote the cooldown timestamp"
+  unset STOW_AGENT_RC
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  wait_for_stub_calls "$root" 2 \
+    || fail "a failed stow pass was not retried on the next compaction"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a failed pass records no cooldown and retries on the next compaction"
 }
 
 test_precompact_gate_stands_down_when_ineligible() {
   local root="$TMP_ROOT/run-gate-scope" base="$TMP_ROOT/gate-linked-base" linked="$TMP_ROOT/gate-linked"
   local out status=0
   make_run_primary "$root"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
   expect_silent_zero "gate env compaction" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
     FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
     "$GATE" --claude --trigger manual
-  assert_absent "$root/state/.precompact-stow-gate" "a gate agent armed the compaction gate"
+  sleep 1
+  [ ! -s "$root/stow-calls" ] \
+    || fail "a gate agent launched a stow pass"
 
   fm_git_worktree "$base" "$linked" fm/gate-linked
   mkdir -p "$linked/bin" "$linked/state"
   : > "$linked/AGENTS.md"
   expect_silent_zero "linked worktree compaction" run_gate "$linked" --claude --trigger manual
-  assert_absent "$linked/state/.precompact-stow-gate" "an unmarked task worktree armed the compaction gate"
-  pass "pre-compact gate: a gate agent and an unmarked task worktree never arm the compaction gate"
+  sleep 1
+  [ ! -s "$root/stow-calls" ] \
+    || fail "an unmarked task worktree launched a stow pass"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a gate agent and an unmarked task worktree never launch the stow pass"
 }
 
-test_precompact_gate_missing_trigger_defaults_to_asking() {
+test_precompact_gate_unwritable_state_never_wedges() {
+  local root="$TMP_ROOT/gate-readonly" out status=0
+  make_run_primary "$root"
+  chmod 0500 "$root/state"
+  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --claude 2>&1) || status=$?
+  chmod 0700 "$root/state"
+  expect_code 0 "$status" "an unwritable state directory must never block compaction"
+  [ -z "$out" ] || fail "the unwritable-state path printed output: $out"
+  pass "pre-compact runner: a state directory that rejects writes loses bookkeeping only, never the compaction"
+}
+
+test_precompact_gate_missing_trigger_defaults_to_performing() {
   local root="$TMP_ROOT/gate-no-trigger" out status=0
   make_run_primary "$root"
-  out=$(printf '{"hook_event_name":"PreCompact"}' | run_gate "$root" --codex) || status=$?
-  expect_code 0 "$status" "a payload with no trigger key must still gate safely"
-  assert_contains "$out" 'continue":false' "a missing trigger did not default to the manual gate"
-  pass "pre-compact gate: a payload without a trigger key defaults to asking once"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" STOW_CALLS_FILE="$root/stow-calls"
+  out=$(printf '{"hook_event_name":"PreCompact"}' | run_gate "$root" --codex 2>&1) || status=$?
+  expect_code 0 "$status" "a payload with no trigger key must still perform stow safely"
+  [ -z "$out" ] || fail "the missing-trigger path printed output: $out"
+  wait_for_stub_calls "$root" 1 \
+    || fail "a payload without a trigger key launched no stow pass"
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE
+  pass "pre-compact runner: a payload without a trigger key defaults to performing the pass"
 }
 
 test_postcompact_runs_compact_start() {
@@ -1144,12 +1262,15 @@ test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
-test_precompact_gate_blocks_manual_once_claude
-test_precompact_gate_codex_json_blocks_once
-test_precompact_gate_auto_never_blocks
-test_precompact_gate_stale_marker_rearms
+test_precompact_gate_performs_stow_manual_claude
+test_precompact_gate_codex_agent_invoked
+test_precompact_gate_cooldown_and_stale_rearm
+test_precompact_gate_auto_also_performs_stow
+test_precompact_gate_live_run_not_stacked
+test_precompact_gate_failed_pass_retries_next_compaction
 test_precompact_gate_stands_down_when_ineligible
-test_precompact_gate_missing_trigger_defaults_to_asking
+test_precompact_gate_unwritable_state_never_wedges
+test_precompact_gate_missing_trigger_defaults_to_performing
 test_postcompact_runs_compact_start
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
