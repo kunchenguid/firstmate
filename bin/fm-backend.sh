@@ -838,15 +838,15 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] [harness] -
   esac
 }
 
-fm_backend_agy_composer_content() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-} cap caps cursor capture_lines
+fm_backend_agy_composer_content() {  # <backend> <target> [expected-label] [comparison]
+  local backend=$1 target=$2 expected_label=${3:-} comparison=${4:-} cap caps cursor capture_lines
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux)
       cursor=$(fm_tmux_composer_cursor_row "$target") || return 1
       case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
       cap=$(fm_tmux_composer_capture "$target") || return 1
-      fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$cap" "$cursor" agy
+      fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$cap" "$cursor" agy "$comparison"
       ;;
     herdr)
       fm_backend_herdr_parse_target "$target" || return 1
@@ -857,16 +857,16 @@ fm_backend_agy_composer_content() {  # <backend> <target> [expected-label]
         cap=$(fm_backend_herdr_capture "$target" "$capture_lines") || return 1
         caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$capture_lines")
       fi
-      fm_composer_extract_selected_content "$caps" "$cap" '' agy
+      fm_composer_extract_selected_content "$caps" "$cap" '' agy "$comparison"
       ;;
-    zellij) fm_backend_zellij_composer_content "$target" "$expected_label" agy ;;
+    zellij) fm_backend_zellij_composer_content "$target" "$expected_label" agy "$comparison" ;;
     orca)
       cap=$(fm_backend_orca_composer_capture "$target" "$expected_label" agy) || return 1
-      fm_composer_extract_selected_content "$(fm_backend_orca_composer_caps agy)" "$cap" '' agy
+      fm_composer_extract_selected_content "$(fm_backend_orca_composer_caps agy)" "$cap" '' agy "$comparison"
       ;;
     cmux)
       cap=$(fm_backend_cmux_composer_capture "$target" "$expected_label" agy) || return 1
-      fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps agy)" "$cap" '' agy
+      fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps agy)" "$cap" '' agy "$comparison"
       ;;
     *) return 1 ;;
   esac
@@ -874,7 +874,7 @@ fm_backend_agy_composer_content() {  # <backend> <target> [expected-label]
 
 fm_backend_agy_composer_matches() {  # <backend> <target> <text> [expected-label]
   local backend=$1 target=$2 text=$3 expected_label=${4:-} actual expected
-  actual=$(fm_backend_agy_composer_content "$backend" "$target" "$expected_label") || return 1
+  actual=$(fm_backend_agy_composer_content "$backend" "$target" "$expected_label" compare) || return 1
   expected=$(fm_composer_normalize_compare_text "$text")
   actual=$(fm_composer_normalize_compare_text "$actual")
   [ "$actual" = "$expected" ]

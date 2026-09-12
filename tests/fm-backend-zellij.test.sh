@@ -1154,6 +1154,79 @@ test_send_text_submit_preserves_agent_glyph_within_wrapped_content() {
   pass "fm_backend_zellij_send_text_submit: preserves agent glyphs within wrapped content"
 }
 
+test_send_text_submit_agy_reconstructs_visual_wrap() {
+  local dir fb out boundary first second text typed empty
+  dir="$TMP_ROOT/submit-agy-visual-wrap"; mkdir -p "$dir/responses"
+  boundary=$(printf '─%.0s' {1..72})
+  first=$(printf 'A%.0s' {1..70})
+  second='BBBBBBBBBB'
+  text="$first$second"
+  typed="$boundary"$'\n> '"$first"$'\n  '"$second"$'\n'"$boundary"
+  empty="$boundary"$'\n>\n'"$boundary"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' "$empty" > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' "$typed" > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' "$empty" > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01 "" agy' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "an AGY mid-token visual wrap should submit, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "an AGY mid-token visual wrap should reach Enter"
+  pass "fm_backend_zellij_send_text_submit: AGY reconstructs mid-token visual wraps"
+}
+
+test_send_text_submit_agy_reconstructs_word_wrap() {
+  local dir fb out boundary first second text typed empty
+  dir="$TMP_ROOT/submit-agy-word-wrap"; mkdir -p "$dir/responses"
+  boundary=$(printf '─%.0s' {1..72})
+  first='first phrase'
+  second='second phrase'
+  text="$first $second"
+  typed="$boundary"$'\n> '"$first"$'\n  '"$second"$'\n'"$boundary"
+  empty="$boundary"$'\n>\n'"$boundary"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' "$empty" > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' "$typed" > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' "$empty" > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01 "" agy' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "an AGY word-boundary wrap should submit, got '$out'"
+  pass "fm_backend_zellij_send_text_submit: AGY reconstructs word-boundary wraps"
+}
+
+test_send_text_submit_agy_preserves_significant_spaces() {
+  local dir fb out boundary empty typed
+  dir="$TMP_ROOT/submit-agy-significant-spaces"; mkdir -p "$dir/responses"
+  boundary=$(printf '─%.0s' {1..72})
+  empty="$boundary"$'\n>\n'"$boundary"
+  typed="$boundary"$'\n> foo bar\n'"$boundary"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' "$empty" > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' "$typed" > "$dir/responses/6.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "foo  bar" 2 0.01 0.01 "" agy' "$ROOT" )
+  [ "$out" = agy-draft-conflict ] || fail "an AGY space mismatch should defer, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "an AGY space mismatch must not reach Enter"
+  pass "fm_backend_zellij_send_text_submit: AGY preserves significant spaces"
+}
+
 test_send_text_submit_rejects_stale_composer_above_live_shell() {
   local dir fb out
   dir="$TMP_ROOT/submit-live-shell"; mkdir -p "$dir/responses"
@@ -1212,6 +1285,21 @@ test_agy_composer_capture_preserves_long_draft() {
   assert_contains "$(cat "$dir/log")" $'\x1f''--ansi'$'\x1f''--full' \
     "AGY composer capture did not request the bounded full scrollback read"
   pass "fm_backend_zellij_composer_state: AGY preserves a 30-row draft beyond the default tail"
+}
+
+test_agy_composer_content_keeps_note_rows_separate() {
+  local dir fb out boundary content
+  dir="$TMP_ROOT/composer-agy-note-rows"; mkdir -p "$dir/responses"
+  boundary=$(printf '─%.0s' {1..72})
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' "$boundary"$'\n> first line\n  second line\n  third line\n'"$boundary" > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_content firstmate:7 "" agy' "$ROOT" )
+  content='first line second line third line'
+  [ "$out" = "$content" ] || fail "AGY note extraction must keep genuine rows separate, got '$out'"
+  pass "fm_backend_zellij_composer_content: AGY note extraction keeps genuine rows separate"
 }
 
 test_composer_state_dead_pane_is_unknown() {
@@ -1400,9 +1488,13 @@ test_send_text_submit_accepts_wrapped_boxed_text
 test_send_text_submit_accepts_wrapped_bare_text
 test_send_text_submit_preserves_non_agy_whitespace_contract
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
+test_send_text_submit_agy_reconstructs_visual_wrap
+test_send_text_submit_agy_reconstructs_word_wrap
+test_send_text_submit_agy_preserves_significant_spaces
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
 test_agy_composer_capture_preserves_long_draft
+test_agy_composer_content_keeps_note_rows_separate
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent

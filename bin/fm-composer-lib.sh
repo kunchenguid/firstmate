@@ -679,6 +679,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_AGY_ROW=-1
   FM_COMPOSER_SCAN_AGY_END=-1
   FM_COMPOSER_SCAN_AGY_BOUNDARY=-1
+  FM_COMPOSER_SCAN_AGY_WIDTH=0
   FM_COMPOSER_SCAN_AGY_AMBIGUOUS=0
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
@@ -688,7 +689,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0
+  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 boundary_width
   local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -741,10 +742,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         ;;
       *) leftbar_start=-1 ;;
     esac
-    if [ "$harness" = agy ] && _fm_composer_agy_boundary_row "$trimmed"; then
+    if [ "$harness" = agy ] && boundary_width=$(_fm_composer_agy_boundary_width "$trimmed"); then
       agy_boundary_count=$((agy_boundary_count + 1))
       if [ "$agy_boundary_count" -eq 1 ]; then
         agy_opening_row=$row
+        FM_COMPOSER_SCAN_AGY_WIDTH=$boundary_width
       elif [ "$agy_boundary_count" -eq 2 ]; then
         agy_closing_row=$row
       fi
@@ -1079,7 +1081,7 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
-_fm_composer_agy_boundary_row() {  # <trimmed-row>
+_fm_composer_agy_boundary_width() {  # <trimmed-row> -> character count
   local LC_ALL=C s=$1 b1 b2 b3 count=0
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
@@ -1095,7 +1097,12 @@ _fm_composer_agy_boundary_row() {  # <trimmed-row>
     count=$((count + 1))
     s=${s:3}
   done
-  [ "$count" -ge 16 ]
+  [ "$count" -ge 16 ] || return 1
+  printf '%s' "$count"
+}
+
+_fm_composer_agy_boundary_row() {  # <trimmed-row>
+  _fm_composer_agy_boundary_width "$1" >/dev/null
 }
 
 _fm_composer_agy_busy_scope() {  # <plain-screen>
@@ -1334,9 +1341,10 @@ _fm_composer_select_agy_cursorless() {
   FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
 }
 
-fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row] [harness]
-  local caps=$1 screen=$2 cursor=${3:-} harness=${4:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row] [harness] [compare]
+  local caps=$1 screen=$2 cursor=${3:-} harness=${4:-} compare=${5:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local agy_content_width=0 previous_full_row=0 content_length
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1347,6 +1355,9 @@ EOF
   _fm_composer_scan_screen "$plain" "$cursor" 1 "$harness"
   if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
     return 0
+  fi
+  if [ "$harness" = agy ] && [ "$compare" = compare ]; then
+    agy_content_width=$((FM_COMPOSER_SCAN_AGY_WIDTH - 2))
   fi
   if [ "$harness" = agy ] && [ "$FM_COMPOSER_SCAN_AGY_ROW" -lt 0 ]; then
     return 1
@@ -1423,10 +1434,20 @@ EOF
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
+      previous_full_row=0
       row=$((row + 1))
       continue
     fi
-    joined="${joined}${joined:+ }$content"
+    if [ "$compare" = compare ] && [ "$harness" = agy ] && [ "$previous_full_row" = 1 ]; then
+      joined="${joined}${content}"
+    else
+      joined="${joined}${joined:+ }$content"
+    fi
+    previous_full_row=0
+    if [ "$compare" = compare ] && [ "$harness" = agy ] && [ "$agy_content_width" -gt 0 ]; then
+      content_length=${#content}
+      [ "$content_length" -eq "$agy_content_width" ] && previous_full_row=1
+    fi
     row=$((row + 1))
   done
   printf '%s' "$joined"
