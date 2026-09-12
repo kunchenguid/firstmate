@@ -546,6 +546,8 @@ import { pathToFileURL } from "node:url";
 import { writeFileSync, existsSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const handlers = new Map(); let tool = null; let command = null; const sent = [];
+const primaryCtx = { sessionManager: { getSessionId: () => "primary-session" } };
+const childCtx = { sessionManager: { getSessionId: () => "nested-child-session" } };
 const pi = {
   on(e, h) { handlers.set(e, h); },
   registerCommand(n, o) { if (n === "fm-watch-arm-omp") command = o.handler; },
@@ -562,15 +564,22 @@ const result = await tool.execute();
 if (!/^watcher: started omp extension arm child 1;/.test(result.content[0].text)) throw new Error(`unexpected arm result: ${result.content[0].text}`);
 const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-loaded`, "utf8").split("\n");
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
+await handlers.get("session_start")({ type: "session_start" }, primaryCtx);
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
+await handlers.get("session_start")({ type: "session_start" }, childCtx);
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, childCtx);
+const afterChildShutdown = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(afterChildShutdown.content[0].text)) {
+  throw new Error(`nested child shutdown stopped the primary arm: ${afterChildShutdown.content[0].text}`);
+}
 await new Promise((r) => setTimeout(r, 2500));
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
 if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");
 // The wake is consumed when omp starts the next run with that exact prompt.
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
-await handlers.get("session_shutdown")({}, {});
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, primaryCtx);
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
 process.exit(0);
 EOF
@@ -578,7 +587,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
-  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+  pass ".omp watch extension: the primary session owns its arm across nested child shutdown, then delivers one follow-up"
 }
 
 test_detection_anchored_name_and_marker_precedence
