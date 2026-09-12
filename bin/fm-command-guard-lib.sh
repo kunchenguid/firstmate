@@ -63,10 +63,12 @@ fm_command_guard_emit() {  # <command>
 
 fm_command_guard_probe_preflight() {  # <home> <state-dir>
   local home=$1 state=$2 meta
-  [ -d "$home" ] && [ -r "$home" ] || return 1
-  [ -d "$state" ] && [ -r "$state" ] || return 1
+  [ -d "$home" ] && [ -r "$home" ] && [ -x "$home" ] || return 1
+  [ -d "$state" ] && [ -r "$state" ] && [ -x "$state" ] || return 1
   for meta in "$state"/*.meta; do
-    [ -e "$meta" ] || continue
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+      continue
+    fi
     [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
   done
 }

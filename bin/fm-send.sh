@@ -269,8 +269,6 @@ fi
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
-
 fm_send_id_from_meta() {  # <meta-file>
   local base
   base=${1##*/}
@@ -372,7 +370,7 @@ fm_send_resolve_target() {  # <raw-target>
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
       TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
-      TARGET_REMOTE_TARGET=$(fm_backend_target_of_meta "$meta")
+      TARGET_REMOTE_TARGET=$(fm_meta_get "$meta" remote_target)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -457,8 +455,12 @@ fm_send_task_selector_validate_locked() {
   [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || return 0
   [ -f "$TARGET_META" ] && [ ! -L "$TARGET_META" ] && [ -r "$TARGET_META" ] || return 1
   current_id=$(fm_send_id_from_meta "$TARGET_META")
-  current_target=$(fm_backend_target_of_meta "$TARGET_META")
   current_backend=$(fm_backend_of_meta "$TARGET_META")
+  if [ "$TARGET_BACKEND" = remote ]; then
+    current_target=$(fm_meta_get "$TARGET_META" remote_target)
+  else
+    current_target=$(fm_backend_target_of_meta "$TARGET_META")
+  fi
   if [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ]; then
     current_spawn_gen=$(fm_backend_meta_exact_value "$TARGET_META" spawn_gen 2>/dev/null || true)
   else
@@ -506,12 +508,14 @@ fm_send_cleanup() {
   fm_lease_guard_release || true
   return "$status"
 }
-if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ]; then
+if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
     trap 'fm_send_cleanup' EXIT
   fi
+fi
+if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ]; then
   SEND_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
   if ! fm_task_inbox_lock_acquire "$SEND_META_LOCK"; then
     echo "error: steer not sent: task metadata could not be locked for final guard validation" >&2
@@ -528,6 +532,8 @@ if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ]; then
     exit 1
   fi
 fi
+
+FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
@@ -909,7 +915,7 @@ else
     CURRENT_REMOTE_ID=$(fm_send_id_from_meta "$TARGET_META")
     CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
     CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-    CURRENT_REMOTE_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+    CURRENT_REMOTE_TARGET=$(fm_meta_get "$TARGET_META" remote_target)
     if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
       || [ "$CURRENT_REMOTE_TARGET" != "$TARGET_REMOTE_TARGET" ] \
       || [ -z "$CURRENT_REMOTE_HOST" ] \

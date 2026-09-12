@@ -177,7 +177,7 @@ setup_remote_parent_home() {  # <name> <remote-home> -> echoes home dir
   home=$(setup_home "$1")
   mkdir -p "$home/data"
   fm_write_meta "$home/state/rsm.meta" \
-    "window=fm-remote:p1" \
+    "window=remote:rsm" \
     "endpoint_task_id=rsm" \
     "harness=claude" \
     "kind=secondmate" \

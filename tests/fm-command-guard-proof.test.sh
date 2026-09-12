@@ -99,6 +99,22 @@ test_probe_protocol() {
   out=$(FM_HOME="$dir/home" "$CONTROL" --guard-capabilities 2>/dev/null); rc=$?
   [ "$rc" -ne 0 ] || fail "an inexact control probe was accepted"
   [ -z "$out" ] || fail "an inexact control probe emitted positive proof: $out"
+
+  dir=$(new_home probe-fail-closed)
+  ln -s "$dir/home/state/missing.meta" "$dir/home/state/dangling.meta"
+  out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json 2>/dev/null); rc=$?
+  [ "$rc" -ne 0 ] || fail "a dangling metadata symlink produced positive send proof"
+  [ -z "$out" ] || fail "a dangling metadata symlink emitted send proof: $out"
+  chmod 600 "$dir/home"
+  out=$(FM_HOME="$dir/home" "$CONTROL" --guard-capabilities --json 2>/dev/null); rc=$?
+  chmod 700 "$dir/home"
+  [ "$rc" -ne 0 ] || fail "an untraversable home produced positive control proof"
+  [ -z "$out" ] || fail "an untraversable home emitted control proof: $out"
+  chmod 600 "$dir/home/state"
+  out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json 2>/dev/null); rc=$?
+  chmod 700 "$dir/home/state"
+  [ "$rc" -ne 0 ] || fail "an untraversable state directory produced positive send proof"
+  [ -z "$out" ] || fail "an untraversable state directory emitted send proof: $out"
   pass "command guard proof: exact probes emit deterministic JSON and create no state"
 }
 
@@ -111,12 +127,14 @@ test_send_generation_and_endpoint_guards() {
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "matching send guards did not enqueue"
 
   rm -rf "$dir/home/state/t1.inbox" "$dir/home/state/pending-replies"
+  rm -f "$dir/home/state/.guard-watcher-stale-banner"
   : > "$dir/send.log"
   run_send "$dir" env FM_SEND_EXPECTED_SPAWN_GEN=stale \
     "$SEND" t1 "stale generation" >/dev/null 2>"$dir/err"; rc=$?
   [ "$rc" -ne 0 ] || fail "a stale generation was accepted"
   [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "stale generation created an inbox record"
   [ ! -s "$dir/send.log" ] || fail "stale generation rang a doorbell"
+  [ ! -e "$dir/home/state/.guard-watcher-stale-banner" ] || fail "stale generation changed guard state"
 
   run_send "$dir" env FM_SEND_EXPECTED_ENDPOINT=stale:sess \
     "$SEND" t1 "stale endpoint" >/dev/null 2>"$dir/err"; rc=$?
