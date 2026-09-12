@@ -19,9 +19,6 @@ cat > "$FAKEBIN/gh" <<'SH'
 set -o pipefail
 serve() {
   case "$*" in
-    "pr view "*" --json url --jq .url")
-      printf '%s\n' '{"url":"https://github.com/o/r/pull/7"}'
-      ;;
     "api /repos/o/r/pulls/7 --jq "*)
       printf '%s\n' '{"user":{"login":"prauthor"},"base":{"sha":"base123"}}'
       ;;
@@ -70,7 +67,7 @@ SH
 chmod +x "$FAKEBIN/gh"
 
 run_reviewers() {
-  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
 }
 
 test_candidates_use_api_logins_and_unique_commit_counts() {
@@ -103,6 +100,11 @@ test_refusals_exit_nonzero() {
   status=0
   PATH="$FAKEBIN:$PATH" "$SCRIPT" not-a-pr >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "lookup refusal exited zero"
+
+  status=0
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a bare number resolves against the ambient repository and is not an address"
   pass "argument and lookup refusals exit nonzero"
 }
 

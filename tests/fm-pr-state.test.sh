@@ -27,9 +27,6 @@ set -o pipefail
 head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
 serve() {
   case "$*" in
-    "pr view "*" --json url --jq .url")
-      printf '%s\n' '{"url":"https://github.com/o/r/pull/7"}'
-      ;;
     "pr view "*" --json mergeable,headRefOid,reviewDecision --jq "*)
       jq -n --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
         --arg head "${FM_TEST_VIEW_HEAD-$head}" \
@@ -76,7 +73,7 @@ SH
 chmod +x "$FAKEBIN/gh"
 
 run_state() {
-  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
 }
 
 # reviews "<login> <state> <commit> <submitted_at>"... prints the JSON array
@@ -93,18 +90,19 @@ test_clean_pr_is_silent_and_ignores_advisory_failures() {
   pass "clean PR is silent and advisory failures do not block"
 }
 
-test_closed_and_merged_state_are_reported() {
+test_terminal_state_is_the_whole_report() {
   local out
-  out=$(FM_TEST_STATE=closed run_state) || fail "closed fixture was refused"
-  assert_contains "$out" 'STATE: closed' "a closed pull request must report its state"
+  out=$(FM_TEST_STATE=closed FM_TEST_VIEW_MERGEABLE=null run_state) \
+    || fail "closed fixture was refused"
+  [ "$out" = 'STATE: closed' ] \
+    || fail "a closed pull request leaves the author nothing else to read, got: $out"
 
-  out=$(FM_TEST_STATE=closed FM_TEST_MERGED_AT=2019-10-04T16:01:04Z run_state) \
+  out=$(FM_TEST_STATE=closed FM_TEST_MERGED_AT=2019-10-04T16:01:04Z \
+    FM_TEST_VIEW_MERGEABLE=null FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED run_state) \
     || fail "merged fixture was refused"
-  assert_contains "$out" 'STATE: merged at 2019-10-04T16:01:04Z' \
-    "a merged pull request must say so rather than reading as merely closed"
-  assert_not_contains "$out" 'STATE: closed' \
-    "merged is the more specific verdict and must not be doubled with closed"
-  pass "closed and merged pull requests report their terminal state"
+  [ "$out" = 'STATE: merged at 2019-10-04T16:01:04Z' ] \
+    || fail "a merged pull request says so and reports no blocker after it, got: $out"
+  pass "a terminal pull request reports that state and nothing else"
 }
 
 test_draft_is_a_blocker() {
@@ -236,12 +234,12 @@ test_no_reported_checks_is_unverified() {
   pass "a head with no reported checks is unverified rather than ready"
 }
 
-test_help_discloses_unavailable_thread_resolution() {
+test_help_states_thread_resolution_is_out_of_scope() {
   local out
   out=$("$SCRIPT" --help) || fail "help was refused"
-  assert_contains "$out" 'Unresolved review-thread state is not reported' \
-    "help must disclose the REST-only thread-resolution limit"
-  pass "help discloses the unavailable REST thread-resolution signal"
+  assert_contains "$out" "Unresolved review-thread state is out of this command's scope" \
+    "help must state the thread-resolution boundary without inventing a reason for it"
+  pass "help states the thread-resolution boundary as scope"
 }
 
 test_unknown_mergeability_is_a_blocker() {
@@ -275,11 +273,16 @@ test_refusals_exit_nonzero() {
   status=0
   PATH="$FAKEBIN:$PATH" "$SCRIPT" not-a-pr >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "lookup refusal exited zero"
+
+  status=0
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a bare number resolves against the ambient repository and is not an address"
   pass "argument and lookup refusals exit nonzero"
 }
 
 test_clean_pr_is_silent_and_ignores_advisory_failures
-test_closed_and_merged_state_are_reported
+test_terminal_state_is_the_whole_report
 test_draft_is_a_blocker
 test_head_moving_mid_read_invalidates_the_result
 test_stale_blocking_reviews_explain_a_blocking_decision
@@ -291,7 +294,7 @@ test_pending_approval_is_not_a_blocker
 test_required_failure_is_a_blocker
 test_no_required_checks_is_silent
 test_no_reported_checks_is_unverified
-test_help_discloses_unavailable_thread_resolution
+test_help_states_thread_resolution_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
 test_mergeability_uses_current_pr_view_value_without_retry
 test_refusals_exit_nonzero

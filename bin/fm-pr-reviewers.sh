@@ -6,9 +6,10 @@
 # commit is counted once even when it touched multiple changed paths. Candidates
 # use GitHub's own commit author.login mapping; names and email addresses are
 # never converted or guessed. The pull-request author and Bot accounts are
-# excluded.
+# excluded. One API read is issued per changed path, so a wide pull request
+# costs proportionally more reads and time.
 #
-# Usage: fm-pr-reviewers.sh <pr-url-or-number>
+# Usage: fm-pr-reviewers.sh <pr-url>
 #   Prints candidates in descending unique-commit count as:
 #     <github-login><tab><count> recent commit[s]
 #   When no mapped author other than the pull-request author appears, prints no
@@ -33,18 +34,12 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
   usage
   exit 0
 fi
-[ "$#" -eq 1 ] || die "usage: fm-pr-reviewers.sh <pr-url-or-number>"
+[ "$#" -eq 1 ] || die "usage: fm-pr-reviewers.sh <pr-url>"
 command -v gh >/dev/null 2>&1 || die "gh is required"
 
-INPUT=$1
-if [[ "$INPUT" =~ ^[1-9][0-9]*$ ]]; then
-  URL=$(gh pr view "$INPUT" --json url --jq .url) \
-    || die "could not read pull request $INPUT"
-else
-  URL=$INPUT
-fi
+URL=$1
 if ! fm_pr_url_parse "$URL" || [ "$FM_PR_PROVIDER" != github ]; then
-  die "expected a GitHub pull-request URL or positive pull-request number"
+  die "expected a GitHub pull-request URL"
 fi
 
 PATH_PART=$FM_PR_PATH

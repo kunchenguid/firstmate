@@ -14,10 +14,10 @@
 # Every reading is taken against one exact head. A push that lands mid-read
 # invalidates the whole result rather than mixing two heads, so the caller
 # re-runs the command against the new head.
-# Unresolved review-thread state is not reported because GitHub's REST API does
-# not expose resolution and unattended commands may not use GraphQL.
+# A closed or merged pull request reports that terminal state and nothing else.
+# Unresolved review-thread state is out of this command's scope.
 #
-# Usage: fm-pr-state.sh <pr-url-or-number>
+# Usage: fm-pr-state.sh <pr-url>
 #   Prints one line per concrete blocker and nothing when none are found.
 #   Blockers do not change the successful exit status; lookup or usage refusal
 #   exits non-zero.
@@ -41,18 +41,12 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
   usage
   exit 0
 fi
-[ "$#" -eq 1 ] || die "usage: fm-pr-state.sh <pr-url-or-number>"
+[ "$#" -eq 1 ] || die "usage: fm-pr-state.sh <pr-url>"
 command -v gh >/dev/null 2>&1 || die "gh is required"
 
-INPUT=$1
-if [[ "$INPUT" =~ ^[1-9][0-9]*$ ]]; then
-  URL=$(gh pr view "$INPUT" --json url --jq .url) \
-    || die "could not read pull request $INPUT"
-else
-  URL=$INPUT
-fi
+URL=$1
 if ! fm_pr_url_parse "$URL" || [ "$FM_PR_PROVIDER" != github ]; then
-  die "expected a GitHub pull-request URL or positive pull-request number"
+  die "expected a GitHub pull-request URL"
 fi
 
 PATH_PART=$FM_PR_PATH
@@ -108,8 +102,10 @@ EOF_VIEW
 
 if [ -n "$MERGED_AT" ]; then
   printf 'STATE: merged at %s\n' "$MERGED_AT"
+  exit 0
 elif [ "$STATE" != open ]; then
   printf 'STATE: %s\n' "$STATE"
+  exit 0
 fi
 [ "$DRAFT" = false ] || printf 'DRAFT: pull request is not ready for review\n'
 case "$MERGEABILITY" in

@@ -5,8 +5,11 @@
 # script's jq programs through the local jq, so only a real gh invocation proves
 # they compile and produce the shape the script parses where they are actually
 # executed. cli/cli#1 is a merged 2019 pull request, so its verdict is stable.
-# The review-history program stays hermetic-only: it runs only behind a
-# CHANGES_REQUESTED decision, which no public pull request holds stably.
+# That stability costs reach: a terminal pull request reports its state and
+# stops, so this guard covers the two pull-request reads taken before that
+# verdict. The required-check and review-history programs stay hermetic-only,
+# the latter because it runs only behind a CHANGES_REQUESTED decision, which no
+# public pull request holds stably.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,14 +26,14 @@ PR=https://github.com/cli/cli/pull/1
 
 gh auth status >/dev/null 2>&1 || fail "gh is not authenticated"
 
-test_every_jq_program_runs_under_gh_engine() {
+test_pull_request_read_jq_programs_run_under_gh_engine() {
   local out status=0
   out=$("$SCRIPT" "$PR" 2>&1) || status=$?
   [ "$status" -eq 0 ] \
     || fail "fm-pr-state.sh refused a readable public pull request (exit $status): $out"
   assert_contains "$out" 'STATE: merged at 2019-10-04T16:01:04Z' \
     "the merged verdict must come from the live REST object"
-  pass "fm-pr-state.sh's jq programs are accepted by gh's own jq engine"
+  pass "fm-pr-state.sh's pull-request read programs are accepted by gh's jq engine"
 }
 
-test_every_jq_program_runs_under_gh_engine
+test_pull_request_read_jq_programs_run_under_gh_engine
