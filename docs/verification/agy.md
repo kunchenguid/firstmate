@@ -23,7 +23,7 @@ A capture with three or more measured boundary rows is ambiguous by design and d
 Non-tmux AGY composer reads use a bounded 200-row tail while other harnesses retain the 20-row default, so long drafts preserve both measured boundaries.
 The AGY inbox doorbell defers both `pending` and `unknown` composer verdicts and rings only after a proven `empty`; the watcher records the deferral and retries.
 Typed AGY steering performs a final composer comparison after literal typing and before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.
-The remaining sub-second race between that final preflight and literal typing is shared with every typed harness path; any race text is left unsubmitted and the durable inbox record is the recovery copy.
+The remaining sub-second race between that final preflight and literal typing is shared with every typed harness path; no exclusive input reservation is provided, a human typing in this window can leave firstmate's text unsent alongside their draft, Enter is never pressed on a mismatch, and the durable inbox record is the recovery copy.
 Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain unwired and do not receive the verified AGY control, composer, or inbox behavior.
 
 ## Current measurement: Antigravity CLI 1.2.2

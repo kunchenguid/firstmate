@@ -297,6 +297,12 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [har
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target" "$harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
+  # Accepted residual race (design decision; see the AGY adapter reference and
+  # docs/verification/agy.md): no exclusive input reservation is provided,
+  # matching every other harness's typed-send path; a human typing in this
+  # window can leave firstmate's text unsent alongside their draft, Enter is
+  # never pressed on a mismatch, and the durable inbox record survives. Do not
+  # add serialization here.
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   if [ "$harness" = agy ]; then
     if ! after=$(fm_composer_agy_wait_stable fm_backend_tmux_agy_composer_content "$target"); then

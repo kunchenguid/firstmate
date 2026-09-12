@@ -803,6 +803,12 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   text=$2
   expected_label=${6:-}
   harness=${7:-}
+  # Accepted residual race (design decision; see the AGY adapter reference and
+  # docs/verification/agy.md): no exclusive input reservation is provided,
+  # matching every other harness's typed-send path; a human typing in this
+  # window can leave firstmate's text unsent alongside their draft, Enter is
+  # never pressed on a mismatch, and the durable inbox record survives. Do not
+  # add serialization here.
   if [ "$harness" = agy ]; then
     state=$(fm_backend_composer_state "$backend" "$target" "$expected_label" agy) || state=unknown
     case "$state" in
@@ -936,12 +942,6 @@ fm_backend_agy_composer_content() {  # <backend> <target> [expected-label] [comp
       ;;
     *) return 1 ;;
   esac
-}
-
-fm_backend_agy_composer_matches() {  # <backend> <target> <text> [expected-label]
-  local backend=$1 target=$2 text=$3 expected_label=${4:-} rows
-  rows=$(fm_backend_agy_composer_content "$backend" "$target" "$expected_label" compare-rows) || return 1
-  fm_composer_agy_expected_matches_rows "$text" "$rows"
 }
 
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
