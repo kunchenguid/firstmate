@@ -129,10 +129,9 @@ fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Append <line> once, using fm-classify-lib.sh's retry contract.
-# Pass relay for historical copies to bypass stamping without changing retry
-# equivalence; omitting it declares a newly emitted event.
-fm_parent_channel_append_once() {  # <path> <line> [relay]
+# Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:
+# the caller declaring a new event is the one that stamps it.
+fm_parent_channel_append_once() {  # <path> <line>
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -142,9 +141,6 @@ fm_parent_channel_append_once() {  # <path> <line> [relay]
   if status_event_recorded "$path" "$line"; then
     return 0
   fi
-  if [ "${3:-}" != relay ]; then
-    line=$(status_stamp_line "$line")
-  fi
   printf '%s\n' "$line" >> "$path"
 }
 
@@ -153,5 +149,5 @@ fm_parent_channel_report() {  # <home> <state> <line>
   local home=$1 state=$2 line=$3 destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  fm_parent_channel_append_once "$destination" "$line" || return 4
+  fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 4
 }
