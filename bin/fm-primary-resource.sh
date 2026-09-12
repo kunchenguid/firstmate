@@ -132,6 +132,8 @@ esac
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$SCRIPT_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -1333,6 +1335,7 @@ action_commit() {
     esac
   done
   [ -n "$incident" ] || die_usage "commit: incident id required"
+  fm_pr_task_id_valid "$incident" || die_usage "commit: invalid incident id"
   [ -n "$stow" ] || die_usage "commit: --stow-receipt required"
   [ -e "$stow" ] || { printf 'fm-primary-resource: stow receipt missing\n' >&2; return 1; }
   [ -L "$stow" ] && { printf 'fm-primary-resource: stow receipt must not be a symlink\n' >&2; return 1; }
@@ -1678,15 +1681,17 @@ pr_pane_occupant_matches() {  # <backend> <target> <expected-pid> <expected-harn
 action_helper() {
   local incident=${1:-}
   [ -n "$incident" ] || die_usage "helper: incident id required"
-  pr_ensure_dir || exit 1
-
-  # Ready acknowledgement.
-  : > "$PR_DIR/helper-ready/$incident"
-  chmod 0600 "$PR_DIR/helper-ready/$incident" 2>/dev/null || true
+  fm_pr_task_id_valid "$incident" || die_usage "helper: invalid incident id"
 
   local receipt binding pid harness backend target launch_cmd exit_cmd dest_h
   receipt="$PR_DIR/receipts/$incident.json"
-  [ -f "$receipt" ] || { pr_outcome_write "$incident" "failed" "missing-receipt"; exit 1; }
+  [ -f "$receipt" ] || { printf 'fm-primary-resource: missing receipt\n' >&2; exit 1; }
+  jq -e --arg id "$incident" '.incidentId == $id' "$receipt" >/dev/null 2>&1 \
+    || { printf 'fm-primary-resource: invalid receipt\n' >&2; exit 1; }
+  pr_ensure_dir || exit 1
+
+  : > "$PR_DIR/helper-ready/$incident"
+  chmod 0600 "$PR_DIR/helper-ready/$incident" 2>/dev/null || true
   binding="$PR_DIR/binding.json"
   [ -f "$binding" ] || { pr_outcome_write "$incident" "failed" "missing-binding"; exit 1; }
   pid=$(jq -r '.pid' "$binding")

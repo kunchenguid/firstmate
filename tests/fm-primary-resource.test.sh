@@ -508,6 +508,40 @@ test_helper_occupant_changed_no_exit() {
   pass "helper occupant-changed is consumed failed attempt"
 }
 
+test_incident_path_rejected_before_state_write() {
+  local home lock_hash err rc=0 incident=valid-incident
+  home=$(make_main_home incident-path)
+  printf 'lock must survive\n' > "$home/state/.lock"
+  lock_hash=$(shasum -a 256 "$home/state/.lock" | awk '{print $1}')
+
+  err=$(run_pr "$home" helper ../../.lock 2>&1) || rc=$?
+  expect_code 2 "$rc" "helper must reject traversal incident ids"
+  assert_contains "$err" "invalid incident id" "helper must explain traversal rejection"
+  assert_equals "$lock_hash" "$(shasum -a 256 "$home/state/.lock" | awk '{print $1}')" \
+    "helper traversal must leave the session lock byte-identical"
+
+  rc=0
+  err=$(run_pr "$home" commit ../../.lock --stow-receipt "$home/missing-stow" 2>&1) || rc=$?
+  expect_code 2 "$rc" "commit must reject traversal incident ids"
+  assert_contains "$err" "invalid incident id" "commit must explain traversal rejection"
+  assert_equals "$lock_hash" "$(shasum -a 256 "$home/state/.lock" | awk '{print $1}')" \
+    "commit traversal must leave the session lock byte-identical"
+
+  mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+    > "$home/state/primary-resource/receipts/$incident.json"
+  jq -nc --argjson p "$$" \
+    '{version:1, harness:"codex", pid:$p, sessionId:"valid", transcriptPath:"/dev/null", boundAt:1}' \
+    > "$home/state/primary-resource/binding.json"
+  printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+  FM_SUPERVISOR_BACKEND=zellij FM_SUPERVISOR_TARGET="fixture:0" \
+    run_pr "$home" helper "$incident" >/dev/null 2>&1 || true
+  assert_present "$home/state/primary-resource/helper-ready/$incident" \
+    "valid helper incident must proceed through receipt validation"
+  pass "incident paths are rejected before state writes"
+}
+
 # Finding 4: stranded nonterminal outcome emits one alert; receipt preserved.
 test_reconcile_stranded_helper_alert() {
   local home out incident
@@ -982,6 +1016,7 @@ test_arm_requires_python3
 test_helper_busy_then_idle_fake_backend
 test_helper_no_pgrep_fallback_records_failure
 test_helper_occupant_changed_no_exit
+test_incident_path_rejected_before_state_write
 test_reconcile_stranded_helper_alert
 test_quota_axi_bounded_and_fresh
 test_reconcile_same_second_successor
