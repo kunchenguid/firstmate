@@ -181,22 +181,40 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# fm_commit_attribution_block <task-id> prints the hard, standing prohibition
-# on an agent co-author commit trailer. Sourced into fm_dod_block below so
-# every rendered mode - including a promoted scout's ship instructions from
-# bin/fm-promote.sh - carries the same text; this is the single owner, so a
+# fm_commit_attribution_block <task-id> <mode> prints the hard, standing
+# prohibition on an agent co-author commit trailer. Sourced into fm_dod_block
+# below so every rendered mode - including a promoted scout's ship instructions
+# from bin/fm-promote.sh - carries the same text; this is the single owner, so a
 # change here reaches both callers without a second copy to drift.
-# It also covers a commit a pipeline step made on the worker's behalf, since
-# the worker checks the whole branch rather than only its own hand-written
-# commits, and it authorizes rewriting only this task's own unmerged branch.
-fm_commit_attribution_block() {  # <task-id>
-  local id=$1
+# It also covers a commit a pipeline step made on the worker's behalf. The
+# remedy is mode-aware because branch ownership is: in no-mistakes mode the
+# pipeline owns the branch once a run starts, so the worker checks before it
+# hands the branch over and escalates afterwards instead of rewriting under the
+# pipeline. Never touching the default branch is absolute in every mode.
+fm_commit_attribution_block() {  # <task-id> <mode>
+  local id=$1 mode=$2
   cat <<EOF
 # Commit attribution - HARD RULE, no exceptions
 NEVER put an agent name as a commit co-author trailer (for example \`Co-Authored-By: Claude ... <noreply@anthropic.com>\`) on any commit on this branch.
 This holds whether you write the commit yourself or a pipeline step writes it on your behalf while applying a fix.
+EOF
+  case "$mode" in
+    no-mistakes)
+      cat <<EOF
+Check this branch's commits for that trailer once, before you hand the branch to the pipeline by starting a no-mistakes run.
+If you find one then, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
+Once a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter, or hand-commit on it to strip a trailer, not even your own.
+If a trailer survives into a terminal run - including on a pipeline-authored commit you did not write - report it to firstmate before merge and let the captain decide; do not rewrite it yourself.
+EOF
+      ;;
+    *)
+      cat <<EOF
 Before every \`done:\` report and before opening or updating a PR, check this branch's commits for that trailer.
 If you find one, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
+EOF
+      ;;
+  esac
+  cat <<'EOF'
 Never rewrite a commit that has already reached the default branch; that is the captain's call, not yours.
 EOF
 }
@@ -222,7 +240,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 
-$(fm_commit_attribution_block "$id")
+$(fm_commit_attribution_block "$id" "$mode")
 EOF
       ;;
     local-only)
@@ -235,7 +253,7 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 
-$(fm_commit_attribution_block "$id")
+$(fm_commit_attribution_block "$id" "$mode")
 EOF
       ;;
     no-mistakes)
@@ -244,7 +262,7 @@ EOF
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 
-$(fm_commit_attribution_block "$id")
+$(fm_commit_attribution_block "$id" "$mode")
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 

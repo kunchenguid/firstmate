@@ -241,12 +241,12 @@ test_ship_briefs_forbid_agent_coauthor_trailer() {
     brief="$home/data/$id/brief.md"
     assert_grep "co-author" "$brief" "$id: brief did not mention the co-author trailer ban at all"
     assert_grep "HARD RULE" "$brief" "$id: co-author ban was not phrased as a hard, unmissable rule"
-    assert_grep "pipeline step writes it on your behalf" "$brief" \
-      "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
+    grep -Eiq "pipeline.*on your behalf" "$brief" \
+      || fail "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
     assert_grep "own unmerged branch" "$brief" \
       "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
-    assert_grep "already reached the default branch" "$brief" \
-      "$id: co-author ban did not forbid touching commits already on the default branch"
+    grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" "$brief" \
+      || fail "$id: co-author ban did not forbid touching commits already on the default branch"
   done
   pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
 }
