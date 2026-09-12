@@ -1773,12 +1773,11 @@ WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
-  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
-    exit 1
-  fi
-fi
+# A watcher start never reopens the episode it is about to read. Reopening here
+# re-minted a generation on every arm, so an announced episode resurfaced this
+# cycle away forever and the acknowledgement a drain had printed was already
+# stale by the time the model ran it. The supervising close owns opening the one
+# new down stretch instead (fm_recovery_transition's release-lock).
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
@@ -1922,6 +1921,7 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+    WATCHER_RECOVERY_PENDING=1
   fi
   wake "check: rearm-resurface"
 }

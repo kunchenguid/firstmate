@@ -625,10 +625,17 @@ _fm_recovery_marker_write_locked() {
 # Preserve a pending or announced episode's generation across downtime
 # republication so its outstanding acknowledgement remains usable, and keep an
 # already-announced generation announced so it cannot be re-presented until a
-# new down stretch mints a new generation.
+# new down stretch reopens it.
+#
+# The optional third argument is the one exception. A watcher that actually
+# supervised is closing, so the down stretch its announcement covered has ended:
+# "reopen" returns an already-announced episode to pending, which makes it
+# presentable once more. It deliberately keeps that episode's own generation, so
+# an acknowledgement a drain has already printed still retires it; only a
+# finished (acked) episode ever mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
+  local marker=$1 kind=${2:-downtime} reopen=${3:-} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -649,7 +656,11 @@ _fm_recovery_marker_publish() {
           ;;
         announced:handling:*|announced:downtime:*)
           generation=${FM_RECOVERY_MARKER_TOKEN##*:}
-          status=announced
+          if [ "$reopen" = reopen ]; then
+            status=pending
+          else
+            status=announced
+          fi
           ;;
       esac
     fi
@@ -807,29 +818,6 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# A non-successor watcher start after an announced-but-unacked episode is a new
-# down stretch: mint a fresh pending generation so a still-open decision or
-# buried note can be presented once more. Handling successors must not call
-# this, because Option B re-arm is not a new down stretch.
-_fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
-  lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
-  if ! fm_recovery_marker_read "$marker"; then
-    fm_lock_release "$lock"
-    return 0
-  fi
-  case "$FM_RECOVERY_MARKER_TOKEN" in
-    announced:*)
-      if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
-        fm_lock_release "$lock"
-        return 1
-      fi
-      ;;
-  esac
-  fm_lock_release "$lock"
-}
-
 fm_recovery_transition() {
   local marker=$1 action=$2 target=${3:-} value=${4:-}
   case "$action" in
@@ -842,12 +830,14 @@ fm_recovery_transition() {
     arm-check)
       _fm_recovery_marker_arm_check "$marker"
       ;;
-    reopen-announced)
-      _fm_recovery_marker_reopen_announced "$marker"
-      ;;
     release-lock)
+      # A watcher that supervised is closing: end the down stretch its
+      # announcement covered, so the episode is presentable once more under its
+      # own generation. A resurfacing cycle uses release-lock-existing instead
+      # and leaves the announcement standing, which is what bounds recovery to
+      # one cycle rather than every cycle.
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" reopen || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
@@ -884,10 +874,6 @@ fm_recovery_marker_begin_handling() {
 
 fm_recovery_marker_arm_check() {
   fm_recovery_transition "$1" arm-check
-}
-
-fm_recovery_marker_reopen_announced() {
-  fm_recovery_transition "$1" reopen-announced
 }
 
 fm_lock_try_acquire() {
