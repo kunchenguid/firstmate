@@ -362,8 +362,9 @@ test_name_task_agent_waits_for_detection_then_renames_and_verifies() {
   : > "$resp/3.out"
   printf '{"result":{"agent":{"agent":"pi","pane_id":"w1:p9","name":"%s"}}}\n' "$expected" > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
+  chmod +x "$fb/sleep"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_BACKEND_HERDR_AGENT_NAME_POLLS=2 FM_BACKEND_HERDR_AGENT_NAME_POLL_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_task_agent fmtest:w1:p9 worker-label ship "$1"' \
     "$ROOT" "$dir/home" 2>&1)
   status=$?

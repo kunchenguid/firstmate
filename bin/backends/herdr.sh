@@ -412,8 +412,7 @@ fm_backend_herdr_task_agent_name() {  # <task-id> <ship|scout|secondmate> <targe
 # read refuses the spawn instead of leaving a misleading generic agent behind.
 fm_backend_herdr_name_task_agent() {  # <target> <task-id> <kind> <target-home>
   local target=$1 id=$2 kind=$3 home=$4 name out code pane current attempt=0
-  local max_attempts=${FM_BACKEND_HERDR_AGENT_NAME_POLLS:-100}
-  local poll_sleep=${FM_BACKEND_HERDR_AGENT_NAME_POLL_SLEEP:-0.1}
+  local max_attempts=100 poll_sleep=0.1
   name=$(fm_backend_herdr_task_agent_name "$id" "$kind" "$home") || {
     echo "error: could not derive a valid herdr agent name for task $id" >&2
     return 1
