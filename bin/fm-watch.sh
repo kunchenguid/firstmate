@@ -108,10 +108,10 @@
 #                          between observations for FM_SECONDMATE_WAKE_STALL_SECS
 #                          while the mate was not in an active turn (a busy mate
 #                          is exempt only until the queue has been frozen for
-#                          BUSY_TURN_MAX_SECS); declared
-#                          external-wait pause rows do not feed this escalation,
-#                          observation is read-only, and one parent notification
-#                          covers each no-progress episode
+#                          BUSY_TURN_MAX_SECS); declared external-wait pause
+#                          rows do not feed this escalation, observation is
+#                          read-only, and one parent notification covers each
+#                          no-progress episode
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -761,7 +761,8 @@ secondmate_in_active_turn() {  # <window> <idle>
 # never to the interval. A moved position ends an alerted episode and starts a
 # new observation interval, so a newly-oldest row cannot alert immediately while
 # a later genuine freeze remains visible. A mate demonstrably inside an active
-# turn never escalates, so the interval is only the backstop behind that gate.
+# turn defers its escalation, but only while this same interval is under
+# BUSY_TURN_MAX_SECS, so a turn that never ends cannot hide a frozen queue.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
 secondmate_wake_stall_tick() {
