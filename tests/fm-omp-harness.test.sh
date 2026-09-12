@@ -594,28 +594,51 @@ EOF
 }
 
 test_omp_markers_record_outer_omp_ancestor() {
-  local repo home bin driver omp_pid out status
+  local repo home bin driver omp_pid out status mode
   repo="$TMP_ROOT/nested/repo"; home="$TMP_ROOT/nested/home"
   install_omp_extension_fixture "$repo"
   mkdir -p "$home/state"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_SESSION_PID:?}" > "${FM_HOME:?}/state/.lock"
+printf 'OMP DIGEST source=%s\n' "$2"
+SH
+  chmod +x "$repo/bin/fm-sessionstart-run.sh"
   driver="$TMP_ROOT/nested/drive.mjs"
   cat > "$driver" <<'EOF'
 import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+const handlers = new Map();
 const noop = { on() {}, registerCommand() {}, registerTool() {}, sendUserMessage() {} };
 await import(pathToFileURL(process.env.WATCH_EXT).href).then(({ default: load }) => load(noop));
-await import(pathToFileURL(process.env.GUARD_EXT).href).then(({ default: load }) => load(noop));
+await import(pathToFileURL(process.env.GUARD_EXT).href).then(({ default: load }) => load({ on(e, h) { handlers.set(e, h); } }));
+if (process.env.MODE === "fresh") {
+  if (existsSync(`${process.env.FM_HOME}/state/.lock`)) throw new Error("fresh startup must begin without a lock");
+  if (existsSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`)) throw new Error("missing lock must not publish a marker");
+  const ctx = { sessionManager: { getSessionId: () => "fresh" } };
+  handlers.get("session_start")({}, ctx);
+  const result = await handlers.get("before_agent_start")({ prompt: "hi" }, ctx);
+  if (!result?.message?.content?.includes("OMP DIGEST source=startup")) throw new Error("startup did not complete");
+  const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`, "utf8").trim().split("\n");
+  if (marker[1] !== process.env.FM_TEST_SESSION_PID || marker[1] === String(process.pid)) throw new Error("startup marker must record the outer session PID");
+  await handlers.get("session_shutdown")({}, {});
+}
 EOF
   bin=$(make_named_shells "$TMP_ROOT/nested/bin")
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
-    "$bin/omp" -c 'printf "%s\n" "$$" > "$1/state/.lock"; node "$2"' _ "$home" "$driver" 2>&1)
-  status=$?
-  expect_code 0 "$status" "nested omp marker writer: $out"
-  [ -z "$out" ] || fail "nested omp marker writer printed output: $out"
-  omp_pid=$(cat "$home/state/.lock")
-  [ -n "$omp_pid" ] || fail "nested omp wrapper did not record its pid"
-  for marker in .omp-watch-extension-loaded .omp-turnend-extension-loaded; do
-    [ "$(sed -n '2p' "$home/state/$marker")" = "$omp_pid" ] \
-      || fail "$marker must record outer omp pid $omp_pid, got $(sed -n '2p' "$home/state/$marker")"
+  for mode in owned fresh; do
+    rm -f "$home/state/.lock" "$home/state/.omp-watch-extension-loaded" "$home/state/.omp-turnend-extension-loaded"
+    out=$(MODE="$mode" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
+      "$bin/omp" -c 'export FM_TEST_SESSION_PID=$$; if [ "$MODE" = owned ]; then printf "%s\n" "$$" > "$1/state/.lock"; fi; node "$2"; result=$?; exit "$result"' _ "$home" "$driver" 2>&1)
+    status=$?
+    expect_code 0 "$status" "nested omp $mode marker writer: $out"
+    [ -z "$out" ] || fail "nested omp marker writer printed output: $out"
+    omp_pid=$(cat "$home/state/.lock")
+    [ -n "$omp_pid" ] || fail "nested omp wrapper did not record its pid"
+    for marker in .omp-watch-extension-loaded .omp-turnend-extension-loaded; do
+      [ "$mode" = fresh ] && [ "$marker" = .omp-watch-extension-loaded ] && continue
+      [ "$(sed -n '2p' "$home/state/$marker")" = "$omp_pid" ] \
+        || fail "$marker must record outer omp pid $omp_pid, got $(sed -n '2p' "$home/state/$marker")"
+    done
   done
   pass "omp extension markers record the outer lock-owning omp ancestor from a nested worker"
 }
