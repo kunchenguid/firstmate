@@ -4,10 +4,11 @@
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
 # The command does not acquire the session lock, drain wakes, arm watchers,
-# mutate backlog state, or write reports. Its default ledger collector may
-# atomically refresh parent-side cached copies of remote home summaries under
-# state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation.
+# mutate backlog state, or write reports. While collecting task summaries, it
+# may atomically refresh parent-side cached copies of remote home summaries under
+# state/secondmate-summary-cache and per-status open-decision cursors under
+# state/.<task>.open-decisions-cursor; those observational cache writes are its
+# only fleet-state mutations.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -58,7 +59,7 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
-#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
+#     fm-classify-lib.sh's authoritative cursor-backed incremental fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
@@ -611,21 +612,42 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 }
 
 prefetch_task_observations() {  # <meta> <id>
-  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' decisions_pid='' current_rc=0
+  local status_log status_capture decisions_capture status_capture_before='' status_capture_after='' status_capture_size=''
+  local report_path report_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
+  decisions_capture="$SNAPSHOT_TASK_DIR/$id.decisions"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
+    status_capture_before=$(_fm_open_decisions_file_ident "$status_log") || status_capture_before=''
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    if [ -f "$status_capture" ]; then
+      status_capture_size=$(LC_ALL=C wc -c < "$status_capture" 2>/dev/null) || current_rc=1
+      status_capture_size=${status_capture_size//[[:space:]]/}
+      case "$status_capture_size" in ''|*[!0-9]*) status_capture_size='' ;; esac
+      status_capture_after=$(_fm_open_decisions_file_ident "$status_log") || status_capture_after=''
+    fi
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
+    # The cursor-backed fold owns its atomic cache but the fresh fold result is private to this task snapshot.
+    # A stable source identity lets it fold only through the captured byte endpoint.
+    # A rotation during capture falls back to the captured copy so every status-derived field stays coherent.
+    if [ -n "$status_capture_before" ] && [ "$status_capture_before" = "$status_capture_after" ] \
+      && [ -n "$status_capture_size" ]; then
+      status_open_decisions_incremental "$status_log" "$status_capture_size" "$status_capture_before" > "$decisions_capture" &
+    else
+      status_open_decisions "$status_capture" > "$decisions_capture" &
+    fi
+    decisions_pid=$!
+  else
+    : > "$decisions_capture" || current_rc=1
   fi
 
   if [ -n "$remote_host" ]; then
@@ -655,10 +677,12 @@ prefetch_task_observations() {  # <meta> <id>
   fi
 
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
+  [ -z "$decisions_pid" ] || wait "$decisions_pid" || current_rc=1
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$decisions_capture" "$report_capture"
+    : > "$decisions_capture" || current_rc=1
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -724,7 +748,7 @@ prefetch_task_current_states() {
 
 task_json_lines() {
   local meta original_meta id kind harness model mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root current_file endpoint_file observation_line index=0
+  local remote_host remote_root current_file endpoint_file decisions_capture observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -756,6 +780,7 @@ task_json_lines() {
       target=$(fm_backend_target_of_meta "$meta")
     fi
     status_log="$SNAPSHOT_TASK_DIR/$id.status"
+    decisions_capture="$SNAPSHOT_TASK_DIR/$id.decisions"
     report_path="$SNAPSHOT_TASK_DIR/$id.report"
     pr=$(meta_value "$meta" pr)
     pr_source=meta
@@ -779,11 +804,9 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
+    # Durable keyed open-decision set: the concurrent task observation folded only bytes appended since the prior publication through fm-classify-lib.sh's cursor-backed incremental fold.
+    # That preserves decisions across unrelated status events without serializing every task's full status history here.
+    # The set is derived purely from the keyed fold - never from report bodies or decision-like prose - and then reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
@@ -796,7 +819,7 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
+    open_decisions_tsv=$(<"$decisions_capture") || open_decisions_tsv=""
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

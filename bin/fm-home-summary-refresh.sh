@@ -39,6 +39,10 @@ ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
+# A home-summary refresh is a bounded cache publication, not the liveness sweep.
+# One slow task state must not consume its 60-second publication budget in every concurrent batch.
+# It uses one second unless the established snapshot bound is explicitly set.
+HOME_SUMMARY_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-1}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
@@ -72,6 +76,9 @@ case "$ERROR_LOG_MAX_BYTES" in
 esac
 case "$HOME_SUMMARY_TIMEOUT" in
   ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
+esac
+case "$HOME_SUMMARY_CREW_STATE_TIMEOUT" in
+  ''|*[!0-9]*|0) HOME_SUMMARY_CREW_STATE_TIMEOUT=1 ;;
 esac
 case "$HOME_SUMMARY_IF_IDLE" in
   0|1) ;;
@@ -131,6 +138,7 @@ home_summary_refresh_once() {
     FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_SNAPSHOT_CREW_STATE_TIMEOUT="$HOME_SUMMARY_CREW_STATE_TIMEOUT" \
     "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
       > "$HOME_SUMMARY_TMP" 2> "$HOME_SUMMARY_ERR_TMP"; then
     producer_rc=0

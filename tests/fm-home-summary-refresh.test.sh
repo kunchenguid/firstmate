@@ -356,6 +356,7 @@ SLOW_MARKER="$TMP_ROOT/slow-no-mistakes.pid"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_SNAPSHOT_CREW_STATE_TIMEOUT=10 \
   FM_TEST_NM_MARKER="$SLOW_MARKER" FM_TEST_NM_SLEEP=30 \
   "$WRITER" > "$TMP_ROOT/killed-writer.out" 2> "$TMP_ROOT/killed-writer.err" &
 SLOW_WRITER_PID=$!
@@ -409,6 +410,7 @@ SUCCESS_MARKER="$TMP_ROOT/success-no-mistakes.pid"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_SNAPSHOT_CREW_STATE_TIMEOUT=10 \
   FM_TEST_NM_MARKER="$SUCCESS_MARKER" FM_TEST_NM_SLEEP=1 \
   "$WRITER" > "$TMP_ROOT/success-writer.out" 2> "$TMP_ROOT/success-writer.err" &
 SLOW_WRITER_PID=$!
@@ -665,6 +667,104 @@ jq -e --arg home "$COST_HOME" '
 ' "$COST_HOME/state/home-summary.json" >/dev/null \
   || fail "the accumulated home published a ledger missing its open decision"
 pass "publication completes on a home carrying accumulated status history"
+
+# A warm summary publication must retain an open decision while folding only the
+# new status bytes appended since its prior publication.
+WARM_HOME="$TMP_ROOT/warm-home"
+WARM_PROBE="$TMP_ROOT/warm-open-decisions.probe"
+mkdir -p "$WARM_HOME/state" "$WARM_HOME/data" "$WARM_HOME/config" \
+  "$WARM_HOME/projects/task"
+printf '# Seeded Firstmate home\n' > "$WARM_HOME/AGENTS.md"
+printf 'warm\n' > "$WARM_HOME/.fm-secondmate-home"
+fm_git_init_commit "$WARM_HOME/projects/task"
+cat > "$WARM_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] warm-task - Publish a warm status fold (repo: firstmate) (kind: secondmate) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$WARM_HOME/state/warm-task.meta" \
+  "window=fmtest:fm-warm-task" \
+  "worktree=$WARM_HOME/projects/task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=secondmate" \
+  "backend=tmux"
+python3 - "$WARM_HOME/state/warm-task.status" <<'PY'
+import sys
+note = "routine work that does not change the open decision " * 12
+with open(sys.argv[1], "w") as handle:
+    for _ in range(160):
+        handle.write(f"working: {note}\n")
+    handle.write("needs-decision [key=warm-gate]: keep the publication current\n")
+PY
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WARM_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_OPEN_DECISIONS_READ_PROBE="$WARM_PROBE" "$WRITER" \
+  || fail "the initial warm-home publication failed"
+jq -e 'any(.decisions_open[]; .key == "warm-gate")' \
+  "$WARM_HOME/state/home-summary.json" >/dev/null \
+  || fail "the initial warm-home publication lost its open decision"
+: > "$WARM_PROBE"
+warm_append='working: later routine work'
+printf '%s\n' "$warm_append" >> "$WARM_HOME/state/warm-task.status"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WARM_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  FM_OPEN_DECISIONS_READ_PROBE="$WARM_PROBE" "$WRITER" \
+  || fail "the warm-home republish failed"
+warm_bytes=$(awk -F '\t' -v path="$WARM_HOME/state/warm-task.status" \
+  '$1 == path { bytes = $2 } END { print bytes }' "$WARM_PROBE")
+expected_warm_bytes=$(printf '%s\n' "$warm_append" | wc -c | tr -d '[:space:]')
+[ "$warm_bytes" = "$expected_warm_bytes" ] \
+  || fail "warm publication re-folded $warm_bytes bytes instead of the $expected_warm_bytes-byte append"
+jq -e 'any(.decisions_open[]; .key == "warm-gate")' \
+  "$WARM_HOME/state/home-summary.json" >/dev/null \
+  || fail "the warm republish lost its previously open decision"
+pass "warm publication folds only appended status bytes while retaining open decisions"
+
+# Home-summary publication gives each live task read one second.
+# Repeated slow state probes cannot exhaust its sixty-second ledger budget.
+SUMMARY_BOUND_HOME="$TMP_ROOT/summary-bound-home"
+SUMMARY_BOUND_MARKER="$TMP_ROOT/summary-bound-no-mistakes.pid"
+mkdir -p "$SUMMARY_BOUND_HOME/state" "$SUMMARY_BOUND_HOME/data" \
+  "$SUMMARY_BOUND_HOME/config" "$SUMMARY_BOUND_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$SUMMARY_BOUND_HOME/AGENTS.md"
+printf 'summary-bound\n' > "$SUMMARY_BOUND_HOME/.fm-secondmate-home"
+{
+  printf '%s\n' '## In flight'
+  i=1
+  while [ "$i" -le 9 ]; do
+    printf '%s\n' "- [ ] summary-bound-$i - Publish bounded state (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Queued' '' '## Done'
+} > "$SUMMARY_BOUND_HOME/data/backlog.md"
+i=1
+while [ "$i" -le 9 ]; do
+  worktree="$SUMMARY_BOUND_HOME/projects/task-$i"
+  mkdir -p "$worktree"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -q -b "fm/summary-bound-$i"
+  fm_write_meta "$SUMMARY_BOUND_HOME/state/summary-bound-$i.meta" \
+    "window=fmtest:fm-summary-bound-$i" \
+    "worktree=$worktree" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  i=$((i + 1))
+done
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SUMMARY_BOUND_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_HOME_SUMMARY_TIMEOUT=20 FM_TEST_NM_MARKER="$SUMMARY_BOUND_MARKER" \
+  FM_TEST_NM_SLEEP=30 "$WRITER" \
+  || fail "summary publication exhausted its deadline on slow task reads"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+  "$SUMMARY_BOUND_HOME/state/home-summary.json" >/dev/null \
+  || fail "bounded task-state publication did not write its ledger"
+pass "home-summary publication bounds slow task-state reads"
 
 # One unreachable home must not extend publication without limit. A remote
 # secondmate's current state is read over ssh, and ssh's own dead-peer detection
