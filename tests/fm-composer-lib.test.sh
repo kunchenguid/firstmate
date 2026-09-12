@@ -351,26 +351,43 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 
-test_pi_idle_footer_does_not_become_pending() {
-  local screen typed pi_identity out
+test_pi_vimmode_status_row_is_furniture() {
+  # issue #3819, reproduced: pi 0.84.4 with `pi-vimmode` loaded draws
+  # `─ INSERT 1:1 ─` inside its separated region. The pane was idle and the
+  # composer empty, yet the row scan read `pending`, so fm-send skipped the
+  # doorbell and the re-ring ladder retired the record unrung.
+  local screen typed out
   screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
-  pi_identity=$(printf 'pi\tidle')
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$pi_identity")
-  [ "$out" = empty ] \
-    || fail "an idle pi vim footer must not become pending composer text, got '$out'"
-  pi_identity=$(printf 'pi\tdone')
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$pi_identity")
-  [ "$out" = empty ] \
-    || fail "a done pi vim footer must not become pending composer text, got '$out'"
+  assert_screen "pi idle behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
+  assert_screen "pi done behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
+  assert_screen "pi idle behind the vimmode row on tmux" empty "$CAPS_TMUX" "$screen" 2 "$(printf 'pi\tidle')"
+  # The mode row renders without the cursor cell in other vim modes.
   screen=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')")
-  [ "$out" = empty ] \
-    || fail "a done pi mode footer must not become pending composer text, got '$out'"
+  assert_screen "pi done behind a bare mode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
+  # Furniture removes the row; it does not grant a live pi an empty verdict.
+  assert_screen "working pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tworking')"
+  assert_screen "blocked pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tblocked')"
+  # Pi's region treats every other surviving byte as input. A draft that merely
+  # OPENS and CLOSES with the rule glyph is user text, and reading it `empty`
+  # would let the doorbell overwrite an unsent steer.
+  typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'
+  assert_screen "rule-framed pi draft" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ INSERT the migration guard ─\n────────────────────────'
+  assert_screen "pi draft quoting a mode token" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')")
-  [ "$out" = pending ] \
-    || fail "real input must remain pending for an idle pi, got '$out'"
-  pass "pi idle/done identity floors terminal footer rows to empty without hiding real input"
+  assert_screen "plain pi draft" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  # Extraction reads the same region, so it must agree on what is furniture:
+  # the mode row's `1:1` cell moves as the user types, and a paste proof that
+  # includes it can never match what was sent.
+  screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] \
+    || fail "pi extraction must exclude the vimmode mode row, got '$out'"
+  typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed")
+  [ "$out" = '─ retry the deploy ─' ] \
+    || fail "pi extraction must keep a rule-framed draft, got '$out'"
+  pass "pi-vimmode's mode row is furniture in both pi readers; every other byte stays input"
 }
 
 test_matrix_pi_separated_needs_identity() {
@@ -701,7 +718,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
-test_pi_idle_footer_does_not_become_pending
+test_pi_vimmode_status_row_is_furniture
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_pi_separated_needs_identity
