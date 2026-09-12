@@ -270,7 +270,7 @@ afk_active() {  # <state>
 # supervision_active: the daemon may inject in away mode or when this home has
 # explicitly opted into attended continuous supervision.
 supervision_active() {  # <state>
-  afk_active "$1" || [ -f "$FM_HOME/config/$CONTINUOUS_CONFIG_NAME" ]
+  afk_active "$1" || [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/$CONTINUOUS_CONFIG_NAME" ]
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk

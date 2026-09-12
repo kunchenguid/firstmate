@@ -307,7 +307,7 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
 # with nothing at all wrong - the supervisor is the daemon, and the watcher is
 # its restarting child.
 #
-# fm_afk_daemon_owns_supervision <state>
+# fm_afk_daemon_owns_supervision <state> [config-dir]
 # Legacy name retained for callers. True when away mode or the per-home
 # continuous opt-in is active AND a live, identity-matched daemon holds this
 # home's singleton daemon lock. The identity match is the same discipline the
@@ -318,8 +318,9 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
 # a daemon that stops restarting its watcher still fails supervision once the
 # beacon passes grace.
 fm_afk_daemon_owns_supervision() {
-  local state=$1 lockdir pid recorded current
-  [ -e "$state/.afk" ] || [ -f "$(dirname "$state")/config/continuous-supervision" ] || return 1
+  local state=$1 config=${2:-} lockdir pid recorded current
+  [ -n "$config" ] || config=$(dirname "$state")/config
+  [ -e "$state/.afk" ] || [ -f "$config/continuous-supervision" ] || return 1
   lockdir="$state/.supervise-daemon.lock"
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
   fm_pid_alive "$pid" || return 1
