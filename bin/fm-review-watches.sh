@@ -8,7 +8,7 @@
 #
 # install renders both checks with absolute snapshot paths owned by <home>, then
 # binds them through fm-check-register.sh. When scope is supplied, installation
-# is enabled only for a scope containing "review" (case-insensitive).
+# is enabled only for a scope that owns colleague-PR reviews (prefix match).
 # retire removes only these checks through fm-check-unregister.sh.
 set -u
 
@@ -24,7 +24,7 @@ usage: fm-review-watches.sh install <home> [scope]
 
 install writes and registers reviewed-pr-watch.check.sh and
 review-requests.check.sh in <home>/state. With a scope argument, it skips
-homes whose scope does not mention review.
+homes whose scope does not own colleague-PR reviews.
 EOF
 }
 
@@ -36,8 +36,11 @@ resolve_home() {
   (CDPATH='' cd -- "$home" && pwd -P) || die "cannot resolve home: $home"
 }
 
-scope_matches() {
-  printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | grep -Fq review
+scope_owns_colleague_pr_reviews() {
+  case "$1" in
+    'Reviews of colleague PRs'*) return 0 ;;
+  esac
+  return 1
 }
 
 shell_quote() {
@@ -121,8 +124,8 @@ EOF
 
 install_watches() {
   local requested=$1 scope=${2-} home state device stage register id
-  if [ -n "$scope" ] && ! scope_matches "$scope"; then
-    printf 'skipped: scope does not contain review\n'
+  if [ -n "$scope" ] && ! scope_owns_colleague_pr_reviews "$scope"; then
+    printf 'skipped: scope does not own colleague-PR reviews\n'
     return 0
   fi
   home=$(resolve_home "$requested")

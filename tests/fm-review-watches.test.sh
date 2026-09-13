@@ -101,16 +101,51 @@ test_scope_skips_non_review_home() {
   local home out
   home=$(make_home non-review)
   out=$("$WATCHES" install "$home" 'release automation')
-  [ "$out" = 'skipped: scope does not contain review' ] \
+  [ "$out" = 'skipped: scope does not own colleague-PR reviews' ] \
     || fail "non-review scope was not skipped: $out"
   [ ! -e "$home/state/reviewed-pr-watch.check.sh" ] \
     || fail "non-review scope rendered reviewed-pr-watch"
   pass "non-review persistent scopes stay unarmed"
 }
 
+extract_scope() {
+  awk -v wanted="$1" '$1 == "-" && $2 == wanted {
+    sub(/^.*; scope: /, "")
+    sub(/; projects:.*$/, "")
+    print
+    exit
+  }' "$2"
+}
+
+test_secondmates_registry_installs_only_reviews_home() {
+  local fixture home id scope out installed=0 refused=0
+  fixture="$TMP_ROOT/secondmates.md"
+  cp "$ROOT/tests/fixtures/secondmates-b59-scopes.md" "$fixture"
+  for id in reviews shipwright shipwright-reviewer artemis-engineer research; do
+    scope=$(extract_scope "$id" "$fixture") || fail "missing scope for $id"
+    home=$(make_home "registry-$id")
+    out=$("$WATCHES" install "$home" "$scope")
+    case "$out" in
+      installed:*)
+        installed=$((installed + 1))
+        [ "$id" = reviews ] || fail "unexpected install for $id: $out"
+        ;;
+      'skipped: scope does not own colleague-PR reviews')
+        refused=$((refused + 1))
+        [ "$id" = reviews ] && fail "reviews home was refused"
+        ;;
+      *) fail "unexpected install output for $id: $out" ;;
+    esac
+  done
+  [ "$installed" -eq 1 ] || fail "expected one install, got $installed"
+  [ "$refused" -eq 4 ] || fail "expected four refusals, got $refused"
+  pass "registry scopes install colleague-PR watches only in reviews"
+}
+
 test_head_change_is_one_self_contained_wake
 test_entering_reviewed_set_is_silent
 test_new_review_request_is_self_contained
 test_scope_skips_non_review_home
+test_secondmates_registry_installs_only_reviews_home
 
 printf '# all fm-review-watches tests passed\n'
