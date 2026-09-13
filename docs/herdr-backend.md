@@ -94,7 +94,9 @@ An absent registration, name collision, or mismatched readback stops the spawn i
 The failure event records the expected name and exact pane.
 Firstmate then closes that exact pane, because the harness may already hold its brief and would otherwise keep working with no task record owning it; the Treehouse copy remains available for inspection.
 Fresh provisional metadata and backlog state are not committed on that failure.
-Raw launch commands and secondmate-primary launches keep their existing behavior because this contract covers only ship and scout launches using supported harness adapters.
+Mandatory task-based naming is reserved for ordinary ship and scout dispatch through a verified harness adapter.
+A raw launch command is the verification-only exception: it is the escape hatch for trying an unverified adapter, so Firstmate never renames it and naming never blocks or fails that spawn, and its agent keeps Herdr's default presentation.
+Secondmate-primary launches also keep their existing behavior, in their own per-home workspace.
 Rovo is the one supported adapter excluded: Herdr ships no rovo integration, and a live rovo pane answered `agent get` with `agent_not_found` ([`verification/rovo.md`](verification/rovo.md)), so a rovo task keeps Herdr's default presentation.
 
 The alias is presentation state, not endpoint authority.
