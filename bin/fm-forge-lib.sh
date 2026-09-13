@@ -72,7 +72,8 @@ fm_forge_safe_ssh_config() {
 # HostName directives. Passing the original config to ssh would also evaluate
 # Match exec commands while resolving a remote's provider alias.
 fm_forge_safe_ssh_config_file() {
-  local config=${1:-} depth=${2:-0} dir line key rest pattern candidate included
+  local config=${1:-} depth=${2:-0} dir line key rest pattern condition candidate included
+  local -a conditions
   local in_host=0 in_match=0 match_safe=1
 
   [ -r "$config" ] || return 0
@@ -97,9 +98,14 @@ fm_forge_safe_ssh_config_file() {
         in_match=1
         match_safe=1
         for pattern in $rest; do
-          case "$pattern" in
-            [Ee][Xx][Ee][Cc]) match_safe=0; break ;;
-          esac
+          IFS=',' read -ra conditions <<< "$pattern"
+          for condition in "${conditions[@]}"; do
+            condition=${condition#\!}
+            condition=$(printf '%s' "$condition" | tr '[:upper:]' '[:lower:]')
+            case "$condition" in
+              exec|exec=*) match_safe=0; break 2 ;;
+            esac
+          done
         done
         [ "$match_safe" -eq 1 ] && printf '%s\n' "$line"
         ;;
