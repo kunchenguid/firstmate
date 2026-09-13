@@ -209,6 +209,19 @@ is_glob_pointer_token() {
   return 1
 }
 
+is_angle_placeholder_path() {
+  local path=$1 segment
+  while :; do
+    segment=${path%%/*}
+    case "$segment" in
+      *'<'*'>'*) return 0 ;;
+    esac
+    [ "$path" = "$segment" ] && break
+    path=${path#*/}
+  done
+  return 1
+}
+
 absent_pointer_status() {
   local home_kind=$1 home=$2 config=$3 data=$4 state=$5 tok=$6
   case "$tok" in
@@ -227,6 +240,7 @@ classify_pointer_token() {
     *'..'*|*'://'*) return 1 ;;
   esac
   is_glob_pointer_token "$tok" && return 1
+  is_angle_placeholder_path "$tok" && return 1
   is_secretish_path "$tok" && return 1
   case "$tok" in
     /*|data/*|config/*|state/*|bin/*|docs/*|.agents/*|skills/*)

@@ -8,6 +8,7 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
+#   fmx_relay_activation_status <home> - active, inactive, or unreadable relay config
 #   fmx_relay_active <home>    - whether the relay has a pairing token
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
@@ -61,6 +62,32 @@ fi
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
 # callers can treat empty output as "unset".
+_fmx_env_get() {
+  local strict=$1 key=$2 file=$3 line val matches grep_status
+  if [ ! -f "$file" ]; then
+    [ "$strict" -eq 0 ] && return 0
+    return 2
+  fi
+  if matches=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null); then
+    line=${matches##*$'\n'}
+  else
+    grep_status=$?
+    if [ "$grep_status" -eq 1 ] || [ "$strict" -eq 0 ]; then
+      return 0
+    fi
+    return 2
+  fi
+  [ -n "$line" ] || return 0
+  val=${line#*=}
+  val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
+  val=${val%"${val##*[![:space:]]}"}   # strip trailing whitespace (incl. CR)
+  case "$val" in
+    \"*\") val=${val#\"}; val=${val%\"} ;;
+    \'*\') val=${val#\'}; val=${val%\'} ;;
+  esac
+  printf '%s' "$val"
+}
+
 fmx_env_get() {
   local key=$1 file=$2 line val
   [ -f "$file" ] || return 0
@@ -76,6 +103,22 @@ fmx_env_get() {
   printf '%s' "$val"
 }
 
+fmx_relay_activation_status() {
+  local home=$1 env_file token
+  if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
+    [ -n "${FMX_PAIRING_TOKEN-}" ]
+    return $?
+  fi
+  [ -d "$home" ] && [ -x "$home" ] || return 2
+  env_file="$home/.env"
+  if [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
+    return 1
+  fi
+  [ -f "$env_file" ] && [ -r "$env_file" ] || return 2
+  token=$(_fmx_env_get 1 FMX_PAIRING_TOKEN "$env_file") || return 2
+  [ -n "$token" ]
+}
+
 fmx_relay_active() {
   local home=$1 token
   if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
@@ -85,6 +128,32 @@ fmx_relay_active() {
   [ -f "$home/.env" ] || return 1
   token=$(fmx_env_get FMX_PAIRING_TOKEN "$home/.env")
   [ -n "$token" ]
+}
+
+FMX_INBOX_DIRNAME='x-inbox'
+FMX_OUTBOX_DIRNAME='x-outbox'
+FMX_CONTEXT_DIRNAME='x-context'
+
+fmx_home_path_absence_status() {
+  local home=$1 path=$2 activation_status
+  case "$path" in
+    "state/$FMX_INBOX_DIRNAME"|"state/$FMX_INBOX_DIRNAME/"|\
+    "state/$FMX_OUTBOX_DIRNAME"|"state/$FMX_OUTBOX_DIRNAME/"|\
+    "state/$FMX_CONTEXT_DIRNAME"|"state/$FMX_CONTEXT_DIRNAME/")
+      if fmx_relay_activation_status "$home"; then
+        printf 'UNKNOWN\n'
+      else
+        activation_status=$?
+        if [ "$activation_status" -eq 1 ]; then
+          printf 'OPTIONAL\n'
+        else
+          printf 'UNKNOWN\n'
+        fi
+      fi
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 fmx_poll_shim_content() {

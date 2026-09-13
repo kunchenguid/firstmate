@@ -109,6 +109,32 @@ assert_no_writes() {
   [ "$before" = "$after" ] || fail "$label: doctor wrote to an inspected fixture"$'\n'"--- before ---"$'\n'"$before"$'\n'"--- after ---"$'\n'"$after"
 }
 
+# --- missing absence probes --------------------------------------------------
+
+DIAGNOSTIC_FIXTURE="$TMP_ROOT/diagnostic-fixture"
+make_home "$DIAGNOSTIC_FIXTURE"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'Read-only checks may inspect `state/public-followup/` and `state/slack-inbox/`.' > "$DIAGNOSTIC_FIXTURE/data/captain.md"
+out=$(run_doctor "$DIAGNOSTIC_FIXTURE" --home-local 2>"$TMP_ROOT/err.diagnostic-fixture") && rc=0 || rc=$?
+expect_code 0 "$rc" "read-only diagnostics must succeed"
+if grep -F -q 'command not found' "$TMP_ROOT/err.diagnostic-fixture"; then
+  fail "read-only diagnostics emitted an undefined-command error: $(cat "$TMP_ROOT/err.diagnostic-fixture")"
+fi
+pass "read-only diagnostics have no undefined-command errors"
+
+POINTER_PLACEHOLDER_FIXTURE="$TMP_ROOT/pointer-placeholder-fixture"
+make_home "$POINTER_PLACEHOLDER_FIXTURE"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
+printf '%s\n' 'Template: `data/<task>/room-join.txt`. Real path: `data/missing-literal.md`. Cross-segment: `data/a<b/c>d.md`.' > "$POINTER_PLACEHOLDER_FIXTURE/data/captain-shared.md"
+out=$(run_doctor "$POINTER_PLACEHOLDER_FIXTURE" --home-local 2>"$TMP_ROOT/err.pointer-placeholder") && rc=0 || rc=$?
+expect_code 1 "$rc" "real missing pointers must remain threatening"
+assert_contains "$out" 'data/missing-literal.md' "real missing pointer evidence is missing"
+assert_contains "$out" 'data/a<b/c>d.md' "angle brackets spanning path segments were incorrectly ignored"
+if printf '%s\n' "$out" | grep -F -q 'data/<task>/room-join.txt'; then
+  fail "angle-bracket template was treated as a missing pointer: $out"
+fi
+pass "angle-bracket templates are ignored while literal pointer gaps remain"
+
 # --- all-green --------------------------------------------------------------
 
 PRIMARY="$TMP_ROOT/primary"
