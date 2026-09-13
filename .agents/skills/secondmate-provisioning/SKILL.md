@@ -85,7 +85,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-Each project clone is also pointed at a treehouse pool root private to its home; [`bin/fm-treehouse-pool-lib.sh`](../../../bin/fm-treehouse-pool-lib.sh)'s header owns the derivation and what a project that already tracks its own `treehouse.toml` triggers.
+Each newly cloned project is also pointed at a treehouse pool root private to its home; [`bin/fm-treehouse-pool-lib.sh`](../../../bin/fm-treehouse-pool-lib.sh)'s header owns the derivation and what a project that already tracks its own `treehouse.toml` triggers.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.

@@ -14,9 +14,10 @@
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
 # reply promise, which the subsystem can only carry on the parent's own
 # filesystem, is never mistaken for one this child could hold - and the
-# .fm-secondmate-home marker commits the complete seed last. Each cloned project
-# is also pointed at a treehouse pool private to this home through
-# bin/fm-treehouse-pool-lib.sh, so a secondmate never shares its parent home's pool.
+# .fm-secondmate-home marker commits the complete seed last. Each newly cloned
+# project is also pointed at a treehouse pool private to this home through
+# bin/fm-treehouse-pool-lib.sh, which owns the derivation and the project-owned
+# treehouse.toml case.
 # A newly created home is removed on failure. An existing matching seeded home
 # is converged only through guarded ordinary-file updates and new project clones.
 set -eu
