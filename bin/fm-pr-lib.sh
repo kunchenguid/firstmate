@@ -285,6 +285,26 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Read the task record's canonical PR identity, refusing any record that is not
+# shaped the way the arming writer left it.
+#
+# Exactly one pr= line may exist: that count, not its position, is what makes
+# the identity unambiguous. Position carries a separate obligation - the pr=
+# block must be the record's TRAILING block. Only pr=, pr_head= and the x_*
+# keys may follow pr=; anything else means some writer appended to the record
+# after the poll was armed, and the record is refused.
+#
+# Every writer that adds a key to a task record therefore has to put it BEFORE
+# the pr= block: bin/fm-pr-check.sh strips and re-appends that block when it
+# arms the poll, and bin/fm-spawn.sh's relaunch rewrite holds it back to the
+# end. A writer that appends past it costs the task its merge poll outright -
+# bin/fm-watch.sh refuses the check on every cycle and reports it as
+# unauthenticated, so the merge the poll exists to catch is never noticed.
+# Widening the list below instead of fixing such a writer only moves the next
+# occurrence to the next new key.
+#
+# A pr_head= line is validated only where it follows pr=, which is where this
+# contract puts it and where its consumers' `tail -1` read resolves.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

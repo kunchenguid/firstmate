@@ -25,11 +25,15 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -384,6 +388,112 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# Arm a real merge poll on <id> through bin/fm-pr-check.sh, exactly as the
+# lifecycle does, so the assertion below runs against the armed artifacts rather
+# than a hand-written record. gh is stubbed so the head comes from the fixture
+# instead of the network, and fm-guard.sh is stubbed out of the way.
+arm_pr_poll() {  # <case-dir> <id> <pr-url>
+  local dir=$1 id=$2 url=$3
+  mkdir -p "$dir/root/bin"
+  cat > "$dir/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/root/bin/fm-guard.sh"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+  env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    "$PR_CHECK" "$id" "$url"
+}
+
+# The bug this pins: relaunch rewrites the task record, and every key it appends
+# lands after the pr= identity block. fm_pr_metadata_identity_parse treats any
+# unrecognised line after pr= as a broken record, so the watcher stops executing
+# the merge poll and reports it as an unauthenticated check on every cycle - a
+# merge nobody is watching for, reported as if it were tampering.
+#
+# It has to be asserted through the armed poll: every individual piece looks
+# correct alone. The record still carries pr=, the parser still accepts a
+# hand-written control_relaunch_tx= line, and relaunch still preserves every
+# value (test_relaunch_preserves_durable_task_metadata covers exactly that and
+# passed throughout). Only the two together show the poll going dark.
+test_relaunch_keeps_the_armed_merge_poll_valid() {
+  local dir out rc url tx
+  url=https://github.com/example/repo/pull/44
+  dir=$(new_case pr-poll rl44)
+  add_ship_task "$dir" rl44 claude
+  out=$(arm_pr_poll "$dir" rl44 "$url"); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl44 "$PR_POLL" \
+    || fail "the fixture did not arm a valid merge poll"
+
+  out=$(run_control "$dir" rl44 relaunch --note "continuing the delivery"); rc=$?
+  expect_code 0 "$rc" "a relaunch on a PR-ready task should succeed"$'\n'"$out"
+
+  [ "$(meta_field "$dir" rl44 pr)" = "$url" ] || fail "the task PR must survive relaunch"
+  tx=$(meta_field "$dir" rl44 control_relaunch_tx)
+  [ -n "$tx" ] || fail "the fixture did not exercise the relaunch record key"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl44 "$PR_POLL" \
+    || fail "relaunch invalidated the armed merge poll; the merge would go unnoticed"
+  pass "fm-control relaunch: an armed merge poll still validates after the agent is replaced"
+}
+
+# The relaunch path writes the record twice: the rewrite above, and a second
+# pass that records the replacement's trace carrier. Trace context is off by
+# default, so the case above never reaches that second write - it needs its own
+# fixture or the carrier goes back to landing past the pr= block.
+test_relaunch_with_trace_context_keeps_the_armed_merge_poll_valid() {
+  local dir out rc url
+  url=https://github.com/example/repo/pull/46
+  dir=$(new_case pr-poll-trace rl46)
+  add_ship_task "$dir" rl46 claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  out=$(arm_pr_poll "$dir" rl46 "$url"); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+
+  out=$(run_control "$dir" rl46 relaunch --note "continuing the delivery"); rc=$?
+  expect_code 0 "$rc" "a relaunch on a PR-ready task should succeed"$'\n'"$out"
+
+  fm_trace_context_valid "$(meta_field "$dir" rl46 traceparent)" \
+    || fail "the fixture did not exercise the trace-carrier write"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl46 "$PR_POLL" \
+    || fail "recording the replacement's trace carrier invalidated the armed merge poll"
+  pass "fm-control relaunch: recording the replacement trace carrier keeps the merge poll valid"
+}
+
+# The same guarantee stated as an invariant rather than a single key: whatever a
+# relaunch preserves or adds, the pr= identity block stays trailing. This is what
+# keeps the next key nobody has written yet from silently repeating the bug.
+test_relaunch_leaves_the_pr_identity_block_trailing() {
+  local dir out rc url meta tail_keys
+  url=https://github.com/example/repo/pull/45
+  dir=$(new_case pr-trailing rl45)
+  add_ship_task "$dir" rl45 claude
+  out=$(arm_pr_poll "$dir" rl45 "$url"); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  # A key from a writer this fix does not touch, recorded before the relaunch,
+  # so the rewrite has to re-order preserved state and not merely place its own.
+  printf '%s\n' 'decisions_reviewed=1' >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continuing the delivery"); rc=$?
+  expect_code 0 "$rc" "a relaunch on a PR-ready task should succeed"$'\n'"$out"
+
+  meta="$dir/home/state/rl45.meta"
+  [ "$(meta_field "$dir" rl45 decisions_reviewed)" = 1 ] \
+    || fail "relaunch dropped durable state while re-ordering the record"
+  tail_keys=$(sed -n "/^pr=/,\$p" "$meta" | cut -d= -f1 | sort -u | tr '\n' ' ')
+  [ "$tail_keys" = "pr pr_head " ] \
+    || fail "relaunch left '$tail_keys' at the end of the record; only the PR identity block may trail pr="
+  pass "fm-control relaunch: the PR identity block stays the trailing block of the record"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1562,6 +1672,9 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
+test_relaunch_keeps_the_armed_merge_poll_valid
+test_relaunch_with_trace_context_keeps_the_armed_merge_poll_valid
+test_relaunch_leaves_the_pr_identity_block_trailing
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
