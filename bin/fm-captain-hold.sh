@@ -22,6 +22,10 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#   fm-captain-hold.sh escalate <task-id> --reason <reason> \
+#     --escalation-file <path> [--title <title>] [--repo <repo>] \
+#     [--origin <origin-id>] [--until YYYY-MM-DD]
+#   fm-captain-hold.sh prompt <task-id>
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -43,9 +47,11 @@
 # question gates over minting a new row. The command records a UTC `Captain
 # hold set:` timestamp in the task body: repeating an active hold preserves the
 # existing timestamp, while re-holding released work starts a new lifecycle.
-# A task already closed is refused rather than reopened. `--until` records the
-# captain's own deferral date through `tasks-axi hold --until`, so a "revisit
-# later" answer is stored as a date instead of a live card.
+# A structured escalation is durable context for the interactive ask surface.
+# Its schema, validation, and persistence are owned by the commands below; the
+# production shell does not invoke a model-only ask tool. The firstmate runtime
+# presents `prompt` through its own ask capability, then feeds the selected
+# answer to `answers` or `fm-send --resolve-key`.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -797,6 +803,107 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
     fail "could not record the hold-set stamp on $id"
   fi
   rm -f -- "$tmp"
+}
+
+ESCALATION_SCHEMA=fm-captain-escalation.v1
+escalation_path() { printf '%s/%s.escalation.json' "$STATE" "$1"; }
+validate_escalation_file() {  # <task-id> <path>
+  local id=$1 path=$2 bytes
+  command -v jq >/dev/null 2>&1 || fail "jq is required for structured captain escalations"
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "escalation file is not a regular file: $path"
+  bytes=$(LC_ALL=C wc -c < "$path" | tr -d ' ') || fail "could not read escalation file: $path"
+  [ "$bytes" -le 32768 ] || fail "escalation file exceeds 32768 bytes"
+  jq -e --arg schema "$ESCALATION_SCHEMA" --arg task "$id" '
+    type == "object" and .schema == $schema and .task == $task
+    and (.question | type == "string" and length > 0)
+    and (.evidence | type == "string" and length > 0)
+    and (.context | type == "string" and length > 0)
+    and (.options | type == "array" and length >= 2 and length <= 5)
+    and (all(.options[]; type == "object"
+      and (.value | type == "string" and test("^[A-Za-z0-9._-]+$") and length <= 128)
+      and (.label | type == "string" and length > 0)
+      and ((has("hint") | not) or (.hint | type == "string"))))
+    and ([.options[].value] | length == (unique | length))
+    and (.recommendation as $r | ($r | type == "string")
+      and ([.options[].value] | index($r) != null))
+    and (.recommendation_reason | type == "string" and length > 0)
+  ' "$path" >/dev/null \
+    || fail "escalation file must be $ESCALATION_SCHEMA with question, evidence, context, 2-5 unique options, and a recommendation"
+}
+stage_escalation() {  # <task-id> <path>; sets ESCALATION_STAGED/DEST
+  local id=$1 path=$2 dest tmp
+  validate_escalation_file "$id" "$path"
+  dest=$(escalation_path "$id")
+  ESCALATION_DEST=$dest
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    [ -f "$dest" ] && [ ! -L "$dest" ] || fail "existing escalation record is unsafe: $dest"
+    cmp -s <(jq -cS . "$path") <(jq -cS . "$dest") \
+      || fail "task $id already has a different structured escalation"
+    return 0
+  fi
+  (umask 077; mkdir -p "$STATE") || fail "cannot create state directory for escalation"
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail "state directory is unsafe: $STATE"
+  tmp=$(umask 077; mktemp "$STATE/.captain-escalation.XXXXXX") \
+    || fail "cannot stage structured escalation"
+  if ! jq -cS . "$path" > "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage structured escalation"
+  fi
+  ESCALATION_STAGED=$tmp
+}
+commit_escalation() {
+  [ -n "${ESCALATION_STAGED:-}" ] || return 0
+  mv -f -- "$ESCALATION_STAGED" "$ESCALATION_DEST" \
+    || fail "could not publish structured escalation"
+  ESCALATION_STAGED=''
+}
+print_escalation_prompt() {  # <task-id>
+  local id=$1 path
+  path=$(escalation_path "$id")
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "task $id has no durable structured escalation"
+  validate_escalation_file "$id" "$path"
+  jq -cS . "$path"
+}
+
+command_escalate() {
+  local id=${1:-} escalation_file='' reason='' title='' repo='' origin='' until='' key
+  local -a hold_args
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reason|--escalation-file|--title|--repo|--origin|--until)
+        [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+        key=$1; shift
+        case "$key" in
+          --reason) reason=$1 ;; --escalation-file) escalation_file=$1 ;;
+          --title) title=$1 ;; --repo) repo=$1 ;; --origin) origin=$1 ;; --until) until=$1 ;;
+        esac ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  [ -n "$escalation_file" ] || fail "--escalation-file is required"
+  [ -n "$reason" ] || fail "--reason is required"
+  stage_escalation "$id" "$escalation_file"
+  hold_args=("$id" --reason "$reason")
+  [ -z "$title" ] || hold_args+=(--title "$title")
+  [ -z "$repo" ] || hold_args+=(--repo "$repo")
+  [ -z "$origin" ] || hold_args+=(--origin "$origin")
+  [ -z "$until" ] || hold_args+=(--until "$until")
+  if ! command_hold "${hold_args[@]}" >/dev/null; then
+    [ -z "${ESCALATION_STAGED:-}" ] || rm -f -- "$ESCALATION_STAGED"
+    exit 1
+  fi
+  commit_escalation
+  printf '%s\n' "$id"
+}
+
+command_prompt() {
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$1"
+  print_escalation_prompt "$1"
 }
 
 # Resolve one entry and verify the row it names is durably captain-held. A
@@ -1928,6 +2035,8 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
+  escalate) shift; command_escalate "$@" ;;
+  prompt) shift; command_prompt "$@" ;;
   answer) shift; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;

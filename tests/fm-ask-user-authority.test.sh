@@ -36,7 +36,57 @@ test_primary_and_secondmate_instruction_generation() {
     "generated secondmate charter does not load the tracked authority boundary"
   assert_no_grep 'continuous frame-by-frame monitoring' "$charter" \
     "generated secondmate charter duplicated the detailed authority procedure"
-  pass "primary workers and secondmates receive the authority rule through generated instructions"
+  pass "primary and secondmate workers receive the authority rule through generated instructions"
 }
+test_structured_escalation_persists_and_validates() {
+  local home prompt out
+  home="$TMP_ROOT/structured-home"
+  mkdir -p "$home/data" "$home/state" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
 
+## Queued
+
+## Done
+EOF
+  fakebin=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  prompt="$home/prompt.json"
+  cat > "$prompt" <<EOF
+{"schema":"fm-captain-escalation.v1","task":"choose-route","question":"Which route should ship?","evidence":"Two designs pass the current checks.","context":"The choice changes the public API and is not settled by the task.","options":[{"value":"north","label":"North","hint":"Recommended compatibility path"},{"value":"south","label":"South","hint":"Lower migration cost"}],"recommendation":"north","recommendation_reason":"North preserves the accepted compatibility contract."}
+EOF
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" escalate choose-route \
+    --title "Choose route" --repo firstmate --reason "route choice needs captain" \
+    --escalation-file "$prompt") || fail "structured escalation failed: $out"
+  [ "$out" = choose-route ] || fail "escalation returned the wrong task id: $out"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" prompt choose-route) \
+    || fail "durable escalation prompt could not be read: $out"
+  printf '%s' "$out" | jq -e '.schema == "fm-captain-escalation.v1" and .task == "choose-route" and (.options | length == 2) and .recommendation == "north"' >/dev/null \
+    || fail "prompt output lost structured question fields: $out"
+  assert_present "$home/state/choose-route.escalation.json" "escalation prompt was not durable"
+  if jq '.options = [{"value":"only","label":"Only"}]' "$prompt" > "$home/bad.json" \
+    && PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-captain-hold.sh" escalate another-route \
+      --title "Another route" --repo firstmate --reason "route choice needs captain" \
+      --escalation-file "$home/bad.json" > "$home/bad.out" 2> "$home/bad.err"; then
+    fail "structured escalation accepted fewer than two options"
+  fi
+  assert_grep '2-5 unique options' "$home/bad.err" "invalid structured escalation did not explain its contract"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" answers --source "captain interactive ask" \
+      <<'EOF'
+choose-route	north	North
+EOF
+  ) || fail "keyed answer routing failed after structured escalation: $out"
+  assert_contains "$(cat "$home/data/backlog.md")" "choose-route" "structured escalation answer did not use the existing keyed intake"
+  pass "structured escalations persist 2-5-option prompts and route answers through keyed captain holds"
+}
 test_primary_and_secondmate_instruction_generation
+test_structured_escalation_persists_and_validates

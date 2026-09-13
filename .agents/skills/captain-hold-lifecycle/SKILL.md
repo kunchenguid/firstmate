@@ -10,15 +10,21 @@ metadata:
 
 # Captain-hold lifecycle
 
-A decision is not a separate thing: it is simply a task waiting on the captain.
-The one primitive is an ordinary backlog task held for the captain through `bin/fm-captain-hold.sh hold`; its identity is the task id, and that wrapper owns the deterministic mechanics this policy relies on.
-The agent performs the semantic inventory because scripts must not infer captain calls from report prose, visual-review artifacts, terminal output, or chat.
+This skill is the single owner of decision escalation policy and lifecycle.
+It applies to any genuinely ambiguous, contract-expanding, destructive,
+irreversible, or security-sensitive choice, not only no-mistakes findings.
+Unambiguous findings that preserve accepted intent remain autonomous.
+An escalated choice is presented with concise evidence and context, 2-5
+concrete options, and one recommendation. The structured prompt is persisted
+by `bin/fm-captain-hold.sh escalate` and retrieved with `prompt`; that command
+is the production integration seam because the model-only ask tool is not
+callable from shell production code. The selected answer is routed through the
+existing keyed `answers` intake or `fm-send --resolve-key` path, never a second
+answer store.
 
-## Policy
-
-Every unresolved question that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must be carried by a captain-held task in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
-Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
-Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
+The firstmate decides unambiguous findings autonomously and uses the
+interactive ask surface for only the escalation classes above. A worker never
+answers its own escalated finding.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
