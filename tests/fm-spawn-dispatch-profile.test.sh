@@ -347,7 +347,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -414,7 +414,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -430,14 +430,14 @@ test_codex_omits_max_effort_before_supported_version() {
   expect_code 0 "$status" "codex spawn before max support should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit max reasoning effort before support"
   pass "codex omits max effort before the supported version"
 }
 
 test_codex_threads_max_effort_on_supported_version() {
-  local rec id out status launch
+  local rec id out status launch otherbin original_marker wrong_marker
   id=profile-codex-max-supported-z4b
   rec=$(make_spawn_case profile-codex-max-supported codex "$id")
   read_case_record "$rec"
@@ -447,8 +447,27 @@ test_codex_threads_max_effort_on_supported_version() {
   expect_code 0 "$status" "codex spawn with supported max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not forward supported max reasoning effort"
+  otherbin="$CASE_DIR/other-bin"
+  original_marker="$CASE_DIR/codex-original-ran"
+  wrong_marker="$CASE_DIR/codex-other-ran"
+  mkdir -p "$otherbin"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+touch "$FM_CODEX_ORIGINAL_MARKER"
+exit 0
+SH
+  cat > "$otherbin/codex" <<'SH'
+#!/bin/sh
+touch "$FM_CODEX_OTHER_MARKER"
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/codex" "$otherbin/codex"
+  env -i PATH="$otherbin:/usr/bin:/bin" FM_CODEX_ORIGINAL_MARKER="$original_marker" FM_CODEX_OTHER_MARKER="$wrong_marker" \
+    /bin/bash -c "$launch" || fail "Codex launch failed under a different destination PATH"
+  assert_present "$original_marker" "Codex launch did not use the probed executable"
+  assert_absent "$wrong_marker" "Codex launch used a destination PATH executable instead of the probed one"
   pass "codex forwards max effort on the supported version"
 }
 
@@ -1309,7 +1328,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   status=$?
   expect_code 0 "$status" "codex spawn under claude-permission-mode=auto should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex " "codex launch did not run codex"
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex'" "codex launch did not run the resolved Codex executable"
   assert_not_contains "$launch" "--permission-mode" "the claude permission flag must not leak into a codex launch"
   pass "config/claude-permission-mode changes claude launches only"
 }
