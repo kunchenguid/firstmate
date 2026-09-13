@@ -849,6 +849,7 @@ done
 pass "a failed edge-marker write escalates to a captured terminal outcome and retires the watch"
 
 # --- retire stops a repeat watch ---------------------------------------------
+H="$TMP_ROOT/h-repeat"
 STOPPED=$(count_lines "$REPEATLOG")
 when "$H" retire repeat >/dev/null
 assert_absent "$H/state/procevent/when-repeat.source" "retire drops the repeat registration"
