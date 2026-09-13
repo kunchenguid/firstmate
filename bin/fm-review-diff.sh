@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
-# Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# The base is the branch the task delivers to, which is the same rule
+# bin/fm-spawn.sh applies when it picks a fresh task worktree's base:
+# - a project with no origin remote is compared against its local <default>;
+# - a task whose meta records a pull-request delivery is compared against
+#   origin/<default>, fetched first, because that is the branch its pull request
+#   targets and everything origin lacks would land inside it (bin/fm-dod-lib.sh
+#   owns which modes those are);
+# - any other task - a local-only ship, or a scout - is compared against
+#   whichever of the local <default> and origin/<default> meets the branch later,
+#   the one whose merge base with it descends from the other's. A local-only
+#   project lands work on the local <default> and never pushes, so origin stays
+#   frozen behind it and anchoring there would show every landed commit as this
+#   task's; a primary checkout that trails origin is the mirror case. Equal merge
+#   bases anchor on the local <default>, as does a local <default> that already
+#   contains the branch (the review is then empty, and says why); two unrelated
+#   merge bases are reported and anchor there as well.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -18,6 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -122,6 +137,7 @@ resolve_pr_head() {
   return 1
 }
 
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
@@ -133,11 +149,50 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+# The commit `git diff <anchor>...<branch>` starts from: the anchor's merge base
+# with the compare ref. Empty when the two histories are unrelated.
+merge_base_with_compare() {  # <rev>
+  git -C "$WT" merge-base "$1" "$COMPARE_REF" 2>/dev/null || true
+}
+
+# Pick the branch this review is anchored on; the header owns the rule.
+resolve_review_base() {
+  local local_rev origin_rev compare_rev mb_local mb_origin
+  if fm_delivery_opens_pull_request "$MODE"; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  local_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  if [ -z "$local_rev" ]; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  compare_rev=$(git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" 2>/dev/null || true)
+  mb_local=$(merge_base_with_compare "$local_rev")
+  mb_origin=
+  [ -z "$origin_rev" ] || mb_origin=$(merge_base_with_compare "$origin_rev")
+  if [ -n "$mb_local" ] && [ "$mb_local" = "$compare_rev" ]; then
+    echo "note: $DEFAULT already contains $COMPARE_REF, so there is nothing left to review against it" >&2
+  fi
+  if [ -z "$mb_origin" ] || [ "$mb_local" = "$mb_origin" ] \
+    || { [ -n "$mb_local" ] && git -C "$WT" merge-base --is-ancestor "$mb_origin" "$mb_local" 2>/dev/null; }; then
+    printf '%s' "$DEFAULT"
+    return 0
+  fi
+  if [ -z "$mb_local" ] || git -C "$WT" merge-base --is-ancestor "$mb_local" "$mb_origin" 2>/dev/null; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  echo "note: $DEFAULT and origin/$DEFAULT meet $COMPARE_REF at unrelated commits, so neither is the tighter anchor; anchoring on $DEFAULT" >&2
+  printf '%s' "$DEFAULT"
+}
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  BASE=$(resolve_review_base)
 else
   BASE="$DEFAULT"
 fi

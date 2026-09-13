@@ -952,6 +952,63 @@ test_diverged_candidates_fall_back_to_the_forge_tip() {
   pass "a diverged primary and origin still launch a scout or a local-only ship from origin's tip"
 }
 
+# The base a fresh slot is given and the commit the captain's review starts from
+# must be the SAME commit, or a branch is built on one base and reviewed against
+# another. bin/fm-spawn.sh and bin/fm-review-diff.sh apply one rule from the two
+# sides of the branch's existence - the spawn picks the commit to plant, the
+# review picks the anchor whose merge base with the branch is that commit - and
+# share the one owner of which modes open a pull request. So this drives the
+# spawn, commits on the planted slot, runs the review, and requires the review's
+# actual starting commit (the anchor's merge base with the branch) to be the
+# slot's spawn base. Each delivery runs twice: once where the primary checkout
+# contains origin, and once where a forge-only push has left the two diverged,
+# which is where a rule that only compared the two branches by containment would
+# disagree with itself.
+test_the_review_starts_where_the_spawn_planted_the_slot() {
+  local contract shape id rec out status spawn_base base_line review_start
+  for contract in no-mistakes direct-PR local-only scout; do
+    for shape in converged diverged; do
+      id="pool-agree-${contract}-${shape}-r18"
+      rec=$(make_local_only_case "agree-$contract-$shape" "$id" 2)
+      read_case_record "$rec"
+      [ "$shape" = converged ] || push_forge_only_commit
+
+      if [ "$contract" = scout ]; then
+        out=$(run_spawn "$id" --scout)
+      else
+        out=$(run_spawn "$id" --mode "$contract" --yolo off)
+      fi
+      status=$?
+      expect_code 0 "$status" "spawn should launch a $contract task on a $shape history"$'\n'"$out"
+      spawn_base=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+      git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+      printf 'the work under review\n' > "$POOL_DIR/task-change.txt"
+      git -C "$POOL_DIR" add task-change.txt
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm "task work"
+      out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+        "$ROOT/bin/fm-review-diff.sh" "$id" --stat 2>/dev/null)
+      base_line=$(printf '%s\n' "$out" | sed -n 's/^diff base: //p')
+      [ -n "$base_line" ] || fail "$contract/$shape: fm-review-diff printed no base line"
+      review_start=$(git -C "$POOL_DIR" merge-base "$base_line" "fm/$id" 2>/dev/null) \
+        || fail "$contract/$shape: the review base '$base_line' has no merge base with the branch"
+      [ "$review_start" = "$spawn_base" ] \
+        || fail "$contract/$shape: the spawn planted the slot on $spawn_base but the review starts from $review_start (anchored on $base_line)"
+      assert_contains "$out" 'task-change.txt' \
+        "$contract/$shape: the review diff lost the task's own work"
+      assert_not_contains "$out" 'forge-only.txt' \
+        "$contract/$shape: the review diff carries a commit the task never authored"
+      assert_not_contains "$out" 'landed-2.txt' \
+        "$contract/$shape: the review diff carries a landing the task never authored"
+      if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+        printf '# observed %s/%s review base: %s\n' "$contract" "$shape" "$base_line"
+      fi
+    done
+  done
+  pass "the review starts from the commit the spawn planted the slot on, for every delivery, converged or diverged"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -977,5 +1034,6 @@ test_dirty_slot_survives_even_when_the_primary_is_ahead
 test_pull_request_delivery_keeps_the_forge_tip
 test_pull_request_delivery_ignores_a_diverged_primary
 test_diverged_candidates_fall_back_to_the_forge_tip
+test_the_review_starts_where_the_spawn_planted_the_slot
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
