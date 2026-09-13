@@ -253,7 +253,7 @@ This generous floor is required for small composer and peek reads.
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
 When a harness-specific busy source is missing or unverified, `bin/fm-crew-state.sh` may use Herdr's `agent_status` as a current-state source after the process-level liveness check proves the registered agent is live.
-That fallback maps `working` and `done` directly, maps `blocked` to `parked`, and remains unknown for unreadable or shell-only registrations; the measured versioned behavior is in [`verification/runtime-backends.md`](verification/runtime-backends.md#current-state-agent-status-fallback).
+That fallback accepts only live `working` as activity evidence and remains unknown for `done`, `blocked`, unreadable, or shell-only registrations, so Herdr activity never becomes a durable crew outcome; the measured versioned behavior is in [`verification/runtime-backends.md`](verification/runtime-backends.md#current-state-agent-status-fallback).
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
