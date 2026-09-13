@@ -154,6 +154,7 @@ The window between a merge landing and cleanup is an accepted structural residua
 That local window is normally only seconds wide and requires re-holding a task whose merge has just landed.
 A re-hold inside the window makes cleanup retain the row rather than publish it, so the delivery is omitted until the stale hold is cleared from that row.
 Queued forge merges cannot be covered locally because the forge performs the merge asynchronously after the local command has returned, when no lock this code could hold would still be held.
+The away-posture restriction on queued merges and its residual limits are owned by [architecture.md](architecture.md#delivery-modes-are-explicit-per-task).
 
 ## Record divergence
 

@@ -2,7 +2,11 @@
 # Pre-register Claude Code's workspace trust for the directory a claude spawn is
 # about to launch into - the isolated task worktree of a ship or scout crewmate,
 # or the seeded home of a secondmate - so the agent reaches its brief or charter
-# instead of wedging on the trust dialog.
+# instead of wedging on the trust dialog. In worktree mode it also carries
+# forward the external-CLAUDE.md-import approval, but only when the primary
+# checkout already holds standing consent for it - see the consent-gating
+# block below for why that dialog is otherwise left for the worker to wedge
+# on rather than answered on the human's behalf.
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
@@ -22,7 +26,52 @@
 # Enter, Escape and C-c with no arrow navigation, so firstmate cannot answer it
 # and must not try - pressing Enter would select exit. The agent wedges before
 # it ever reads the brief. Registering the trust before launch is the only
-# control that reaches an interactive pane.
+# control that reaches an interactive pane. The same reasoning covers Claude
+# Code's separate "Allow external CLAUDE.md file imports?" dialog, which
+# `--setting-sources project,local` (firstmate PR 10's minimal worker tool
+# surface) stopped suppressing: it renders whenever a loaded CLAUDE.md chain
+# reaches outside the project tree - which every crewmate's does, through the
+# captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md` - and it is
+# gated the same fail-closed way as trust: cursor on "No, disable", no arrow
+# navigation from firstmate's steering plane. Only worktree mode reaches this
+# second dialog's flags: a secondmate home has no separate "project" entry to
+# carry consent forward from, so its registration stays trust-only.
+#
+# TWO PROJECT-CONFIG ENTRIES IN WORKTREE MODE, NOT ONE. Registering both flags
+# on the worktree entry alone (the original trust-only design) leaves the
+# external-imports dialog showing. Verified 2026-09-06 by disassembling the
+# installed `claude` binary and reproducing in an isolated three-way tmux
+# launch: Claude Code's own trust check (`Rde`) reads the canonical
+# project-root entry first and, failing that, falls back to an ancestor walk
+# from the worktree upward that DOES reach the worktree's own entry - which is
+# why the trust dialog kept working after PR 10. The external-imports check
+# (`es`/`F1e`) has no such fallback: it reads ONLY the canonical project-root
+# entry, and that root is never the worktree - Claude Code's own git-root
+# canonicalization (`Fr`/`Se`) walks a linked worktree's `.git` file through
+# its `commondir` pointer back to the PRIMARY CHECKOUT, exactly the <project>
+# argument this script already receives for the worktree-mode scope test
+# below. So the trust flag is registered on BOTH the worktree entry (for
+# trust's ancestor-walk fallback and defense in depth) and the project entry
+# (the trust check's first, canonical-shaped, look); the two external-imports
+# flags land on those same two entries only when the project entry already
+# carries standing consent (see the consent-gating block below) - the project
+# entry is the only place the external-imports check ever looks. Registering
+# the project entry is a write to the launching user's OWN Claude config
+# store, keyed by a project PATH the scope test below has already verified is
+# real - not a write to the project's tracked content, so hard rule 1 does not
+# apply, same as the existing worktree-entry write.
+#
+# THAT SAME PROJECT ENTRY IS ALSO THE LAUNCHING HUMAN'S OWN INTERACTIVE
+# CONFIG, though, so this registration must never overwrite a decision the
+# human already made there. If the project entry already carries
+# hasClaudeMdExternalIncludesApproved===false - Claude Code only ever writes
+# that on an explicit "No, disable" answer - the whole registration refuses
+# rather than flipping it, because doing so would grant every future
+# interactive session in that checkout silent external-file inclusion the
+# human declined, permanently and without being asked. The worktree entry is
+# left unwritten too: the spawn wedges on the dialog, which is the honest
+# outcome given a standing decline, not registered trust with a stripped
+# consent record.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. Each mode has its own, because the two directories have entirely
@@ -34,7 +83,18 @@
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip.
+# never a silent skip. When <project> is itself a linked worktree (a
+# secondmate home spawned from, rather than as, the primary checkout),
+# refusing outright would wedge a relaunch that is otherwise perfectly valid:
+# its own common dir already IS the primary checkout's own git dir (git's
+# git-common-dir answer never changes by which worktree asks), so the
+# checkout is derived structurally from it - its parent directory in the
+# standard non-bare, non-GIT_DIR-overridden layout this script already
+# requires elsewhere - and verified, never assumed: the candidate's own
+# resolved git dir must equal that common dir, the same primary-checkout
+# definition used throughout, or this refuses rather than guess. The
+# consent-gated external-imports flags land on that resolved canonical
+# checkout, never on the linked-worktree argument itself.
 #
 # The test is deliberately NOT a treehouse or orca path prefix. Treehouse's
 # root is configurable (--root, TREEHOUSE_ROOT, config, and a relative
@@ -75,15 +135,21 @@
 #
 # Home-level trust is broader than worktree trust, since the pane starts in the
 # home and the secondmate works across it, so it is granted on that seed
-# evidence alone and never on a caller's word about what a path is.
+# evidence alone and never on a caller's word about what a path is. It is
+# trust-only: a secondmate home has no separate primary-checkout "project"
+# argument to gate external-imports consent against, so the two import flags
+# are never written there.
 #
-# Only the launching user's own store is written: the projects entry for the
-# registered path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a
-# regular file this uid owns. Every unrelated key and project entry is
-# preserved, and the replacement is atomic. fm-spawn.sh forwards CLAUDE_CONFIG_DIR
-# onto the claude launch verbatim rather than resolving it, and the pane starts
-# in the registered directory, so only an absolute value names the same store on
-# both sides; a relative one is refused below rather than guessed at.
+# Only the launching user's own store is written. In worktree mode: the
+# projects entries for the worktree path and the resolved canonical project
+# path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
+# file this uid owns; every unrelated key and project entry is preserved, and
+# both entries land in one atomic replacement. In secondmate-home mode: the
+# single projects entry for the registered home path, same store, same atomic
+# replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the claude launch
+# verbatim rather than resolving it, and the pane starts in the registered
+# directory, so only an absolute value names the same store on both sides; a
+# relative one is refused below rather than guessed at.
 set -u
 # Path resolution here must answer from the filesystem, never from the caller's
 # environment, because the refusals below are the safety property. CDPATH would
@@ -204,6 +270,35 @@ if [ "$MODE" = worktree ]; then
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
   [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+
+  # The external-imports flags must land on the primary checkout - its own git
+  # dir equals the common dir - because that is exactly the path Claude Code's
+  # own git-root canonicalization collapses every linked worktree to. When
+  # <project> is itself a linked worktree (a secondmate home spawned from,
+  # rather than as, the primary checkout), refusing outright would wedge a
+  # relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
+  # primary checkout's own git dir (git's git-common-dir answer never changes
+  # by which worktree asks), so the checkout is derived structurally from it -
+  # its parent directory in the standard non-bare, non-GIT_DIR-overridden
+  # layout this script already requires elsewhere - and verified, never
+  # assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
+  # same primary-checkout definition used above, or this refuses rather than
+  # guess.
+  PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
+  PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
+  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has an unresolvable git directory"
+  if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
+    PROJ_CANON=$PROJ_REAL
+  else
+    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
+    [ -n "$PROJ_CANON" ] \
+      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+    CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
+    CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
+    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
+      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+  fi
 else
   # The seed evidence, in the order that names the most useful reason first: the
   # marker decides whether this is a secondmate home at all, the id decides
@@ -287,11 +382,44 @@ fi
 # attempts, and it must fail loudly rather than report a trust it did not leave.
 # ponytail: fingerprint-and-refuse, not a lock; flock is absent on macOS and
 # cannot stop a vendor session's own rewrite anyway.
-if ! node - "$STORE" "$TARGET_REAL" <<'NODE'
+#
+# In worktree mode every flag lands on both the worktree entry and the project
+# entry in the same read-modify-write attempt, so a single rename either
+# records all of it or none of it - there is no state where the worktree entry
+# is fresh and the project entry stale, or the other way round. In
+# secondmate-home mode only the single home entry is written.
+#
+# The two external-imports flags (worktree mode only) are gated separately
+# from the trust flag, because they are a CONSENT grant, not a pre-approval
+# this script is allowed to manufacture. Claude Code only ever writes
+# hasClaudeMdExternalIncludesApproved itself, on an explicit interactive
+# answer; this script's own job is to keep a worker from wedging on a dialog,
+# never to answer that dialog on the human's behalf. So the import flags land
+# on the project entry - the only place the imports check ever reads (see the
+# disassembly note above) - only when that entry ALREADY carries
+# hasClaudeMdExternalIncludesApproved===true, i.e. the human already said yes
+# at some point and this write is a same-value refresh, not new consent from
+# an absent flag. When it is not already true (including plain absent, the
+# common case for a project claude has never asked about), the import flags
+# are left untouched on both entries: writing them to the worktree entry alone
+# would be a pure no-op (the imports check never reads it) that only obscures
+# the real state, so trust still registers normally but the import dialog is
+# left exactly as undecided as it already was - the worker wedges on it, the
+# same honest outcome as an explicit decline, rather than a spawn spending
+# consent the human was never asked for.
+TRUST_FLAG='hasTrustDialogAccepted'
+IMPORT_FLAGS='["hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"]'
+if [ "$MODE" = worktree ]; then
+  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "$PROJ_CANON" "$TRUST_FLAG" "$IMPORT_FLAGS")
+else
+  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "" "$TRUST_FLAG" "$IMPORT_FLAGS")
+fi
+if ! node - "${WRITE_ARGS[@]}" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, target] = process.argv.slice(2);
+const [store, mode, target, project, trustFlag, importFlagsJson] = process.argv.slice(2);
+const importFlags = JSON.parse(importFlagsJson);
 const readStore = () => {
   try {
     return fs.readFileSync(store);
@@ -302,6 +430,32 @@ const readStore = () => {
 };
 const fingerprint = (buf) =>
   buf === null ? "absent" : crypto.createHash("sha256").update(buf).digest("hex");
+const setFlags = (projects, key, flags) => {
+  let entry = projects[key];
+  if (entry === undefined || entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    entry = {};
+  }
+  for (const flag of flags) entry[flag] = true;
+  projects[key] = entry;
+};
+const flagsLanded = (projects, key, flags) =>
+  flags.every((flag) => projects?.[key]?.[flag] === true);
+// The project entry is the launching user's OWN interactive config, not a
+// throwaway worktree, so a spawn must never silently reverse a decision the
+// human already recorded there. hasClaudeMdExternalIncludesApproved===false
+// is exactly that decision (Claude Code only ever writes it on an explicit
+// "No, disable" answer); flipping it to true would grant every future
+// interactive session in that checkout silent external-file inclusion the
+// human declined. Refuse the whole registration instead of overriding it -
+// the worktree entry is not written either, so the spawn wedges on the
+// dialog rather than the human's consent being spent without being asked.
+const declinedExternalImports = (projects, key) =>
+  projects?.[key]?.hasClaudeMdExternalIncludesApproved === false;
+// True only on an explicit prior "Yes, allow" answer - the sole state this
+// script may treat as standing consent to refresh. Absent, or any other
+// value, is NOT consent (see the block comment above this script's node call).
+const approvedExternalImports = (projects, key) =>
+  projects?.[key]?.hasClaudeMdExternalIncludesApproved === true;
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
@@ -320,12 +474,23 @@ const attempt = () => {
   if (projects === null || typeof projects !== "object" || Array.isArray(projects)) {
     throw new Error(`${store} has a non-object "projects" value`);
   }
-  let entry = projects[target];
-  if (entry === undefined || entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-    entry = {};
+  let keys;
+  if (mode === "worktree") {
+    if (declinedExternalImports(projects, project)) {
+      throw new Error(
+        `project entry for ${project} in ${store} already declined external CLAUDE.md imports; refusing to override that consent`,
+      );
+    }
+    const carryImportConsent = approvedExternalImports(projects, project);
+    const targetFlags = carryImportConsent ? [trustFlag, ...importFlags] : [trustFlag];
+    const projectFlags = carryImportConsent ? [trustFlag, ...importFlags] : [trustFlag];
+    setFlags(projects, target, targetFlags);
+    setFlags(projects, project, projectFlags);
+    keys = [[target, targetFlags], [project, projectFlags]];
+  } else {
+    setFlags(projects, target, [trustFlag]);
+    keys = [[target, [trustFlag]]];
   }
-  entry.hasTrustDialogAccepted = true;
-  projects[target] = entry;
   // Unpredictable name plus an exclusive create: the config directory may be
   // writable by another local account, and a predictable path could be
   // pre-created there as a symlink that a plain write would follow into some
@@ -347,7 +512,8 @@ const attempt = () => {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
   const back = JSON.parse(fs.readFileSync(store, "utf8"));
-  return back.projects?.[target]?.hasTrustDialogAccepted === true ? "recorded" : "dropped";
+  const landed = keys.every(([key, flags]) => flagsLanded(back.projects, key, flags));
+  return landed ? "recorded" : "dropped";
 };
 try {
   for (let i = 0; i < 3; i += 1) {
@@ -362,11 +528,18 @@ try {
   console.error(`error: ${err.message}`);
   process.exit(1);
 }
-console.error(`error: ${store} did not retain trust for ${target} after 3 attempts`);
+console.error(`error: ${store} did not retain trust for ${target}${project ? ` and ${project}` : ""} after 3 attempts`);
 process.exit(1);
 NODE
 then
-  refuse "could not record trust for '$TARGET_REAL' in '$STORE'"
+  if [ "$MODE" = worktree ]; then
+    refuse "could not record trust for '$TARGET_REAL' and project '$PROJ_CANON' in '$STORE'"
+  else
+    refuse "could not record trust for '$TARGET_REAL' in '$STORE'"
+  fi
 fi
 
 echo "trusted: $TARGET_REAL"
+if [ "$MODE" = worktree ]; then
+  echo "trusted (project root): $PROJ_CANON"
+fi

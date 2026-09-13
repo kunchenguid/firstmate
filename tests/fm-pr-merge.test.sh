@@ -65,7 +65,7 @@ write_github_live_json() {
   local case_dir=$1 head=$2
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
 JSON
 }
 
@@ -73,7 +73,7 @@ write_github_red_json() {
   local case_dir=$1 head=$2 name=$3
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
 JSON
 }
 
@@ -108,7 +108,7 @@ write_github_rollup_json() {
   done
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[$rollup]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[$rollup]}
 JSON
 }
 
@@ -158,6 +158,17 @@ case "${1:-} ${2:-}" in
   "pr merge")
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
       cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
+    fi
+    # The forge call runs inside the merge's critical section, so a real
+    # away-record change attempted from here is the TOCTOU itself: whatever
+    # happens to it happens between the authority read and the merge.
+    if [ -x "${FM_TEST_AWAY_MUTATE_AT_MERGE:-}" ]; then
+      away_rc=0
+      "$FM_TEST_AWAY_MUTATE_AT_MERGE" > "$FM_TEST_AWAY_MUTATE_OUT" 2>&1 || away_rc=$?
+      printf '%s\n' "$away_rc" > "$FM_TEST_AWAY_MUTATE_RC"
+      "$FM_TEST_ROOT/bin/fm-afk-contract.sh" grants \
+        > "$FM_TEST_AWAY_GRANTS_AT_MERGE" 2>/dev/null \
+        || printf 'no-live-record\n' > "$FM_TEST_AWAY_GRANTS_AT_MERGE"
     fi
     if [ -n "${FM_TEST_GH_MERGE_OUTPUT:-}" ]; then
       printf '%s\n' "$FM_TEST_GH_MERGE_OUTPUT"
@@ -278,6 +289,7 @@ write_mr_json() {
   local file=$1 kv key value
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
+  local merge_when_pipeline_succeeds=false merge_after=null
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -291,6 +303,8 @@ write_mr_json() {
       pipeline_sha) pipeline_sha=$value ;;
       pipeline_status) pipeline_status=$value ;;
       pipeline) pipeline=$value ;;
+      merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
+      merge_after) merge_after=$value ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
@@ -299,8 +313,10 @@ write_mr_json() {
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s}\n' \
+  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
+  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
+    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
@@ -367,6 +383,11 @@ run_pr_merge() {
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
+  FM_TEST_ROOT="$ROOT" \
+  FM_TEST_AWAY_MUTATE_AT_MERGE="${FM_TEST_AWAY_MUTATE_AT_MERGE:-}" \
+  FM_TEST_AWAY_MUTATE_OUT="$case_dir/away-mutate-output" \
+  FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
+  FM_TEST_AWAY_GRANTS_AT_MERGE="$case_dir/away-grants-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
@@ -2686,6 +2707,79 @@ test_away_grant_and_yolo_and_hold_for_return() {
   pass "away merges require yolo or a grant, and --attended-override does not skip that"
 }
 
+test_away_posture_refuses_asynchronous_merge_paths() {
+  local case_dir rc url head merge_line
+  head=abababababababababababababababababababab
+  url=https://github.com/example/repo/pull/89
+
+  case_dir=$(make_case away-auto-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --attended-override -- --auto --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-auto-refused: auto-merge must be attended-only"
+  assert_grep '--auto is attended-only' "$case_dir/stderr" \
+    "away-auto-refused: refusal did not name the asynchronous flag"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-auto-refused: gh pr merge ran for an away auto-merge request"
+
+  case_dir=$(make_case away-queue-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-queue-refused: a required merge queue must refuse before submission"
+  assert_grep 'merge-queue state does not prove an immediate merge' "$case_dir/stderr" \
+    "away-queue-refused: refusal did not explain the away restriction"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-queue-refused: gh received a merge that could enter its queue"
+
+  case_dir=$(make_gitlab_case away-gitlab-auto)
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --attended-override -- --auto-merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-gitlab-auto: GitLab auto-merge must refuse"
+  assert_grep 'GitLab auto-merge is attended-only' "$case_dir/stderr" \
+    "away-gitlab-auto: refusal did not name auto-merge"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "away-gitlab-auto: glab received an asynchronous merge"
+
+  case_dir=$(make_gitlab_case away-gitlab-configured merge_when_pipeline_succeeds=true)
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-gitlab-configured: configured auto-merge must refuse"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "away-gitlab-configured: glab received a configured asynchronous merge"
+
+  case_dir=$(make_gitlab_case away-gitlab-sync)
+  write_away_record "$case_dir" --grant task-x1
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-gitlab-sync: an immediate granted merge should succeed"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  case "$merge_line" in
+    *" --auto-merge=false") ;;
+    *) fail "away-gitlab-sync: the final glab flag did not force an immediate merge: '$merge_line'" ;;
+  esac
+  pass "away posture permits immediate merges but refuses every asynchronous path"
+}
+
 test_away_grant_does_not_bypass_red_or_identity() {
   local case_dir rc head
   head=adadadadadadadadadadadadadadadadadadadad
@@ -2739,6 +2833,164 @@ test_unreadable_away_record_refuses_merge() {
   pass "an unreadable away-posture record refuses the merge instead of skipping the grant"
 }
 
+# The race this closes: the away record is read for merge authority and the
+# forge is called afterwards, so an archive (the captain's return) or a grant
+# revocation landing in between would merge on authority that no longer holds.
+# away_change_script writes the change the gh mock attempts from inside the
+# forge call, which IS that window. Its body drives the real away-record
+# commands /afk and the return use, never a file edit, and takes a one-second
+# lock bound so a contended case refuses quickly instead of waiting.
+away_change_script() {  # <case-dir> <name>; script body on stdin
+  local case_dir=$1 name=$2 path
+  path="$case_dir/$name"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -eu\n'
+    printf 'export FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1\n'
+    printf 'CONTRACT="%s/bin/fm-afk-contract.sh"\n' "$ROOT"
+    cat
+  } > "$path"
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+# Two away-record changes, each attempted from inside the merge's critical
+# section: the archive a captain return performs, and the replacement that
+# revokes a grant. Neither may land there, and the merge must still complete on
+# the authority it read.
+test_away_record_cannot_change_between_the_authority_read_and_the_merge() {
+  local case_dir rc mutate
+  case_dir=$(make_case away-archive-at-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b
+  write_away_record "$case_dir" --grant task-x1
+  mutate=$(away_change_script "$case_dir" archive-at-merge <<'SH'
+"$CONTRACT" archive
+SH
+  )
+
+  export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AWAY_MUTATE_AT_MERGE
+
+  expect_code 0 "$rc" "away-archive-at-merge: the granted green merge should still land"
+  [ -s "$case_dir/away-mutate-rc" ] \
+    || fail "away-archive-at-merge: the archive was never attempted inside the merge"
+  [ "$(cat "$case_dir/away-mutate-rc")" != 0 ] \
+    || fail "away-archive-at-merge: the archive landed inside the merge's critical section"
+  assert_grep 'locked by live process' "$case_dir/away-mutate-output" \
+    "away-archive-at-merge: the refused archive did not name the live holder"
+  assert_equals task-x1 "$(cat "$case_dir/away-grants-at-merge" 2>/dev/null || true)" \
+    "away-archive-at-merge: the grant this merge read was not still standing at the forge call"
+  assert_grep "merge landed: task-x1 https://github.com/example/repo/pull/71 away-grant" \
+    "$case_dir/state/.wake-queue" \
+    "away-archive-at-merge: the landed merge was not recorded under the grant it read"
+  # The lock goes with the merge rather than leaking: the captain's return
+  # archives the record on its first try once the merge is done.
+  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "away-archive-at-merge: the record stayed locked after the merge"
+
+  case_dir=$(make_case away-revoke-at-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
+  write_away_record "$case_dir" --grant task-x1
+  mutate=$(away_change_script "$case_dir" revoke-at-merge <<'SH'
+"$CONTRACT" propose --grant task-other
+"$CONTRACT" confirm
+SH
+  )
+  export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AWAY_MUTATE_AT_MERGE
+
+  expect_code 0 "$rc" "away-revoke-at-merge: the granted green merge should still land"
+  [ "$(cat "$case_dir/away-mutate-rc" 2>/dev/null || true)" != 0 ] \
+    || fail "away-revoke-at-merge: the replacement landed inside the critical section"
+  assert_equals task-x1 "$(cat "$case_dir/away-grants-at-merge" 2>/dev/null || true)" \
+    "away-revoke-at-merge: the grant was revoked inside the merge's critical section"
+  pass "no away-record archive or grant revocation lands between the authority read and the merge"
+}
+
+# The same serialization from the other side. A revocation that wins the race
+# lands BEFORE the in-lock authority read, and the merge then refuses: the lock
+# decides an order, it never lets a stale grant through.
+test_a_grant_revoked_before_the_merge_refuses_it() {
+  local case_dir rc
+  case_dir=$(make_case away-revoked-before-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d
+  write_away_record "$case_dir"
+  mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+  write_away_record "$case_dir" --grant task-x1
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "away-revoked-before-merge: a revoked grant must refuse"
+  assert_grep 'held for the captain return' "$case_dir/stderr" \
+    "away-revoked-before-merge: refusal did not name hold-for-return"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-revoked-before-merge: gh pr merge ran on a revoked grant"
+  pass "a grant revoked before the merge's own authority read refuses the merge"
+}
+
+# Fail closed. The lock is what makes the authority read and the merge one
+# action, so a merge that cannot take it has no locked window to merge in and
+# refuses - including on this attended case, where the record is absent and
+# there is no grant to check at all.
+test_merge_refuses_when_the_away_record_cannot_be_locked() {
+  local case_dir rc holder_pid i lock
+  case_dir=$(make_case away-lock-unavailable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e
+  lock="$case_dir/state/.afk-contract.lock"
+
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$case_dir/holder.ready" "$case_dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$case_dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$case_dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "away-lock-unavailable: the fixture never took the record lock"; }
+
+  export FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT
+  : > "$case_dir/release-holder"
+  wait "$holder_pid" || fail "away-lock-unavailable: the fixture holder did not release cleanly"
+
+  expect_code 1 "$rc" "away-lock-unavailable: an unlockable away record must refuse the merge"
+  assert_grep 'could not be locked for the merge' "$case_dir/stderr" \
+    "away-lock-unavailable: refusal did not name the lock it could not take"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-lock-unavailable: gh pr merge ran without the away-record lock"
+  pass "a merge that cannot lock the away record refuses instead of merging unlocked"
+}
+
 test_allow_red_refused_on_gitlab() {
   local case_dir rc
   case_dir=$(make_gitlab_case gitlab-allow-red)
@@ -2786,6 +3038,10 @@ test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
+test_away_posture_refuses_asynchronous_merge_paths
 test_away_grant_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
+test_away_record_cannot_change_between_the_authority_read_and_the_merge
+test_a_grant_revoked_before_the_merge_refuses_it
+test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab

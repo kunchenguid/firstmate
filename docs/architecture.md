@@ -178,7 +178,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, omp through its extension's `agent_start` and `agent_end` without `willContinue`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
-Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
+Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok, Rovo, and AGY each keep one clearly isolated rendered-tail fallback that can only ever classify their own task.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
@@ -254,7 +254,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, and omp while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy while preserving the requested profile for later audit.
 
 ## Optional secondmates
 
@@ -317,11 +317,18 @@ A `https://github.com/<owner>/<repo>/pull/<n>` URL requires `gh` and `jq`, is me
 A check run is green when its current run is green, because GitHub leaves a cancelled run in the rollup beside the passing re-run it triggered when the base branch advanced; `bin/fm-pr-merge.sh`'s `github_checks_not_green` owns the rule, which uses `startedAt` to clear only an older completed check run that a passing run with the same name provably replaced, while unfinished check runs and non-green status contexts stay red.
 `--auto`, `--admin`, and branch-deletion flags are refused unless `--attended-override` is passed for an explicit captain instruction; that override never skips the live green check, the away-grant check, or a captain hold.
 An attended `--allow-red <check-name>` may appear once, waives only GitHub checks with that exact name, and is refused while the away-posture record exists.
+Because away merge authority is read from that record and then acted on by the forge, the authority read and synchronous forge command share the record's cross-subsystem lock, closing the common live-owner TOCTOU.
+A lock that cannot be taken refuses the merge.
+While the record exists, GitHub auto-merge and any base whose rules cannot prove the absence of a merge queue are refused before submission, and GitLab auto-merge flags or scheduled state are refused while an immediate merge is forced with a final `--auto-merge=false`.
+This is deliberately confused-agent-grade, as `bin/fm-lease-lib.sh` defines that grade, rather than fully atomic.
+A GitHub queue-rule or PR-base change after the queue-free preflight can still enqueue a merge that lands after its away grant lapses, and killing the lock-owning shell while its forge child survives lets stale-owner recovery admit archive or replacement before that child completes.
+These are accepted limitations, not oversights; durable authority, landing re-verification, and child-lock handoff are outside this boundary.
+`bin/fm-afk-contract.sh` owns the lock contract, while `tests/fm-afk-contract.test.sh` and `tests/fm-pr-merge.test.sh` pin the serialization and fail-closed merge behavior.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
 After either forge command returns, the script confirms the PR or MR actually landed, and only a confirmed landing records a landed outcome; a queued or unconfirmed request records none and leaves its poll armed.
 On GitLab an auto-merge-queued or unconfirmed request is reported without failing the run.
-On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and a base branch that requires the merge queue is refused with the concrete `--attended-override -- --auto --<method>` retry flags its configured method requires rather than having a merge method chosen on the caller's behalf.
+On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and in attended posture a base branch that requires the merge queue is refused with the concrete `--attended-override -- --auto --<method>` retry flags its configured method requires rather than having a merge method chosen on the caller's behalf.
 When the forge already accepted exactly those flags and the pull request still has not entered the queue, that refusal points at the queue state to re-check instead of echoing back the flags the caller just ran.
 An auto-merge request is held to the same standard: `--auto` that leaves the pull request neither merged nor queued is refused rather than reported as success.
 Every GitHub refusal states what it could not observe as plainly as what it did, so an unreadable branch-rule response, an unrecognised queue method, and a merge queue no available read can see are each named rather than left to look like a base branch with no queue at all.

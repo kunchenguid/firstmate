@@ -68,6 +68,39 @@ assert_store_value() {  # <store> <expected-json> <msg> <key...>
   [ "$actual" = "$expected" ] || fail "$msg (expected $expected, got $actual)"
 }
 
+# assert_all_flags <store> <path> <msg>: all three registered flags - trust,
+# external-includes approved, external-includes warning-shown - are true on
+# the project entry at <path>. The external-imports flags are the ones the
+# running app reads only from the PROJECT-root entry, never the worktree
+# entry, so this is what actually proves the dialog is suppressed.
+assert_all_flags() {
+  local store=$1 key=$2 msg=$3
+  node -e '
+    const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    const e=(j.projects||{})[process.argv[2]]||{};
+    const flags=["hasTrustDialogAccepted","hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"];
+    process.exit(flags.every((f)=>e[f]===true)?0:1);
+  ' "$store" "$key" || fail "$msg"
+}
+
+# assert_trust_only_no_import_consent <store> <path> <msg>: the entry at
+# <path> carries hasTrustDialogAccepted===true but NEITHER external-imports
+# flag is true - the shape a registration must leave behind when the project
+# entry had no prior explicit "Yes, allow" for external CLAUDE.md imports, so
+# a spawn never manufactures that consent from an absent flag.
+assert_trust_only_no_import_consent() {
+  local store=$1 key=$2 msg=$3
+  node -e '
+    const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));
+    const e=(j.projects||{})[process.argv[2]]||{};
+    const trustOk = e.hasTrustDialogAccepted === true;
+    const noImportConsent =
+      e.hasClaudeMdExternalIncludesApproved !== true &&
+      e.hasClaudeMdExternalIncludesWarningShown !== true;
+    process.exit(trustOk && noImportConsent ? 0 : 1);
+  ' "$store" "$key" || fail "$msg"
+}
+
 # A PATH carrying the tools the scope test needs but no node, so the
 # missing-interpreter path is exercised without disturbing the real PATH.
 node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but no node
@@ -138,6 +171,97 @@ test_fresh_worktree_is_trusted() {
   [ -z "$(find "$CONFIG" -maxdepth 1 -name '.claude.json.fm-trust.*' -print -quit)" ] \
     || fail "a temporary store file was left behind in the config directory"
   pass "fm-claude-trust.sh: a fresh task worktree is trusted"
+}
+
+# The trust dialog is read only from the PROJECT-root entry, never the
+# worktree entry (Claude Code's own git-root canonicalization collapses every
+# linked worktree to its primary checkout for that check, with no
+# ancestor-walk fallback the way the trust check has), so this proves both
+# entries carry the trust flag after one registration. External-imports
+# consent is a SEPARATE grant this script never manufactures: on a genuinely
+# fresh project (no prior interactive answer at all) neither entry may carry
+# hasClaudeMdExternalIncludesApproved or hasClaudeMdExternalIncludesWarningShown
+# - see test_registration_carries_forward_existing_import_consent below for
+# the case where the project already said yes.
+test_fresh_worktree_also_trusts_the_project_root_without_import_consent() {
+  local rec out
+  rec=$(make_case fresh-project)
+  read_case "$rec"
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a fresh linked worktree must be trusted: $out"
+  assert_contains "$out" "$PROJ" "registration did not report the project root it also trusted"
+  assert_trust_only_no_import_consent "$CONFIG/.claude.json" "$WT" \
+    "the worktree entry either lost trust or gained unearned import consent"
+  assert_trust_only_no_import_consent "$CONFIG/.claude.json" "$PROJ" \
+    "the project-root entry either lost trust or gained unearned import consent"
+  pass "fm-claude-trust.sh: a fresh registration trusts the project root without manufacturing import consent"
+}
+
+# The Greptile-flagged regression this pins: a project entry that already
+# carries an explicit "Yes, allow" (hasClaudeMdExternalIncludesApproved===true)
+# is exactly the standing consent this script may refresh - and refreshing it
+# is what actually suppresses the external-imports dialog for the worker,
+# since that check reads only the project entry (see the disassembly note at
+# the top of fm-claude-trust.sh), never the worktree one.
+test_registration_carries_forward_existing_import_consent() {
+  local rec store
+  rec=$(make_case import-consent-carried)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":true}}}
+JSON
+  run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null || fail "registration failed against a project that already approved external imports"
+  assert_all_flags "$store" "$WT" \
+    "the worktree entry did not carry the refreshed import consent"
+  assert_all_flags "$store" "$PROJ" \
+    "the project-root entry lost its own already-granted import consent"
+  pass "fm-claude-trust.sh: carries forward a project's already-granted import consent to the worktree entry"
+}
+
+# The project-root entry is the same store the launching user's interactive
+# claude sessions read and write (it is usually already present, carrying
+# unrelated keys such as allowedTools or MCP config), so preservation must
+# hold there exactly as it holds for the worktree entry.
+test_project_root_entry_preserves_other_keys() {
+  local rec store
+  rec=$(make_case project-preserve)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":false,"allowedTools":["Read"]}}}
+JSON
+  run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null || fail "registration failed against an existing project entry"
+  assert_trust_only_no_import_consent "$store" "$PROJ" \
+    "the project-root entry did not gain trust, or gained unearned import consent it had never been asked for"
+  assert_store_value "$store" '["Read"]' "the project entry's unrelated settings were lost" projects "$PROJ" allowedTools
+  pass "fm-claude-trust.sh: preserves unrelated keys on the project-root entry"
+}
+
+# hasClaudeMdExternalIncludesApproved===false on the project-root entry is a
+# human's explicit "No, disable" answer, recorded in the SAME store their own
+# interactive sessions read. A spawn must never flip that to true on their
+# behalf: doing so would grant every later interactive session in that
+# checkout silent external-file inclusion the human declined. The whole
+# registration refuses instead, and the store - including the worktree entry,
+# which is never reached - must come back byte-for-byte unchanged.
+test_project_root_entry_declined_external_imports_is_not_overridden() {
+  local rec store out before after
+  rec=$(make_case project-decline)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true,"allowedTools":["Read"]}}}
+JSON
+  before=$(cat "$store")
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 1 $? "a project that already declined external imports must be refused: $out"
+  assert_contains "$out" "declined external CLAUDE.md imports" \
+    "the refusal did not name the declined-consent reason"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the store was modified despite the refusal"
+  assert_not_trusted "$store" "$WT" "the worktree entry was registered despite the refusal"
+  pass "fm-claude-trust.sh: refuses to override a project's declined external-imports consent"
 }
 
 test_registration_is_idempotent() {
@@ -310,6 +434,29 @@ test_worktree_subdirectory_is_refused() {
   assert_contains "$out" "is not a worktree root" "the refusal did not name the non-root path"
   assert_not_trusted "$CONFIG/.claude.json" "$sub" "a worktree subdirectory was trusted"
   pass "fm-claude-trust.sh: refuses a subdirectory of the worktree"
+}
+
+# The write target the external-imports flags depend on is only correct when
+# it names the primary checkout. When <project> is itself a linked worktree
+# (a secondmate home spawned from, rather than as, the primary checkout),
+# writing the flags at that worktree's own path would land them at a key
+# Claude Code's git-root canonicalization never reads, silently reproducing
+# the bug this script exists to close - so this resolves the argument
+# structurally to its primary checkout instead of refusing it.
+test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout() {
+  local rec out proj_wt
+  rec=$(make_case nested-project)
+  read_case "$rec"
+  proj_wt="$CASE_DIR/proj-wt"
+  git -C "$PROJ" worktree add --quiet -b wt-proj-wt "$proj_wt"
+  out=$(run_trust "$CONFIG" "$WT" "$proj_wt")
+  expect_code 0 $? "a project argument that is itself a linked worktree must resolve to its primary checkout: $out"
+  assert_contains "$out" "$PROJ" "the outcome did not name the resolved primary checkout"
+  assert_trust_only_no_import_consent "$CONFIG/.claude.json" "$PROJ" \
+    "the resolved primary checkout either lost trust or gained unearned import consent"
+  assert_not_trusted "$CONFIG/.claude.json" "$proj_wt" \
+    "the linked worktree argument itself was recorded as the project root"
+  pass "fm-claude-trust.sh: a project argument that is itself a linked worktree resolves to the primary checkout"
 }
 
 test_unrelated_store_content_is_preserved() {
@@ -645,6 +792,10 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
 }
 
 test_fresh_worktree_is_trusted
+test_fresh_worktree_also_trusts_the_project_root_without_import_consent
+test_registration_carries_forward_existing_import_consent
+test_project_root_entry_preserves_other_keys
+test_project_root_entry_declined_external_imports_is_not_overridden
 test_registration_is_idempotent
 test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal
@@ -656,6 +807,7 @@ test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
 test_worktree_subdirectory_is_refused
+test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
 test_unrelated_store_content_is_preserved
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted

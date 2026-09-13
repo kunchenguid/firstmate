@@ -471,6 +471,42 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: a self-update rebinds a locally armed watch on the primary --------
+# A self-update fast-forwards bin/ in place, changing bytes an armed
+# fm-procevent-when watch's trust binding was hashed against with no
+# tampering involved; without a rebind the very next fire would be refused.
+test_primary_update_rebinds_local_watch() {
+  local w before_hash after_hash out spec
+  w=$(new_world t12)
+  mkdir -p "$w/seed/bin"
+  printf "#!/usr/bin/env bash\necho v1 >> \"\$1\"\n" > "$w/seed/bin/watched-action.sh"
+  chmod +x "$w/seed/bin/watched-action.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm add-watched-action
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" pull -q origin main
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$ROOT/bin/fm-procevent-when.sh" \
+    arm rebind-primary --interval 60 --stable 1 \
+    --condition true --action "$w/main/bin/watched-action.sh" "$w/rebind.log" >/dev/null
+  spec="$w/home/state/when/when-rebind-primary.spec"
+  before_hash=$(grep '^action_sha256=' "$spec")
+
+  printf "#!/usr/bin/env bash\necho v2 >> \"\$1\"\n" > "$w/seed/bin/watched-action.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm bump-watched-action
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "the primary still advanced"
+  assert_contains "$out" "rebound: when-rebind-primary" "the primary self-update rebound its own locally armed watch"
+  after_hash=$(grep '^action_sha256=' "$spec")
+  [ "$before_hash" != "$after_hash" ] \
+    || fail "the watch's trust binding was not refreshed to match the updated action bytes"
+  pass "T12 a self-update rebinds a locally armed watch on the primary"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
@@ -485,5 +521,6 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_primary_update_rebinds_local_watch
 
 echo "# all fm-update tests passed"

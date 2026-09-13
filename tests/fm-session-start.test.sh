@@ -215,10 +215,15 @@ make_fake_ps_claude() {
 
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
-  cat > "$fakebin/ps" <<'SH'
+  cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
-harness=${FM_FAKE_HARNESS:-claude}
+# The ancestry this stub reports defaults to the harness the fixture was built
+# for, so a case that builds a pi (or codex) fixture gets pi (or codex) ancestry
+# without having to repeat it per run; FM_FAKE_HARNESS still overrides it.
+harness=\${FM_FAKE_HARNESS:-$harness}
+SH
+  cat >> "$fakebin/ps" <<'SH'
 pid=
 previous=
 for argument in "$@"; do
@@ -2424,6 +2429,48 @@ EOF
   pass "next step delegates watcher ownership to the AFK daemon"
 }
 
+test_next_step_quiet_mode_delegates_to_daemon() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-quiet)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "quiet-mode supervision is active" "AFK digest did not report quiet mode for a quiet-content flag"
+  assert_contains "$out" "only an explicit /quiet off exits it" "AFK digest lost the explicit-only exit rule"
+  assert_contains "$out" "Quiet mode is active" "next step did not switch to quiet-mode guidance"
+  assert_contains "$out" "load /quiet" "next step did not name the /quiet skill"
+  assert_contains "$out" "- Quiet mode: active" "supervision block did not include active quiet state"
+  assert_not_contains "$out" "Away mode is active" "quiet-mode flag was misreported as away mode"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "quiet next step still told the agent to arm the watcher directly"
+
+  pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
+}
+
+test_next_step_afk_legacy_empty_flag_defaults_away() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-afk-legacy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
+  assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
+  assert_not_contains "$out" "Quiet mode" "a legacy empty .afk flag leaked quiet-mode text"
+
+  pass "a legacy empty .afk flag (written before mode existed) still reads as away mode"
+}
+
 test_supervision_block_exactly_one_and_pi_diagnostic() {
   local rec root home fakebin out block_count wake_line sup_line context_line
   rec=$(new_world pi-supervision-block)
@@ -2657,6 +2704,8 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_next_step_quiet_mode_delegates_to_daemon
+test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
