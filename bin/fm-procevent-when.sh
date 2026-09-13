@@ -719,9 +719,10 @@ cmd_silent() {
 # --- rebind-all ---------------------------------------------------------------
 
 # publish_spec <sid> <device> <action_hash>: write and hash-bind a spec from
-# the SPEC_* scalars and COND_ARGV/ACT_ARGV a prior spec_load already
+# the SPEC_* scalars and COND_ARGV/ACT_ARGV/ENV_ARGV a prior spec_load already
 # populated, using the given action hash. Mirrors cmd_arm's write block; the
-# only caller today is rebind_one, refreshing action_sha256 alone.
+# only caller today is rebind_one, refreshing action_sha256 while preserving
+# every other field spec_load parsed, including repeat and the action env.
 publish_spec() {
   local sid=$1 device=$2 action_hash=$3 tmp trust_tmp hash
   tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || return 1
@@ -734,12 +735,15 @@ publish_spec() {
     printf 'condition_timeout=%s\n' "$SPEC_CONDITION_TIMEOUT"
     printf 'action_timeout=%s\n' "$SPEC_ACTION_TIMEOUT"
     printf 'error_budget=%s\n' "$SPEC_ERROR_BUDGET"
+    printf 'repeat=%s\n' "$SPEC_REPEAT"
     printf 'action_sha256=%s\n' "$action_hash"
     printf 'condition_argc=%s\n' "${#COND_ARGV[@]}"
     printf 'action_argc=%s\n' "${#ACT_ARGV[@]}"
+    printf 'env_argc=%s\n' "${#ENV_ARGV[@]}"
     printf 'argv:\n'
     printf '%s\n' "${COND_ARGV[@]}"
     printf '%s\n' "${ACT_ARGV[@]}"
+    [ "${#ENV_ARGV[@]}" -eq 0 ] || printf '%s\n' "${ENV_ARGV[@]}"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }

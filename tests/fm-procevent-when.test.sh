@@ -469,6 +469,56 @@ assert_grep 'status: fired' "$RESULT" "the rebound watch fires instead of being 
 assert_grep 'action ran v2 against' "$RESULT" "the fired action ran the new bytes, not a stale copy"
 pass "rebind-all refreshes an in-repo watch's trust binding after a self-update and leaves an out-of-repo one alone"
 
+# --- rebind-all preserves repeat and the action environment -----------------
+# publish_spec republishes a watch's spec from the fields spec_load already
+# parsed; if it dropped repeat/env_argc/the env assignments, a rebound
+# --repeat --action-env watch would silently downgrade to a plain one-shot
+# watch with no environment on its very next fire.
+H="$TMP_ROOT/h-rebind-repeat-env"; new_home "$H"
+REPO_ROOT="$TMP_ROOT/rebind-repeat-env-repo"
+mkdir -p "$REPO_ROOT/bin"
+REPEAT_ENV_ACT="$REPO_ROOT/bin/act.sh"
+cat > "$REPEAT_ENV_ACT" <<'SH'
+#!/usr/bin/env bash
+log=$1
+printf 'v1 ran with FM_TEST_MARK=%s\n' "${FM_TEST_MARK:-unset}" >> "$log"
+SH
+chmod +x "$REPEAT_ENV_ACT"
+when_ro() { FM_HOME="$1" FM_ROOT_OVERRIDE="$REPO_ROOT" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"; }
+
+REPEAT_ENV_TRIG="$TMP_ROOT/rebind-repeat-env-trigger"
+REPEAT_ENV_LOG="$TMP_ROOT/rebind-repeat-env-act"
+when_ro "$H" arm rebind-repeat-env --interval 0.1 --stable 1 --repeat \
+  --action-env "FM_TEST_MARK=keep" \
+  --condition "$COND" "$REPEAT_ENV_TRIG" "$TMP_ROOT/rebind-repeat-env-count" \
+  --action "$REPEAT_ENV_ACT" "$REPEAT_ENV_LOG" >/dev/null
+
+# Simulate the self-update: rewrite the in-repo action's bytes in place.
+cat > "$REPEAT_ENV_ACT" <<'SH'
+#!/usr/bin/env bash
+log=$1
+printf 'v2 ran with FM_TEST_MARK=%s\n' "${FM_TEST_MARK:-unset}" >> "$log"
+SH
+chmod +x "$REPEAT_ENV_ACT"
+
+OUT=$(when_ro "$H" rebind-all) || fail "rebind-all reported a failure: $OUT"
+assert_contains "$OUT" "rebound: when-rebind-repeat-env" "the repeat/action-env watch was rebound"
+
+pe "$H" reconcile >/dev/null
+wait_for_file "$TMP_ROOT/rebind-repeat-env-count" || fail "the rebound watch's condition was never polled"
+: > "$REPEAT_ENV_TRIG"
+wait_for_result "$H" when-rebind-repeat-env || fail "the rebound watch captured no outcome"
+RESULT=$(first_result "$H" when-rebind-repeat-env)
+assert_grep 'status: fired' "$RESULT" "the rebound repeat/action-env watch still fires"
+assert_grep 'repeat: continues' "$RESULT" \
+  "rebind-all must preserve the repeat flag, not silently downgrade to a one-shot watch"
+assert_grep 'v2 ran with FM_TEST_MARK=keep' "$REPEAT_ENV_LOG" \
+  "rebind-all must preserve the action environment, not drop it on republish"
+# A repeat watch never self-retires, so its poller would otherwise keep
+# running (and contending for CPU) for the rest of the suite.
+when_ro "$H" retire rebind-repeat-env >/dev/null
+pass "rebind-all preserves a watch's repeat flag and action environment across a self-update"
+
 # --- rebind-all matches an action reached through a symlinked FM_ROOT -------
 H="$TMP_ROOT/h-rebind-symlink"; new_home "$H"
 REPO_REAL="$TMP_ROOT/rebind-symlink-real"
