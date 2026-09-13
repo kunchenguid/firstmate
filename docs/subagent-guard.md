@@ -136,7 +136,8 @@ It costs one line and removes the failure mode where a rename or a rollback sile
 The shipped hook fires only in a genuine firstmate primary home, using the shared predicate `fm_primary_scope_matches` from `bin/fm-primary-scope-lib.sh`.
 This is the same predicate `bin/fm-sessionstart-nudge.sh` and `bin/fm-turnend-guard.sh` use, so the three tracked primary-scoped hooks cannot drift apart.
 
-A home is in scope when it has `AGENTS.md`, a `bin/` directory, an existing state directory, and either a plain checkout where git-dir equals git-common-dir or a valid `.fm-secondmate-home` marker.
+A home is in scope when `FM_TASK_ID` is unset, it has `AGENTS.md`, a `bin/` directory, an existing state directory, and either a plain checkout where git-dir equals git-common-dir or a valid `.fm-secondmate-home` marker.
+`FM_TASK_ID` makes the predicate inert unconditionally first, because a firstmate-repo task worktree inherits every tracked hook registration from the primary checkout; each harness's own registration (`.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, the `.grok/hooks/*.json` files, and the omp/opencode/pi extensions) also short-circuits on it before ever invoking the script ([`tests/fm-primary-hook-scope.test.sh`](../tests/fm-primary-hook-scope.test.sh)).
 A marked secondmate home is in scope on purpose: it operates its own fleet and must dispatch through it for the same durability reasons.
 
 A crewmate's disposable task worktree is a linked git worktree, which is the shape `bin/fm-spawn.sh` always hands out, so it is out of scope.

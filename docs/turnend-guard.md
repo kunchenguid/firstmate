@@ -21,6 +21,7 @@ The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) o
 ## Guard predicates
 
 The guard first calls the shared primary scope.
+`FM_TASK_ID` makes it inert unconditionally first, because a firstmate-repo task worktree inherits every tracked hook registration from the primary checkout and this marker is the only proof a pane is a task worker rather than the primary session ([`tests/fm-primary-hook-scope.test.sh`](../tests/fm-primary-hook-scope.test.sh)).
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 An unmarked checkout or invalid marker falls through to the git-dir check.
