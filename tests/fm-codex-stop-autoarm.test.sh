@@ -60,10 +60,13 @@ install_autoarm_scripts() {
   local dir=$1 f
   mkdir -p "$dir/bin"
   for f in fm-codex-stop-autoarm.sh fm-primary-scope-lib.sh fm-supervision-lib.sh \
-    fm-wake-lib.sh fm-session-lock-lib.sh fm-cursor-lib.sh fm-lock.sh; do
+    fm-wake-lib.sh fm-session-lock-lib.sh fm-cursor-lib.sh fm-lock.sh \
+    fm-guard.sh fm-tangle-lib.sh fm-lease-lib.sh fm-classify-lib.sh \
+    fm-harness.sh fm-gemini-lib.sh fm-timeout-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
-  chmod +x "$dir/bin/fm-codex-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  chmod +x "$dir/bin/fm-codex-stop-autoarm.sh" "$dir/bin/fm-lock.sh" \
+    "$dir/bin/fm-guard.sh" "$dir/bin/fm-harness.sh"
 }
 
 make_primary_dir() {
@@ -211,7 +214,11 @@ test_it_keeps_its_own_ledger_separate_from_claudes() {
 # The same hook, fired from a harness process that KEEPS holding the session
 # lock after the hook returns, which is the live shape every mid-turn reader
 # sees: the session that armed the watcher is still the session running the
-# handling turn. Sets HOLD_PID for the caller to reap.
+# handling turn. That held shell then serves guard runs on request, so
+# bin/fm-guard.sh is exercised exactly where the model would run it - as a
+# descendant of the live codex-named session that owns this home's lock, which
+# is also what makes bin/fm-harness.sh detect codex for real. Sets HOLD_PID for
+# the caller to reap.
 HOLD_PID=
 run_autoarm_holding_lock() {
   local dir=$1 i=0
@@ -220,7 +227,17 @@ run_autoarm_holding_lock() {
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-codex-stop-autoarm.sh"
         : > "$FM_HOME/state/hook-returned"
-        sleep 60
+        n=0
+        while [ "$n" -lt 900 ]; do
+          if [ -e "$FM_HOME/state/guard-request" ]; then
+            rm -f "$FM_HOME/state/guard-request"
+            FM_ROOT_OVERRIDE="$FM_HOME" "$FM_HOME/bin/fm-guard.sh" \
+              > "$FM_HOME/state/guard.out" 2>&1
+            : > "$FM_HOME/state/guard-done"
+          fi
+          sleep 0.1
+          n=$((n + 1))
+        done
       ' >/dev/null 2>&1 &
   HOLD_PID=$!
   while [ "$i" -lt 300 ] && [ ! -e "$dir/state/hook-returned" ]; do
@@ -229,31 +246,69 @@ run_autoarm_holding_lock() {
   done
 }
 
-midturn_healthy() {  # <dir>
-  local dir=$1
-  FM_AUTOARM_PREFIX=.codex-autoarm FM_STATE_OVERRIDE="$dir/state" \
-    bash -c '. "$1"; fm_autoarm_midturn_healthy "$2"' _ "$dir/bin/fm-wake-lib.sh" "$dir/state"
+# Run the real pull guard inside that live codex session and return its output.
+# FM_AUTOARM_PREFIX is never set here on purpose: selecting this home's own
+# ledger is production's job, and a test that set it would hide the very gap
+# that let a Codex home read Claude's ledger and alarm on healthy supervision.
+guard_output() {  # <dir>
+  local dir=$1 i=0
+  rm -f "$dir/state/guard.out" "$dir/state/guard-done" \
+    "$dir/state/.guard-watcher-stale-banner"
+  : > "$dir/state/guard-request"
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/state/guard-done" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  cat "$dir/state/guard.out" 2>/dev/null || true
 }
 
-# The pull guard (bin/fm-guard.sh) reads a stale mid-turn beacon as a supervision
-# lapse unless the auto-arm ledger proves a handling turn owns the gap. That
-# proof needs the rewake row bound to the live session lock and the current
-# watcher recovery generation, so an unbound row makes every Codex handling turn
-# that outruns grace print "SUPERVISION IS OFF" while supervision is healthy.
-test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation() {
-  local dir rc=0
+# Age the beacon past any grace so the fresh-beacon shortcut cannot decide the
+# verdict and the mid-turn ledger proof is what the guard actually consults.
+# This is the handling turn that outran grace, which is the false alarm at issue.
+age_the_beacon() {  # <dir>
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+}
+
+# The whole point of binding the rewake row: during a Codex handling turn the
+# watcher has already exited, so a turn that outruns grace has a stale beacon and
+# no live watcher. Without this, bin/fm-guard.sh prints the full
+# "SUPERVISION IS OFF" banner once per wake-handling turn on healthy hook-owned
+# supervision - the recurring banner this whole change exists to remove.
+test_a_bound_rewake_keeps_the_pull_guard_quiet_through_the_real_caller() {
+  local dir out
   dir=$(make_primary_dir "$TMP_ROOT/rewake-binding")
   need_supervision "$dir"
   write_arm_fixture "$dir" actionable
   run_autoarm_holding_lock "$dir"
   assert_contains "$(queued_log "$dir")" "firstmate watcher wake" \
     "the wake was delivered, so there is a rewake row to bind"
-  midturn_healthy "$dir" || rc=$?
+  age_the_beacon "$dir"
+  out=$(guard_output "$dir")
   kill "$HOLD_PID" 2>/dev/null || true
   wait "$HOLD_PID" 2>/dev/null || true
-  expect_code 0 "$rc" \
-    "a delivered Codex rewake must satisfy the mid-turn proof its own session can read back"
-  pass "fm-codex-stop-autoarm: a delivered rewake is bound to the session lock and recovery generation"
+  assert_not_contains "$out" "SUPERVISION IS OFF" \
+    "a Codex handling turn whose own ledger proves it owns recovery must not be called unsupervised"
+  pass "fm-codex-stop-autoarm: a bound rewake keeps the real pull guard quiet on a stale mid-turn beacon"
+}
+
+# The other direction, and the reason mapping codex to autoarm costs no safety:
+# the proof demands a ledger row only the Stop hook writes, so a home whose hook
+# never fired has nothing to show and the banner still fires exactly as it must.
+test_a_codex_home_with_no_ledger_still_gets_the_banner() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/rewake-no-ledger")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" actionable
+  run_autoarm_holding_lock "$dir"
+  age_the_beacon "$dir"
+  # Everything else identical; only the hook's own claim is gone.
+  rm -f "$dir/state/.codex-autoarm-epoch"
+  out=$(guard_output "$dir")
+  kill "$HOLD_PID" 2>/dev/null || true
+  wait "$HOLD_PID" 2>/dev/null || true
+  assert_contains "$out" "SUPERVISION IS OFF" \
+    "a Codex home with no auto-arm claim and a stale beacon must still raise the alarm"
+  pass "fm-codex-stop-autoarm: a Codex home with no ledger claim still raises the supervision alarm"
 }
 
 # A rewake row with no recovery generation can never satisfy the mid-turn proof,
@@ -462,7 +517,8 @@ test_an_idle_home_stays_inert() {
 
 test_actionable_close_queues_the_wake_into_this_payloads_thread
 test_it_keeps_its_own_ledger_separate_from_claudes
-test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation
+test_a_bound_rewake_keeps_the_pull_guard_quiet_through_the_real_caller
+test_a_codex_home_with_no_ledger_still_gets_the_banner
 test_an_unbindable_rewake_is_refused
 test_a_rejected_failure_push_is_retried_on_the_next_stop
 test_a_notice_with_no_writable_marker_is_never_pushed

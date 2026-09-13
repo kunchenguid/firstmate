@@ -4085,13 +4085,16 @@ if [ "$KIND" = secondmate ]; then
   # Pi and pi-signed secondmates previously received persistent here and now
   # receive extension to match fm_supervision_model's own table, so their pull
   # guard tolerates the extension hand-off exactly as a Pi primary does.
-  # Codex is deliberately NOT autoarm here even though fm_supervision_model maps a
-  # codex PRIMARY that way: the primary's claim rests on its own checkout's
-  # tracked .codex/hooks.json, while a Codex hook only runs after the operator has
-  # approved its hash, and docs/verification/supervision.md records Firstmate
-  # project hooks under a spawned worktree firing for neither a trusted
-  # interactive pane nor codex exec. Until a spawned home is proven to fire them,
-  # persistent keeps a dead watcher loud there instead of silently tolerated.
+  # Codex is deliberately NOT autoarm here, and this is the one place that
+  # diverges from fm_supervision_model, which does map a codex PRIMARY to
+  # autoarm. The primary's claim rests on its own checkout's tracked
+  # .codex/hooks.json; a spawned home has no such claim, because a Codex hook
+  # runs only after the operator approved its hash and
+  # docs/verification/supervision.md records Firstmate project hooks under a
+  # spawned worktree firing for neither a trusted interactive pane nor codex
+  # exec. Such a home is on the foreground-checkpoint fallback, whose watcher IS
+  # a tracked live process, so persistent is both accurate and stricter there: it
+  # refuses to accept a fresh beacon with no live watcher, which autoarm allows.
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;

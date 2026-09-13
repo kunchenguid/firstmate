@@ -200,6 +200,12 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # queue does not already hold, and the synchronous guard still owns the next
 # turn end.
 #
+# That protection is real only because two things hold in bin/fm-wake-lib.sh, and
+# this row is worth nothing without either: fm_supervision_model maps codex to
+# autoarm, and fm_watcher_supervision_verdict selects THIS home's prefix before
+# consulting the predicate, so the claim is read from .codex-autoarm-epoch rather
+# than Claude's ledger.
+#
 # With a marker argument the marker is created inside the same owned ledger
 # write, so it commits before the push and a marker that cannot be created
 # refuses instead of announcing something nothing can deduplicate. A rejected

@@ -185,22 +185,26 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
-#               watcher is armed at each turn end and exits on its wake, so it
-#               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
-#               watcher process is healthy, and a stale beacon is still healthy
-#               while a Claude auto-arm generation explains the gap
-#               (fm_autoarm_midturn_healthy).
+#   autoarm     Claude's and Codex's Stop-hook auto-arms and Cursor's stop-hook
+#               park: the watcher is armed at each turn end and exits on its
+#               wake, so it runs only BETWEEN turns. Mid-turn a fresh beacon with
+#               no live watcher process is healthy, and a stale beacon is still
+#               healthy while that harness's own auto-arm generation explains the
+#               gap (fm_autoarm_midturn_healthy).
+#               Classifying a Stop-hook harness as persistent buys no safety: the
+#               mid-turn proof demands a recovery generation only the Stop hook
+#               writes, so a home whose hook never fires has no ledger entry, the
+#               predicate is false, and the guard alarms exactly as it should.
+#               All persistent bought was the alarm firing on HEALTHY hook-owned
+#               supervision too, once per wake-handling turn.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex, whose Stop hook cannot be assumed to
-#               have fired and whose fallback is a foreground checkpoint,
-#               opencode/grok background arm, tmux, unknown): the watcher runs as
-#               a tracked live process, so a live identity-matched pid is the
-#               real liveness signal.
+#   persistent  every other harness (opencode/grok background arm, tmux,
+#               unknown): the watcher runs as a tracked live process, so a live
+#               identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
 # stays consistent with the harness-specific repair line the guards already emit.
@@ -211,9 +215,26 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
+    claude|codex|cursor) printf 'autoarm\n' ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
+  esac
+}
+
+# Which Stop auto-arm ledger this home's PRIMARY harness writes. Each Stop-owned
+# auto-arm keeps its own generation ledger, micro-mutex, and failure markers
+# under its own FM_AUTOARM_PREFIX (bin/fm-claude-stop-autoarm.sh and
+# bin/fm-codex-stop-autoarm.sh), so a READER that did not set the prefix itself
+# has to ask which one the running primary actually writes before it reads a
+# generation claim. Reading the wrong ledger is not a near miss: a Codex home
+# consulting Claude's ledger finds no claim and alarms on healthy supervision.
+# An explicit FM_AUTOARM_PREFIX always wins, so a hook and its tests stay
+# authoritative over detection.
+fm_autoarm_prefix_for_primary() {
+  [ -z "${FM_AUTOARM_PREFIX:-}" ] || { printf '%s\n' "$FM_AUTOARM_PREFIX"; return 0; }
+  case "$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)" in
+    codex) printf '.codex-autoarm\n' ;;
+    *) printf '.claude-autoarm\n' ;;
   esac
 }
 
@@ -396,9 +417,16 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
-    if [ "$fresh" = true ] || fm_autoarm_midturn_healthy "$state" "$grace"; then
+    if [ "$fresh" = true ]; then
+      FM_WATCHER_VERDICT_OK=true
+      return 0
+    fi
+    local saved_prefix=${FM_AUTOARM_PREFIX:-}
+    FM_AUTOARM_PREFIX=$(fm_autoarm_prefix_for_primary)
+    if fm_autoarm_midturn_healthy "$state" "$grace"; then
       FM_WATCHER_VERDICT_OK=true
     fi
+    FM_AUTOARM_PREFIX=$saved_prefix
     return 0
   fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then

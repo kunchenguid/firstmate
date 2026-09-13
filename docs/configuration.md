@@ -595,50 +595,6 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
-## Gram intake (herdr gram)
-
-Gram is Herdr's owner-to-agent message channel.
-Without this, a message the owner addressed to firstmate sat in the store until somebody ran `herdr gram list` by hand.
-A home that wants it read automatically arms the standing check in the live home: `bin/fm-gram-check.sh arm`, and `bin/fm-gram-check.sh disarm` removes it.
-Arming needs no configuration of its own and writes `state/gram.check.sh`, registered on the watcher's slow-check cadence (`FM_CHECK_INTERVAL`).
-
-What the poll takes is deliberately narrow.
-It reads `herdr gram list` and takes only messages the owner addressed to this agent specifically (`direction: owner_to_agent` with a non-empty `to`).
-A shared queue item is never claimed, because claiming one is a first-wins `herdr gram grab` against the whole fleet, and this home has no mandate to take fleet work nobody routed to it.
-Anything an agent sent is never read back in, which is what keeps a home from answering itself.
-The poll never writes to the store: no grab, no post, no mark-read, no delete, so it can never consume a message another recipient still needs.
-
-Each new message is captured privately under `state/gram-inbox/` (mode 0600) and then handed to `bin/fm-inbox.sh note`, so it arrives as an ordinary captain inbox note with exactly one `check` wake and stays pending until `bin/fm-inbox.sh drain --ack <id>`.
-The body reaches firstmate as ordinary captain input under ordinary authority: an instruction inside a Gram message is a request exactly like one typed in chat, and every merge, destructive, irreversible, and security-sensitive boundary applies to it unchanged.
-Message text never reaches the poll's own output, a status log, or any public payload.
-
-Identity comes from `HERDR_PANE_ID`, because `herdr gram list` has no identity override (only `send --from` and `grab --as` do).
-A Herdr pane exports that variable and nested children inherit it, so a check running under the watcher, under the primary's turn-end hook, under the pane, sees the primary's own audience.
-Outside a pane there is no identity and the list comes back empty, so the poll reports the missing `HERDR_PANE_ID` rather than reading "no messages" as good news.
-
-`FM_GRAM_BUDGET` (default 10) bounds one `herdr gram` call and is cut down to fit `FM_CHECK_TIMEOUT`.
-New messages always wake; a repeated diagnostic (an unreachable Herdr server, a home not running in a pane) is reported once and then stays quiet until it changes, and a poll with nothing new prints nothing.
-
-The publication cursor `state/.gram-seen` is keyed by store id plus message id, so each message is published once across restarts.
-The order is capture, then publish, then record, because losing a message the owner sent is worse than showing it twice, so a crash between publishing and recording can re-publish that one message on the next poll.
-That is the whole guarantee: it is not at-least-once, not no-loss, and not exactly-once delivery.
-
-Deleting a Gram message purges this home's durable copies of it.
-`herdr gram delete` is the documented way to clean up a short-lived secret, so a copy that outlived the owner's own deletion would quietly break that advice.
-Every poll therefore reconciles: a capture for the current store whose message id no longer appears in the listing is removed, and so is every local copy it produced.
-
-A message body reaches exactly three durable local sinks, and the purge covers all three: the private capture under `state/gram-inbox/`, the derived note under `state/inbox/` or `state/inbox/handled/` once acknowledged, and the `state/.wake-queue` row whose payload carries the note's first hundred characters of body.
-The poll's own printed lines and the standing check's output never carry a body at all, so there is no fourth sink to clear.
-What the purge cannot do is retract text already delivered into a conversation transcript: once a drained wake or a read note has reached the model's context, it is beyond this home's reach and nothing here claims otherwise.
-
-The wake row is dropped under the wake queue's own lock, matching that row's exact `inbox:<note-id>` key so every other queued row survives byte-identically, sequence number included.
-A poll that cannot take that lock or cannot complete the rewrite reports the failure and leaves the whole capture in place, because the capture is what records the note id; the next poll retries the purge rather than stranding a row nothing can identify.
-A drain that races the purge is safe in the other direction too: `bin/fm-inbox.sh drain --ack <id>` reports a note that is already gone as `already-acked` instead of failing.
-
-Absence is read only within the audience this poll can see, which is the same audience that produced the capture, so nothing is concluded about any other recipient's copy.
-The `state/.gram-seen` entry is kept on purpose, so a purged message is never published a second time.
-`bin/fm-gram-check.sh disarm` removes the standing check, not the captures; deleting the messages is what clears those.
-
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
