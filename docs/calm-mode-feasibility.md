@@ -79,15 +79,16 @@ The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` 
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `AssistantMessageComponent.updateContent` method.
+The fix installs one idempotent presentation adapter, verified on Pi 0.84.4, on the exported `AssistantMessageComponent.updateContent` method.
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
-Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
-The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
-Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
+While Calm is active, the adapter passes a shallow thinking-free presentation copy into Pi's ordinary layout calculation, independent of Pi's own hide-thinking setting, then retains the original message on the component for invalidation.
+The persisted assistant message, provider context, tool execution, export data, and Pi's own hide-thinking preference remain unchanged.
+Thinking-only assistant messages render zero rows under Calm, and thinking before visible assistant text adds no spacing beyond the text-only baseline.
+Turning Calm off restores whatever Pi hide-thinking setting the captain already had; `/export` and `/share` keep full thinking because stock export rendering disables the hide path.
 
 The disconfirming checks deliberately retain supported boundaries.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
-Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
+Pi hide-thinking expansion while Calm is active does not restore reasoning; turning Calm off does.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
 
 ## Duplicate-turn regression and semantic boundary
@@ -223,7 +224,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The text blocks are removed from the shallow presentation copy before layout, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Reasoning is removed from the shallow presentation copy before layout and occupies zero rows whenever Calm is active, independent of Pi's hide-thinking setting; turning Calm off restores ordinary Pi thinking display, and exports keep full thinking. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
