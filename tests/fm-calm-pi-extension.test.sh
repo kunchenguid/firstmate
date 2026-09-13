@@ -3279,6 +3279,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 export default function (pi: ExtensionAPI): void {
+  // Own the label through Pi's public API so vendor wording cannot mask visibility.
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.setWorkingMessage("CALM_NATIVE_WORKING_INDICATOR");
+  });
+
   pi.registerProvider("calm-e2e", {
     baseUrl: "http://127.0.0.1/unused",
     apiKey: "test-only",
@@ -3801,7 +3806,7 @@ JS
   done
   cp "$working_snapshot" "$boat_frame_one"
   assert_contains "$(cat "$boat_frame_one")" '\__/' "Calm did not show the working ship during a real provider wait"
-  assert_not_contains "$(cat "$boat_frame_one")" "Working..." "Calm left Pi's stock working row visible while the ship was shown"
+  assert_not_contains "$(cat "$boat_frame_one")" "CALM_NATIVE_WORKING_INDICATOR" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
   boat_hull_line=$(grep -F '\__/' "$boat_frame_one" | head -1)
@@ -4007,7 +4012,7 @@ JS
     || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
   [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
     || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
-  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working..." \
+  assert_not_contains "$(cat "$boat_resume_snapshot")" "CALM_NATIVE_WORKING_INDICATOR" \
     "the second working period left Pi's stock working row visible"
 
   # Clear the resumed run before the Calm-off stock-row probe.
@@ -4040,13 +4045,13 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq "Working..." "$working_snapshot"; then
+    if grep -Fq "CALM_NATIVE_WORKING_INDICATOR" "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm off did not keep Pi's stock working row"
+  assert_contains "$(cat "$working_snapshot")" "CALM_NATIVE_WORKING_INDICATOR" "Calm off did not keep Pi's stock working row"
   assert_not_contains "$(cat "$working_snapshot")" '\__/' "Calm off showed the working ship"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
