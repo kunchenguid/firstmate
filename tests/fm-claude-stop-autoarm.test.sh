@@ -87,6 +87,8 @@ write_arm_fixture() {
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -131,6 +133,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 2
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: slow fixture\n'
 exit 0
@@ -141,6 +145,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 6
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -161,6 +167,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 rm -f "$FM_HOME/state/task.meta"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: fixture\n'
 exit 0
@@ -171,6 +179,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 : > "$FM_HOME/state/.afk"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -395,6 +405,10 @@ test_actionable_close_rewakes_with_reason() {
   assert_contains "$out" "bin/fm-wake-drain.sh" "rewake must direct the drain-first protocol"
   assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "rewake must forbid a duplicate model re-arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" session_pid)" = "$(cat "$dir/state/.lock")" ] \
+    || fail "rewake epoch must bind the lock-owning Claude session"
+  [ "$(epoch_field "$dir" recovery_generation)" = fixture-generation ] \
+    || fail "rewake epoch must bind the watcher recovery generation"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"

@@ -85,9 +85,14 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
-#     Structured-home input must declare the current hold-classifier schema; an
-#     older live ledger or cached copy is invalid even when it contains no captain
-#     holds, and leaves the home explicitly unreadable until its producer refreshes it.
+#     Before that queued bound is applied, non-captain-actionable rows are selected
+#     ahead of captain-actionable rows so separately projected live decisions cannot
+#     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
+#     filed date newest first, with undated rows stable at the end.
+#     Structured-home input must declare the current home-summary and hold-classifier
+#     schemas; a live ledger or cached copy missing either declaration or declaring
+#     an unsupported version is unavailable even when it contains no captain holds.
+#     These schemas also accept v1 summaries from older producers.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes are partial, not unreadable, when an unavailable child state
@@ -95,6 +100,8 @@
 #     they retain independently trustworthy structured surfaces. An inventory
 #     mismatch also keeps the home's own current classification, which only an
 #     unavailable child state or an untrustworthy backlog collapses to unknown.
+#     Which closed rows a home contributes is bin/fm-landed-lib.sh's rule, shared
+#     with the bearings projection so one Recently Landed section has one owner.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -207,6 +214,9 @@ esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 
 usage() {
   cat <<'EOF'
@@ -380,6 +390,21 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | if $v == null then null else ($v | trim) end;
     def metadata($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
+    # LOAD-BEARING, do not remove as a duplicate definition of the kind field.
+    # tasks-axi 0.2.5 omits the (kind: ...) metadata when a title starts with
+    # uppercase SCOUT or SHIP at a JavaScript word boundary (ASCII letters,
+    # digits, and underscore are word characters), so those rows carry no
+    # explicit kind to read. Without this fallback a scout whose title starts
+    # with SCOUT reports kind null, its
+    # recorded report stops counting as a delivery, and it drops out of Recently
+    # Landed - the defect this selector exists to fix. Pinned by
+    # the producer word-boundary regression in tests/fm-bearings-snapshot.test.sh.
+    def kind_of($rest):
+      metadata($rest; "kind") as $kind
+      | if $kind != null then $kind
+        elif ($rest | test("^SCOUT(?![A-Za-z0-9_])")) then "scout"
+        elif ($rest | test("^SHIP(?![A-Za-z0-9_])")) then "ship"
+        else null end;
     def hold_metadata($rest):
       cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)");
     def metadata_word($rest; $key):
@@ -445,7 +470,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              checked:($m.check | test("[xX]")),
              title:title_of($rest),
              repo:metadata($rest; "repo"),
-             kind:metadata($rest; "kind"),
+             kind:kind_of($rest),
              priority:metadata($rest; "priority"),
              hold_reason:hold_metadata($rest),
              hold_kind:metadata($rest; "hold-kind"),
@@ -487,6 +512,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .local_note = (.local_note
+              // (if any(.body_lines[];
+                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
+                  then null
+                  else cap(.body_lines[-1]; "^(?<v>local main)$")
+                  end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
@@ -920,12 +951,22 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" '
+    --slurpfile tasks "$2" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def filed_epoch:
+      (.since // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -942,8 +983,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
-    | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
+    | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            kind:((.kind // null) | if . == null then null else trunc(40) end),
+            hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
@@ -987,6 +1030,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
@@ -1053,7 +1097,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          since:((.since // null) | if . == null then null else trunc(40) end)}]
+          | ((map(select(.captain_actionable != true)) | newest_filed_first)
+             + (map(select(.captain_actionable == true)) | newest_filed_first))
+          | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
@@ -1240,6 +1288,7 @@ summary_file_read() {  # <file> <expected-home> <output-file>
   fi
   return 0
 }
+
 
 summary_file_oversized() {  # <file>
   local bytes

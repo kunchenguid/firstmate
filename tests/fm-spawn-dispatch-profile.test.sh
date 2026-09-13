@@ -577,6 +577,74 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_native_effort_validator_keeps_axes_separate() {
+  local harness
+  for harness in pi pi-signed; do
+    "$ROOT/bin/fm-harness.sh" validate-native-effort "$harness" codex-native/gpt-6-astra ultra \
+      || fail "native validator refused supported harness $harness"
+  done
+  if "$ROOT/bin/fm-harness.sh" validate-native-effort 'pi:codex-native/forged' '' ultra 2>/dev/null; then
+    fail "native validator accepted a model prefix embedded in the harness axis"
+  fi
+  pass "native effort validator checks harness and model as separate axes"
+}
+
+test_native_pi_ultra_is_explicit_and_model_scoped() {
+  local rec id out launch harness mode native_profile model
+  for harness in pi pi-signed; do
+    for mode in no-mistakes direct-PR; do
+      id="ultra-$harness-$mode"
+      rec=$(make_spawn_case "$id" "$harness" "$id")
+      read_case_record "$rec"
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+        --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off)
+      expect_code 0 "$?" "native Ultra spawn failed: $out"
+      assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" codex-native/gpt-6-astra ultra
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" "--model 'codex-native/gpt-6-astra' --codex-effort 'ultra'" "native Ultra flag missing"
+      assert_not_contains "$launch" "--thinking" "native Ultra was converted into Pi thinking"
+      assert_not_contains "$launch" "'max'" "native Ultra was aliased to max"
+    done
+  done
+  for native_profile in 'claude:codex-native/gpt-6-astra' 'codex:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
+    harness=${native_profile%%:*}; model=${native_profile#*:}; id="ultra-refused-$RANDOM"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness "$harness" --model "$model" --effort ultra 2>&1)
+    expect_code 1 "$?" "unsupported Ultra profile should refuse: $native_profile"
+    assert_contains "$out" "ultra effort requires pi or pi-signed" "native-only refusal missing"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unsupported Ultra published metadata"
+    [ ! -e "$HOME_DIR/state/$id.busy-gen" ] || fail "unsupported Ultra provisioned lifecycle wiring"
+    [ ! -s "$LAUNCH_LOG" ] || fail "unsupported Ultra launched an agent"
+  done
+  id=ultra-raw-refused
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    'pi --offline' --model codex-native/gpt-6-astra --effort ultra 2>&1)
+  expect_code 1 "$?" "raw launch silently omitted the native Ultra flag"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "raw Ultra launch published metadata"
+  assert_contains "$out" "canonical --harness pi or pi-signed" "raw launch refusal was not actionable"
+  pass "Ultra is explicit for native Pi and Pi-signed, including direct-PR, and refuses unsupported profiles before provisioning"
+}
+
+test_batch_preserves_native_ultra() {
+  local rec id1=ultra-batch-a id2=ultra-batch-b out launch
+  rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
+  expect_code 0 "$?" "native Ultra batch failed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id1.meta" pi codex-native/gpt-6-astra ultra
+  assert_meta_profile "$HOME_DIR/state/$id2.meta" pi codex-native/gpt-6-astra ultra
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--codex-effort 'ultra'" "batch dropped native effort"
+  assert_not_contains "$launch" "--thinking 'ultra'" "batch passed an invalid Pi level"
+  pass "batch dispatch preserves native Ultra in metadata and launch flags"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -1135,6 +1203,99 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
+# config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
+# must both produce today's launch byte-for-byte, `auto` swaps only the
+# permission flag, and any other token refuses before endpoint or metadata.
+claude_expected_launch() {  # <home> <id> <permission-flag>
+  local home=$1 id=$2 flag=$3
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+}
+
+test_claude_permission_mode_bypass_matches_absent_launch() {
+  local rec id out status launch expected
+  id=permmode-bypass-z19
+  rec=$(make_spawn_case permmode-bypass claude "$id")
+  read_case_record "$rec"
+  printf 'bypass\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-permission-mode=bypass should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  [ "$launch" = "$expected" ] || fail "explicit bypass did not reproduce the absent-file launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "config/claude-permission-mode=bypass launches exactly as an absent file does"
+}
+
+test_claude_permission_mode_auto_swaps_only_the_permission_flag() {
+  local rec id out status launch expected
+  id=permmode-auto-z20
+  rec=$(make_spawn_case permmode-auto claude "$id")
+  read_case_record "$rec"
+  # Surrounding whitespace is trimmed, so an editor's trailing newline or indent is fine.
+  printf '  auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-permission-mode=auto should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "auto spawn did not report claude"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" '--permission-mode auto')
+  [ "$launch" = "$expected" ] || fail "auto changed more than the permission flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" "auto launch must not request bypass mode"
+  pass "config/claude-permission-mode=auto replaces --dangerously-skip-permissions with --permission-mode auto"
+}
+
+test_claude_permission_mode_auto_reaches_scout_launch() {
+  local rec id out status launch
+  id=permmode-scout-z21
+  rec=$(make_spawn_case permmode-scout claude "$id")
+  read_case_record "$rec"
+  printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with claude-permission-mode=auto should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --permission-mode auto --settings" "scout launch did not carry --permission-mode auto"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
+  pass "config/claude-permission-mode=auto reaches scout launches too"
+}
+
+test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=permmode-invalid-z22
+  rec=$(make_spawn_case permmode-invalid claude "$id")
+  read_case_record "$rec"
+  printf 'yolo\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unrecognized claude-permission-mode token must refuse the spawn"
+  assert_contains "$out" "config/claude-permission-mode holds 'yolo'" "refusal must name the file and the offending token"
+  assert_contains "$out" "bypass" "refusal must list bypass as an accepted value"
+  assert_contains "$out" "--permission-mode auto" "refusal must list auto as an accepted value"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an invalid permission mode must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "an unrecognized config/claude-permission-mode token refuses before any endpoint or metadata"
+}
+
+test_non_claude_harness_ignores_claude_permission_mode() {
+  local rec id out status launch
+  id=permmode-codex-z23
+  rec=$(make_spawn_case permmode-codex codex "$id")
+  read_case_record "$rec"
+  printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "codex spawn under claude-permission-mode=auto should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex " "codex launch did not run codex"
+  assert_not_contains "$launch" "--permission-mode" "the claude permission flag must not leak into a codex launch"
+  pass "config/claude-permission-mode changes claude launches only"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1157,6 +1318,9 @@ test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
+test_native_effort_validator_keeps_axes_separate
+test_native_pi_ultra_is_explicit_and_model_scoped
+test_batch_preserves_native_ultra
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
@@ -1165,6 +1329,11 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
+test_claude_permission_mode_bypass_matches_absent_launch
+test_claude_permission_mode_auto_swaps_only_the_permission_flag
+test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
+test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy

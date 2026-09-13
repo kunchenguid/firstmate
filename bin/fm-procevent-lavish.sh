@@ -97,7 +97,7 @@
 # That is an internal retry, not news, so registering the raw poll made the
 # generic runner capture it and wake the whole fleet. `poll` therefore re-runs
 # the published poll up to POLL_RETRY_LIMIT times for that exact response, with
-# POLL_RETRY_DELAY_DEFAULT seconds between attempts. The match is exact and
+# attempt starts at least POLL_RETRY_DELAY_DEFAULT seconds apart. The match is exact and
 # deliberately narrow: real feedback, ended and missing sessions, any other
 # SERVER_ERROR, and the same interruption still standing after the bound is
 # spent are all printed straight through and captured normally. The retry is a
@@ -175,6 +175,7 @@ cmd_retire() {
 # without waiting it out.
 POLL_RETRY_LIMIT=12
 POLL_RETRY_DELAY_DEFAULT=5
+POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
@@ -227,8 +228,8 @@ poll_response_filter() {  # <response-file>
   ' "$1"
 }
 
-# Seconds between retries. FM_LAVISH_POLL_RETRY_DELAY is a bounded test
-# override; a malformed or out-of-range value is refused rather than quietly
+# Minimum seconds between retry attempt starts. FM_LAVISH_POLL_RETRY_DELAY is a
+# bounded test override; a malformed or out-of-range value is refused rather than quietly
 # rounded, because silently changing a retry cadence is how a bound stops
 # meaning anything.
 poll_retry_delay() {
@@ -238,15 +239,28 @@ poll_retry_delay() {
     return 0
   fi
   case "$delay" in
-    *[!0-9]*) die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from 0 to $POLL_RETRY_DELAY_MAX: $delay" ;;
+    *[!0-9]*) die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay" ;;
   esac
-  [ "$delay" -le "$POLL_RETRY_DELAY_MAX" ] \
-    || die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from 0 to $POLL_RETRY_DELAY_MAX: $delay"
+  [ "$delay" -ge "$POLL_RETRY_DELAY_MIN" ] && [ "$delay" -le "$POLL_RETRY_DELAY_MAX" ] \
+    || die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay"
   printf '%s\n' "$delay"
 }
 
+poll_iteration_started() {
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)'
+}
+
+poll_iteration_floor_wait() {
+  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
+    my ($started, $floor) = @ARGV;
+    my $remaining = $floor - (clock_gettime(CLOCK_MONOTONIC) - $started);
+    sleep($remaining) if $remaining > 0;
+  ' "$1" "$2"
+}
+
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
+  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
@@ -266,6 +280,7 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
+    iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     lavish-axi poll "$artifact" | poll_response_filter "$response"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
@@ -275,7 +290,8 @@ cmd_poll() {
       10)
         if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
-          sleep "$delay"
+          poll_iteration_floor_wait "$iteration_started" "$delay" \
+            || die "cannot enforce the poll rate governor"
         else
           cat -- "$response"
           break

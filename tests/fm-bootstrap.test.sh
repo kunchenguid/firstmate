@@ -5,7 +5,7 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
+# 'MISSING: gh-axi (install: ...)', 'PRESENTATION_UNAVAILABLE: lavish-axi ...', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
@@ -373,8 +373,8 @@ ROWS
 }
 
 test_lavish_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)'
+  local label version mode case_dir fakebin out unavailable n
+  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -383,24 +383,28 @@ test_lavish_axi_min_version() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
+    [ "$version" != absent ] || rm -f "$fakebin/lavish-axi"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh") \
+      || fail "$label: optional presentation must not fail bootstrap"
+    assert_not_contains "$out" 'MISSING:' "$label: optional presentation must not block nonvisual dispatch"
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      unavailable)
+        [ "$out" = "$unavailable" ] || fail "$label: expected '$unavailable', got: $out" ;;
     esac
   done <<'ROWS'
+absent lavish-axi permits text fallback^absent^unavailable
 minimum lavish-axi version is accepted^0.1.46^empty
 newer lavish-axi patch is accepted^0.1.47^empty
 newer lavish-axi minor is accepted^0.2.0^empty
 newer lavish-axi major is accepted^1.0.0^empty
-the patch just below the floor reports an upgrade^0.1.45^missing
-much older lavish-axi minor reports an upgrade^0.0.9^missing
-unparseable lavish-axi version reports an upgrade^lavish-axi development build^missing
+the patch just below the floor permits text fallback^0.1.45^unavailable
+much older lavish-axi minor permits text fallback^0.0.9^unavailable
+unparseable lavish-axi version permits text fallback^lavish-axi development build^unavailable
 ROWS
-  pass "bootstrap enforces lavish-axi minimum version"
+  pass "bootstrap permits nonvisual work without compatible lavish-axi and retains its presentation floor"
 }
 
 test_tasks_axi_min_version() {
@@ -1121,10 +1125,20 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
+native pi ultra is accepted^{"rules":[],"default":{"harness":"pi","model":"codex-native/gpt-6-astra","effort":"ultra"}}^empty^
+native signed pi ultra is accepted^{"rules":[{"when":"native reasoning","use":{"harness":"pi-signed","model":"codex-native/gpt-6-astra","effort":"ultra"}}]}^empty^
+ordinary pi ultra is refused^{"default":{"harness":"pi","model":"openai-codex/gpt-6-astra","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+missing native model ultra is refused^{"default":{"harness":"pi","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+empty native model ultra is refused^{"default":{"harness":"pi","model":"codex-native/","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+codex harness ultra is refused^{"default":{"harness":"codex","model":"codex-native/gpt-6-astra","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:ultra
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
+agy model profile is accepted^{"rules":[{"when":"agy work","use":{"harness":"agy","model":"gemini-3.8-flash-high"}}]}^empty^
+agy low medium high efforts are accepted^{"rules":[{"when":"agy low","use":{"harness":"agy","effort":"low"}},{"when":"agy medium","use":{"harness":"agy","effort":"medium"}},{"when":"agy high","use":{"harness":"agy","effort":"high"}}]}^empty^
+unsupported agy xhigh effort is flagged^{"rules":[{"when":"agy xhigh","use":{"harness":"agy","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:xhigh
+unsupported agy max effort is flagged^{"rules":[{"when":"agy max","use":{"harness":"agy","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:max
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high

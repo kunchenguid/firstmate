@@ -42,6 +42,15 @@ command -v tasks-axi >/dev/null 2>&1 || {
 
 # --- fixture ----------------------------------------------------------------
 
+# fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
+# through to the developer's ambient ~/.tasks-axi/config.toml. make_home pins
+# the home itself; a case that relocates its data directory is addressed from
+# that directory's own parent instead, so it pins that root too. Cases that
+# prove a root OUTSIDE the home is refused deliberately leave it unpinned.
+pin_markdown_backend() {  # <addressing-root>
+  printf '%s\n' 'backend = "markdown"' > "$1/.tasks.toml"
+}
+
 # A home with a real backlog, a real project clone with an origin, a pooled
 # worktree, and stubs for every tool the spawn path shells out to.
 make_home() {  # <name> [task-id...]
@@ -55,6 +64,15 @@ make_home() {  # <name> [task-id...]
   printf '%s\n' claude > "$home/config/crew-harness"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
     > "$home/data/backlog.md"
+  # Pin the adapter per case: without it fm_tasks_axi_backend would fall through
+  # to the developer's ambient tasks-axi config and silently exercise a
+  # different transition path.
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
   for id in "$@"; do
     mkdir -p "$home/data/$id"
     cat > "$home/data/$id/brief.md" <<EOF
@@ -100,6 +118,27 @@ start_item() {  # <case-dir> <id>
 row_state() {  # <case-dir> <id>
   tasks-axi show "$2" --file "$(backlog_of "$1")" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
+}
+
+configure_env_backend_tasks_axi() {  # <case-dir>
+  local case_dir=$1
+  rm -f "$(backlog_of "$case_dir")"
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --version) printf '0.2.5\n' ;;
+  update) printf '%s\n' '--archive-body' ;;
+  mv) printf '%s\n' '[<id>...]' ;;
+  show)
+    printf 'task:\n  state: queued\n  held: no\n  blocked: no\n'
+    ;;
+  start)
+    printf '%s\n' "\$*" > "$case_dir/env-backend-start"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
 # Shadow tasks-axi with a wrapper that fails one verb and delegates every other
@@ -591,6 +630,148 @@ run_bootstrap() {  # <case-dir>
 
 # --- dispatch ---------------------------------------------------------------
 
+test_backend_resolution_preserves_config_errors() {
+  local case_dir project_config user_config config resolver out rc probe
+  case_dir="$TMP_ROOT/backend-resolution-errors"
+  project_config="$case_dir/home/.tasks.toml"
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  # shellcheck disable=SC2016 # $1..$3 must expand when bash -c evaluates the probe with its supplied arguments.
+  probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  printf '%s\n' 'backend = "markdown"' > "$project_config"
+  for config in "$project_config" "$user_config"; do
+    chmod 000 "$config"
+    [ ! -r "$config" ] || fail "the backend configuration fixture is still readable"
+    for resolver in fm_tasks_axi_backend fm_tasks_axi_backend_resolve; do
+      rc=0
+      out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+        "$ROOT" "$resolver" "$case_dir/home" 2>"$case_dir/stderr") || rc=$?
+      [ "$rc" -eq 2 ] || fail "$resolver concealed an unreadable configuration: $config (exit $rc)"
+      [ -z "$out" ] || fail "$resolver returned a backend for an unreadable configuration: $out"
+      assert_grep "tasks-axi backend configuration cannot be read at $config" "$case_dir/stderr" \
+        "$resolver did not identify the unreadable configuration"
+    done
+    chmod 600 "$config"
+    rm "$config"
+  done
+  pass "backend resolution preserves unreadable configuration errors for every caller"
+}
+
+test_backend_resolution_preserves_precedence_and_defaults() {
+  local case_dir resolver out probe
+  case_dir="$TMP_ROOT/backend-resolution-precedence"
+  mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  # shellcheck disable=SC2016 # $1..$3 must expand when bash -c evaluates the probe with its supplied arguments.
+  probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
+  for resolver in fm_tasks_axi_backend fm_tasks_axi_backend_resolve; do
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver rejected absent configuration"
+    [ "$out" = markdown ] || fail "$resolver changed the unconfigured default"
+    printf '%s\n' 'backend = "beads"' > "$case_dir/user-home/.tasks-axi/config.toml"
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver rejected readable user configuration"
+    [ "$out" = beads ] || fail "$resolver ignored the user backend"
+    chmod 000 "$case_dir/user-home/.tasks-axi/config.toml"
+    printf '%s\n' 'backend = "markdown"' > "$case_dir/home/.tasks.toml"
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver read a lower-priority user configuration"
+    [ "$out" = markdown ] || fail "$resolver ignored the project backend"
+    chmod 000 "$case_dir/home/.tasks.toml"
+    out=$(env TASKS_AXI_BACKEND=beads HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver read configuration despite an environment override"
+    [ "$out" = beads ] || fail "$resolver ignored the environment backend"
+    chmod 600 "$case_dir/home/.tasks.toml" "$case_dir/user-home/.tasks-axi/config.toml"
+    rm "$case_dir/home/.tasks.toml" "$case_dir/user-home/.tasks-axi/config.toml"
+  done
+  pass "backend resolution preserves environment, project, user, and default precedence"
+}
+
+test_backlog_callers_refuse_unreadable_backend_config() (
+  local case_dir data id operation rc diagnostic
+  local args=()
+  case_dir="$TMP_ROOT/backend-callers"
+  data="$case_dir/records"
+  id='backend-callers-row'
+  mkdir -p "$data" "$case_dir/data" "$case_dir/config"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
+  cp "$data/backlog.md" "$case_dir/data/backlog.md"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Configured row" --file "$data/backlog.md" >/dev/null \
+    || fail "could not create the configured backlog"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Default row" --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "could not create the default backlog"
+  cp "$data/backlog.md" "$case_dir/configured-before"
+  cp "$case_dir/data/backlog.md" "$case_dir/default-before"
+  ln -s missing-config "$case_dir/.tasks.toml"
+  . "$ROOT/bin/fm-tasks-axi-lib.sh"
+  . "$ROOT/bin/fm-backlog-transition-lib.sh"
+  unset TASKS_AXI_BACKEND
+  for operation in fm_backlog_transition_applies fm_backlog_row_show fm_backlog_row_list fm_backlog_row_probe fm_backlog_mutate; do
+    case "$operation" in
+      fm_backlog_transition_applies) args=("$case_dir/config" "$data" ship) ;;
+      fm_backlog_row_list) args=("$data") ;;
+      fm_backlog_mutate) args=("$data" start "$id") ;;
+      *) args=("$data" "$id") ;;
+    esac
+    rc=0
+    "$operation" "${args[@]}" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    [ "$rc" -eq 2 ] || fail "$operation ignored the backend error (exit $rc)"
+    [ ! -s "$case_dir/stdout" ] || fail "$operation returned data despite the backend error"
+    case "$operation" in
+      fm_backlog_row_probe) diagnostic=$FM_BACKLOG_ROW_ERROR ;;
+      fm_backlog_transition_applies|fm_backlog_mutate) diagnostic=$FM_BACKLOG_TRANSITION_ERROR ;;
+      *) diagnostic=$(cat "$case_dir/stderr") ;;
+    esac
+    assert_contains "$diagnostic" "tasks-axi backend configuration cannot be read at $case_dir/.tasks.toml" \
+      "$operation lost the configuration diagnostic"
+    cmp -s "$case_dir/configured-before" "$data/backlog.md" || fail "$operation changed the configured backlog"
+    cmp -s "$case_dir/default-before" "$case_dir/data/backlog.md" || fail "$operation changed the default backlog"
+  done
+  pass "backlog readers and mutations refuse unresolved backends without touching either backlog"
+)
+
+test_captain_hold_preserves_relocated_backlog_on_backend_error() {
+  local case_dir home data config_state id out rc show
+  id='backend-hold-row'
+  for config_state in dangling absent readable; do
+    case_dir="$TMP_ROOT/backend-hold-$config_state"
+    home="$case_dir/home"
+    data="$home/records"
+    mkdir -p "$data" "$home/data" "$home/config" "$home/state" "$case_dir/user-home"
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
+    cp "$data/backlog.md" "$home/data/backlog.md"
+    TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Hold regression" --file "$data/backlog.md" >/dev/null \
+      || fail "could not create the configured hold row"
+    TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Hold regression" --file "$home/data/backlog.md" >/dev/null \
+      || fail "could not create the default hold row"
+    cp "$data/backlog.md" "$case_dir/configured-before"
+    cp "$home/data/backlog.md" "$case_dir/default-before"
+    case "$config_state" in
+      dangling) ln -s missing-config "$home/.tasks.toml" ;;
+      readable) printf '%s\n' 'backend = "markdown"' > "$home/.tasks.toml" ;;
+    esac
+    rc=0
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" FM_HOME="$home" \
+      FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+      --title "Hold regression" --reason "Captain must choose" 2>&1) || rc=$?
+    if [ "$config_state" = dangling ]; then
+      [ "$rc" -ne 0 ] || fail "captain hold accepted an unresolved backend and changed the wrong backlog"
+      assert_contains "$out" "tasks-axi backend configuration cannot be read at $home/.tasks.toml" \
+        "captain hold did not report its configuration error"
+      cmp -s "$case_dir/configured-before" "$data/backlog.md" \
+        || fail "refused captain hold changed the configured backlog"
+    else
+      [ "$rc" -eq 0 ] || fail "captain hold rejected $config_state configuration: $out"
+      show=$(TASKS_AXI_BACKEND=markdown tasks-axi show "$id" --file "$data/backlog.md") \
+        || fail "the configured hold row disappeared"
+      assert_contains "$show" "held: yes" "captain hold did not update the configured backlog"
+    fi
+    cmp -s "$case_dir/default-before" "$home/data/backlog.md" \
+      || fail "captain hold changed the default backlog with $config_state configuration"
+  done
+  pass "captain hold refuses backend errors and preserves relocated addressing for valid configuration"
+}
+
 test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   local case_dir id out
   id=atomic-dispatch-b1
@@ -626,6 +807,27 @@ test_dispatch_omits_the_file_for_a_beads_show() {
   assert_no_grep "show $id --file" "$case_dir/tasks-axi-calls" \
     "Beads dispatch passed the markdown file to show"
   pass "dispatch omits the markdown file when probing a Beads backlog"
+}
+
+test_a_leftover_markdown_symlink_does_not_brick_a_beads_home() {
+  local case_dir home id out
+  id=atomic-dispatch-beads-b2
+  case_dir=$(make_home dispatch-beads-leftover "$id")
+  home=$(home_of "$case_dir")
+  printf '%s\n' 'backend = "beads"' '[beads]' 'path = ".beads"' \
+    'prefix = "atomic"' > "$home/.tasks.toml"
+  mkdir -p "$home/archive"
+  mv "$home/data/backlog.md" "$home/archive/backlog.md"
+  ln -s ../archive/backlog.md "$home/data/backlog.md"
+  make_beads_tasks_axi_stub "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "Beads spawn failed over a leftover markdown symlink: $out"
+  assert_contains "$out" "spawned $id" "Beads spawn did not report success"
+  assert_present "$home/state/$id.meta" "spawn published no record"
+  assert_grep "show $id" "$case_dir/tasks-axi-calls" \
+    "Beads dispatch did not probe the backlog row"
+  pass "a leftover markdown symlink does not brick a Beads home's dispatch"
 }
 
 test_completion_omits_the_file_for_a_beads_done() {
@@ -857,6 +1059,7 @@ test_recovery_uses_the_parent_of_a_trailing_slash_data_record() {
   case_dir=$(make_home recovery-relocated-root)
   relocated="$case_dir/fm-records"
   mkdir -p "$relocated"
+  pin_markdown_backend "$case_dir"
   backlog="$relocated/backlog.md"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
   tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
@@ -879,6 +1082,7 @@ test_completion_targets_a_nested_relative_data_directory() {
   relative_data=relocated/data
   data="$case_dir/$relative_data"
   mkdir -p "$case_dir/relocated"
+  pin_markdown_backend "$case_dir/relocated"
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
@@ -906,6 +1110,7 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
   local case_dir id data data_resolved backlog out
   id=atomic-immediate-child-data-b2
   case_dir=$(make_home immediate-child-data "$id")
+  pin_markdown_backend "$case_dir"
   data="$case_dir/fm-records"
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
@@ -931,6 +1136,7 @@ test_bare_relative_data_dispatches_and_completes() {
   local case_dir id data backlog out
   id=atomic-bare-relative-data-b2
   case_dir=$(make_home bare-relative-data "$id")
+  pin_markdown_backend "$case_dir"
   data="$case_dir/records"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
@@ -1437,6 +1643,7 @@ test_completion_records_a_relative_report_for_relocated_data() {
   case_dir=$(make_home close-relocated-scout)
   relocated="$case_dir/relocated/data"
   mkdir -p "$case_dir/relocated"
+  pin_markdown_backend "$case_dir/relocated"
   mv "$(home_of "$case_dir")/data" "$relocated"
   backlog="$relocated/backlog.md"
   tasks-axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
@@ -1464,6 +1671,7 @@ test_space_containing_scout_report_marker_replays() {
   case_dir=$(make_home space-report-replay)
   data="$case_dir/crew space/data"
   mkdir -p "$case_dir/crew space"
+  pin_markdown_backend "$case_dir/crew space"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
   tasks-axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
@@ -2539,6 +2747,12 @@ test_home_without_a_backlog_dispatches_and_completes() {
   id=atomic-no-backlog-b12
   case_dir=$(make_home no-backlog "$id")
   rm -f "$(backlog_of "$case_dir")"
+  cat > "$(home_of "$case_dir")/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
   make_tasks_axi_incompatible "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "no-backlog spawn failed: $out"
@@ -2552,11 +2766,173 @@ test_home_without_a_backlog_dispatches_and_completes() {
   pass "a home with no backlog remains exempt from lifecycle transitions"
 }
 
+test_spawn_refuses_a_special_file_tasks_config() {
+  local case_dir home id out rc=0
+  id=atomic-special-config-b15
+  case_dir=$(make_home special-config "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  rm -f "$home/.tasks.toml"
+  mkfifo "$home/.tasks.toml"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' \
+    PATH="$case_dir/fakebin:$PATH" \
+    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
+  [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
+  assert_contains "$out" "tasks-axi config is not a regular file" \
+    "spawn did not identify the unsafe tasks-axi config"
+  assert_absent "$home/state/$id.meta" \
+    "spawn published a task record through an unsafe tasks-axi config"
+  pass "spawn refuses a special-file tasks-axi config instead of blocking on it"
+}
+
+test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog() {
+  local case_dir home id out rc=0
+  id=atomic-unsafe-config-b15
+  case_dir=$(make_home unsafe-config "$id")
+  home=$(home_of "$case_dir")
+  rm -f "$(backlog_of "$case_dir")"
+  mkdir -p "$case_dir/outside"
+  cat > "$case_dir/outside/tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "records/tasks.md"
+EOF
+  rm -f "$home/.tasks.toml"
+  ln -s "$case_dir/outside/tasks.toml" "$home/.tasks.toml"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a tasks-axi config resolving outside the home"
+  assert_contains "$out" "tasks-axi config resolves outside its authorized directory" \
+    "spawn silently exempted the home instead of reporting the unsafe config"
+  assert_absent "$home/state/$id.meta" \
+    "spawn published a task record through an unsafe tasks-axi config"
+  pass "spawn refuses an unsafe tasks-axi config before any exemption is derived from it"
+}
+
+
+test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
+  local case_dir home id out rc=0
+  id=atomic-external-data-b15
+  case_dir=$(make_home external-data "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  mkdir -p "$case_dir/outside"
+  mv "$home/data/backlog.md" "$home/data/$id" "$case_dir/outside/"
+  rmdir "$home/data"
+  ln -s "$case_dir/outside" "$home/data"
+
+  out=$(TASKS_AXI_BACKEND=markdown run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a data directory resolving outside the home"
+  assert_contains "$out" "backlog file authorized directory resolves outside this home" \
+    "spawn did not identify the data directory escaping the home"
+  assert_absent "$home/state/$id.meta" \
+    "spawn published a task record through a data directory outside the home"
+  pass "spawn refuses a data directory symlinked outside the home"
+}
+
+
+test_configured_adapter_refuses_a_data_directory_outside_the_home() {
+  local case_dir home id out rc=0
+  id=atomic-external-data-beads-b15
+  case_dir=$(make_home external-data-beads "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  mkdir -p "$case_dir/outside"
+  mv "$home/data/backlog.md" "$home/data/$id" "$case_dir/outside/"
+  rmdir "$home/data"
+  ln -s "$case_dir/outside" "$home/data"
+
+  out=$(TASKS_AXI_BACKEND=beads run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a configured adapter accepted a data directory resolving outside the home"
+  assert_contains "$out" "backlog data directory authorized directory resolves outside this home" \
+    "a configured adapter did not identify the data directory escaping the home"
+  assert_absent "$home/state/$id.meta" \
+    "a configured adapter published a task record outside the home"
+  pass "a configured adapter refuses a data directory outside the home"
+}
+
+
+test_dispatch_and_completion_are_structural() {
+  local case_dir home id meta out pr
+  id=fm-structural-b15
+  pr=https://github.com/example/firstmate/pull/15
+  case_dir=$(make_home structural "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "structural spawn failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "spawn left the backlog item outside In flight"
+
+  # Recovery may claim an already-live row repeatedly; the transition remains
+  # idempotent and does not reopen or duplicate the item.
+  run_bootstrap "$case_dir" >/dev/null \
+    || fail "first idempotent reconciliation failed"
+  run_bootstrap "$case_dir" >/dev/null \
+    || fail "second idempotent reconciliation failed"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "repeated claims changed the live backlog state"
+
+  meta="$home/state/$id.meta"
+  printf 'pr=%s\n' "$pr" >> "$meta"
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "structural teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown left the backlog item outside Done"
+  assert_grep "$pr" "$(backlog_of "$case_dir")" \
+    "teardown closed the item without its recorded PR evidence"
+  pass "dispatch and completion transition structurally with evidence"
+}
+
+test_refused_teardown_leaves_the_item_live() {
+  local case_dir home id out rc=0
+  id=fm-structural-refusal-b15
+  case_dir=$(make_home structural-refusal "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "refusal setup spawn failed: $out"
+
+  printf '%s\n' unlanded > "$case_dir/wt/unlanded.txt"
+  git -C "$case_dir/wt" add unlanded.txt
+  git -C "$case_dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "unlanded fixture work"
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "teardown accepted unlanded work"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "refused teardown changed the live backlog state"
+  assert_present "$home/state/$id.meta" \
+    "refused teardown removed the live task record"
+  pass "refused teardown leaves the backlog item in flight"
+}
+
+test_environment_selected_adapter_is_not_forced_to_markdown() {
+  local case_dir id out
+  id=fm-env-adapter-b15
+  case_dir=$(make_home env-adapter "$id")
+  configure_env_backend_tasks_axi "$case_dir"
+
+  out=$(TASKS_AXI_BACKEND=beads run_ship_spawn "$case_dir" "$id") \
+    || fail "environment-selected adapter spawn failed: $out"
+  [ "$(cat "$case_dir/env-backend-start")" = "start $id" ] \
+    || fail "environment-selected adapter received legacy markdown arguments"
+  pass "environment-selected adapters bypass the legacy markdown file override"
+}
+
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog() {
   local case_dir id data data_resolved out
   id=atomic-manual-b12
   case_dir=$(make_home manual-backend "$id")
   printf '%s\n' manual > "$(home_of "$case_dir")/config/backlog-backend"
+  pin_markdown_backend "$case_dir"
   data="$case_dir/manual-data"
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
@@ -2617,8 +2993,13 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_backend_resolution_preserves_config_errors
+test_backend_resolution_preserves_precedence_and_defaults
+test_backlog_callers_refuse_unreadable_backend_config
+test_captain_hold_preserves_relocated_backlog_on_backend_error
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_omits_the_file_for_a_beads_show
+test_a_leftover_markdown_symlink_does_not_brick_a_beads_home
 test_completion_omits_the_file_for_a_beads_done
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
@@ -2701,6 +3082,13 @@ test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry
 test_teardown_rechecks_record_parent_after_lock_acquisition
 test_teardown_refuses_a_symlinked_state_directory_at_entry
 test_home_without_a_backlog_dispatches_and_completes
+test_spawn_refuses_a_special_file_tasks_config
+test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
+test_spawn_refuses_a_data_directory_symlinked_outside_the_home
+test_configured_adapter_refuses_a_data_directory_outside_the_home
+test_dispatch_and_completion_are_structural
+test_refused_teardown_leaves_the_item_live
+test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item

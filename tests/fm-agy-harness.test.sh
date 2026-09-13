@@ -1,455 +1,550 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016 # $p and $parent are jq variables bound with --arg, never shell expansions.
-# Behavior tests for the verified Antigravity CLI (agy) crewmate adapter.
+# Behavior tests for the verified Antigravity CLI crewmate/scout adapter.
 #
-# Every check here is portable: it runs against real processes, real SQLite
-# databases, and real captured-shape bytes, with no agy installed. The
-# harness-dependent halves that only a real agy can prove - that its process is
-# still named `agy`, that it still writes `Created conversation` into its log,
-# and that its step rows still settle to status 3 - are covered by the opt-in
-# live guard tests/fm-agy-signals-live-e2e.test.sh.
+# The facts pinned here are the ones an agy release could silently change and
+# the ones a wrong guess would make dangerous:
+#   1. agy publishes no harness-identity marker of its own (a live 1.2.0 TUI
+#      carries no AGY_* variable; AGENT=1 there is inherited launcher state),
+#      so detection is ancestry alone on the anchored process name `agy`.
+#   2. The anchored match must never claim unrelated commands containing the
+#      fragment, and a structural agy ancestor now outranks a retained or
+#      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the
+#      general boundary.
+#   3. The launch carries the brief via --prompt-interactive with --model,
+#      --effort, and --dangerously-skip-permissions; a requested model a
+#      reachable `agy models` omits refuses loudly instead of wedging a pane,
+#      while a hung or unreachable listing is cut off and never blocks.
+#   4. A fresh worktree would park agy on its folder-trust dialog, so the spawn
+#      pre-registers the worktree in agy's own trustedWorkspaces store through
+#      bin/fm-agy-trust.sh (scope-refused for anything but a linked worktree
+#      of the project) and the post-launch gate is the backstop: it answers a
+#      dialog that renders anyway exactly once, never counts a busy turn as
+#      ready on an unregistered path until the dialog has been answered (the
+#      Herdr native-busy-before-dialog race), and fails the spawn with endpoint
+#      cleanup when the brief cannot be confirmed to run in the worktree.
+#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
+#      and nothing is armed as busy wiring because no writer could clear it.
+#   6. The busy signature is the pinned `esc to cancel` status row alone; the
+#      free-floating `Generating...` word must never read busy on its own.
+#   7. Herdr's registry already tracks agy, and exit detection proves the
+#      agent at process level before trusting any registration (the shared
+#      post-#4115 contract in bin/backends/herdr.sh): a registered status plus
+#      a process view naming agy is live and refuses replacement, a registered
+#      status over a proven shell-only pane is the explicit stale-agent state,
+#      and nothing short of that shared proof flips an agy pane to agent-free.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
-# the fake ancestry the detection cases set up. Drop the ambient markers so the
-# asserted verdict does not depend on which harness launched the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ANTIGRAVITY_AGENT
+# from inside another harness inherits those markers, which outrank the fake
+# ancestry the detection cases set up. Drop the ambient markers so the asserted
+# verdict does not depend on which harness launched the suite.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
+  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
-TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
-PYTHON_BIN=$(command -v python3) || fail "test needs python3"
-PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
-JQ_BIN=$(command -v jq) || fail "test needs jq"
-SQLITE_BIN=$(command -v sqlite3) || fail "test needs sqlite3"
-BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
-
-cleanup_agy_harness() {
-  rm -rf "$TMP_ROOT"
-}
-trap cleanup_agy_harness EXIT
-
-# shellcheck source=bin/fm-busy-lib.sh
-. "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-composer-lib.sh
-. "$ROOT/bin/fm-composer-lib.sh"
-# shellcheck source=bin/fm-control-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
 
-# --- detection --------------------------------------------------------------
+HARNESS="$ROOT/bin/fm-harness.sh"
+SPAWN="$ROOT/bin/fm-spawn.sh"
+TRUST="$ROOT/bin/fm-agy-trust.sh"
+TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
 
-# fake_ps <fakebin> <comm-for-pid-4242>: an ancestry walk whose one non-shell
-# ancestor reports <comm>. Every other pid is a plain shell, so the ONLY
-# ancestry evidence in the walk is the name under test.
-fake_ps() {  # <fakebin> <comm>
-  local fakebin=$1 comm=$2
-  cat > "$fakebin/ps" <<SH
+# The store is agy's own persisted settings JSON, so trust is asserted against
+# the parsed trustedWorkspaces array and preservation against parsed values.
+agy_trusted_paths() {  # <store>
+  node -e 'const fs=require("node:fs");const j=fs.existsSync(process.argv[1])?JSON.parse(fs.readFileSync(process.argv[1],"utf8")):{};for(const p of (j.trustedWorkspaces||[]))console.log(p);' "$1"
+}
+
+agy_store_value() {  # <store> <key>
+  node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify(j[process.argv[2]]));' "$1" "$2"
+}
+
+assert_agy_trusted() {  # <store> <path> <msg>
+  agy_trusted_paths "$1" | grep -Fqx "$2" || fail "$3"
+}
+
+assert_agy_not_trusted() {  # <store> <path> <msg>
+  agy_trusted_paths "$1" | grep -Fqx "$2" && fail "$3"
+  return 0
+}
+
+test_agy_ancestry_detects_the_native_command_name() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-native")
+  cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
-set -u
-field=
-pid=
-prev=
-for arg in "\$@"; do
-  [ "\$prev" = -o ] && field=\$arg
-  [ "\$prev" = -p ] && pid=\$arg
-  prev=\$arg
-done
-case "\$field:\$pid" in
-  comm=:4242) printf '%s\n' '$comm' ;;
-  comm=:*) printf '/bin/bash\n' ;;
-  ppid=:4242) printf '1\n' ;;
-  ppid=:*) printf '4242\n' ;;
-  args=:*) printf 'bash\n' ;;
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/agy'; exit 0 ;;
+  *"args="*) printf '%s\n' 'agy --prompt-interactive hello'; exit 0 ;;
 esac
+exit 1
 SH
   chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "a natively-named agy command must be detected by ancestry, got '$out'"
+  pass "fm-harness.sh: ancestry detects a natively-named agy command"
 }
 
-detect_with() {  # <fakebin> <cfg> [env assignments...]
-  local fakebin=$1 cfg=$2
-  shift 2
-  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT \
-    "$@" PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" \
-    "$ROOT/bin/fm-harness.sh"
+test_agy_ancestry_rejects_unrelated_mentions() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(FAKE_PS_COMM=magyk FAKE_PS_ARGS='magyk --serve' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "an unrelated magyk command must not detect agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=bash FAKE_PS_ARGS='bash -c "echo agy --help"' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "a later shell argument naming agy must not detect agy, got '$out'"
+  pass "fm-harness.sh: ancestry rejects unrelated agy mentions"
 }
 
-test_agy_detection_survives_losing_either_signal() {
-  local dir fakebin cfg out
-  dir="$TMP_ROOT/detect-both"
-  fakebin=$(fm_fakebin "$dir")
-  cfg="$dir/config"
-  mkdir -p "$cfg"
-
-  # Signal A alone: the ANTIGRAVITY_AGENT marker, with an ancestry that names
-  # NO harness at all. The divergence is asserted first, so this case cannot
-  # pass vacuously by the ancestry quietly supplying the verdict.
-  fake_ps "$fakebin" /bin/bash
-  out=$(detect_with "$fakebin" "$cfg")
-  [ "$out" = unknown ] \
-    || fail "control: a harness-free ancestry should be unknown, got '$out'"
-  out=$(detect_with "$fakebin" "$cfg" ANTIGRAVITY_AGENT=1)
-  [ "$out" = agy ] || fail "agy env-marker detection returned '$out'"
-
-  # Signal B alone: the process name, with NO marker in the environment.
-  fake_ps "$fakebin" /Users/someone/.local/bin/agy
-  out=$(detect_with "$fakebin" "$cfg")
-  [ "$out" = agy ] || fail "agy ancestry detection returned '$out'"
-
-  # Marker precedence is unchanged: a verified foreign marker still outranks
-  # an agy ancestry, exactly as it does for every markerless adapter.
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT \
-    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" \
-    "$ROOT/bin/fm-harness.sh")
-  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: agy is detected by its marker and by ancestry independently"
+test_agy_claims_no_inherited_launcher_marker() {
+  local fakebin out
+  # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
+  # must never promote to an agy identity the way GEMINI_CLI does for gemini.
+  out=$(AGENT=1 "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
+  # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
+  # so a structural agy ancestor must still outrank the retained marker rather
+  # than being renamed away from it. Pin both halves so neither can rot
+  # silently.
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-claude")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' agy; exit 0 ;;
+  *"args="*) printf '%s\n' 'agy --prompt-interactive hi'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(CLAUDECODE=1 PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "a structural agy ancestor must outrank an inherited CLAUDECODE, got '$out'"
+  pass "fm-harness.sh: no inherited launcher marker claims the agy identity"
 }
 
-test_agy_ancestry_match_is_anchored() {
-  local dir fakebin cfg out name
-  dir="$TMP_ROOT/detect-anchor"
-  fakebin=$(fm_fakebin "$dir")
-  cfg="$dir/config"
-  mkdir -p "$cfg"
-  # `agy` is a three-letter fragment of ordinary words. An unanchored *agy*
-  # match would claim every one of these as a live agent pane.
-  for name in /usr/bin/magyar /opt/bin/agyness /usr/local/bin/nagy; do
-    fake_ps "$fakebin" "$name"
-    out=$(detect_with "$fakebin" "$cfg")
-    [ "$out" = unknown ] \
-      || fail "unanchored agy match claimed '$name' as harness '$out'"
-  done
-  # The exact name still matches, so the anchoring is not vacuously strict.
-  fake_ps "$fakebin" /usr/local/bin/agy
-  out=$(detect_with "$fakebin" "$cfg")
-  [ "$out" = agy ] || fail "anchored agy match rejected the exact name, got '$out'"
-  pass "fm-harness: the agy ancestry match is anchored, never a substring"
-}
-
-# --- busy fold --------------------------------------------------------------
-
-# make_agy_db <path> <status...>: a real conversation database whose steps table
-# carries the given statuses in idx order.
-make_agy_db() {  # <path> <status...>
-  local db=$1 idx=0 st
-  shift
-  "$SQLITE_BIN" "$db" 'CREATE TABLE steps (idx integer, step_type integer NOT NULL DEFAULT 0, status integer NOT NULL DEFAULT 0, PRIMARY KEY (idx));' \
-    || fail "could not create the agy steps table"
-  for st in "$@"; do
-    "$SQLITE_BIN" "$db" "INSERT INTO steps (idx, step_type, status) VALUES ($idx, 15, $st);" \
-      || fail "could not seed an agy step row"
-    idx=$((idx + 1))
-  done
-}
-
-bind_agy_task() {  # <state-dir> <id> <conversations-root> <conversation-id>
-  local state=$1 id=$2 root=$3 conv=$4
-  mkdir -p "$state" "$root"
-  printf 'ERROR: logging before google.Init: I0828 08:56:47 1 server.go:1153] Created conversation %s\n' "$conv" \
-    > "$state/$id.agy-log"
-  {
-    printf 'conversations_root=%s\n' "$root"
-    printf 'log_file=%s\n' "$state/$id.agy-log"
-  } > "$state/$id.agy-session"
-}
-
-test_agy_busy_uses_every_step_not_the_last_one() {
-  local dir state root conv db last unfinished
-  dir="$TMP_ROOT/busy-predicate"
-  state="$dir/state"
-  root="$dir/conversations"
-  conv=11111111-2222-3333-4444-555555555555
-  bind_agy_task "$state" agy-task "$root" "$conv"
-  db="$root/$conv.db"
-  # The exact live shape that makes the two candidate predicates disagree: an
-  # enclosing step still running at status 2, with a LATER step that already
-  # settled to 3 sitting above it.
-  make_agy_db "$db" 3 3 2 3
-
-  # Assert the divergence itself, so this case can never go quietly vacuous if
-  # the seeded shape stops distinguishing the two predicates.
-  last=$("$SQLITE_BIN" "$db" 'SELECT status FROM steps ORDER BY idx DESC LIMIT 1;')
-  unfinished=$("$SQLITE_BIN" "$db" 'SELECT COUNT(*) FROM steps WHERE status != 3;')
-  [ "$last" = 3 ] || fail "fixture no longer has a settled highest-idx row, got '$last'"
-  [ "$unfinished" -gt 0 ] || fail "fixture no longer has an unfinished step"
-
-  [ "$(fm_busy_agy_run_state "$db")" = busy ] \
-    || fail "a running enclosing step under a settled newer step must read busy"
-  [ "$(fm_busy_classify tmux fm:agy-task agy agy-task "$state")" = "busy agy-steps" ] \
-    || fail "the classifier did not report busy agy-steps mid-turn"
-  pass "busy fold: a turn in flight reads busy even when the newest step has settled"
-}
-
-test_agy_busy_settles_and_refuses_to_guess() {
-  local dir state root conv db out
-  dir="$TMP_ROOT/busy-states"
-  state="$dir/state"
-  root="$dir/conversations"
-
-  conv=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-  bind_agy_task "$state" settled "$root" "$conv"
-  make_agy_db "$root/$conv.db" 3 3 3
-  [ "$(fm_busy_agy_run_state "$root/$conv.db")" = settled ] \
-    || fail "an all-finished step table must read settled"
-  [ "$(fm_busy_classify tmux fm:settled agy settled "$state")" = "idle agy-steps" ] \
-    || fail "the classifier did not report idle agy-steps for a settled turn"
-
-  # A conversation that has run no turn proves nothing about the pane, so it is
-  # unknown rather than idle.
-  conv=aaaaaaaa-bbbb-cccc-dddd-ffffffffffff
-  bind_agy_task "$state" fresh "$root" "$conv"
-  make_agy_db "$root/$conv.db"
-  [ "$(fm_busy_agy_run_state "$root/$conv.db")" = none ] \
-    || fail "an empty step table must read none"
-  out=$(fm_busy_classify tmux fm:fresh agy fresh "$state")
-  [ "$out" = "unknown agy-steps" ] \
-    || fail "a turn-free conversation must be unknown, got '$out'"
-
-  # No sidecar at all.
-  out=$(fm_busy_classify tmux fm:absent agy absent "$state")
-  [ "$out" = "unknown agy-steps" ] \
-    || fail "an unbound agy task must be unknown, got '$out'"
-
-  # A sidecar whose named conversation has no database on disk.
-  bind_agy_task "$state" missingdb "$root" 99999999-8888-7777-6666-555555555555
-  out=$(fm_busy_classify tmux fm:missingdb agy missingdb "$state")
-  [ "$out" = "unknown agy-steps" ] \
-    || fail "a missing conversation database must be unknown, got '$out'"
-  pass "busy fold: settled reads idle while every unproven shape reads unknown"
-}
-
-test_agy_conversation_binding_ignores_unrelated_uuids() {
-  local dir state root conv wrong
-  dir="$TMP_ROOT/busy-binding"
-  state="$dir/state"
-  root="$dir/conversations"
-  conv=12121212-3434-5656-7878-909090909090
-  wrong=deadbeef-0000-1111-2222-333333333333
-  mkdir -p "$state" "$root"
-  # A worktree path can itself contain a UUID, and agy logs the workspace it
-  # opened. Only the `Created conversation` line may name the conversation.
-  {
-    printf 'ERROR: logging before google.Init: I0828 08:56:45 1 server.go:1487] workspace /tmp/scratch/%s/wt\n' "$wrong"
-    printf 'ERROR: logging before google.Init: I0828 08:56:47 1 server.go:1153] Created conversation %s\n' "$conv"
-  } > "$state/bind.agy-log"
-  {
-    printf 'conversations_root=%s\n' "$root"
-    printf 'log_file=%s\n' "$state/bind.agy-log"
-  } > "$state/bind.agy-session"
-  [ "$(fm_busy_agy_conversation_id "$state" bind)" = "$conv" ] \
-    || fail "an unrelated UUID in the log was mistaken for the conversation"
-
-  # A log with no Created-conversation line at all binds nothing.
-  printf 'ERROR: some unrelated line with %s in it\n' "$wrong" > "$state/none.agy-log"
-  {
-    printf 'conversations_root=%s\n' "$root"
-    printf 'log_file=%s\n' "$state/none.agy-log"
-  } > "$state/none.agy-session"
-  fm_busy_agy_conversation_id "$state" none >/dev/null 2>&1 \
-    && fail "a log naming no conversation must not resolve one"
-  pass "busy fold: the conversation binding matches agy's own token, not any UUID"
-}
-
-test_agy_busy_reads_a_checkpointed_database() {
-  local dir state root conv db
-  dir="$TMP_ROOT/busy-wal"
-  state="$dir/state"
-  root="$dir/conversations"
-  conv=abcdabcd-1111-2222-3333-444444444444
-  bind_agy_task "$state" wal "$root" "$conv"
-  db="$root/$conv.db"
-  make_agy_db "$db" 3 2
-  # agy keeps the database in WAL mode and removes the sidecars when it
-  # checkpoints. A read-only open cannot create the -shm it would need at that
-  # point, so the fold must still answer through its second open mode rather
-  # than degrading to unknown on every settled conversation.
-  "$SQLITE_BIN" "$db" 'PRAGMA journal_mode=WAL;' >/dev/null \
-    || fail "could not put the fixture database into WAL mode"
-  "$SQLITE_BIN" "$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || true
-  rm -f "$db-wal" "$db-shm"
-  [ "$(fm_busy_agy_run_state "$db")" = busy ] \
-    || fail "a checkpointed WAL-mode database must still fold"
-  # The fold must not have resurrected the sidecars inside the operator's own
-  # conversation store.
-  [ ! -e "$db-wal" ] || fail "the busy fold created a -wal file beside the operator's database"
-  [ ! -e "$db-shm" ] || fail "the busy fold created a -shm file beside the operator's database"
-  pass "busy fold: a checkpointed database still folds and stays untouched"
-}
-
-test_agy_busy_never_borrows_another_adapters_source() {
-  local dir state root conv out
-  dir="$TMP_ROOT/busy-scope"
-  state="$dir/state"
-  root="$dir/conversations"
-  conv=55555555-6666-7777-8888-999999999999
-  bind_agy_task "$state" scope "$root" "$conv"
-  make_agy_db "$root/$conv.db" 3 3
-  # The same on-disk binding must classify NOTHING for another harness: a
-  # source is only ever read for the adapter that owns it.
-  out=$(fm_busy_classify tmux fm:scope cursor scope "$state")
-  [ "$out" = "unknown cursor-transcript" ] \
-    || fail "an agy binding classified a cursor task, got '$out'"
-  pass "busy fold: agy's source never classifies another adapter"
-}
-
-# --- composer ---------------------------------------------------------------
-
-DIM=$'\033[90m'
-BLUE=$'\033[94m'
-FAINT=$'\033[2m'
-OFF=$'\033[m'
-DEFAULT=$'\033[39m'
-RULE=$(printf '─%.0s' $(seq 1 60))
-
-# agy_screen <composer-body>: the verified agy pane shape - a bare separated
-# composer between two dim-gray horizontal rules, a bright-blue `>` prompt
-# glyph, and a dim footer BELOW the closing rule (verified live, agy 1.1.22).
-agy_screen() {  # <composer-body>
-  printf '%s\n' "  Antigravity CLI 1.1.22"
-  printf '%s\n' ""
-  printf '%s%s%s\n' "$DIM" "$RULE" "$OFF"
-  printf '%s>%s%s\n' "$BLUE" "$DEFAULT" "$1"
-  printf '%s%s%s\n' "$DIM" "$RULE" "$OFF"
-  printf '%s? for shortcuts%s   %sGemini 3.6 Flash · high%s\n' "$DIM" "$DEFAULT" "$FAINT" "$OFF"
-}
-
-AGY_CAPS=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
-
-test_agy_composer_needs_its_own_identity() {
-  local screen out
-  screen=$(agy_screen "")
-  # Row 3 holds the prompt glyph; the composer sits between rows 2 and 4.
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$screen" 3)
-  [ "$out" = need-identity ] \
-    || fail "an agy composer should ask for identity, got '$out'"
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$screen" 3 probe-absent)
-  [ "$out" = unknown ] \
-    || fail "an agy shape with no live agent must be unknown, got '$out'"
-  # The shape alone must never be enough: another agent's identity over the
-  # same bytes stays unknown, so agy's rule cannot classify a foreign pane.
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$screen" 3 "$(printf 'claude\tidle')")
-  [ "$out" = unknown ] \
-    || fail "an agy shape under a foreign identity must be unknown, got '$out'"
-  pass "composer: the agy separated shape is unreadable without agy's own identity"
-}
-
-test_agy_composer_reads_empty_and_pending() {
-  local out
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$(agy_screen "")" 3 "$(printf 'agy\tidle')")
-  [ "$out" = empty ] \
-    || fail "an idle agy composer should read empty, got '$out'"
-  # agy draws NO ghost or placeholder text inside its composer, so anything
-  # after the glyph is real typed input.
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$(agy_screen " hello there")" 3 "$(printf 'agy\tidle')")
-  [ "$out" = pending ] \
-    || fail "typed agy composer text should read pending, got '$out'"
-  # A working agent is not a safe injection target even with an empty composer.
-  out=$(fm_composer_classify_screen "$AGY_CAPS" "$(agy_screen "")" 3 "$(printf 'agy\tworking')")
-  [ "$out" = unknown ] \
-    || fail "a working agy pane should not read empty, got '$out'"
-  pass "composer: agy's prompt glyph reads empty while typed text reads pending"
-}
-
-test_agy_delivery_footer_is_scoped() {
-  # agy's busy footer must acknowledge an agy submit and must NOT be borrowed
-  # by another harness, nor another harness's footer by agy.
-  printf 'esc to cancel\n' | fm_busy_lines_match agy \
-    || fail "agy's own busy footer did not match"
-  printf '? for shortcuts\n' | fm_busy_lines_match agy \
-    && fail "agy's idle footer was read as busy"
-  printf 'esc to cancel\n' | fm_busy_lines_match grok \
-    && fail "grok borrowed agy's busy footer"
-  printf 'Ctrl+c:cancel\n' | fm_busy_lines_match agy \
-    && fail "agy borrowed grok's busy footer"
-  pass "composer: agy's delivery footer is scoped to agy"
-}
-
-# --- control mechanics ------------------------------------------------------
-
-test_agy_control_mechanics_are_declared() {
-  local out
-  fm_control_harness_supported agy || fail "agy is not a supported control harness"
-  out=$(fm_control_harness_family agy) || fail "agy has no control family"
-  [ "$out" = agy ] || fail "agy control family resolved to '$out'"
-  [ "$(fm_control_interrupt_key agy)" = Escape ] \
-    || fail "agy interrupt key changed"
-  [ "$(fm_control_interrupt_repeat agy)" = 1 ] \
-    || fail "agy interrupt repeat changed"
-  [ -z "$(fm_control_interrupt_clear_key agy)" ] \
-    || fail "agy should need no composer clear key after an interrupt"
-  [ "$(fm_control_exit_command agy)" = /exit ] \
-    || fail "agy exit command changed"
-  # agy is a crewmate/scout adapter only.
-  fm_control_harness_supports_kind agy ship || fail "agy should run a ship task"
-  fm_control_harness_supports_kind agy scout || fail "agy should run a scout task"
-  pass "control: agy's verified interrupt, exit, and kind support are declared"
-}
-
-test_agy_secondmate_is_refused_before_anything_is_stopped() {
-  # This gate is asked BEFORE the control plane stops the running agent, so an
-  # adapter the launch owner will refuse must be refused HERE too. Missing it
-  # stops a live secondmate and only then fails the relaunch, leaving the task
-  # with no agent at all.
+test_agy_control_mechanics_are_the_verified_ones() {
+  fm_control_harness_supported agy || fail "agy must be a supported control harness"
+  [ "$(fm_control_harness_family agy)" = agy ] || fail "agy must map to its own family"
+  fm_control_harness_supports_kind agy scout || fail "agy must run scouts"
+  fm_control_harness_supports_kind agy ship || fail "agy must run ships"
   fm_control_harness_supports_kind agy secondmate \
-    && fail "agy must be refused for kind=secondmate on the pre-stop side of a relaunch"
-  # muse is the established precedent for the same rule; assert it too so a
-  # future edit cannot quietly drop either name.
-  fm_control_harness_supports_kind muse secondmate \
-    && fail "muse must be refused for kind=secondmate"
-  # The refusal is kind-scoped, not a blanket rejection of the adapter.
-  fm_control_harness_supports_kind agy ship \
-    || fail "the secondmate refusal must not also block an agy ship task"
-  pass "control: agy is refused for a secondmate before the running agent is stopped"
+    && fail "agy must refuse secondmates" || true
+  [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy must interrupt on Escape"
+  [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must interrupt on a single press"
+  [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
+  [ "$(fm_control_interrupt_ack_source agy)" = none ] || fail "agy must have no ack source"
+  [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit on /quit"
+  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
 }
 
-test_agy_wiring_paths_are_retired_on_relaunch() {
-  local out
-  out=$(fm_control_harness_wiring_paths agy /wt /state task1)
-  assert_contains "$out" "/state/task1.agy-session" "agy sidecar is not retired on relaunch"
-  assert_contains "$out" "/state/task1.agy-log" "agy log is not retired on relaunch"
-  # agy installs no global turn-end hook, so it mints no registry token.
-  out=$(fm_control_harness_turnend_token_path agy /state task1)
-  [ -z "$out" ] || fail "agy should mint no turn-end registry token, got '$out'"
-  pass "control: agy's per-task wiring is retired when a task changes harness"
+test_agy_busy_tail_needs_the_pinned_status_row() {
+  printf 'working\nesc to cancel\n' | fm_busy_agy_tail_busy \
+    || fail "the esc-to-cancel status row must read busy"
+  printf 'working\n  Generating...\n' | fm_busy_agy_tail_busy \
+    && fail "the free-floating Generating word alone must not read busy" || true
+  printf 'Generating report...\ndone\n? for shortcuts\n>\n' | fm_busy_agy_tail_busy \
+    && fail "echoed worker output naming Generating must not read busy" || true
+  printf 'idle\n? for shortcuts\n>\n' | fm_busy_agy_tail_busy \
+    && fail "an idle footer must not read busy" || true
+  printf 'Generating report...\ndone\n? for shortcuts\n>\n' | fm_busy_lines_match agy \
+    && fail "the delivery guard must not acknowledge on echoed Generating output" || true
+  FM_BUSY_AGY_REGEX='idle' bash -c '. "$0/bin/fm-busy-lib.sh"; printf "idle\n" | fm_busy_agy_tail_busy' "$ROOT" \
+    && fail "an environment override must not change the agy busy signature" || true
+  pass "fm-busy-lib: only the pinned esc-to-cancel row carries the agy busy verdict"
 }
 
-# --- spawn: trust grant, sidecar, and launch flags ---------------------------
+test_agy_busy_signatures_are_harness_scoped() {
+  printf 'esc to cancel\n' | fm_busy_lines_match agy \
+    || fail "harness=agy must match its own esc token"
+  printf 'esc to cancel\n' | fm_busy_lines_match grok \
+    && fail "harness=grok must never borrow agy's esc token" || true
+  printf 'Ctrl+c:cancel\n' | fm_busy_lines_match agy \
+    && fail "harness=agy must never borrow grok's token" || true
+  printf 'esc to cancel\n' | fm_busy_lines_match kimi \
+    && fail "harness=kimi must never borrow agy's token" || true
+  printf 'esc to cancel\n' | fm_busy_lines_match spaceship \
+    && fail "an unverified harness must match nothing" || true
+  pass "fm-composer-lib: agy delivery signatures never cross harnesses"
+}
 
-make_agy_spawn_fakebin() {
+test_agy_classify_reports_unknown_when_the_marker_scrolls_out() {
+  local statedir busy idle
+  statedir="$TMP_ROOT/classify"; mkdir -p "$statedir"
+  busy=$(fm_busy_classify tmux fake:win agy agy-case-1 "$statedir" 'turn running
+esc to cancel                                                           Gemini 3.8 Flash · low')
+  [ "$busy" = "busy agy-regex" ] || fail "a busy tail must classify busy agy-regex, got '$busy'"
+  idle=$(fm_busy_classify tmux fake:win agy agy-case-2 "$statedir" 'reply landed
+? for shortcuts                                                         Gemini 3.8 Flash · low')
+  [ "$idle" = "unknown agy-regex" ] || fail "a scrolled-out marker must classify unknown, got '$idle'"
+  pass "fm-busy-lib: agy classifies busy on its marker and unknown without it"
+}
+
+test_agy_tmux_names_the_native_binary_an_agent() {
+  local got
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  fm_backend_source tmux || fail "fm_backend_source tmux failed"
+  got=$(fm_agent_process_classify_name agy)
+  [ "$got" = agent ] || fail "tmux liveness must read the agy binary as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name magyk)
+  [ "$got" = other ] || fail "tmux liveness must not read magyk as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name bash)
+  [ "$got" = shell ] || fail "tmux liveness must still read bash as a shell, got '$got'"
+  pass "bin/fm-agent-process-lib.sh: agy is an agent, fragments are not"
+}
+
+# Canned `pane process-info` bodies for the herdr fixtures. The shared
+# exit-detection contract proves a registered agent at process level before
+# trusting it (bin/backends/herdr.sh fm_backend_herdr_pane_process_state), so
+# every registered-status fixture pairs its `agent get` body with a process
+# view. The agy-shaped body names the foreground process exactly `agy`, which
+# is the same identity surface the tmux liveness probe and the ancestry
+# detector use - no real agy process is needed because the foreground branch
+# answers before the descendant walk touches the process table.
+agy_herdr_process_info_body() {  # <shell-pid> <foreground-name> -> JSON
+  printf '%s\n' "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w9:p1\",\"shell_pid\":$1,\"foreground_processes\":[{\"pid\":$(( $1 + 1 )),\"name\":\"$2\",\"argv\":[\"$2\",\"--prompt-interactive\"],\"argv0\":\"$2\",\"cmdline\":\"$2 --prompt-interactive\"}]}}}"
+}
+
+agy_herdr_agent_state() {  # <fixture-dir> -> verdict; logs every CLI call
+  local dir=$1
+  : > "$dir/calls.log"
+  AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" \
+    AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$AGY_FIX_LOG"
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_pane_agent_state testsession w9:p1' "$ROOT" 2>&1
+}
+
+test_herdr_done_with_live_registry_stays_live() {
+  local dir out
+  dir="$TMP_ROOT/herdr-done"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = live ] || fail "a registered done status with an agy process view must stay live, got '$out'"
+  grep -q "process-info" "$dir/calls.log" \
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = refused ] || fail "a live pane must refuse husk replacement, got '$out'"
+  pass "herdr exit detection: done with a live registry and an agy process view stays live and refuses replacement"
+}
+
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live() {
+  local dir out shell_pid
+  dir="$TMP_ROOT/herdr-stale"; mkdir -p "$dir"
+  # The descendant walk reads the REAL process table, so the canned pane shell
+  # must be a process this test owns and can prove alive: a short-lived sleep.
+  sleep 30 & shell_pid=$!
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body "$shell_pid" bash > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = stale-agent ] || fail "a registered status over a proven shell-only pane must read stale-agent, got '$out'"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = refused ] || fail "a stale registration must still refuse husk replacement, got '$out'"
+  pass "herdr exit detection: a registered status over a shell-only pane is stale-agent and still refuses closing"
+}
+
+test_herdr_shell_first_with_live_registry_stays_live() {
+  local dir out
+  dir="$TMP_ROOT/herdr-idle"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"idle","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  # The pane shell is present in the process view too (shell_pid), but the
+  # foreground names agy: the verified harness identity outranks shell-first
+  # ranking, and the shared contract's process proof is satisfied.
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = live ] || fail "a registered idle status with an agy foreground must stay live, got '$out'"
+  grep -q "process-info" "$dir/calls.log" \
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  pass "herdr exit detection: a registered pane with an agy foreground stays live however its shell ranks"
+}
+
+test_herdr_lone_unregistered_pane_is_agent_free() {
+  local dir out
+  dir="$TMP_ROOT/herdr-gone"; mkdir -p "$dir"
+  printf '%s\n' '{"error":{"code":"agent_not_found","message":"agent target w9:p1 not found"}}' > "$dir/agent-get.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = no-agent ] || fail "an unregistered pane must read no-agent, got '$out'"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in *"agent get"*) cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = husk ] || fail "an agent-free pane must allow husk replacement, got '$out'"
+  pass "herdr exit detection: only a positively unregistered pane is agent-free"
+}
+
+test_herdr_malformed_and_failed_reads_stay_unknown() {
+  local dir out
+  dir="$TMP_ROOT/herdr-malformed"; mkdir -p "$dir"
+  printf '%s\n' '{not json at all' > "$dir/agent-get.json"
+  out=$(agy_herdr_agent_state "$dir")
+  [ "$out" = unknown ] || fail "a malformed registry response must read unknown, got '$out'"
+  dir="$TMP_ROOT/herdr-failed"; mkdir -p "$dir"
+  printf '%s\n' '{"result":{}}' > "$dir/agent-get.json"
+  export AGY_FIX_FAIL=1
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$AGY_FIX_LOG"
+      case "$*" in *"agent get"*) [ "${AGY_FIX_FAIL:-0}" = 1 ] && exit 3; cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+    }
+    fm_backend_herdr_pane_agent_state testsession w9:p1' "$ROOT" 2>&1)
+  unset AGY_FIX_FAIL
+  [ "$out" = unknown ] || fail "a failed registry query must read unknown, got '$out'"
+  pass "herdr exit detection: malformed and failed reads stay unknown"
+}
+
+make_agy_trust_case() {  # <name> -> "<case>|<proj>|<wt>|<home>"
+  local name=$1 case_dir proj wt home
+  case_dir="$TMP_ROOT/trust-$name"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  home="$case_dir/home"
+  mkdir -p "$home"
+  fm_git_worktree "$proj" "$wt" "wt-trust-$name"
+  printf '%s|%s|%s|%s\n' "$case_dir" "$proj" "$wt" "$home"
+}
+
+read_agy_trust_case() {
+  IFS='|' read -r CASE_DIR PROJ_DIR WT_DIR HOME_DIR <<EOF
+$1
+EOF
+}
+
+run_agy_trust() {  # <home> <worktree> <project>
+  HOME="$1" "$TRUST" "$2" "$3" 2>&1
+}
+
+test_agy_trust_registers_the_logical_and_resolved_worktree_paths() {
+  local rec store out link
+  rec=$(make_agy_trust_case fresh)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '%s\n' '{"model":"Gemini 3.8 Flash (High)","allowNonWorkspaceAccess":true,"trustedWorkspaces":["/home/someone/elsewhere"]}' > "$store"
+  link="$CASE_DIR/wt-link"
+  ln -s "$WT_DIR" "$link"
+  out=$(run_agy_trust "$HOME_DIR" "$link" "$PROJ_DIR") || fail "a fresh linked worktree must be trusted: $out"
+  assert_agy_trusted "$store" "$link" "the logical (symlinked) pane path agy compares against was not registered"
+  assert_agy_trusted "$store" "$WT_DIR" "the resolved worktree path was not registered alongside the logical one"
+  assert_agy_trusted "$store" "/home/someone/elsewhere" "registration dropped an existing trustedWorkspaces entry"
+  [ "$(agy_store_value "$store" model)" = '"Gemini 3.8 Flash (High)"' ] \
+    || fail "registration did not preserve an unrelated store key"
+  [ "$(agy_store_value "$store" allowNonWorkspaceAccess)" = true ] \
+    || fail "registration did not preserve an unrelated boolean key"
+  out=$(run_agy_trust "$HOME_DIR" "$link" "$PROJ_DIR") || fail "repeat registration must succeed: $out"
+  [ "$(agy_trusted_paths "$store" | grep -Fcx "$WT_DIR")" -eq 1 ] \
+    || fail "repeat registration duplicated the worktree entry"
+  pass "fm-agy-trust.sh: registers the logical and resolved worktree paths and preserves the store"
+}
+
+test_agy_trust_creates_a_missing_store() {
+  local rec store out
+  rec=$(make_agy_trust_case nostore)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  out=$(run_agy_trust "$HOME_DIR" "$WT_DIR" "$PROJ_DIR") || fail "a missing store must be created: $out"
+  [ -f "$store" ] || fail "no settings store was created at $store"
+  assert_agy_trusted "$store" "$WT_DIR" "the worktree was not registered in the created store"
+  pass "fm-agy-trust.sh: creates agy's settings store when none exists"
+}
+
+test_agy_trust_refuses_out_of_scope_paths() {
+  local rec store out rc plain before after
+  rec=$(make_agy_trust_case scope)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '%s\n' '{"trustedWorkspaces":[]}' > "$store"
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$PROJ_DIR" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the primary checkout must be refused"
+  assert_contains "$out" "primary checkout" "primary-checkout refusal lacked its reason"
+  assert_agy_not_trusted "$store" "$PROJ_DIR" "a refused primary checkout was still registered"
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$HOME_DIR" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the home directory must be refused"
+  assert_agy_not_trusted "$store" "$HOME_DIR" "a refused home directory was still registered"
+  plain="$CASE_DIR/plain"; mkdir -p "$plain"
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$plain" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a plain directory must be refused"
+  assert_agy_not_trusted "$store" "$plain" "a refused plain directory was still registered"
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$WT_DIR/.git" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a path below the worktree root must be refused"
+  printf '%s\n' '{not json' > "$store"
+  before=$(cat "$store")
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$WT_DIR" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparseable store must be refused"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "an unparseable store was rewritten"
+  pass "fm-agy-trust.sh: refuses every out-of-scope path and never rewrites a broken store"
+}
+
+# The fake tmux renders an agy-shaped screen that advances through
+# launched -> (trust dialog ->) busy as the real spawn drives it, so the launch
+# command, the pre-registration, the single Enter that answers a dialog, and
+# the readiness gate are exercised through their real code paths. Whether the
+# dialog renders is decided the way agy decides it: the pane path is looked up
+# in the trustedWorkspaces array of the store the spawn just wrote.
+# FM_FAKE_AGY_IGNORE_TRUST=1 models a vendor that stopped honouring the store;
+# FM_FAKE_AGY_ASSUME_TRUSTED=1 models a pane that never shows the dialog even
+# though firstmate could not register the path (a busy verdict with no proof
+# of where the turn runs);
+# FM_FAKE_AGY_RACE=1 models Herdr's native busy verdict rendering one capture
+# before the dialog paints; FM_FAKE_AGY_ANSWER=stuck models a dialog whose
+# answer never turns into a busy turn.
+make_agy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+state=$(cat "$FM_FAKE_AGY_STATE" 2>/dev/null || true)
+fake_screen() {
+  case "$state" in
+    dialog)
+      printf 'Accessing workspace:\n\n%s\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    busy)
+      printf 'Generating...\n└ Tip: press f to see the full diff.\n\nesc to cancel                                Gemini 3.8 Flash · low\n'
+      ;;
+    racing)
+      printf 'esc to cancel                                Gemini 3.8 Flash · low\n'
+      printf 'dialog\n' > "$FM_FAKE_AGY_STATE"
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
+fake_path_trusted() {
+  [ "${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" = 1 ] && return 0
+  [ "${FM_FAKE_AGY_IGNORE_TRUST:-0}" = 1 ] && return 1
+  node -e 'const fs=require("node:fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));}catch(e){process.exit(1);}process.exit(Array.isArray(j.trustedWorkspaces)&&j.trustedWorkspaces.includes(process.argv[2])?0:1);' \
+    "$FM_FAKE_AGY_SETTINGS" "$FM_FAKE_PANE_PATH"
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
-  *"#{cursor_y}"*) printf '3\n'; exit 0 ;;
+  *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
-    prev=
     literal=
+    prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then literal=$arg; break; fi
       prev=$arg
     done
-    [ -z "$literal" ] || printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+    if [ -n "$literal" ]; then
+      case "$literal" in
+        *--prompt-interactive*)
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf 'launched\n' > "$FM_FAKE_AGY_STATE"
+          ;;
+      esac
+      exit 0
+    fi
+    case " $* " in
+      *' Enter '*)
+        case "$state" in
+          launched)
+            if fake_path_trusted; then
+              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+            elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
+              printf 'racing\n' > "$FM_FAKE_AGY_STATE"
+            else
+              printf 'dialog\n' > "$FM_FAKE_AGY_STATE"
+            fi
+            ;;
+          dialog)
+            if [ "${FM_FAKE_AGY_ANSWER:-works}" = works ]; then
+              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+            fi
+            ;;
+        esac
+        ;;
+    esac
     exit 0
     ;;
-  capture-pane) printf 'shell starting\n$ \n'; exit 0 ;;
+  capture-pane) fake_screen; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy
-  ln -s "$JQ_BIN" "$fakebin/jq"
-  ln -s "$SQLITE_BIN" "$fakebin/sqlite3"
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = models ]; then
+  if [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ]; then exit 3; fi
+  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
+  printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
+  printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+  printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
+  exit 0
+fi
+echo "fake agy must never execute" >&2
+exit 9
+SH
+  chmod +x "$fakebin/agy"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   printf '%s\n' "$fakebin"
 }
 
@@ -459,244 +554,363 @@ make_agy_spawn_case() {
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_agy_spawn_fakebin "$case_dir/fake")
+  fakebin=$(make_agy_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for agy\n' > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Antigravity dispatch.
+
+## Firstmate spec
+Verify launch and delivery behavior.
+EOF
   printf 'agy\n' > "$home/config/crew-harness"
+  mkdir -p "$home/.gemini/antigravity-cli"
+  printf '%s\n' '{"model":"Gemini 3.8 Flash (High)","trustedWorkspaces":["/home/someone/elsewhere"]}' \
+    > "$home/.gemini/antigravity-cli/settings.json"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
+  : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/agy.state"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
+read_agy_spawn_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+# The spawn drives the real bin/fm-agy-trust.sh and the fake tmux's trust
+# lookup under this base PATH, and both read agy's settings store with node,
+# which runners do not keep in the system bin dirs. Carry the directory the
+# invoking environment resolves node from, the fm-kimi-harness shape.
+NODE_BIN=$(command -v node) || fail "test needs node"
+NODE_BIN_DIR=$(dirname "$NODE_BIN")
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+
 run_agy_spawn() {
-  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 settings=$7
-  shift 7
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
-    FM_AGY_SETTINGS_OVERRIDE="$settings" \
-    AGY_CONVERSATIONS_ROOT_OVERRIDE="$case_dir/conversations" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_AGY_STATE="$case_dir/agy.state" \
+    FM_FAKE_AGY_SETTINGS="$home/.gemini/antigravity-cli/settings.json" \
+    FM_FAKE_AGY_MODELS_FAIL="${FM_FAKE_AGY_MODELS_FAIL:-0}" \
+    FM_FAKE_AGY_MODELS_HANG="${FM_FAKE_AGY_MODELS_HANG:-0}" \
+    FM_FAKE_AGY_IGNORE_TRUST="${FM_FAKE_AGY_IGNORE_TRUST:-0}" \
+    FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
+    FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
+    FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
 
-test_agy_spawn_pre_trusts_the_worktree_without_disturbing_settings() {
-  local id rec case_dir home proj wt fakebin settings out rc launch wt_abs
-  id="agy-trust-$$"
+test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
+  local id rec out rc launch meta
+  id="agy-launch-z1-$$"
+  rec=$(make_agy_spawn_case launch "$id")
+  read_agy_spawn_record "$rec"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low --effort low)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn with a listed model should succeed"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "$FAKEBIN_DIR/agy" "agy launch did not pin the resolved absolute binary"
+  assert_contains "$launch" "--prompt-interactive" "agy launch did not carry the brief via --prompt-interactive"
+  assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch did not carry the requested model"
+  assert_contains "$launch" "--effort 'low'" "agy launch did not carry the requested effort"
+  assert_contains "$launch" "--dangerously-skip-permissions" "agy launch omitted unattended autonomy"
+  assert_contains "$launch" "env -u CLAUDECODE" "agy launch did not clear the inherited launcher marker"
+  assert_not_contains "$launch" "__AGYBIN__" "agy launch left its binary placeholder unsubstituted"
+  assert_not_contains "$launch" "__MODELFLAG__" "agy launch left its model placeholder unsubstituted"
+  assert_not_contains "$launch" "__BRIEF__" "agy launch left its brief placeholder unsubstituted"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'harness=agy' "$meta" "agy meta did not record its harness"
+  assert_grep 'model=gemini-3.8-flash-low' "$meta" "agy meta did not record its model"
+  assert_grep 'effort=low' "$meta" "agy meta did not record its effort"
+  pass "fm-spawn: agy launch carries brief, model, effort, and autonomy with cleared markers"
+}
+
+test_agy_effort_xhigh_is_recorded_but_omitted() {
+  local id rec out rc launch meta
+  id="agy-xhigh-z2-$$"
+  rec=$(make_agy_spawn_case xhigh "$id")
+  read_agy_spawn_record "$rec"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low --effort xhigh)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn with an unsupported effort should still succeed"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "--effort" "agy launch passed a known-bad effort value"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'effort=xhigh' "$meta" "agy meta did not retain the unsupported effort axis"
+  pass "fm-spawn: agy omits xhigh from the launch but records it in task metadata"
+}
+
+test_agy_unlisted_model_refuses_before_pane_creation() {
+  local id rec out rc
+  id="agy-badmodel-z3-$$"
+  rec=$(make_agy_spawn_case badmodel "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unlisted agy model should refuse the spawn"
+  assert_contains "$out" "not listed by 'agy models'" "unlisted model refusal lacked its concrete reason"
+  [ -s "$CASE_DIR/launch.log" ] && fail "an unlisted model created a launch command" || true
+  pass "fm-spawn: an unlisted agy model refuses before pane creation"
+}
+
+test_agy_unreachable_listing_launches_unvalidated() {
+  local id rec out rc
+  id="agy-nolisting-z4-$$"
+  rec=$(make_agy_spawn_case nolisting "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_MODELS_FAIL=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "an unreachable model listing must not block the spawn"
+  [ -s "$CASE_DIR/launch.log" ] || fail "an unreachable listing produced no launch command"
+  assert_contains "$out" "listing is unreachable" "an unreachable listing launched without its notice"
+  pass "fm-spawn: an unreachable agy listing establishes nothing and launches"
+}
+
+test_agy_hung_listing_is_cut_off_and_launches() {
+  local id rec out rc started elapsed
+  id="agy-hanglisting-z8-$$"
+  rec=$(make_agy_spawn_case hanglisting "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  started=$(date +%s)
+  out=$(FM_FAKE_AGY_MODELS_HANG=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$rc" "a hung model listing must not block the spawn"
+  [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
+  [ -s "$CASE_DIR/launch.log" ] || fail "a hung listing produced no launch command"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
+    "a hung listing dropped the requested model instead of launching it unvalidated"
+  pass "fm-spawn: a hung agy listing is cut off by the shared bound and launches unvalidated"
+}
+
+test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
+  local id rec out rc started elapsed
+  id="agy-zerobound-z14-$$"
+  rec=$(make_agy_spawn_case zerobound "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  started=$(date +%s)
+  out=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_MODELS_TIMEOUT=0 \
+    run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn"
+  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 15s" \
+    "a zero model bound was not clamped to the documented default"
+  [ -s "$CASE_DIR/launch.log" ] || fail "a zero model bound produced no launch command"
+  pass "fm-spawn: a zero FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
+}
+
+# Bare Enter key presses only: shell setup rides its Enter on the typed text
+# (`send-keys -t <target> export X=Y Enter`), while the launch submit and the
+# trust-dialog answer are lone key sends (`send-keys -t <target> Enter`).
+count_enter_sends() {  # <tmux-call-log>
+  grep -c '^send-keys -t [^ ]* Enter$' "$1" || true
+}
+
+test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
+  local id rec out rc enters store
+  id="agy-trust-z9-$$"
   rec=$(make_agy_spawn_case trust "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  # A realistic pre-existing settings file: other keys, and a trusted entry the
-  # spawn must not disturb. The worktree's PARENT is already trusted, which agy
-  # does NOT honour - its matching is exact - so the exact path must still be
-  # added.
-  "$JQ_BIN" -n --arg parent "$(dirname "$wt")" '{
-    allowNonWorkspaceAccess: true,
-    model: "Gemini 3.6 Flash (High)",
-    permissions: {allow: ["command(unzip)"]},
-    trustedWorkspaces: ["/Users/someone", $parent]
-  }' > "$settings"
-
-  out=$(run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
   rc=$?
-  expect_code 0 "$rc" "an agy spawn should succeed"
+  expect_code 0 "$rc" "an agy spawn into a fresh worktree should succeed"
   assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success"
-
-  # The grant must name the path the PANE is launched in, byte for byte. agy
-  # normalizes redundant separators but does NOT resolve symlinks (verified
-  # live, agy 1.1.22), so re-deriving a physical path here would assert the
-  # wrong invariant: what has to match is the worktree fm-spawn recorded and
-  # launched in, which is what the meta carries.
-  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
-  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree to compare the trust grant against"
-  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces // []) | index($p) != null' \
-    "$settings" >/dev/null || fail "the launched worktree was not added to trustedWorkspaces"
-  # Nothing else moved: every pre-existing key and entry survives.
-  "$JQ_BIN" -e '.allowNonWorkspaceAccess == true and .model == "Gemini 3.6 Flash (High)"
-      and (.permissions.allow | index("command(unzip)") != null)' \
-    "$settings" >/dev/null || fail "an unrelated agy setting was dropped or changed"
-  "$JQ_BIN" -e '(.trustedWorkspaces | index("/Users/someone")) != null' \
-    "$settings" >/dev/null || fail "an existing trusted workspace was removed"
-
-  # The launch carries the three flags the adapter depends on.
-  launch=$(cat "$case_dir/launch.log")
-  assert_contains "$launch" -- "--dangerously-skip-permissions" \
-    "the agy launch is missing its autonomy flag"
-  assert_contains "$launch" -- "--log-file" \
-    "the agy launch is missing its per-task log binding"
-  assert_contains "$launch" " -i " \
-    "the agy launch does not deliver the brief interactively"
-
-  # The busy binding sidecar is written and points at that same log.
-  assert_present "$home/state/$id.agy-session" "the agy busy sidecar was not written"
-  assert_grep "log_file=$home/state/$id.agy-log" "$home/state/$id.agy-session" \
-    "the agy sidecar does not bind this task's own log"
-  assert_grep "conversations_root=$case_dir/conversations" "$home/state/$id.agy-session" \
-    "the agy sidecar does not record the resolved conversations root"
-  pass "spawn: agy pre-trusts its exact worktree and binds its own conversation log"
+  assert_not_contains "$out" "could not pre-register" "a legitimate worktree failed trust pre-registration"
+  assert_agy_trusted "$store" "$WT_DIR" "the spawn did not pre-register the worktree in agy's trust store"
+  assert_agy_trusted "$store" "/home/someone/elsewhere" "the spawn dropped an existing trustedWorkspaces entry"
+  [ "$(agy_store_value "$store" model)" = '"Gemini 3.8 Flash (High)"' ] \
+    || fail "the spawn did not preserve an unrelated agy setting"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 1 ] \
+    || fail "a pre-trusted worktree must receive only the launch Enter, got $enters Enter sends"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a successful agy spawn must never tear down the endpoint it just launched"
+  pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
 }
 
-test_agy_spawn_refuses_to_rewrite_unparseable_settings() {
-  local id rec case_dir home proj wt fakebin settings out rc before
-  id="agy-badjson-$$"
-  rec=$(make_agy_spawn_case badjson "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  printf '{ "trustedWorkspaces": [ "/a", \n' > "$settings"
-  before=$(cat "$settings")
-
-  out=$(run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings")
+test_agy_dialog_despite_registration_is_answered_once() {
+  local id rec out rc enters
+  id="agy-vendor-z10-$$"
+  rec=$(make_agy_spawn_case vendor-dialog "$id")
+  read_agy_spawn_record "$rec"
+  out=$(FM_FAKE_AGY_IGNORE_TRUST=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low)
   rc=$?
-  [ "$rc" -ne 0 ] || fail "an agy spawn onto unparseable settings should refuse"
-  assert_contains "$out" "not valid JSON" "the refusal did not name the settings problem"
-  [ "$(cat "$settings")" = "$before" ] \
-    || fail "an unparseable agy settings file was rewritten anyway"
-  pass "spawn: agy refuses a spawn rather than clobbering unreadable settings"
+  expect_code 0 "$rc" "an agy spawn whose dialog renders despite registration should succeed"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 2 ] \
+    || fail "expected exactly one launch Enter plus one trust-dialog Enter, got $enters Enter sends"
+  pass "fm-spawn: agy answers a dialog that renders anyway exactly once, then confirms busy"
 }
 
-test_agy_spawn_trust_write_is_idempotent() {
-  local id rec case_dir home proj wt fakebin settings wt_abs count
-  id="agy-idem-$$"
-  rec=$(make_agy_spawn_case idem "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  "$JQ_BIN" -n --arg p "$wt" '{trustedWorkspaces: [$p]}' > "$settings"
-  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1
-  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
-  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree to compare the trust grant against"
-  count=$("$JQ_BIN" --arg p "$wt_abs" '[.trustedWorkspaces[] | select(. == $p)] | length' "$settings")
-  [ "$count" = 1 ] \
-    || fail "re-trusting an already-trusted worktree duplicated the entry ($count copies)"
-  pass "spawn: re-spawning into a trusted worktree adds no duplicate grant"
+test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered() {
+  local id rec out rc enters store before after
+  id="agy-race-z11-$$"
+  rec=$(make_agy_spawn_case race "$id")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  printf '%s\n' '{not json' > "$store"
+  before=$(cat "$store")
+  out=$(FM_FAKE_AGY_RACE=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "an agy spawn that meets the dialog after a premature busy verdict should still succeed"
+  assert_contains "$out" "could not pre-register agy workspace trust" \
+    "a broken store did not surface the registration warning"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the spawn rewrote an unparseable agy store"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the spawn reported success before the answered dialog turned busy (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 2 ] \
+    || fail "a busy verdict before the dialog must not count as ready on an unregistered path; expected the dialog Enter, got $enters Enter sends"
+  pass "fm-spawn: on an unregistered path a premature busy verdict waits for the dialog to be answered"
 }
 
-test_agy_detection_survives_losing_either_signal
-test_agy_ancestry_match_is_anchored
-test_agy_secondmate_is_refused_before_anything_is_stopped
-test_agy_busy_uses_every_step_not_the_last_one
-test_agy_busy_settles_and_refuses_to_guess
-test_agy_conversation_binding_ignores_unrelated_uuids
-test_agy_busy_reads_a_checkpointed_database
-test_agy_busy_never_borrows_another_adapters_source
-test_agy_composer_needs_its_own_identity
-test_agy_composer_reads_empty_and_pending
-test_agy_delivery_footer_is_scoped
-test_agy_control_mechanics_are_declared
-test_agy_wiring_paths_are_retired_on_relaunch
-test_agy_spawn_pre_trusts_the_worktree_without_disturbing_settings
-test_agy_spawn_refuses_to_rewrite_unparseable_settings
-test_agy_spawn_trust_write_is_idempotent
-
-test_agy_trust_write_preserves_order_and_duplicates() {
-  local id rec case_dir home proj wt fakebin settings before after wt_abs
-  id="agy-order-$$"
-  rec=$(make_agy_spawn_case order "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  # Deliberately UNSORTED, WITH a duplicate: jq's `unique` would sort this array
-  # and drop the repeat, which is exactly what the captain's constraint forbids
-  # for a file he also edits by hand.
-  "$JQ_BIN" -n '{
-    allowNonWorkspaceAccess: true,
-    trustedWorkspaces: ["/z/one", "/a/two", "/a/two", "/m/three"],
-    model: "Gemini 3.6 Flash (High)"
-  }' > "$settings"
-  before=$("$JQ_BIN" -c '.trustedWorkspaces' "$settings")
-
-  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1
-  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
-  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
-
-  # The grant is APPENDED and everything that was there keeps its exact position.
-  after=$("$JQ_BIN" -c --arg p "$wt_abs" '.trustedWorkspaces | map(select(. != $p))' "$settings")
-  [ "$after" = "$before" ] \
-    || fail "the trust write reordered or dropped existing entries: $before -> $after"
-  "$JQ_BIN" -e --arg p "$wt_abs" '.trustedWorkspaces[-1] == $p' "$settings" >/dev/null \
-    || fail "the new grant was not appended at the end"
-  "$JQ_BIN" -e '[.trustedWorkspaces[] | select(. == "/a/two")] | length == 2' \
-    "$settings" >/dev/null || fail "the trust write de-duplicated an existing repeated entry"
-  pass "spawn: the trust write appends without reordering or de-duplicating"
+test_agy_unregistered_path_without_a_dialog_fails_the_spawn() {
+  local id rec out rc store
+  id="agy-nodialog-z12-$$"
+  rec=$(make_agy_spawn_case nodialog "$id")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  printf '%s\n' '{not json' > "$store"
+  rc=0
+  out=$(FM_FAKE_AGY_ASSUME_TRUSTED=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a busy verdict on an unregistered path with no dialog must not pass the gate"
+  assert_contains "$out" "never showed its folder-trust dialog on an unregistered worktree" \
+    "the failure did not name the unconfirmed workspace"
+  assert_not_contains "$out" "spawned $id" "an unconfirmed workspace still reported a successful spawn"
+  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 1 ] \
+    || fail "the gate must not send Enter into a pane that shows no dialog"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  assert_grep 'failed: agy never showed its folder-trust dialog' "$HOME_DIR/state/$id.status" \
+    "a failed agy readiness gate did not record the failure in the task status"
+  pass "fm-spawn: a busy verdict on an unregistered path without a dialog fails and closes the endpoint"
 }
 
-test_agy_teardown_retires_only_the_grant_it_added() {
-  local id rec case_dir home proj wt fakebin settings wt_abs
-  id="agy-retire-$$"
-  rec=$(make_agy_spawn_case retire "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  "$JQ_BIN" -n '{trustedWorkspaces: ["/z/keep", "/a/keep"], other: 1}' > "$settings"
-
-  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1 \
-    || fail "the agy spawn should succeed before teardown"
-  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
-  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
-  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) != null' "$settings" >/dev/null \
-    || fail "the spawn did not add the grant this case is about to retire"
-
-  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_AGY_SETTINGS_OVERRIDE="$settings" \
-    PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
-    || fail "the agy teardown failed"
-
-  # The task's own grant is reclaimed, so a recreated worktree path does not
-  # inherit trust, and nothing else in the file is disturbed.
-  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) == null' "$settings" >/dev/null \
-    || fail "teardown did not reclaim the trust grant the spawn added"
-  "$JQ_BIN" -e '.trustedWorkspaces == ["/z/keep", "/a/keep"] and .other == 1' "$settings" >/dev/null \
-    || fail "teardown disturbed entries or keys it did not add"
-  assert_absent "$home/state/$id.agy-session" "the agy sidecar survived teardown"
-  assert_absent "$home/state/$id.agy-log" "the agy log survived teardown"
-  pass "teardown: the task's trust grant is reclaimed and nothing else is touched"
+test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn() {
+  local id rec out rc
+  id="agy-idle-z13-$$"
+  rec=$(make_agy_spawn_case idle "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_IGNORE_TRUST=1 FM_FAKE_AGY_ANSWER=stuck run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dialog that never turns into a busy turn must fail the spawn"
+  assert_contains "$out" "did not start processing its brief after the folder-trust dialog was answered" \
+    "a stuck trust dialog failed without its concrete reason"
+  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 2 ] \
+    || fail "the gate must answer the dialog exactly once and never hammer Enter"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  pass "fm-spawn: an agy dialog that never turns busy fails the spawn and closes the endpoint"
 }
 
-test_agy_teardown_keeps_a_grant_the_operator_already_had() {
-  local id rec case_dir home proj wt fakebin settings wt_abs
-  id="agy-preowned-$$"
-  rec=$(make_agy_spawn_case preowned "$id")
-  IFS='|' read -r case_dir home proj wt fakebin <<EOF
-$rec
-EOF
-  settings="$case_dir/settings.json"
-  # Pre-trust the exact worktree, so the spawn's write is a no-op and the grant
-  # belongs to the operator rather than to firstmate.
-  "$JQ_BIN" -n --arg p "$wt" '{trustedWorkspaces: [$p]}' > "$settings"
-
-  run_agy_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" "$settings" >/dev/null 2>&1 \
-    || fail "the agy spawn should succeed before teardown"
-  wt_abs=$(sed -n 's/^worktree=//p' "$home/state/$id.meta" | head -1)
-  [ -n "$wt_abs" ] || fail "the spawn recorded no worktree"
-  assert_grep 'trust_added=0' "$home/state/$id.agy-session" \
-    "the spawn should record that it added no grant for an already-trusted worktree"
-
-  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_AGY_SETTINGS_OVERRIDE="$settings" \
-    PATH="$fakebin:$BASE_PATH" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
-    || fail "the agy teardown failed"
-
-  "$JQ_BIN" -e --arg p "$wt_abs" '(.trustedWorkspaces | index($p)) != null' "$settings" >/dev/null \
-    || fail "teardown revoked a workspace the operator had trusted themselves"
-  pass "teardown: a grant firstmate did not add is left alone"
+test_agy_missing_binary_refuses_before_pane_creation() {
+  local id rec out rc
+  id="agy-missing-z5-$$"
+  rec=$(make_agy_spawn_case missing "$id")
+  read_agy_spawn_record "$rec"
+  rm "$FAKEBIN_DIR/agy"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing agy executable should refuse the spawn"
+  assert_contains "$out" "agy executable not found on PATH" "missing agy diagnostic lacked its concrete reason"
+  [ -s "$CASE_DIR/launch.log" ] && fail "a missing agy executable created a launch command" || true
+  pass "fm-spawn: a missing agy executable refuses before pane creation"
 }
 
-test_agy_trust_write_preserves_order_and_duplicates
-test_agy_teardown_retires_only_the_grant_it_added
-test_agy_teardown_keeps_a_grant_the_operator_already_had
+test_agy_secondmate_is_refused() {
+  local id rec out rc
+  id="agy-secondmate-z6-$$"
+  rec=$(make_agy_spawn_case secondmate-refuse "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" --secondmate agy 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an agy secondmate spawn should be refused"
+  assert_contains "$out" "agy is a verified crewmate/scout adapter only" \
+    "agy secondmate refusal lacked its concrete reason"
+  pass "fm-spawn: agy cannot be launched as a secondmate"
+}
+
+test_agy_spawn_arms_no_busy_wiring() {
+  local id rec out rc statedir
+  id="agy-nowiring-z7-$$"
+  rec=$(make_agy_spawn_case nowiring "$id")
+  read_agy_spawn_record "$rec"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn should succeed"
+  statedir="$HOME_DIR/state"
+  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
+  for sidecar in "$statedir/$id.agy-"*; do
+    [ -e "$sidecar" ] || continue
+    fail "agy spawn left an adapter sidecar behind: $sidecar"
+  done
+  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+}
+
+test_agy_ancestry_detects_the_native_command_name
+test_agy_ancestry_rejects_unrelated_mentions
+test_agy_claims_no_inherited_launcher_marker
+test_agy_control_mechanics_are_the_verified_ones
+test_agy_busy_tail_needs_the_pinned_status_row
+test_agy_busy_signatures_are_harness_scoped
+test_agy_classify_reports_unknown_when_the_marker_scrolls_out
+test_agy_tmux_names_the_native_binary_an_agent
+test_herdr_done_with_live_registry_stays_live
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
+test_herdr_shell_first_with_live_registry_stays_live
+test_herdr_lone_unregistered_pane_is_agent_free
+test_herdr_malformed_and_failed_reads_stay_unknown
+test_agy_launch_carries_the_brief_with_model_effort_and_autonomy
+test_agy_effort_xhigh_is_recorded_but_omitted
+test_agy_unlisted_model_refuses_before_pane_creation
+test_agy_unreachable_listing_launches_unvalidated
+test_agy_hung_listing_is_cut_off_and_launches
+test_agy_zero_model_timeout_is_clamped_to_the_default_bound
+test_agy_trust_registers_the_logical_and_resolved_worktree_paths
+test_agy_trust_creates_a_missing_store
+test_agy_trust_refuses_out_of_scope_paths
+test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
+test_agy_dialog_despite_registration_is_answered_once
+test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
+test_agy_unregistered_path_without_a_dialog_fails_the_spawn
+test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
+test_agy_missing_binary_refuses_before_pane_creation
+test_agy_secondmate_is_refused
+test_agy_spawn_arms_no_busy_wiring

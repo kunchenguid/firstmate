@@ -18,24 +18,12 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board-render)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
-# A build starts a listener for the board it publishes, so every home this
-# suite creates is swept before the fixture directory is removed.
-RENDER_HOMES=()
-
-render_teardown() {
-  local home
-  for home in ${RENDER_HOMES[@]+"${RENDER_HOMES[@]}"}; do
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-      FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap render_teardown EXIT
-
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  RENDER_HOMES+=("$home")
+  # A build starts a listener for the board it publishes. Registered with
+  # tests/lib.sh, not with a shell array: make_home runs inside a command
+  # substitution, where an array append never reaches the caller.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
@@ -51,7 +39,11 @@ case "${1-}" in
     [ ! -s "$FM_HOME/lavish-open" ] \
       || printf '  %s,open,"http://127.0.0.1/session/render",0\n' "$(cat "$FM_HOME/lavish-open")"
     ;;
-  poll) while :; do sleep 1; done ;;
+  poll)
+    # Bounded, so a listener that escapes its test stops on its own.
+    while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
+    exit 75
+    ;;
   *)
     real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
     printf '%s\n' "$real" > "$FM_HOME/lavish-open"
@@ -64,12 +56,14 @@ SH
   printf '%s\n' "$home"
 }
 
-# Build the board from <charted-json> and return what the renderer produced.
-render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} data="$1/payload.json"
-  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" '{
+# Build the board from <underway-json> plus <charted-json> and return what the
+# renderer produced.
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+  jq -n --argjson underway "$underway" --argjson charted "$charted" \
+    --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:[], landed:[],
+    prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -77,6 +71,11 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
+}
+
+# Build the board from <charted-json> alone and return what the renderer produced.
+render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
+  render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
 charted_next_count() {  # <render-json>
@@ -166,6 +165,73 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
+  local home out
+  home=$(make_home underway-name)
+  out=$(render_board "$home" '[
+    {"id":"fm-board-name-r1","repo":"firstmate","name":"Show task names on the board",
+     "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
+  ]' '[]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 1
+      and (.underway[0]
+        | .title == "Show task names on the board"
+          and (.sub | test("no-mistakes: review round 2"))
+          and (.sub | test("ship")) and (.sub | test("firstmate"))
+          and [.badges[] | .text] == ["working"])
+  ' >/dev/null || fail "an underway row did not lead with the task name: $out"
+  pass "an underway row leads with the task name and still reports its run status"
+}
+
+test_an_underway_identifier_label_is_not_replaced_by_run_status() {
+  local home out
+  home=$(make_home underway-identifier)
+  out=$(render_board "$home" '[
+    {"id":"mate/child-1","repo":null,"name":"mate/child-1",
+     "state":"working","kind":"secondmate","doing":"fixing the failing check"}
+  ]' '[]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 1
+      and (.underway[0]
+        | .title == "mate/child-1"
+          and (.sub | startswith("fixing the failing check · "))
+          and (.title != "fixing the failing check"))
+  ' >/dev/null || fail "an identifier-labelled underway row rendered as status-only: $out"
+  pass "an underway identifier label is not replaced by run status"
+}
+
+test_charted_next_reads_newest_filed_first() {
+  local home out
+  home=$(make_home charted-order)
+  out=$(render_board "$home" '[]' '[
+    {"id":"oldest","repo":"sample","title":"Filed in June","reason":"queued","dispatchable":true,"filed":"2026-06-01"},
+    {"id":"newest","repo":"sample","title":"Filed in August","reason":"queued","dispatchable":true,"filed":"2026-08-14T09:30:00Z"},
+    {"id":"middle","repo":"sample","title":"Filed in July","reason":"queued","dispatchable":true,"filed":"2026-07-22"}
+  ]')
+  printf '%s' "$out" | jq -e '
+    [.charted[] | .title] == ["Filed in August", "Filed in July", "Filed in June"]
+  ' >/dev/null || fail "charted next was not ordered newest filed first: $out"
+  pass "charted next renders the most recently filed work first"
+}
+
+test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() {
+  local home out
+  home=$(make_home charted-undated)
+  out=$(render_board "$home" '[]' '[
+    {"id":"undated-first","repo":"sample","title":"Undated one","reason":"queued","dispatchable":true},
+    {"id":"dated","repo":"sample","title":"Dated","reason":"queued","dispatchable":true,"filed":"2026-07-22"},
+    {"id":"undated-second","repo":"sample","title":"Undated two","reason":"queued","dispatchable":true,"filed":null}
+  ]')
+  printf '%s' "$out" | jq -e '
+    [.charted[] | .title] == ["Dated", "Undated one", "Undated two"]
+  ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
+  pass "charted rows with no filed date follow the dated rows in payload order"
+}
+
+test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
+test_an_underway_identifier_label_is_not_replaced_by_run_status
+test_charted_next_reads_newest_filed_first
+test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

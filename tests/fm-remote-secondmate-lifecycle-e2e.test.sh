@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -464,7 +466,10 @@ projects_snapshot() { # <dir>
 }
 mkdir -p "$TMP_ROOT/seed-parent/projects"
 fm_git_init_commit "$TMP_ROOT/seed-parent/projects/resident"
-git init -q --bare "$TMP_ROOT/beta.git"
+# Pin the bare origin's initial branch to the one fm_git_init_commit creates.
+# Left to init.defaultBranch, its HEAD names a branch the push never creates on
+# a host that still defaults to master, and cloning it checks out nothing.
+git init -q --bare -b main "$TMP_ROOT/beta.git"
 fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
@@ -1101,6 +1106,22 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+
+# --- a stale herdr client shadowing the one the server accepts --------------
+# The remote host's job PATH can resolve an older self-updated herdr ahead of
+# the one its running server accepts; the server then refuses every command
+# from it with protocol_mismatch. The host-local state read must still reach
+# the live endpoint through the accepted client.
+make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
+export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
+SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
+[ "$SHADOWED_STATE" = alive ] \
+  || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
+assert_contains "$(cat "$TMP_ROOT/client-pair/stale.log")" 'pane get' "the stale client was not the one the job PATH resolved first"
+unset FM_HERDR_PAIR_DIR
+pass "the host-local state read steps around a stale shadowing herdr client"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-liveness-legacy.meta"

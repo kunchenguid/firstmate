@@ -59,7 +59,7 @@ drive_pi_ext() {
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+mod.default({ on: (name, fn) => { handlers[name] = fn; }, events: { on: (name, fn) => { handlers[name] = fn; } } });
 const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
 switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
@@ -70,9 +70,10 @@ switch (process.env.MODE) {
     await handlers["agent_start"]({}, ctx);
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "progress": await handlers["codex-native:progress"]({ type: "commandExecution", phase: "completed" }); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
-if (process.env.MODE === "turn-end") {
+if (["turn-end", "progress"].includes(process.env.MODE)) {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
@@ -92,6 +93,11 @@ test_pi_extension_semantic_lifecycle() {
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
   rm -f "$state/$id.turn-ended"
+  out=$(drive_pi_ext "$ext" progress) || fail "native progress drive failed: $out"
+  [ -f "$state/$id.progress" ] || fail "native progress did not write its separate marker"
+  [ ! -e "$state/$id.turn-ended" ] || fail "native progress fabricated a completed turn"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "native progress changed semantic state: $out"
   out=$(drive_pi_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
   [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
   out=$(classify pi "$id" "$state")
@@ -144,6 +150,8 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(drive_pi_ext "$ext" settle-idle) || fail "stale settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
+  out=$(drive_pi_ext "$ext" progress) || fail "stale progress drive failed: $out"
+  [ ! -e "$state/$id.progress" ] || fail "stale native progress refreshed the new incarnation"
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 

@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Real Pi/Herdr end-to-end regression for the 2026-07-14 two-owner incident.
+# Real Pi/Herdr end-to-end regression for the away posture on Pi.
 #
-# Opt-in because it launches a real interactive Pi primary, a real away daemon,
-# and a real isolated Herdr lab session. Real model turns, real side effects,
-# and heavyweight lab setup put it outside the token-free default-on class, so
-# it does not run merely because its tools are installed. Every explicit and
-# production-adapter Herdr call is routed through fm-herdr-lab.sh. The scenario
-# proves:
-#   - a live blocked status is classified and durably queued while away;
-#   - a pending Pi composer refuses injection and receives no forced Enter;
-#   - the existing wedge alarm remains observable and deduped;
-#   - clearing the draft makes the genuinely idle Pi composer injectable;
-#   - verified submit preserves the terminal-safe marker and clears delivery state;
-#   - an unmarked return request opens the catch-up gate before Bearings;
+# Opt-in because it launches a real interactive Pi primary and a real isolated
+# Herdr lab session. Real side effects and heavyweight lab setup put it outside
+# the token-free default-on class, so it does not run merely because its tools
+# are installed. Every explicit and production-adapter Herdr call is routed
+# through fm-herdr-lab.sh. The scenario proves, against a real Pi primary:
+#   - the away daemon is never launched on Pi: `start` refuses and `confirm`
+#     records the posture with no daemon terminal, pid, or flag;
+#   - a real Pi draft is never touched by away mode (nothing injects on Pi);
+#   - an unmarked return request is recognized as the return, opens the
+#     catch-up gate on the live blocker, renders the brief, and still lets
+#     Bearings report that catch-up posture as content;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
+# The 2026-07-14 two-owner incident's daemon-injection assertions retired with
+# the daemon on Pi; the daemon transport keeps its coverage in
+# tests/fm-afk-inject-herdr-e2e.test.sh for the harnesses that still run it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,20 +37,18 @@ PROJECT="$TMP_ROOT/project"
 PI_DIR="$TMP_ROOT/pi-agent"
 FAKEBIN="$TMP_ROOT/fakebin"
 CAPTURE="$TMP_ROOT/pi-prompts.jsonl"
-NOTIFY_LOG="$TMP_ROOT/wedge-notify.log"
 ORIGINAL_PATH=$PATH
+unset CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI CLAUDECODE
 PRIMARY_PANE=
 CHILD_PANE=
 PRIMARY_TARGET=
-DAEMON_STARTED=0
 
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [ "$DAEMON_STARTED" -eq 1 ]; then
+  if [ -f "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
     PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
-      "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || true
+      PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || true
   fi
   if ! "$LAB_HELPER" teardown "$SESSION"; then
     rc=1
@@ -62,11 +62,12 @@ trap cleanup EXIT
 mkdir -p "$HOME_DIR"/{state,data,config,projects} "$PROJECT" "$PI_DIR" "$FAKEBIN"
 printf '# Synthetic isolated Firstmate primary\n' > "$PROJECT/AGENTS.md"
 
-# A task-local extension grants session-only trust, captures exact prompt bytes,
-# and aborts before provider work. No production supervision extension is loaded
-# in this synthetic primary, so nothing except the test can mutate fleet state.
-# Herdr still observes Pi's real idle->working transition, so production submit
-# verification is exercised without making a model request.
+# A task-local extension grants session-only trust, captures exact submitted
+# input bytes through Pi's `input` hook and marks them handled, so no provider,
+# model, or credential is ever involved (the lab agent dir has none), and it
+# aborts as a backstop should a turn ever start. No production supervision
+# extension is loaded in this synthetic primary, so nothing except the test can
+# mutate fleet state.
 CAPTURE_EXT="$TMP_ROOT/capture-extension.ts"
 cat > "$CAPTURE_EXT" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -74,6 +75,10 @@ import { appendFileSync } from "node:fs";
 const capturePath = process.env.FM_PI_CAPTURE_PATH!;
 export default function (pi: ExtensionAPI) {
   pi.on("project_trust", () => ({ trusted: "yes", remember: false }));
+  pi.on("input", (event) => {
+    appendFileSync(capturePath, `${JSON.stringify({ prompt: event.text, hex: Buffer.from(event.text, "utf8").toString("hex") })}\n`);
+    return { action: "handled" };
+  });
   pi.on("before_agent_start", (event, ctx) => {
     appendFileSync(capturePath, `${JSON.stringify({ prompt: event.prompt, hex: Buffer.from(event.prompt, "utf8").toString("hex") })}\n`);
     ctx.abort();
@@ -101,29 +106,6 @@ PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
 EOF
 chmod +x "$FAKEBIN/herdr"
 
-cat > "$TMP_ROOT/wedge-recorder" <<EOF
-#!/usr/bin/env bash
-printf '%s\t%s\n' "\$1" "\$2" >> '$NOTIFY_LOG'
-EOF
-chmod +x "$TMP_ROOT/wedge-recorder"
-
-cat > "$TMP_ROOT/daemon-entry" <<EOF
-#!/usr/bin/env bash
-export PATH='$FAKEBIN:$ORIGINAL_PATH'
-export HERDR_SESSION='$SESSION'
-export FM_STATE_OVERRIDE='$STATE'
-export FM_ESCALATE_BATCH_SECS=0
-export FM_HOUSEKEEPING_TICK=1
-export FM_POLL=1
-export FM_SIGNAL_GRACE=1
-export FM_HEARTBEAT=999999
-export FM_CHECK_INTERVAL=999999
-export FM_MAX_DEFER_SECS=3
-export FM_STALE_ESCALATE_SECS=999999
-export FM_WEDGE_ALARM_EXEC='$TMP_ROOT/wedge-recorder'
-exec '$ROOT/bin/fm-afk-start.sh'
-EOF
-chmod +x "$TMP_ROOT/daemon-entry"
 
 PRIMARY_OUT=$("$LAB_HELPER" run "$SESSION" workspace create --cwd "$PROJECT" --label synthetic-primary --no-focus)
 WORKSPACE=$(printf '%s' "$PRIMARY_OUT" | jq -r '.result.workspace.workspace_id')
@@ -178,6 +160,7 @@ mode=no-mistakes
 worktree=$PROJECT
 project=synthetic-project
 EOF
+cp "$ROOT/.tasks.toml" "$HOME_DIR/.tasks.toml"
 cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] repair-task - Repair the synthetic dependency (repo: synthetic-project, since 2026-07-14)
@@ -187,35 +170,48 @@ cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 ## Done
 EOF
 
+# The away daemon is never launched on Pi. The launcher detects the primary
+# harness from its own ancestry in production; this test process is not under
+# Pi, so it supplies Pi's verified PI_CODING_AGENT environment marker.
+set +e
+START_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  PI_CODING_AGENT=true FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
+  "$ROOT/bin/fm-afk-launch.sh" start 2>&1)
+START_RC=$?
+set -e
+[ "$START_RC" -ne 0 ] || fail "the away daemon launched on a Pi primary"
+assert_contains "$START_OUT" 'the away daemon is no longer launched on pi' "the Pi refusal did not name its reason"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" FM_AFK_LAUNCH_ENTRY="$TMP_ROOT/daemon-entry" \
-  "$ROOT/bin/fm-afk-launch.sh" start >/dev/null
-DAEMON_STARTED=1
-for _ in $(seq 1 100); do [ -s "$STATE/.supervise-daemon.pid" ] && break; sleep 0.1; done
-[ -s "$STATE/.supervise-daemon.pid" ] || fail "away daemon did not start"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "the away posture read-back failed on Pi"
+CONFIRM_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm 2>&1) || fail "the away posture could not be recorded on Pi: $CONFIRM_OUT"
+assert_contains "$CONFIRM_OUT" 'hold-for-return only' "the entry announcement did not say hold-for-return"
+[ -f "$STATE/.afk-contract" ] || fail "confirm did not write the away-posture record"
+[ ! -e "$STATE/.afk" ] || fail "confirm wrote the daemon flag on Pi"
+[ ! -e "$STATE/.afk-daemon-terminal" ] || fail "confirm recorded a daemon terminal on Pi"
+sleep 2
+[ ! -s "$STATE/.supervise-daemon.pid" ] || fail "an away daemon started on Pi"
+pass "real Pi primary: the away posture is recorded with no daemon launched"
 
-# Pending input is never an injection target. Leave a real draft in Pi before
-# the live child emits blocked:, then wait through max-defer.
+# A real draft in Pi and a live blocker from the child: with no daemon on Pi,
+# nothing is typed into the captain's pane and the draft survives untouched.
 "$LAB_HELPER" run "$SESSION" pane send-text "$PRIMARY_PANE" 'privacy safe human draft' >/dev/null
 sleep 0.5
 composer=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" fm_backend_composer_state herdr "$PRIMARY_TARGET")
 [ "$composer" = pending ] || fail "real Pi draft did not classify pending (got $composer)"
 CHILD_CMD=$(printf "printf 'blocked [key=synthetic-dependency]: firstmate can refresh the synthetic token\\n' >> %q; exec sleep 120" "$STATE/repair-task.status")
 "$LAB_HELPER" run "$SESSION" pane run "$CHILD_PANE" "$CHILD_CMD" >/dev/null
-for _ in $(seq 1 160); do [ -s "$STATE/.subsuper-inject-wedged" ] && break; sleep 0.1; done
-[ -s "$STATE/.subsuper-inject-wedged" ] || fail "persistently pending real Pi composer did not raise the defense-in-depth alarm"
-[ -s "$STATE/.subsuper-escalations" ] || fail "pending real Pi composer lost the buffered blocker"
-[ ! -s "$CAPTURE" ] || fail "daemon submitted into Pi while the real human draft was pending"
+for _ in $(seq 1 40); do grep -q 'synthetic-dependency' "$STATE/repair-task.status" 2>/dev/null && break; sleep 0.1; done
+assert_blocker_open 'after the child declared it'
+sleep 3
+[ ! -s "$CAPTURE" ] || fail "something submitted into Pi while the away posture stood with no daemon"
 plain=$("$LAB_HELPER" run "$SESSION" pane read "$PRIMARY_PANE" --source recent --lines 200)
-printf '%s' "$plain" | grep -F 'privacy safe human draft' >/dev/null || fail "pending Pi draft was modified or forcibly submitted"
-for _ in $(seq 1 50); do [ -s "$NOTIFY_LOG" ] && break; sleep 0.1; done
-[ -s "$NOTIFY_LOG" ] || fail "wedge alarm marker appeared but its active notifier did not finish"
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "wedge alarm was not observed exactly once before recovery"
-assert_blocker_open 'while the Pi composer was pending'
-pass "real Pi/Herdr pending composer refuses injection without forced submit and raises one observable fallback"
+printf '%s' "$plain" | grep -F 'privacy safe human draft' >/dev/null || fail "the pending Pi draft was modified or submitted"
+[ ! -e "$STATE/.subsuper-inject-wedged" ] || fail "a daemon wedge marker appeared with no daemon on Pi"
+pass "real Pi/Herdr: nothing injects into the captain pane under the away posture"
 
-# Clear, never submit, the synthetic human draft. The same exact target now has
-# native idle state plus a complete Pi separator composer and must accept quickly.
+# Clear, never submit, the synthetic human draft; then the captain returns with
+# an ordinary unmarked Bearings request, captured byte-exact.
 "$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" ctrl+c >/dev/null
 wait_for_idle || fail "real Pi did not return idle after clearing the draft"
 for _ in $(seq 1 80); do
@@ -223,33 +219,25 @@ for _ in $(seq 1 80); do
   [ "$composer" = empty ] && break
   sleep 0.1
 done
-[ "$composer" = empty ] || fail "genuinely idle Pi separator composer did not classify empty (got $composer)"
-wait_for_prompt 'any(.[]; .prompt | startswith("\u2063Supervisor escalate"))' \
-  || fail "real Pi did not receive the buffered escalation after becoming safely idle"
-INJECT_HEX=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .hex' "$CAPTURE" | tail -1)
-case "$INJECT_HEX" in e281a3*) ;; *) fail "real Pi escalation lost the terminal-safe marker: $INJECT_HEX" ;; esac
-for _ in $(seq 1 80); do [ ! -s "$STATE/.subsuper-escalations" ] && break; sleep 0.1; done
-[ ! -s "$STATE/.subsuper-escalations" ] || fail "confirmed real Pi delivery did not clear the escalation buffer"
-[ ! -e "$STATE/.subsuper-inject-wedged" ] || fail "confirmed real Pi delivery did not clear the old wedge marker"
-sleep 4
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "successful delivery emitted a duplicate wedge alert"
-INJECT_PROMPT=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .prompt' "$CAPTURE" | tail -1)
-message_is_injection "$INJECT_PROMPT" || fail "terminal-delivered Pi escalation was not recognized as an internal marker"
-assert_blocker_open 'after successful marked injection'
-pass "real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert"
-
-# The captain returns with an ordinary unmarked Bearings request. The request is
-# captured byte-exact, then the public return owner must gate it on the blocker.
-wait_for_idle || fail "real Pi did not settle after the injected catch-up"
-for _ in $(seq 1 80); do
-  composer=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" fm_backend_composer_state herdr "$PRIMARY_TARGET")
-  [ "$composer" = empty ] && break
-  sleep 0.1
-done
 [ "$composer" = empty ] || fail "real Pi composer was not ready for the unmarked return request"
+# Type once, then submit with Enter retried until Pi starts the turn, the same
+# Enter-only retry the production submit primitive uses (a lone Enter on a
+# freshly typed Pi composer can be swallowed while the composer settles).
 "$LAB_HELPER" run "$SESSION" pane send-text "$PRIMARY_PANE" 'Synthetic Bearings request' >/dev/null
-"$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" enter >/dev/null
-wait_for_prompt 'any(.[]; .prompt == "Synthetic Bearings request")' || fail "real Pi did not receive the unmarked return request"
+sleep 0.5
+RETURN_SEEN=0
+for _ in $(seq 1 6); do
+  "$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" enter >/dev/null
+  for _ in $(seq 1 40); do
+    if [ -s "$CAPTURE" ] && jq -s -e 'any(.[]; .prompt == "Synthetic Bearings request")' "$CAPTURE" >/dev/null 2>&1; then
+      RETURN_SEEN=1
+      break
+    fi
+    sleep 0.25
+  done
+  [ "$RETURN_SEEN" -eq 1 ] && break
+done
+[ "$RETURN_SEEN" -eq 1 ] || fail "real Pi did not receive the unmarked return request; agent=$("$LAB_HELPER" run "$SESSION" agent get "$PRIMARY_PANE" 2>/dev/null | jq -c '.result.agent // empty' 2>/dev/null); pane: $("$LAB_HELPER" run "$SESSION" pane read "$PRIMARY_PANE" --source recent --lines 40 2>/dev/null)"
 RETURN_PROMPT=$(jq -r 'select(.prompt == "Synthetic Bearings request") | .prompt' "$CAPTURE" | tail -1)
 should_exit_afk "$STATE" "$RETURN_PROMPT" || fail "unmarked Pi return request did not trigger the away exit contract"
 assert_blocker_open 'before return catch-up'
@@ -257,38 +245,43 @@ assert_blocker_open 'before return catch-up'
 
 set +e
 RETURN_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" "$ROOT/bin/fm-afk-return.sh" begin 2>&1)
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-return.sh" begin 2>&1)
 RETURN_RC=$?
 set -e
-DAEMON_STARTED=0
 [ "$RETURN_RC" -eq 3 ] || fail "return catch-up did not gate the still-live blocker (rc=$RETURN_RC): $RETURN_OUT"
 assert_contains "$RETURN_OUT" 'firstmate-actionable blocker: repair-task [key=synthetic-dependency]' "return gate did not assign remediation"
-set +e
+assert_contains "$RETURN_OUT" '=== Return brief (away ' "the return did not render the brief"
+assert_contains "$RETURN_OUT" 'Supervisor health:' "the brief did not lead with supervisor health"
+[ ! -f "$STATE/.afk-contract" ] || fail "the return did not archive the away-posture record"
 BEARINGS_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
-BEARINGS_RC=$?
-set -e
-[ "$BEARINGS_RC" -eq 3 ] || fail "Bearings bypassed the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
-pass "real unmarked Pi return opens catch-up and blocks Bearings before the unresolved blocker can be deferred"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+  || fail "Bearings refused behind the return gate instead of reporting it: $BEARINGS_OUT"
+printf '%s' "$BEARINGS_OUT" | jq -e '
+  (.in_flight | any(.id == "repair-task"))
+  and (.gates | any(.id == "(return-catchup)" and .reason == "away-return catch-up"))
+  and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
+  || fail "Bearings did not surface the catch-up posture as content: $BEARINGS_OUT"
+pass "real unmarked Pi return renders the brief, opens catch-up, and reports that posture through Bearings while the blocker stays Firstmate's to remediate"
 
 printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$STATE/repair-task.status"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
   "$ROOT/bin/fm-afk-return.sh" check >/dev/null || fail "remediated blocker did not clear return catch-up"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json >/dev/null || fail "Bearings remained gated after blocker remediation"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json \
+  | jq -e '[.gates[].id] | index("(return-catchup)") | not' >/dev/null \
+  || fail "Bearings kept the catch-up posture row after the gate cleared"
 
-# A clean re-entry creates no stale delivery or alert, and an immediate return is
+# A clean re-entry records a fresh posture, and an immediate return is
 # idempotently clear because the keyed blocker is resolved.
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" FM_AFK_LAUNCH_ENTRY="$TMP_ROOT/daemon-entry" \
-  "$ROOT/bin/fm-afk-launch.sh" start >/dev/null
-DAEMON_STARTED=1
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "clean away re-entry read-back failed"
+PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm >/dev/null || fail "clean away re-entry failed"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
   || fail "clean away re-entry/return was not idempotent"
-DAEMON_STARTED=0
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "clean re-entry duplicated the historical wedge alert"
+[ "$(find "$STATE/afk-contracts" -name '*.afk-contract' | wc -l | tr -d ' ')" -eq 2 ] || fail "each away window did not leave exactly one archived record"
 pass "resolved return catch-up allows Bearings and a clean idempotent away re-entry"
 
-printf 'evidence: herdr=%s pi=%s target=%s inject-hex-prefix=%s notifier-count=1\n' \
-  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET" "${INJECT_HEX:0:6}"
+printf 'evidence: herdr=%s pi=%s target=%s archived-records=2\n' \
+  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET"

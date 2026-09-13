@@ -1,44 +1,27 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the Antigravity CLI (agy) signals firstmate depends on.
-#
-# tests/fm-agy-harness.test.sh pins the LOGIC portably, with real processes and
-# real SQLite databases but no agy. That regression cannot notice the half of
-# this adapter that only the vendor controls, because a fixture can only confirm
-# the assumption already written into it. This guard exercises the real installed
-# binary and fails naming the harness and its version, so a release that renames
-# the process, stops logging `Created conversation`, changes the step-status
-# vocabulary, or starts resolving trust differently is caught here rather than by
-# a fleet of silently unsupervisable workers.
-#
-# Run it after every agy upgrade, and before trusting refreshed per-harness
-# evidence in docs/verification/runtime-backends.md:
-#   FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh
+# Live drift guard for the Antigravity CLI adapter's vendor-controlled surface:
+# process name, trust dialog, rendered busy/interrupt/exit behavior.
+# Opt-in because it submits real prompts (no echo provider exists for agy).
 set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGY_BIN=$(command -v agy 2>/dev/null || true)
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
-SQLITE_BIN=$(command -v sqlite3 2>/dev/null || true)
 LAB=
 SOCKET="fm-agy-signals-$$"
 SESSION=agy-signals
 TARGET="$SESSION:agy"
-SETTINGS=
-SETTINGS_BACKUP=
 
 cleanup() {
   [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  # Restore the operator's own settings file byte for byte. This guard writes a
-  # real trust grant into it, so leaving one behind would silently widen what a
-  # later agy session is allowed to read.
-  if [ -n "$SETTINGS" ] && [ -n "$SETTINGS_BACKUP" ] && [ -f "$SETTINGS_BACKUP" ]; then
-    cp "$SETTINGS_BACKUP" "$SETTINGS" 2>/dev/null || true
-  fi
   [ -z "$LAB" ] || rm -rf -- "$LAB"
 }
 
 fail() {
-  printf 'not ok - %s (agy %s)\n' "$1" "${AGY_VERSION:-unknown}" >&2
+  printf 'not ok - %s\n' "$1" >&2
   cleanup
   exit 1
 }
@@ -47,199 +30,164 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-if [ "${FM_AGY_SIGNALS_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_AGY_SIGNALS_LIVE=1 to run the real agy signal drift guard"
-  exit 0
-fi
-
-# An absent harness is reported explicitly rather than passed over: a guard that
-# checked nothing must never look like a guard that checked something.
-[ -n "$AGY_BIN" ] && [ -x "$AGY_BIN" ] \
-  || fail "FM_AGY_SIGNALS_LIVE=1 but no real agy executable is installed on PATH"
-[ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ] \
-  || fail "FM_AGY_SIGNALS_LIVE=1 but tmux is not installed"
-[ -n "$SQLITE_BIN" ] && [ -x "$SQLITE_BIN" ] \
-  || fail "FM_AGY_SIGNALS_LIVE=1 but sqlite3 is not installed"
-command -v jq >/dev/null 2>&1 || fail "jq is required to write agy's trust grant"
-
-AGY_VERSION=$("$AGY_BIN" --version 2>/dev/null | head -1)
-[ -n "$AGY_VERSION" ] || fail "the installed agy reported no version"
-printf '# agy %s at %s\n' "$AGY_VERSION" "$AGY_BIN"
-
-# shellcheck source=bin/fm-busy-lib.sh
-. "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-composer-lib.sh
-. "$ROOT/bin/fm-composer-lib.sh"
+fm_live_gate opt-in FM_AGY_SIGNALS_LIVE agy tmux
+[ -n "$AGY_BIN" ] || fail "agy is not installed"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-signals.XXXXXX") || fail "could not create the isolated agy lab"
 trap cleanup EXIT
-mkdir -p "$LAB/workspace" "$LAB/state"
-WORKSPACE="$LAB/workspace"
-CONVERSATIONS="${HOME:-}/.gemini/antigravity-cli/conversations"
-SETTINGS="${HOME:-}/.gemini/antigravity-cli/settings.json"
-SETTINGS_BACKUP="$LAB/settings.json.bak"
-[ -f "$SETTINGS" ] || fail "no agy settings file at $SETTINGS; run agy once before this guard"
-cp "$SETTINGS" "$SETTINGS_BACKUP" || fail "could not back up the agy settings file"
+mkdir -p "$LAB/workspace"
+git -C "$LAB/workspace" init -q || fail "could not initialize the isolated agy workspace"
+git -C "$LAB/workspace" config user.email "guard@local" || fail "could not configure the isolated agy workspace"
+git -C "$LAB/workspace" config user.name "guard" || fail "could not configure the isolated agy workspace"
+git -C "$LAB/workspace" commit -q --allow-empty -m init || fail "could not seed the isolated agy workspace"
+WORKSPACE=$(cd "$LAB/workspace" && pwd -P) || fail "could not resolve the isolated agy workspace"
 
-# --- trust: the grant firstmate writes must actually suppress the dialog ------
-jq --arg p "$WORKSPACE" '.trustedWorkspaces = ((.trustedWorkspaces // []) + [$p] | unique)' \
-  "$SETTINGS" > "$LAB/settings.new" || fail "could not compute an agy trust grant"
-cp "$LAB/settings.new" "$SETTINGS" || fail "could not install the agy trust grant"
+# The worker runs under a throwaway HOME holding a copy of ~/.gemini (the
+# method recorded in docs/verification/agy.md), so its trust answer and every
+# other agy write land in the lab store, never the operator's real one.
+AGY_HOME="$LAB/home"
+mkdir -p "$AGY_HOME" || fail "could not create the throwaway agy HOME"
+[ -d "$HOME/.gemini" ] || fail "no ~/.gemini to stage for the throwaway agy HOME"
+cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway agy credential copy"
 
-AGY_LOG="$LAB/state/live.agy-log"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
+
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" \
   || fail "could not start the isolated tmux server"
-"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n agy -c "$WORKSPACE" -- \
-  "$AGY_BIN" --dangerously-skip-permissions --log-file "$AGY_LOG" \
-  || fail "could not launch agy"
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n agy -c "$WORKSPACE" \
+  || fail "could not open the isolated agy window"
 
-PANE=
+capture() {
+  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -100 2>/dev/null || true
+}
+
+# The launch prompt asks for a computed answer (12345+67890=80235) so the
+# awaited token never appears in the echoed launch line itself, where a plain
+# reply token would false-positive on the shell echo (including across tmux
+# wrapped rows).
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
+  "HOME=\"$AGY_HOME\" $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
+  || fail "could not type the agy launch line"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+  || fail "could not submit the agy launch line"
+
+# A fresh workspace stops on the folder-trust dialog. Answer the preselected
+# safe choice once it renders. The answer appends the workspace to
+# trustedWorkspaces in the throwaway HOME's copy of the agy settings store.
+screen=
 for _ in $(seq 1 150); do
-  PANE=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" 2>/dev/null || true)
-  case "$PANE" in *'? for shortcuts'*) break ;; esac
-  sleep 0.2
+  screen=$(capture)
+  case "$screen" in
+    *"Do you trust the contents of this project?"*|*80235*|*80,235*) break ;;
+  esac
+  sleep 0.5
 done
-case "$PANE" in
-  *'trust'*|*'Trust'*)
-    fail "a pre-written trustedWorkspaces grant no longer suppresses agy's workspace-trust dialog"
+case "$screen" in
+  *"Do you trust the contents of this project?"*)
+    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+      || fail "could not answer the agy trust dialog"
     ;;
 esac
-case "$PANE" in
-  *'? for shortcuts'*) : ;;
-  *) fail "agy never reached its idle composer; the launch flags or startup shape changed" ;;
+
+# The initial turn executes and its reply lands; the busy footer must render
+# while it is in flight so the portable matcher has live text to prove.
+# Trivial turns were observed taking one to two minutes (cold start plus model
+# latency), so these windows are generous; the guard is opt-in.
+busy_live=
+for _ in $(seq 1 240); do
+  screen=$(capture)
+  if printf '%s' "$screen" | fm_busy_agy_tail_busy; then busy_live=1; break; fi
+  case "$screen" in *80235*|*80,235*) break ;; esac
+  sleep 1
+done
+[ -n "$busy_live" ] || fail "fm_busy_agy_tail_busy never matched the real agy turn in flight"
+pass "the real agy busy footer matches fm_busy_agy_tail_busy in flight"
+
+for _ in $(seq 1 480); do
+  screen=$(capture)
+  case "$screen" in *80235*|*80,235*) break ;; esac
+  sleep 0.5
+done
+reply=$(capture)
+case "$reply" in
+  *80235*|*80,235*) pass "the real agy worker processed its launch prompt" ;;
+  *) fail "the real agy worker never answered its launch prompt" ;;
 esac
-pass "agy's trust grant still suppresses the workspace dialog for an exact path"
-
-# --- detection: the live process is still named agy --------------------------
-TTY=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_tty}' 2>/dev/null)
-[ -n "$TTY" ] || fail "could not read the agy pane tty"
-FOUND=0
-while read -r _ pgid tpgid comm; do
-  [ -n "$comm" ] || continue
-  [ "$pgid" = "$tpgid" ] || continue
-  case "${comm##*/}" in agy) FOUND=1 ;; esac
-done <<EOF
-$(LC_ALL=C ps -t "${TTY#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-[ "$FOUND" = 1 ] \
-  || fail "the live agy foreground process is no longer named 'agy'; bin/fm-harness.sh and bin/backends/tmux.sh anchor on that exact name"
-pass "agy's live process name is still the exact string agy"
-
-# --- composer: the real rendered shape still classifies ----------------------
-STYLED=$("$REAL_TMUX" -L "$SOCKET" capture-pane -e -p -t "$TARGET" -S 0 -E - 2>/dev/null)
-CY=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{cursor_y}' 2>/dev/null)
-CAPS=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
-VERDICT=$(fm_composer_classify_screen "$CAPS" "$STYLED" "$CY" "$(printf 'agy\tidle')")
-[ "$VERDICT" = empty ] \
-  || fail "a real idle agy composer classified '$VERDICT' rather than empty; its rendered shape changed"
-pass "agy's real idle composer still classifies empty"
-
-# --- busy: the real log binding and step-status fold -------------------------
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" \
-  'Run the shell command: sleep 25 && echo slept. Then say done.' Enter \
-  || fail "could not submit a turn to the live agy pane"
-
-CONV=
-for _ in $(seq 1 150); do
-  CONV=$(LC_ALL=C sed -n \
-    's/.*Created conversation \([0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}\).*/\1/p' \
-    "$AGY_LOG" 2>/dev/null | tail -1)
-  [ -z "$CONV" ] || break
-  sleep 0.2
+# The reply can render while the turn is still finishing: the busy footer stays
+# pinned until the idle composer replaces it, so wait for the settled idle row
+# before asserting what the settled pane must not match. The wait itself
+# refreshes $screen: the reply-wait loop above can legitimately break on a
+# frame that still carries the pinned busy footer, and asserting on that stale
+# frame would fail every run whose reply lands mid-turn.
+idle_settled=
+for _ in $(seq 1 120); do
+  screen=$(capture)
+  case "$screen" in *"? for shortcuts"*) idle_settled=1; break ;; esac
+  sleep 0.5
 done
-if [ -z "$CONV" ]; then
-  # Distinguish "agy changed" from "this account could not start a turn". agy
-  # answers an ineligible or throttled account in the pane without ever opening
-  # a conversation, which would otherwise be reported here as a log-format
-  # change and send a maintainer looking in the wrong place.
-  PANE=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" 2>/dev/null || true)
-  case "$PANE" in
-    *'verifying your account'*|*'try again shortly'*|*'quota'*|*'rate limit'*|*'Rate limit'*)
-      fail "agy accepted the turn but its account could not start one (pane says: $(printf '%s' "$PANE" | grep -iE 'verifying your account|try again shortly|quota|rate limit' | head -1 | sed 's/^[[:space:]]*//')). This is an account/quota condition, not adapter drift - retry when the account is available"
-      ;;
-  esac
-  fail "the real agy log no longer carries a 'Created conversation <id>' line; the conversation binding in bin/fm-busy-lib.sh depends on it"
+[ -n "$idle_settled" ] || fail "the agy composer never settled to its idle footer after the reply"
+# Scope to the visible tail the same way the owners do: mid-turn busy rows stay
+# in scrollback after the turn settles and must not count as still busy.
+printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match agy \
+  && fail "harness=agy matched its own idle footer as busy" || true
+printf '%s' "$screen" | fm_busy_agy_tail_busy \
+  && fail "the settled agy footer still matches the busy signature" || true
+
+# The dialog can outlive the turn it gated, so a still-rendered dialog must be
+# dismissed before steering anything: typed text would land in it instead of
+# the composer.
+if case "$(capture)" in *"Do you trust the contents of this project?"*) true ;; *) false ;; esac; then
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+    || fail "could not dismiss the residual agy trust dialog"
+  idle=
+  for _ in $(seq 1 120); do
+    case "$(capture)" in *"? for shortcuts"*) idle=1; break ;; esac
+    sleep 0.5
+  done
+  [ -n "$idle" ] || fail "the agy composer never went idle after the trust answer"
 fi
-pass "agy still names its conversation in the per-task log file"
 
-DB="$CONVERSATIONS/$CONV.db"
-for _ in $(seq 1 150); do
-  [ -f "$DB" ] && break
-  sleep 0.2
+# Interrupt a genuinely long turn: poll until busy is observed, then send
+# exactly one Escape and wait only for the Interrupted row it prints; a busy
+# footer that merely disappears is not cancellation and no further Escape is
+# sent, so a turn that survives one Escape fails this guard.
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
+  "Write a 1500-word essay on the history of glass" \
+  || fail "could not type the long agy prompt"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+  || fail "could not submit the long agy prompt"
+for _ in $(seq 1 100); do
+  screen=$(capture)
+  printf '%s' "$screen" | fm_busy_agy_tail_busy && break
+  sleep 0.5
 done
-[ -f "$DB" ] || fail "agy created no conversation database at $DB"
-
-# Bind the task exactly as fm-spawn does, then fold through the real classifier.
-{
-  printf 'conversations_root=%s\n' "$CONVERSATIONS"
-  printf 'log_file=%s\n' "$AGY_LOG"
-} > "$LAB/state/live.agy-session"
-
-RUN_STATE=
-for _ in $(seq 1 200); do
-  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
-  [ "$RUN_STATE" = busy ] && break
-  sleep 0.2
-done
-[ "$RUN_STATE" = busy ] \
-  || fail "fm_busy_agy_run_state never observed the real turn in flight; agy's step-status vocabulary changed"
-[ "$(fm_busy_classify tmux "$TARGET" agy live "$LAB/state")" = "busy agy-steps" ] \
-  || fail "the classifier did not report busy agy-steps for a real in-flight agy turn"
-pass "agy's real conversation database classifies busy in flight"
-
-for _ in $(seq 1 400); do
-  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
-  [ "$RUN_STATE" = settled ] && break
-  sleep 0.2
-done
-[ "$RUN_STATE" = settled ] \
-  || fail "fm_busy_agy_run_state never settled after the real turn finished; agy's step-status vocabulary changed"
-[ "$(fm_busy_classify tmux "$TARGET" agy live "$LAB/state")" = "idle agy-steps" ] \
-  || fail "the classifier did not report idle agy-steps after a real agy turn settled"
-pass "agy's real conversation database settles to idle after the turn"
-
-# --- interrupt: a cancelled step must still settle to the finished status ----
-# The fold treats any status other than 3 as a turn in flight, so a step that
-# settled to some OTHER terminal value after an interrupt would read busy
-# forever. Interrupt is a first-class verb for agy, so that assumption is
-# exercised here rather than assumed.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" \
-  'Write an extremely long detailed essay, at least 4000 words, about the history of maritime navigation. Do not use any tools.' Enter \
-  || fail "could not submit the interrupt-path turn to the live agy pane"
-
-RUN_STATE=
-for _ in $(seq 1 200); do
-  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
-  [ "$RUN_STATE" = busy ] && break
-  sleep 0.2
-done
-[ "$RUN_STATE" = busy ] \
-  || fail "the interrupt-path turn never read busy, so the interrupt assertion below would be vacuous"
-
+printf '%s' "$screen" | fm_busy_agy_tail_busy \
+  || fail "the long agy turn never showed its busy footer"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape \
-  || fail "could not deliver Escape to the live agy pane"
-
-RUN_STATE=
-for _ in $(seq 1 150); do
-  RUN_STATE=$(fm_busy_agy_run_state "$DB" 2>/dev/null || true)
-  [ "$RUN_STATE" = settled ] && break
-  sleep 0.2
+  || fail "could not send Escape to the real agy turn"
+cancelled=
+for _ in $(seq 1 120); do
+  screen=$(capture)
+  case "$screen" in *Interrupted*) cancelled=1; break ;; esac
+  sleep 0.5
 done
-[ "$RUN_STATE" = settled ] \
-  || fail "an INTERRUPTED agy step did not settle to the finished status; fm_busy_agy_run_state would read busy forever after every interrupt"
-pass "an interrupted agy turn still settles the conversation database to idle"
+[ -n "$cancelled" ] || fail "a single Escape never cancelled the real agy turn"
+pass "a single Escape cancels the real agy turn"
 
-# --- effort/model axes: the launch flags this adapter passes still parse ------
-"$AGY_BIN" --dangerously-skip-permissions --model gemini-3.6-flash --effort low \
-  -p 'Reply with exactly: ok' >/dev/null 2>"$LAB/effort.err" \
-  || fail "a bare base model name plus --effort no longer launches: $(head -1 "$LAB/effort.err")"
-pass "agy still accepts a bare base model name alongside --effort"
-
-if "$AGY_BIN" --dangerously-skip-permissions --model gemini-3.6-flash --effort xhigh \
-    -p 'ping' >/dev/null 2>&1; then
-  fail "agy now accepts --effort xhigh; bin/fm-spawn.sh and bin/fm-bootstrap.sh cap it at high"
-fi
-pass "agy still caps --effort at high"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l "/quit" \
+  || fail "could not type the agy exit command"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+  || fail "could not submit the agy exit command"
+gone=
+for _ in $(seq 1 60); do
+  current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}' 2>/dev/null || true)
+  case "$current" in *agy*) sleep 0.5 ;; *) gone=1; break ;; esac
+done
+[ -n "$gone" ] || fail "/quit never stopped the real agy process"
+pass "/quit stops the real agy process"
 
 cleanup
 trap - EXIT

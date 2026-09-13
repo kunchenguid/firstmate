@@ -38,6 +38,12 @@
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
 #                           escalated | resolved
+#                           An escalated record with an empty delivered_epoch is
+#                           a delivery-unknown escalation, not a missed report:
+#                           its owner may still resend the same correlation, and
+#                           fm_pending_reply_reset_known_undelivered returns it to
+#                           awaiting_report for that resend (see the retryable
+#                           undelivered escalation note below)
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
 #   recovery_attempted_epoch=
@@ -75,6 +81,19 @@
 # fm-send --resolve-key (bin/fm-send.sh header): it must speak the close note
 # owned below (fm_pending_reply_resolved_note), because a bare answered: note is
 # not a reserved-key transition and would leave the decision open.
+#
+# Retryable undelivered escalation: a delivery-unknown escalation reports that
+# the request may never have reached the mate, so the request stays the owner's
+# to resend under the same correlation (fm-send's FM_PENDING_REPLY_EXISTING_CORR
+# contract; the remote enqueue deduplicates onto the same record). The resend
+# resets the record to awaiting_report and leaves the published escalation
+# decision open: a confirmed delivery does not settle the request, only a
+# correlated report does. A later missed-report escalation reuses that key
+# rather than opening a duplicate, and only the ordinary resolve close closes
+# it. A delivered record, whatever its phase, is never reset. Without this, a
+# wake retried only through its owner
+# (bin/fm-backlog-handoff.sh's receiver wake) stayed refused forever once the
+# watcher escalated between the lost transport and the next resume.
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
@@ -220,7 +239,9 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|recovery_sending|recovery_sent) return 0 ;;
-    delivery_unknown)
+    delivery_unknown|escalated)
+      # Undelivered only: a delivery-unknown escalation stays the owner's to
+      # resend, while an escalation after delivery guards a missed report.
       delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
       [ -z "$delivered" ]
       return $?
@@ -489,10 +510,12 @@ fm_pending_reply_delivery_attempt_unresolved() {  # <state-dir> <corr_id>
   return 1
 }
 
-# A definitive backend rejection makes the existing correlation retryable again.
-# Reconciliation may have aged the same attempted sidecar to delivery_unknown
-# while the backend call was in flight, so both undelivered phases converge here
-# under the per-correlation lock; a confirmed delivery can never be reset.
+# A definitive backend rejection, or an owner's idempotent remote resend, makes
+# the existing correlation retryable again. Reconciliation may have aged the
+# same attempted sidecar to delivery_unknown while the backend call was in
+# flight, and the watcher may then have escalated that unknown delivery, so all
+# three undelivered phases converge here under the per-correlation lock; a
+# confirmed delivery can never be reset, whatever its phase.
 fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 lock rc=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -512,7 +535,7 @@ _fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
-  case "$phase" in awaiting_report|delivery_unknown) ;; *) return 1 ;; esac
+  case "$phase" in awaiting_report|delivery_unknown|escalated) ;; *) return 1 ;; esac
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   [ -e "$marker" ] || [ -L "$marker" ] || {
     [ "$phase" = awaiting_report ]
@@ -1224,7 +1247,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   case "$phase" in
     delivery_unknown) kind=delivery-unknown ;;
-    recovery_failed|recovery_unknown) kind=recovery-delivery ;;
+    recovery_failed|recovery_unknown) kind='recovery-delivery' ;;
     *) kind=missed ;;
   esac
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1

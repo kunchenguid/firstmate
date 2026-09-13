@@ -233,6 +233,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/quiet/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -435,6 +439,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",
