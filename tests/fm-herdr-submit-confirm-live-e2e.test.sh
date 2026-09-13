@@ -142,14 +142,27 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 # The tradeoff is stated plainly rather than hidden: an echo reply is a runtime
 # echo and not a model answer, so what this asserts is delivery to the Muse
 # runtime, which is exactly the delivery mechanic this repair exists to prove.
-# Subscription-login routing for real model work is governed separately, in
-# docs/verification/muse.md.
+# Exercising the credentialed provider belongs to real Muse work routing and to
+# docs/verification/muse.md, not to this guard, so the echo provider is a
+# deliberate scope boundary here rather than a gap.
 MUSE_BIN=$(PATH="$ORIGINAL_PATH" command -v muse 2>/dev/null || true)
 if [ -z "$MUSE_BIN" ]; then
   printf '# muse is not installed; Muse-on-Herdr submit confirmation was not verified here\n'
 else
-  MUSE_VERSION=$(PATH="$ORIGINAL_PATH" "$MUSE_BIN" --version 2>/dev/null | head -1)
-  [ -n "$MUSE_VERSION" ] || MUSE_VERSION=version-unknown
+  # muse has no probe-friendly version flag: docs/verification/muse.md records
+  # the launcher execing a version-suffixed muse-bin-<version> beside itself as
+  # the authoritative version surface, and the newest installed one is what the
+  # launcher will exec. Reading it off disk keeps this guard from invoking an
+  # unproven flag that could drop into an interactive TUI instead of printing.
+  MUSE_VERSION=version-unknown
+  muse_newest=
+  for muse_candidate in "${MUSE_BIN%/*}"/muse-bin-*; do
+    [ -x "$muse_candidate" ] || continue
+    if [ -z "$muse_newest" ] || [ "$muse_candidate" -nt "$muse_newest" ]; then
+      muse_newest=$muse_candidate
+    fi
+  done
+  [ -z "$muse_newest" ] || MUSE_VERSION=${muse_newest##*/muse-bin-}
   MUSE_CONFIG_HOME="$TMP_ROOT/muse-config"
   MUSE_DATA_HOME="$TMP_ROOT/muse-data"
   MUSE_WORKSPACE="$TMP_ROOT/muse-workspace"
@@ -197,15 +210,15 @@ else
   [ "$muse_idle" = 1 ] \
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live agent process with a shared empty composer in the lab pane (last process state '$muse_process', last composer state '$muse_state')"
 
-  # This leg exists for the unreadable-native fallback, so the route is asserted
-  # rather than assumed: fm_backend_herdr_send_text_submit reaches empty either
-  # from native agent state or from the shared composer classifier, and only the
-  # second is what a Muse steer must travel. A Herdr that starts registering an
-  # agent for a Muse pane would silently move this guard onto the native route
-  # while it kept printing ok, so an unreadable probe is required here instead.
+  # Best-effort route preference, not proof: a readable native status here means
+  # fm_backend_herdr_send_text_submit would take its native branch instead of
+  # the composer one this leg is about, so the leg refuses rather than reporting
+  # a verdict whose origin it cannot name. It proves nothing on its own, because
+  # fm_backend_herdr_agent_status_raw returns the same empty string for a pane
+  # with no registered agent and for an agent get that simply failed.
   muse_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
   [ -z "$muse_raw" ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: this leg proves the unreadable-native composer fallback, but the native agent probe now reads '$muse_raw', so the submit verdict would no longer travel that route"
+    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: this leg is about the composer fallback, but the native agent probe now reads '$muse_raw', so the submit verdict would take the native branch instead"
 
   MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
   muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
@@ -231,7 +244,7 @@ else
   done
   [ "$muse_landed" = 1 ] \
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
-  pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER reports empty through the unreadable-native composer fallback and renders the requested reply from its echo provider in isolated session $SESSION"
+  pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle bare U+27E9 row as empty, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
 fi
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

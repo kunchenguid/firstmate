@@ -998,8 +998,10 @@ Muse registers no Herdr agent state, so its steers take the same fallback with a
 That shape is current fact: the portable regression in `tests/fm-backend-herdr.test.sh` drives it end to end and passes, asserting the confirmed verdict and that exactly one Enter was sent.
 The live Muse leg of `tests/fm-herdr-submit-confirm-live-e2e.test.sh` is authored and registered but has NOT been executed, so no measured Muse-on-Herdr claim exists here and none of the 2026-08-19 Claude measurement above extends to Muse.
 That leg skips with an explicit unverified line when muse is not installed, and otherwise drives a real Muse on `--provider echo` under an isolated `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and workspace, the same credential-free shape `tests/fm-muse-signals-live-e2e.test.sh` already uses.
-It requires a live agent process and a cleared composer before it steers, requires the native agent probe to still be unreadable at the moment of the steer so the verdict cannot quietly travel the native route instead, and requires the token to come back in the reply.
-The echo provider makes that assertion delivery to the Muse runtime rather than a model answer, which is the delivery mechanic this entry is about; credentialed model routing is recorded in [muse.md](muse.md).
+What it will prove when it runs is bounded: its readiness gate requires the shared classifier to read Muse's idle bare `⟩` row as empty before it steers, and it then requires the steer to confirm empty and the token to come back in the reply.
+It does not prove which branch of `fm_backend_herdr_send_text_submit` produced that verdict, because `fm_backend_herdr_agent_status_raw` returns the same empty string for a pane with no registered agent and for a failed read, and a rendered busy footer can also carry a pending composer to the same verdict.
+Its unreadable-native pre-check is a route preference that refuses a run whose verdict would take the native branch, not a proof that the composer branch decided this one.
+The echo provider makes the delivery assertion an assertion about the Muse runtime rather than about a model answer, which is the delivery mechanic this entry is about; exercising the credentialed provider belongs to real Muse work routing and is recorded in [muse.md](muse.md), not here.
 A Herdr-lab-guarded run of that guard is what will replace this entry with an observed line carrying its Muse version and date.
 
 ### Prune and respawn

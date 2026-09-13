@@ -205,7 +205,7 @@ That is the same terminal shape the `echo`-provider interrupt produced, now conf
 
 ## Refreshing this record
 
-Run all three live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
+Run the first two live guards after any muse upgrade, and the third as well on a Herdr-capable host, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
 
 ```
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
@@ -215,7 +215,8 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-submit-confirm-
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
 The Herdr submit-confirm guard covers the same styled composer and the same `muse-bin-*` process anchoring on the Herdr runtime, where a Muse steer's delivery verdict depends on both.
-It needs a real `muse` binary, `herdr`, and `claude` for its Claude leg, drives Muse on `--provider echo` under an isolated XDG lab so it needs no credential either, and reports an uninstalled Muse as unverified rather than passing silently.
+Its gate requires `herdr`, `jq`, and `claude`, and with `FM_HERDR_SUBMIT_CONFIRM_LIVE=1` set a missing one of those is a red failure rather than a skip, which is why the imperative above is qualified to Herdr-capable hosts.
+`muse` itself is optional to that gate: the guard drives Muse on `--provider echo` under an isolated XDG lab so it needs no credential, and it reports an uninstalled Muse as unverified rather than passing silently.
 Its Muse-on-Herdr entry in [`runtime-backends.md`](runtime-backends.md#submit-confirmation) is still marked authored and not yet executed, so the first guarded run is what turns it into a measurement.
 The guard follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
 
