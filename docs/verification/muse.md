@@ -214,11 +214,11 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-submit-confirm-
 ```
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
+It follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
 The Herdr submit-confirm guard covers both of those surfaces on the Herdr runtime, with different weight: the styled `⟩` composer is what decides a Muse steer's delivery verdict, while the `muse-bin-*` process anchoring only backs that guard's own readiness gate, which refuses to steer a bare shell prompt.
 Its gate requires `herdr`, `jq`, and `claude`, and with `FM_HERDR_SUBMIT_CONFIRM_LIVE=1` set a missing one of those is a red failure rather than a skip, which is why the imperative above is qualified to Herdr-capable hosts.
-`muse` itself is optional to that gate: the guard drives Muse on `--provider echo` under an isolated XDG lab so it needs no credential, and it reports an uninstalled Muse as unverified rather than passing silently.
-Its Muse-on-Herdr entry in [`runtime-backends.md`](runtime-backends.md#submit-confirmation) is still marked authored and not yet executed, so the first guarded run is what turns it into a measurement.
-The guard follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
+`muse` itself is optional to that gate: its Muse leg needs no credential, and a host without `muse` reports that leg unverified rather than passing silently.
+[`runtime-backends.md`](runtime-backends.md#submit-confirmation) owns that leg's shape and still marks it authored and not yet executed, so the first guarded run is what turns it into a measurement.
 
 muse's launcher can replace the running binary underneath the fleet, so an upgrade that changes the session protocol also invalidates the credentialed evidence above.
 Repeat that smoke after a protocol-affecting upgrade: run one real multi-step tool-loop turn with credentials in place, confirm the run-scoped `started`/`terminal` counts are still exactly one each, and confirm an Escape still yields `terminal` with `cancelled`.
