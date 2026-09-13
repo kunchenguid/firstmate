@@ -114,6 +114,9 @@ fm_harness_ancestry_pids() {
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if fm_harness_process_matches "$comm" "$args"; then
+      if [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] && printf '%s\n' "$args" | grep -qE 'daemon run|bg-spare'; then
+        break
+      fi
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -156,7 +159,13 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  if fm_harness_process_matches "$comm" "$args"; then
+    if [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] && printf '%s\n' "$args" | grep -qE 'daemon run|bg-spare'; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

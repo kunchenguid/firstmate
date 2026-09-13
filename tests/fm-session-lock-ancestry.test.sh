@@ -266,6 +266,83 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_daemon_hosted_session_ancestry() {
+  local dir fakebin got
+  dir="$TMP_ROOT/daemon-ancestry"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  800:comm=) printf '%s\n' claude ;;
+  800:args=) printf '%s\n' 'claude daemon run' ;;
+  800:ppid=) printf '%s\n' 1 ;;
+  801:comm=) printf '%s\n' claude ;;
+  801:args=) printf '%s\n' 'claude --bg-pty-host' ;;
+  801:ppid=) printf '%s\n' 800 ;;
+  802:comm=) printf '%s\n' bash ;;
+  802:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  802:ppid=) printf '%s\n' 801 ;;
+  900:comm=) printf '%s\n' claude ;;
+  900:args=) printf '%s\n' 'claude' ;;
+  900:ppid=) printf '%s\n' 901 ;;
+  901:comm=) printf '%s\n' bash ;;
+  901:args=) printf '%s\n' 'bash' ;;
+  901:ppid=) printf '%s\n' 1 ;;
+  902:comm=) printf '%s\n' bash ;;
+  902:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  902:ppid=) printf '%s\n' 900 ;;
+  700:comm=) printf '%s\n' pi ;;
+  700:args=) printf '%s\n' 'pi' ;;
+  700:ppid=) printf '%s\n' 701 ;;
+  701:comm=) printf '%s\n' bash ;;
+  701:args=) printf '%s\n' 'bash' ;;
+  701:ppid=) printf '%s\n' 1 ;;
+  702:comm=) printf '%s\n' bash ;;
+  702:args=) printf '%s\n' 'bash /repo/bin/some-hook.sh' ;;
+  702:ppid=) printf '%s\n' 700 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash' ;;
+  *:ppid=)
+    if [ -n "${FM_TEST_HOOK_PARENT:-}" ]; then
+      printf '%s\n' "$FM_TEST_HOOK_PARENT"
+    else
+      printf '%s\n' 802
+    fi
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(FM_TEST_HOOK_PARENT=802 lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "daemon-hosted session was not resolved"
+  [ "$got" = 801 ] || fail "daemon-hosted resolved '$got', expected per-session 801"
+
+  got=$(FM_TEST_HOOK_PARENT=902 lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "interactive session was not resolved"
+  [ "$got" = 900 ] || fail "interactive session resolved '$got', expected 900"
+
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 800'; then
+    fail "legacy daemon lock was treated as a valid live owner"
+  fi
+
+  printf '801\n' > "$dir/state/.lock"
+  FM_TEST_HOOK_PARENT=802 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "daemon-hosted session did not recognize its own lock"
+
+  got=$(FM_TEST_HOOK_PARENT=702 lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "non-Claude harness was not resolved"
+  [ "$got" = 700 ] || fail "non-Claude harness resolved '$got', expected 700"
+
+  pass "session-lock: daemon-hosted ancestry stops before the daemon, non-Claude unchanged, legacy lock treated as stale"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -412,3 +489,4 @@ test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_daemon_hosted_session_ancestry
