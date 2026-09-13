@@ -99,6 +99,8 @@ with open(path, "w") as fh:
 PY
 rmdir "$STARTUP_LOCK" 2>/dev/null || true
 
+printf 'fm-fleet manager %s: running (home %s, pid %s, poll %ss). Tab shell execed into this loop; no shell remains, any prompt above is pre-start scrollback.\n' "$MANAGER_ID" "$HOME_DIR" "$ME" "${FM_FLEET_POLL:-2}"
+
 write_heartbeat() {
   local hint=$1
   local wait=0 blocked=0 reason=""
