@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import runpy
+import signal
 import subprocess
 import sys
 import tempfile
@@ -634,6 +636,90 @@ for line in sys.stdin:
             self.assertTrue(json.loads(stdout)["stopped"])
             self.assertIsNone(self.harness.poll())
         self.assertEqual(self.store.get("cursor"), "0")
+
+    def test_slow_large_outbox_allows_status_and_receipts_between_chunks(self):
+        row, _ = self.claim()
+        self.assertTrue(self.bridge.send_one())
+        event = self.emit(row, "completed", "x" * 200000, evidence=["fixture"])["event"]
+        query = self.message("/status")
+        calls = []
+        original = self.bridge.transport.call
+
+        def slow_transport(endpoint, payload):
+            calls.append(endpoint)
+            if endpoint == "messages":
+                self.now += 6
+                return original(endpoint, payload)
+            if calls.count("updates") == 2:
+                sent = self.store.rows("SELECT wamid FROM outbox WHERE event=? AND part=0", (event,))[0]["wamid"]
+                return poll([query], statuses=[{"id": sent, "status": "read", "timestamp": str(int(self.now)),
+                                               "recipient_id": "user:owner"}], offset=50)
+            return Reply(204)
+
+        with patch.object(self.bridge.transport, "call", side_effect=slow_transport):
+            self.bridge.tick()
+            self.assertEqual(calls, ["updates", "messages"])
+            self.assertEqual(len(self.store.rows("SELECT * FROM outbox WHERE event=? AND state='pending'", (event,))), 48)
+            self.bridge.tick()
+        self.assertEqual(calls, ["updates", "messages", "updates", "messages"])
+        self.assertEqual(self.store.get("cursor"), "50")
+        status = self.store.rows("SELECT request,state FROM inbound WHERE wamid=?", (query["id"],))[0]
+        self.assertEqual(status["state"], "answered")
+        self.assertTrue(self.store.rows("SELECT body FROM responses WHERE event=?", (status["request"] + ".status",)))
+        parts = self.store.rows("SELECT state FROM outbox WHERE event=? ORDER BY part", (event,))
+        self.assertEqual([p["state"] for p in parts[:2]], ["read", "accepted"])
+        self.assertTrue(all(p["state"] == "pending" for p in parts[2:]))
+
+    def test_stop_during_forward_finishes_current_note_only(self):
+        first, second = self.receive(), self.receive()
+        original = subprocess.run
+
+        def stop_after_note(args, **kwargs):
+            result = original(args, **kwargs)
+            if args[0] == str(ROOT / "bin/fm-inbox.sh"):
+                self.bridge.stopping = True
+            return result
+
+        with patch("subprocess.run", side_effect=stop_after_note):
+            self.bridge.tick()
+        self.assertEqual(self.store.request(first["request"])["state"], "queued")
+        self.assertEqual(self.store.request(second["request"])["state"], "received")
+        self.assertEqual(len(list((self.home / "state/inbox").glob("*.note"))), 1)
+        self.assertEqual(self.store.rows("SELECT * FROM attempts"), [])
+        with patch("subprocess.run", side_effect=AssertionError("stopped bridge started a subprocess")), \
+                patch.object(self.bridge.transport, "call", side_effect=AssertionError("stopped bridge called transport")):
+            self.bridge.tick()
+            self.bridge.forward()
+            self.bridge.poll()
+            self.assertFalse(self.bridge.send_one())
+
+    def test_service_stop_handler_prevents_operations_after_poll_or_send(self):
+        row, _ = self.claim()
+        self.emit(row, "completed", "x" * 200000, evidence=["fixture"])
+        entrypoint = runpy.run_path(str(ROOT / "bin/fm-whatsapp.py"))["main"]
+        original = Simulator.call
+        for stop_at in ("updates", "messages"):
+            with self.subTest(stop_at=stop_at):
+                calls, handlers = [], {}
+
+                def stop_during_transport(transport, endpoint, payload):
+                    calls.append(endpoint)
+                    reply = original(transport, endpoint, payload)
+                    if endpoint == stop_at:
+                        handlers[signal.SIGTERM](signal.SIGTERM, None)
+                    return reply
+
+                with patch.object(sys, "argv", ["fm-whatsapp.py", "--config", str(self.path),
+                                                "run", "--fixture", str(self.fixture)]), \
+                        patch("signal.signal", side_effect=lambda number, handler: handlers.update({number: handler})), \
+                        patch.object(Simulator, "call", new=stop_during_transport):
+                    result = entrypoint()
+                self.assertEqual(result, {"stopped": True, "agents": "untouched"})
+                self.assertEqual(calls, ["updates"] if stop_at == "updates" else ["updates", "messages"])
+                self.assertIsNone(self.harness.poll())
+        self.assertEqual(len(self.store.rows("SELECT * FROM attempts")), 1)
+        self.assertEqual(self.store.snapshot()["outbox"][0]["state"], "accepted")
+        self.assertTrue(all(p["state"] == "pending" for p in self.store.snapshot()["outbox"][1:]))
 
     def test_http_non_json_responses_preserve_status_policy_and_retry_after(self):
         config = Config(self.path)

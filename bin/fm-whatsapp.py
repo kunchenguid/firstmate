@@ -158,18 +158,18 @@ def main():
                 transport = HTTP(config)
             bridge = Bridge(store, transport)
             bridge.recover()
-            stopping = False
 
             def stop(_signal, _frame):
-                nonlocal stopping
-                stopping = True
+                bridge.stopping = True
 
             signal.signal(signal.SIGTERM, stop)
             signal.signal(signal.SIGINT, stop)
-            while not stopping:
+            while not bridge.stopping:
                 bridge.tick()
                 if args.once:
                     return store.snapshot()
+                if bridge.stopping:
+                    break
                 # A diagnostic halt does not cause launchd restart contention.
                 time.sleep(1)
             return {"stopped": True, "agents": "untouched"}

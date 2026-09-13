@@ -4,11 +4,12 @@
 
 Em 2026-09-13, a suíte offline foi executada em Darwin/arm64 com Python 3.14.7 e SQLite da biblioteca padrão.
 Comando de reprodução: `bash tests/fm-whatsapp.test.sh`.
-Resultado observado: `Ran 31 tests in 21.225s` e `OK`.
+Resultado observado: `Ran 34 tests in 23.005s` e `OK`.
 Os testes executam interfaces públicas Python e CLI, o `fm-inbox.sh` real, SQLite real, processos locais de fixture e, no Darwin, `plutil -lint` da plist gerada.
 Nenhum teste usa conta WhatsApp, credencial real, modelo, instalação de serviço ou ciclo de vida Herdr.
 O processo com identidade de harness é uma fixture estrutural para a biblioteca de sessão existente; não é uma execução de Codex ou prova de comportamento de UI do fornecedor.
 O teste de parada/reinício encerra somente o processo que ele próprio criou e verifica que seu principal de fixture continua vivo.
+Regressões determinísticas exercitam o handler de SIGTERM registrado pela entrada CLI durante polling e envio simulados, além da parada após uma nota persistida pelo `fm-inbox.sh` real, impedindo operações posteriores.
 
 O código foi inspecionado no checkout de base `b182d0f908b78d08c7ccb8dce3775bdca8c5d657`, incluindo `fm-inbox.sh`, `fm_voice_records.py`, voz, configuração, arquitetura, protocolo Herdr e os proprietários de lock, eventos, decisões e respostas públicas.
 Esta integração não amplia o escopo da voz nem reutiliza o transporte X/Discord como se fosse WhatsApp.
@@ -27,7 +28,7 @@ O teste real da API e da sessão principal instalada continua pendente de ativa�
 | 5. 204, recibos, inteiro de 64 bits e opcionais | Testados sem parsing do corpo 204, cursor acima de 2^53 devolvido exato e contatos sem profile; regressão adicional cobre read anterior ao resolve-send e delivered posterior sem regressão. |
 | 6. Backlog antigo e cursor durável | Regressões cobrem doctor/status antes da ativação, run desabilitado recusado, instante persistido antes do primeiro poll habilitado, backlog preservado sem execução, cursor no reinício e rejeição explícita de replay. |
 | 7. Instâncias concorrentes e 409 | Testados flock exclusivo e halt persistente após 409; concorrência em máquinas distintas requer resolução operacional. |
-| 8. Rajadas, divisão e digitação | Testadas cotas móveis independentes, persistência, ordem e preservação Unicode; digitação não habilitada, pendente etapa 2. |
+| 8. Rajadas, divisão e digitação | Testadas cotas móveis independentes, persistência, ordem e preservação Unicode; um resultado de 49 partes com envios de seis segundos no relógio simulado permite registrar/tratar status e recibo entre partes, antes de esvaziar a fila; digitação não habilitada, pendente etapa 2. |
 | 9. Políticas de envio | Testados 2xx, 429/Retry-After, 503/131016, 500, reset, timeout e queda após preparar envio; regressões HTTP com opener mockado cobrem corpos não JSON e leituras interrompidas por timeout, reset e IncompleteRead, preservando HTTP decisivo, backoff e redação segura, sem rede; a CLI de reentrega cobre autorização deduplicada, texto integral e estado terminal preservado. |
 | 10. Desconhecidos, citações, reações e anexos | Testadas quarentena e ausência de autorização por reação, attachment ou context.from; regressão de consulta citada encaminha ao principal a correlação da tarefa A mesmo com B ativa, incluindo citação desconhecida sem associação inventada. |
 | 11. Shell e credenciais | Testado texto literal com substituições de shell, autenticação local recusada fora do principal, token sintético privado, rejeição de symlink e ausência do sentinela na saída; nenhum token real lido. |

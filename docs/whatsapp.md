@@ -20,6 +20,7 @@ Respostas conversacionais encerradas não contam como trabalho ativo; havendo ma
 Cada resumo de pedido tem no máximo 180 caracteres, incluindo o rótulo de estado e reticências quando necessário; o resultado integral persistido e suas partes de envio permanecem intactos.
 Uma consulta citada segue ao principal com correlação por `context.id`, sem substituir a tarefa citada pelo andamento global.
 Outras perguntas naturais chegam ao principal com histórico e correlação; ambiguidade entre tarefas exige uma pergunta.
+Por decisão explícita, `/tarefas` permanece como alias de `/status`, e `/ajuda` e `ajuda` mantêm a resposta local curta, disponível sem modelo mesmo quando o principal está indisponível.
 
 ## Configuração local
 
@@ -72,7 +73,9 @@ Crie `~/Library/LaunchAgents` caso ainda não exista antes do `install` impresso
 A máquina precisa permanecer ligada, acordada e com a sessão de usuário disponível para o LaunchAgent atender.
 O serviço usa polling de saída e não abre porta, webhook ou socket público.
 O Firstmate principal continua precisando alcançar checkpoints para executar novos pedidos e publicar resultados.
-`SIGTERM` permite terminar a chamada em andamento e sair; uma interrupção forçada preserva a janela incerta de envio para reconciliação.
+Cada ciclo tenta no máximo um envio, voltando ao polling de entradas e recibos antes da próxima parte, sujeito às cotas e ao backoff persistidos.
+A ordem da fila permanece sequencial; a resposta a uma consulta pode continuar aguardando as partes anteriores, mesmo quando a consulta já foi registrada e tratada.
+`SIGTERM` permite terminar e persistir a operação em andamento e sair, verificando a parada antes das próximas operações e entre encaminhamentos de notas; uma interrupção forçada preserva a janela incerta de envio para reconciliação.
 
 ```sh
 python3 bin/fm-whatsapp.py --config "$FM_HOME/config/whatsapp.json" status

@@ -58,6 +58,7 @@ def auth(config, operation):
 class Bridge:
     def __init__(self, store, transport):
         self.s, self.c, self.transport = store, store.config, transport
+        self.stopping = False
 
     def recover(self):
         with self.s.tx():
@@ -233,9 +234,11 @@ class Bridge:
             self.s.db.execute("UPDATE outbox SET state='delivered' WHERE wamid=? AND state!='read'", (mid,))
 
     def forward(self):
-        if self.availability() == "unavailable":
+        if self.stopping or self.availability() == "unavailable":
             return
         for row in self.s.rows("SELECT * FROM inbound WHERE state='received' ORDER BY received,rowid"):
+            if self.stopping:
+                return
             request = row["request"]
             # Persist the exact envelope BEFORE invoking note, so retry never
             # changes the body attached to an idempotency key.
@@ -269,6 +272,8 @@ class Bridge:
                 self.s.put("forward_error", "")
 
     def poll(self):
+        if self.stopping:
+            return
         self.s.activate()
         if self.s.get("halt") or float(self.s.get("poll_due") or 0) > self.s.clock():
             return
@@ -297,7 +302,7 @@ class Bridge:
             self.s.put("halt", policy)
 
     def send_one(self):
-        if self.s.get("halt") or not self.c.outbound:
+        if self.stopping or self.s.get("halt") or not self.c.outbound:
             return False
         # Global sequence blocks behind unknown/permanent sends until an operator
         # resolves the exact row; later parts never overtake the uncertain part.
@@ -348,8 +353,7 @@ class Bridge:
         return state in ("accepted", "read", "delivered")
 
     def tick(self):
-        self.availability()
-        self.poll()
-        self.forward()
-        while self.send_one():
-            pass
+        for operation in (self.availability, self.poll, self.forward, self.send_one):
+            if self.stopping:
+                return
+            operation()
