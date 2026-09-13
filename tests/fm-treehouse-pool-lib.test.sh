@@ -21,6 +21,10 @@ TMP_ROOT=$(fm_test_tmproot fm-treehouse-pool-lib) || fail "could not create temp
 # machine state directory. The fixture root is not a git repository, so a
 # pool root here proves the pool can live outside every repository.
 export XDG_STATE_HOME="$TMP_ROOT/state"
+# Contain treehouse's own state, and any fallback to its default $HOME pool, in
+# the fixture rather than the developer's home directory.
+export HOME="$TMP_ROOT/user-home"
+mkdir -p "$HOME"
 
 # A realistic firstmate home: a real git repository that ignores its project
 # clones, exactly as a seeded secondmate home does, so a pool root that dirties
@@ -81,32 +85,46 @@ case "$warning" in
 esac
 pass "a project-owned treehouse.toml is left untouched with a named warning, not a seed abort"
 
+ROOT_A=$(fm_treehouse_pool_root "$TMP_ROOT/home-a")
+ROOT_B=$(fm_treehouse_pool_root "$TMP_ROOT/home-b")
+[ "$ROOT_A" != "$ROOT_B" ] || fail "the two homes derived the same pool root '$ROOT_A'"
+
 WT_A=$(cd "$TMP_ROOT/home-a/projects/widget" && treehouse get --lease --lease-holder home-a) \
   || fail "treehouse get --lease failed for home A"
-WT_B=$(cd "$TMP_ROOT/home-b/projects/widget" && treehouse get --lease --lease-holder home-b) \
-  || fail "treehouse get --lease failed for home B"
-[ -n "$WT_A" ] && [ -n "$WT_B" ] || fail "treehouse get --lease did not report a worktree path"
-
+[ -n "$WT_A" ] || fail "treehouse get --lease did not report a worktree path for home A"
 case "$WT_A" in
-  "$TMP_ROOT/home-a"/*) fail "home A's worktree '$WT_A' stayed inside home A's own worktree" ;;
+  "$ROOT_A"/.treehouse/*) : ;;
+  *) fail "home A's worktree '$WT_A' is not under home A's configured pool root '$ROOT_A'" ;;
 esac
-case "$WT_B" in
-  "$TMP_ROOT/home-b"/*) fail "home B's worktree '$WT_B' stayed inside home B's own worktree" ;;
-esac
-[ "$WT_A" != "$WT_B" ] || fail "both homes acquired the same pooled worktree '$WT_A'"
-pass "each clone's real treehouse acquire lands in its own pool, outside its home"
-
 GITDIR_A=$(cat "$WT_A/.git")
-GITDIR_B=$(cat "$WT_B/.git")
 case "$GITDIR_A" in
   *"$TMP_ROOT/home-a/projects/widget/.git/worktrees/"*) : ;;
   *) fail "home A's pooled worktree links back to the wrong clone: $GITDIR_A" ;;
 esac
+POOL_A=$(dirname "$(dirname "$WT_A")")
+
+# Return A before B acquires: against a shared pool treehouse hands B the exact
+# slot A just freed, which is the reuse path that would hand a secondmate a
+# parent-owned worktree. Releasing A first makes the pool comparison below fail
+# if the two clones still resolve to one pool.
+treehouse return --force "$WT_A" >/dev/null 2>&1 || fail "could not return home A's leased worktree before home B acquires"
+WT_A=
+
+WT_B=$(cd "$TMP_ROOT/home-b/projects/widget" && treehouse get --lease --lease-holder home-b) \
+  || fail "treehouse get --lease failed for home B"
+[ -n "$WT_B" ] || fail "treehouse get --lease did not report a worktree path for home B"
+case "$WT_B" in
+  "$ROOT_B"/.treehouse/*) : ;;
+  *) fail "home B's worktree '$WT_B' is not under home B's configured pool root '$ROOT_B'" ;;
+esac
+GITDIR_B=$(cat "$WT_B/.git")
 case "$GITDIR_B" in
   *"$TMP_ROOT/home-b/projects/widget/.git/worktrees/"*) : ;;
   *) fail "home B's pooled worktree links back to the wrong clone: $GITDIR_B" ;;
 esac
-pass "each pooled worktree is linked to its own clone, not the other home's"
+POOL_B=$(dirname "$(dirname "$WT_B")")
+[ "$POOL_A" != "$POOL_B" ] || fail "both homes resolved to the same treehouse pool '$POOL_A'"
+pass "each clone acquires from its own pool, even after the first home returns its slot"
 
 # The regression this fixes: treehouse keeps a pool out of git by rewriting the
 # .gitignore of the repository enclosing {root}/.treehouse, so a root inside a
@@ -117,6 +135,5 @@ pass "each pooled worktree is linked to its own clone, not the other home's"
   || fail "home B reads as dirty after an acquire"
 pass "neither home's own repository is dirtied by a project's pool acquire"
 
-treehouse return --force "$WT_A" >/dev/null 2>&1 || fail "could not return home A's leased worktree"
 treehouse return --force "$WT_B" >/dev/null 2>&1 || fail "could not return home B's leased worktree"
 WT_A=; WT_B=
