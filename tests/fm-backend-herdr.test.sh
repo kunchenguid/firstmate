@@ -2915,6 +2915,47 @@ test_endpoint_confirmed_gone_gates_on_structured_presence() {
   pass "endpoint confirmed-gone: only structured not-found permits record removal and ambiguous identity refuses"
 }
 
+# Real Herdr 0.9.0 writes structured pane_not_found to stderr and exits 1 for
+# both pane get and pane close of an already-gone pane. Cleanup must treat
+# that as confirmed gone instead of looping as an unconfirmed close.
+test_cleanup_treats_structured_pane_not_found_as_confirmed_gone() {
+  local dir log out close_calls
+  dir="$TMP_ROOT/pane-not-found-confirmed-gone"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  out=$(ROOT="$ROOT" LOG="$log" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$LOG"
+      case "$2 $3" in
+        "pane close"|"pane get")
+          printf "{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane %s not found\"},\"id\":\"cli:pane:%s\"}\n" "$4" "$2" >&2
+          return 1
+          ;;
+      esac
+      return 1
+    }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    rc=0
+    fm_backend_herdr_explicit_close_pane_confirmed fmtest w2:p2 || rc=$?
+    printf "explicit:%s\n" "$rc"
+    rc=0
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w2:p2 || rc=$?
+    printf "projection:%s\n" "$rc"
+  ' 2>/dev/null)
+  assert_contains "$out" "explicit:0" \
+    "explicit close must treat structured pane_not_found as confirmed gone, got: $out"
+  assert_contains "$out" "projection:0" \
+    "projection close must treat structured pane_not_found as already gone, got: $out"
+  assert_contains "$(cat "$log")" "pane close w2:p2" \
+    "the gone-pane close verifier did not issue the explicit close"
+  assert_contains "$(cat "$log")" "pane get w2:p2" \
+    "the gone-pane close verifier did not read structured presence"
+  close_calls=$(grep -c 'pane close w2:p2' "$log" || true)
+  [ "$close_calls" = 1 ] \
+    || fail "projection close of an already-gone pane must not issue a second close, got $close_calls: $(cat "$log")"
+  pass "cleanup: structured Herdr pane_not_found is confirmed gone rather than unconfirmed"
+}
+
 test_projection_seeded_prune_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -5276,6 +5317,7 @@ test_projection_close_failed_removal_rolls_back_the_reposition
 test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
+test_cleanup_treats_structured_pane_not_found_as_confirmed_gone
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
