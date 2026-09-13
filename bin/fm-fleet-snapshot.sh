@@ -813,7 +813,8 @@ task_json_lines() {
     # is a bounded literal the composing jq below builds from argv, so no
     # degradation depends on a fallback file whose own write can fail: a missing
     # --slurpfile source is fatal to that jq, which would drop the row it is
-    # degrading. Only an observation this loop has already read back rides a file.
+    # degrading. A file carries a payload only once this loop has proven that file
+    # available: an observation it read back, or a write whose status it checked.
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
     current_state_arg=(--slurpfile current_state_file "$current_file")
     if jq -e 'type == "object"' "$current_file" >/dev/null 2>&1; then
