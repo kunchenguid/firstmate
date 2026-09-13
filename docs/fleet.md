@@ -60,7 +60,7 @@ All commands need `--fleet-root <dir>` or `FM_FLEET_ROOT`, and fail closed witho
 `fm-fleet.sh validate` checks duplicate IDs, homes, SecondMates, projects, and domains, plus overlapping homes, before anything mutates.
 `fm-fleet.sh start` validates first, pre-checks every shard for a live authority, then launches one manager process per shard.
 `fm-fleet.sh status` prints the compact manager table described below.
-`fm-fleet.sh attach <id>` prints read-only inspection commands and the stop-then-shell takeover path, including the Mac mini over SSH.
+`fm-fleet.sh attach <id>` prints read-only inspection commands, the live Herdr tab target with a peek command, and the stop-then-shell takeover path, including the Mac mini over SSH.
 `fm-fleet.sh restart <id>` stops and starts one manager inside its own durable home.
 `fm-fleet.sh stop <id>` or `stop --all` terminates processes while shards stay registered.
 `fm-fleet.sh route` resolves new work to exactly one manager by SecondMate, then project, then domain.
@@ -82,9 +82,17 @@ Status never reports completion, because completion belongs to each shard's Defi
 ## Routing
 
 Every new project or task resolves to one FirstMate owner through explicit mappings.
-SecondMate ownership wins over project mapping, which wins over domain mapping.
+SecondMate ownership wins over project mapping, which wins over domain mapping; projects are the primary durable key and domains only the fallback for cross-cutting work.
 Overlapping project or domain mappings fail validation so routing stays deterministic.
+An empty table fails closed (`no manager owns ...`) rather than guessing; unassigned work returns to the operator.
 Correct ownership matters more than optimal distribution, so no automatic rebalancing exists.
+
+## Questions
+
+Anyone with a question for the fleet asks through `fm-fleet.sh ask <id> <text>` for one manager or `ask --all <text>` for every manager.
+Delivery is a thin primitive: the text is submitted to the manager's Herdr tab and the manager answers in its pane from its own shard.
+A question spanning shards goes to `--all`; each manager answers for its shard and the asker synthesizes the answers.
+Synthesis stays with the asker, never with a global reasoner, so broadcast never becomes joint ownership or a backdoor Primary.
 
 ## Cross-shard dependencies
 

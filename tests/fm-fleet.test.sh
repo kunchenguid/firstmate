@@ -159,6 +159,15 @@ export FM_FLEET_ROOT=$FROOT
 unset FM_FLEET_BACKEND
 "$FLEET" status --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)["managers"])==3' || fail "status json loses managers"
 "$FLEET" attach fm-a | grep -q "homes/fm-a" || fail "attach does not name the manager home"
+if "$FLEET" ask bogus hello >/dev/null 2>&1; then
+  fail "ask accepts an unknown manager"
+fi
+if "$FLEET" ask fm-a hello >/dev/null 2>&1; then
+  fail "ask accepts a manager with no Herdr tab"
+fi
+if "$FLEET" ask >/dev/null 2>&1; then
+  fail "ask accepts no arguments"
+fi
 
 "$FLEET" stop --all >/dev/null || fail "fleet stop --all"
 for mid in fm-a fm-b fm-c; do

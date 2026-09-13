@@ -18,6 +18,11 @@
 #   attach <id>                           print how to reach one manager's session
 #   route [--secondmate <sm>] [--project <p>] [--domain <d>]
 #                                         resolve new work to exactly one manager
+#   ask <id|--all> <text...>              deliver a question to one manager's Herdr
+#                                         tab, or broadcast it to every manager;
+#                                         each answers from its own shard and the
+#                                         asker synthesizes, so no joint reasoning
+#                                         or global relay is needed
 #   progress <id> [--note <t>] [--active <n>]
 #                                         record meaningful progress for one manager
 #   set-wait <id> --on | --off            mark or clear a model/provider wait
@@ -621,6 +626,33 @@ if len(set(claims.values())) > 1:
 by = [k for k in ("secondmates", "projects", "domains") if k in claims][0]
 print("%s (by %s)" % (claims[by], by))
 PY
+    ;;
+
+  ask)
+    need_registry
+    [ $# -ge 2 ] || { echo "fm-fleet: ask needs an id (or --all) and a message" >&2; exit 2; }
+    who=$1; shift
+    if [ "$who" = "--all" ]; then
+      who=$(python3 -c 'import json,sys; print(" ".join(sorted(m["id"] for m in json.load(open(sys.argv[1]))["managers"])))' "$REG")
+    fi
+    [ -n "$who" ] || { echo "fm-fleet: ask needs an id (or --all) and a message" >&2; exit 2; }
+    [ -n "${FM_FLEET_BACKEND:-}" ] || FM_FLEET_BACKEND=herdr
+    [ "$FM_FLEET_BACKEND" = "herdr" ] || { echo "fm-fleet: ask delivers to Herdr tabs only (backend is $FM_FLEET_BACKEND)" >&2; exit 2; }
+    fleet_backend_check herdr || exit 2
+    # shellcheck disable=SC2086
+    rc=0
+    for mid in $who; do
+      home=$(python3 -c 'import json,sys; ms=[m["home"] for m in json.load(open(sys.argv[1]))["managers"] if m["id"]==sys.argv[2]]; print(ms[0] if ms else "")' "$REG" "$mid")
+      if [ -z "$home" ]; then echo "fm-fleet: unknown manager $mid" >&2; rc=1; continue; fi
+      target=$(cat "$home/state/.fleet-herdr-target" 2>/dev/null || true)
+      if [ -z "$target" ]; then echo "fm-fleet: no Herdr tab recorded for $mid" >&2; rc=1; continue; fi
+      if TARGET="$target" TEXT="$*" FM_HOME="$home" FM_ROOT="$FM_ROOT" bash -c '. "$FM_ROOT/bin/backends/herdr.sh" 2>/dev/null; fm_backend_herdr_send_text_submit "$TARGET" "$TEXT" 3 1 0.5' _ >/dev/null 2>&1; then
+        echo "asked $mid ($target)"
+      else
+        echo "fm-fleet: delivery to $mid ($target) failed; peek with: herdr pane read ${target#*:} --session ${target%%:*} --source visible --lines 20 --format text" >&2; rc=1
+      fi
+    done
+    exit $rc
     ;;
 
   progress)
