@@ -3,7 +3,8 @@
 #
 # A token-free Claude stand-in registers through Herdr's documented agent
 # registry, so the real spawn path must rename the exact response-derived pane
-# and prove the alias by reading that pane back. A second spawn meets a real
+# and prove the alias by reading that pane back. Lab panes use a profile-free
+# shell, and the named pane must still be running the stand-in. A second spawn meets a real
 # session-global name collision and must stop visibly, close its exact pane so
 # the launched agent cannot outlive task control, and keep its Treehouse copy.
 set -u
@@ -45,10 +46,15 @@ trap cleanup EXIT
 
 # This process spends no model tokens. It supplies the same registered-agent
 # shape a supported Claude launch supplies, then remains in the pane so the
-# spawn-time rename/readback gate sees a live occupant.
+# spawn-time rename/readback gate sees a live occupant. Its marker names the
+# exact pane and PID so the test can prove the pane ran it, not a real Claude.
+STANDIN_MARKERS="$TMP_ROOT/standin-markers"
+mkdir -p "$STANDIN_MARKERS"
+export STANDIN_MARKERS
 cat > "$FAKEBIN/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf '%s\n' "$$" > "$STANDIN_MARKERS/$HERDR_PANE_ID"
 env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" \
   pane report-agent "$HERDR_PANE_ID" \
   --source fm-agent-name-live-e2e --agent claude --state idle >/dev/null || exit 91
@@ -57,7 +63,17 @@ while :; do sleep 1; done
 SH
 chmod +x "$FAKEBIN/claude"
 
-env PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+# Herdr starts each pane in $SHELL, as a login shell on macOS. A login profile
+# can prepend a directory holding the real `claude` ahead of FAKEBIN, so the
+# lab server gets a shell that reads no profile or rc file and keeps PATH as-is.
+cat > "$FAKEBIN/lab-shell" <<'SH'
+#!/bin/bash
+exec /bin/bash --noprofile --norc "$@"
+SH
+chmod +x "$FAKEBIN/lab-shell"
+
+env PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" SHELL="$FAKEBIN/lab-shell" \
+  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 
 # Production code still exercises its normal explicit-session CLI helper, but
 # this lab shim makes every resulting Herdr call pass through the generated
@@ -134,6 +150,12 @@ SUCCESS_PANE=$(grep '^herdr_pane_id=' "$SUCCESS_META" | cut -d= -f2-)
 SUCCESS_NAME=$(derive_name named-agent)
 [ -n "$SUCCESS_WT" ] && WORKTREES+=("$SUCCESS_WT")
 [ -n "$SUCCESS_PANE" ] || fail 'successful spawn metadata omitted the exact Herdr pane id'
+STANDIN_PID=$(cat "$STANDIN_MARKERS/$SUCCESS_PANE" 2>/dev/null) \
+  || fail 'the spawned pane never ran the token-free Claude stand-in'
+STANDIN_CMD=$(ps -p "$STANDIN_PID" -o command= 2>/dev/null) \
+  || fail 'the token-free Claude stand-in no longer occupies the spawned pane'
+assert_contains "$STANDIN_CMD" "$FAKEBIN/claude" \
+  'the spawned pane process is not the token-free Claude stand-in'
 SUCCESS_AGENT=$(lab agent get "$SUCCESS_PANE") \
   || fail 'could not read the successfully named agent from its exact pane'
 [ "$(printf '%s' "$SUCCESS_AGENT" | jq -r '.result.agent.pane_id // empty')" = "$SUCCESS_PANE" ] \
