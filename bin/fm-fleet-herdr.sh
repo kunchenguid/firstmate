@@ -6,8 +6,8 @@
 #        fm-fleet-herdr.sh close <fleet-root> <manager-id> <home>
 #        fm-fleet-herdr.sh target <home>
 #
-# Managers run as one tab per manager (label fleet-<id>) inside one fleet
-# workspace (label fm-fleet) in the resolved herdr session, so they stay
+# Managers run as one workspace per manager home (label fm-fleet-<id>) with
+# one tab per manager (label fleet-<id>) in the resolved herdr session, so they stay
 # visible on the operator's normal Herdr surface. Tab creation reuses
 # fm_backend_herdr_create_task, which refuses live duplicate labels and
 # reclaims husks; command submit reuses fm_backend_herdr_send_text_submit;
@@ -18,7 +18,10 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FLEET_WS_LABEL="fm-fleet"
+
+fleet_ws_label() {
+  printf 'fm-fleet-%s' "$1"
+}
 
 usage() {
   echo "usage: fm-fleet-herdr.sh workspace|launch|close|target ..." >&2
@@ -42,20 +45,20 @@ sq() {
   python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"
 }
 
-fleet_workspace() {  # <fleet-root> prints "<wsid>\t<seeded-tab-or-empty>"
-  local root=$1 session=$2 list matches count wsid out
+fleet_workspace() {  # <fleet-root> <session> <label> prints "<wsid>\t<seeded-tab-or-empty>"
+  local root=$1 session=$2 wslabel=$3 list matches count wsid out
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "fm-fleet-herdr: cannot list herdr workspaces in session '$session'" >&2
     return 1
   }
-  matches=$(printf '%s' "$list" | jq -r --arg want "$FLEET_WS_LABEL" \
+  matches=$(printf '%s' "$list" | jq -r --arg want "$wslabel" \
     '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || {
     echo "fm-fleet-herdr: cannot parse herdr workspace list" >&2
     return 1
   }
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
   if [ "$count" -gt 1 ]; then
-    echo "fm-fleet-herdr: ${count} workspaces labeled '$FLEET_WS_LABEL'; rename or close the extras" >&2
+    echo "fm-fleet-herdr: ${count} workspaces labeled '$wslabel'; rename or close the extras" >&2
     return 1
   fi
   wsid=${matches%%$'\n'*}
@@ -63,7 +66,7 @@ fleet_workspace() {  # <fleet-root> prints "<wsid>\t<seeded-tab-or-empty>"
     printf '%s\t%s' "$wsid" ""
     return 0
   fi
-  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$root" --label "$FLEET_WS_LABEL" --no-focus 2>/dev/null) || {
+  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$root" --label "$wslabel" --no-focus 2>/dev/null) || {
     echo "fm-fleet-herdr: cannot create fleet workspace in session '$session'" >&2
     return 1
   }
@@ -75,12 +78,12 @@ fleet_workspace() {  # <fleet-root> prints "<wsid>\t<seeded-tab-or-empty>"
 case "$SUB" in
   workspace)
     need_tools
-    [ $# -eq 1 ] || { usage; exit 2; }
+    [ $# -eq 2 ] || { usage; exit 2; }
     load_adapter
     fm_backend_herdr_version_check || exit 1
     session=$(fm_backend_herdr_session)
     fm_backend_herdr_server_ensure "$session" || exit 1
-    fleet_workspace "$1" "$session" || exit 1
+    fleet_workspace "$1" "$session" "$2" || exit 1
     printf '\n'
     ;;
 
@@ -92,7 +95,7 @@ case "$SUB" in
     fm_backend_herdr_version_check || exit 1
     session=$(fm_backend_herdr_session)
     fm_backend_herdr_server_ensure "$session" || exit 1
-    wsinfo=$(fleet_workspace "$root" "$session") || exit 1
+    wsinfo=$(fleet_workspace "$root" "$session" "$(fleet_ws_label "$mid")") || exit 1
     wsid=${wsinfo%%$'\t'*}
     seeded=${wsinfo#*$'\t'}
     ids=$(FM_HOME="$home" fm_backend_herdr_create_task "$session:$wsid" "fleet-$mid" "$home" "$seeded") || exit 1
