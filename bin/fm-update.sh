@@ -77,7 +77,7 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" origin no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi

@@ -29,7 +29,7 @@ The only live mates that do not restart are the ones whose home the update pass 
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It never forces, never creates a merge commit, never stashes, and advances a target only on a fast-forward; anything with tracked-file changes, diverged, offline, or on the wrong branch is skipped and reported.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -92,7 +92,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
 ## Safety
 
 - **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  A target that has diverged, has tracked-file changes, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
