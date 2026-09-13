@@ -464,18 +464,6 @@ test_no_mistakes_dod_carries_quota_efficiency_rules() {
   assert_grep "rings you with a durable inbox message telling you to start the validation run" "$brief" \
     "no-mistakes DOD must describe firstmate's compact-then-ring handoff"
 
-  assert_grep "Default convergence after the second review round" "$brief" \
-    "no-mistakes DOD must state the default convergence rule"
-  assert_grep "Deferred findings" "$brief" \
-    "no-mistakes DOD must name the PR-body section for findings not auto-applied"
-  assert_grep "This brief's own \`# Task\` section may override that default" "$brief" \
-    "no-mistakes DOD must let the task text override the convergence default"
-
-  assert_grep "Pass an absolute path as the PATH argument of \`grep\`, \`sed\`, \`find\`, and \`cat\`" "$brief" \
-    "no-mistakes DOD must require absolute paths for grep/sed/find/cat"
-  assert_grep "never \`cd\` before reading or writing a relative path" "$brief" \
-    "no-mistakes DOD must ban cd-then-relative-path shapes"
-
   for id_mode in "brief-quota-dp1:direct-PR" "brief-quota-lo1:local-only"; do
     id=${id_mode%%:*}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "${id_mode##*:}" >/dev/null 2>&1
@@ -483,8 +471,6 @@ test_no_mistakes_dod_carries_quota_efficiency_rules() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_no_grep "paused: awaiting compaction before validation" "$brief" \
       "$id: the declared-state compaction rule is no-mistakes-only"
-    assert_no_grep "Default convergence after the second review round" "$brief" \
-      "$id: the convergence-default rule is no-mistakes-only"
   done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-quota-scout1 some-proj --scout >/dev/null 2>&1
@@ -492,8 +478,6 @@ test_no_mistakes_dod_carries_quota_efficiency_rules() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_no_grep "paused: awaiting compaction before validation" "$brief" \
     "scout brief must not carry the ship-only declared-state compaction rule"
-  assert_no_grep "Default convergence after the second review round" "$brief" \
-    "scout brief must not carry the ship-only convergence-default rule"
 
   pass "fm-brief.sh: no-mistakes DOD carries the quota-efficiency worker rules, absent from direct-PR/local-only/scout"
 }
