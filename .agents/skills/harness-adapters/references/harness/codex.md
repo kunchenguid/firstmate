@@ -28,7 +28,7 @@ Verified 2026-09-05 on codex-cli **0.151.0** by live probe:
 
 Codex CLI 0.142.1's bundled catalog omitted `max`, while codex-cli 0.151.0 accepts it.
 The operator's own `~/.codex/config.toml` also sets `model_reasoning_effort = "max"` without error.
-Firstmate forwards `max` when the installed Codex CLI reports version 0.151.0 or newer and otherwise records it in task metadata while omitting the unsupported flag.
+Firstmate forwards `max` for direct spawn requests when the installed Codex CLI reports version 0.151.0 or newer, while older versions record the requested effort in task metadata and omit the unsupported flag.
 
 ## Skill popup
 
