@@ -28,9 +28,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECTION_KEYS="status outcome step round"
 PROBE_TIMEOUT="${FM_NM_STATE_PROBE_TIMEOUT:-45}"
 
+# Sentinel projection for "no no-mistakes run exists here yet" (the watched
+# clone or worktree has not had its first run submitted, or the repo has not
+# been through `no-mistakes init` there). This is a normal pre-run state, not
+# an error: a watch armed before the first run must read it as a clean false
+# on every poll, not burn the when-runner's error budget, and it must still
+# fire the moment a real run appears (the sentinel differs from any real
+# projection line, which always contains "="). Matched by the error text
+# no-mistakes itself uses for this state; any other probe failure remains a
+# genuine error.
+NO_RUN_PROJECTION="no-run"
+
 projection() {  # <worktree>
-    local wt=$1 out key value line=''
-    out=$(fm_nm_run_bounded "$wt" "$PROBE_TIMEOUT" axi status 2>/dev/null) || return 1
+    local wt=$1 out rc key value line=''
+    out=$(fm_nm_run_bounded "$wt" "$PROBE_TIMEOUT" axi status 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        case "$out" in
+            *'repo not initialized'*) printf '%s\n' "$NO_RUN_PROJECTION"; return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
     [ -n "$out" ] || return 1
     for key in $PROJECTION_KEYS; do
         value=$(fm_nm_strip_quotes "$(fm_nm_field "$out" "$key")")

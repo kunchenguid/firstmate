@@ -56,6 +56,31 @@ chmod +x "$TMP/bin/no-mistakes"
 NM_STUB_OUT=/dev/null bash "$SCRIPT" "$TMP/wt" "$SNAP"
 check "a failing probe is an error, never a true" 2 "$?"
 
+# A watch armed against a clone/worktree before its first no-mistakes run
+# (repo not yet initialized there) must read as a clean false, never an
+# error - an error here counts against the when-runner's error budget and
+# kills the watch after 3 polls.
+NOINIT_SNAP="$TMP/noinit-snap"
+printf "error: repo not initialized (run 'no-mistakes init' first)\nhelp[1]: Run \`no-mistakes init\` to set up the gate in this repository\n" > "$TMP/noinit.toon"
+cat > "$TMP/bin/no-mistakes" <<'STUB'
+#!/usr/bin/env bash
+cat "$NM_STUB_OUT"
+exit 1
+STUB
+chmod +x "$TMP/bin/no-mistakes"
+NM_STUB_OUT="$TMP/noinit.toon" bash "$SCRIPT" "$TMP/wt" "$NOINIT_SNAP"
+check "no run yet (repo not initialized) is a clean false on first call, not an error" 1 "$?"
+NM_STUB_OUT="$TMP/noinit.toon" bash "$SCRIPT" "$TMP/wt" "$NOINIT_SNAP"
+check "no run yet stays a clean false on repeated polls" 1 "$?"
+
+cat > "$TMP/bin/no-mistakes" <<'STUB'
+#!/usr/bin/env bash
+cat "$NM_STUB_OUT"
+STUB
+chmod +x "$TMP/bin/no-mistakes"
+NM_STUB_OUT="$TMP/a.toon" bash "$SCRIPT" "$TMP/wt" "$NOINIT_SNAP"
+check "a run finally appearing after a no-run wait fires" 0 "$?"
+
 bash "$SCRIPT" --projection "$TMP/wt" >/dev/null 2>&1
 echo "ok - projection mode runs"
 
