@@ -246,8 +246,6 @@ test_ship_briefs_forbid_agent_coauthor_trailer() {
     block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
     assert_contains "$block" "co-author" "$id: brief did not mention the co-author trailer ban at all"
     assert_contains "$block" "HARD RULE" "$id: co-author ban was not phrased as a hard, unmissable rule"
-    printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
-      || fail "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
     assert_contains "$block" "own unmerged branch" \
       "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
     printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
@@ -265,6 +263,13 @@ ROWS
   # the run owns the branch, and route the post-run disclosure off the terminal
   # `done:` line that firstmate parses.
   block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$home/data/brief-coauthor-nm/brief.md")
+  printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
+    || fail "no-mistakes: co-author ban did not cover pipeline-authored commits on the worker's own branch"
+  for id in brief-coauthor-dp brief-coauthor-lo; do
+    printf '%s\n' "$(sed -n '/^#* *Commit attribution/,/default branch/p' "$home/data/$id/brief.md")" \
+      | grep -Eiq "pipeline" \
+      && fail "$id: co-author ban invokes a pipeline this mode's own Definition of done says never runs"
+  done
   printf '%s\n' "$block" | grep -Eiq "while a run is active.*(never|not)|(never|not).*while a run is active" \
     || fail "no-mistakes: co-author ban did not forbid rewriting while a run owns the branch"
   printf '%s\n' "$block" | grep -Eiq "force-push" \
