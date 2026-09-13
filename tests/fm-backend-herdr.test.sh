@@ -3635,10 +3635,128 @@ test_capture_preserves_pane_read_failure() {
   status=$?
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
-    "capture did not ensure the herdr server before reading the pane"
+    "capture did not probe the named server before reading the pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
-  pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+  pass "fm_backend_herdr_capture: probes the session read-only and preserves pane read failure"
+}
+
+# Magistrate consumes fleet snapshots repeatedly, and those snapshots compose
+# these exact public observation surfaces.
+# A stopped session must stay stopped across all of them, while an explicit
+# mutation retains the historical server-start behavior.
+test_observations_do_not_start_a_stopped_server_but_mutation_does() {
+  local dir log marker fb out mutation_log
+  dir="$TMP_ROOT/observe-stopped"; mkdir -p "$dir/fakebin"
+  log="$dir/log"; marker="$dir/server-running"; fb="$dir/fakebin"; : > "$log"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  first=1
+  for arg in "$@"; do
+    [ "$first" -eq 0 ] && printf '\x1f'
+    printf '%s' "$arg"
+    first=0
+  done
+  printf '\n'
+} >> "${FM_HERDR_LOG:?}"
+case "${1:-}:${2:-}" in
+  status:--json)
+    if [ -e "${FM_HERDR_SERVER_MARKER:?}" ]; then
+      printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n'
+    else
+      printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
+    fi
+    ;;
+  server:*)
+    : > "$FM_HERDR_SERVER_MARKER"
+    ;;
+  pane:get|pane:read|pane:process-info|agent:get)
+    if [ ! -e "$FM_HERDR_SERVER_MARKER" ]; then
+      printf '{"error":{"code":"server_not_running"}}\n'
+      exit 1
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      target=fmtest:w1:p2
+      capture_rc=0
+      fm_backend_capture herdr "$target" 5 >/dev/null 2>&1 || capture_rc=$?
+      path=$(fm_backend_herdr_current_path "$target")
+      busy=$(fm_backend_busy_state herdr "$target")
+      composer=$(fm_backend_composer_state herdr "$target")
+      exists=yes
+      fm_backend_target_exists herdr "$target" >/dev/null 2>&1 || exists=no
+      agent=$(fm_backend_agent_state herdr "$target")
+      printf "capture=%s path=%s busy=%s composer=%s exists=%s agent=%s" \
+        "$capture_rc" "$path" "$busy" "$composer" "$exists" "$agent"
+    ' "$ROOT")
+  case "$out" in
+    capture=0*) fail "capture unexpectedly succeeded against a stopped Herdr session: $out" ;;
+  esac
+  assert_contains "$out" "path= busy=unknown composer=unknown exists=no agent=missing" \
+    "stopped-session observations did not return their conservative unavailable verdicts"
+  [ ! -e "$marker" ] || fail "a read-only observation started the stopped Herdr server"
+  mutation_log=$(grep -E '^(server|workspace.create|tab.create|pane.(run|send-text|send-keys|close))' "$log" || true)
+  [ -z "$mutation_log" ] || fail "read-only observations invoked Herdr mutation commands: $mutation_log"
+
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr fmtest:w1:p2 Escape' "$ROOT"
+  [ -e "$marker" ] || fail "an explicit Herdr mutation no longer starts a stopped server"
+  assert_contains "$(cat "$log")" "server"$'\x1f''--session'$'\x1f''fmtest' \
+    "the explicit mutation path did not invoke the named server start"
+  assert_contains "$(cat "$log")" "pane"$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''escape' \
+    "the explicit mutation did not continue after starting the server"
+  pass "Herdr read-only surfaces keep a stopped session offline, while an explicit mutation still starts it"
+}
+
+# Bound both halves of an observation: the non-mutating server-state probe and
+# the payload read after a positive running verdict.
+test_observations_bound_probe_and_payload_reads() {
+  local mode dir fb log out rc elapsed
+  for mode in probe payload; do
+    dir="$TMP_ROOT/observe-timeout-$mode"; mkdir -p "$dir/fakebin"
+    fb="$dir/fakebin"; log="$dir/log"; : > "$log"
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_LOG:?}"
+case "${1:-}:${2:-}" in
+  status:--json)
+    if [ "${FM_HERDR_HANG_MODE:?}" = probe ]; then sleep 20; fi
+    printf '{"server":{"running":true}}\n'
+    ;;
+  pane:read)
+    sleep 20
+    ;;
+esac
+SH
+    chmod +x "$fb/herdr"
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_HANG_MODE="$mode" \
+      FM_BACKEND_HERDR_OBSERVE_TIMEOUT=1 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        SECONDS=0
+        rc=0
+        fm_backend_herdr_capture fmtest:w1:p2 5 >/dev/null 2>&1 || rc=$?
+        printf "%s %s" "$rc" "$SECONDS"
+      ' "$ROOT")
+    read -r rc elapsed <<EOF
+$out
+EOF
+    [ "$rc" -ne 0 ] || fail "$mode observation unexpectedly succeeded after its Herdr command hung"
+    [ "$elapsed" -le 4 ] || fail "$mode observation exceeded its hard read bound: ${elapsed}s"
+    assert_not_contains "$(cat "$log")" "server " \
+      "$mode observation tried to turn its timeout into a server start"
+  done
+  pass "Herdr observations hard-bound both offline probes and live-server payload reads"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -5302,6 +5420,8 @@ test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
+test_observations_do_not_start_a_stopped_server_but_mutation_does
+test_observations_bound_probe_and_payload_reads
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
