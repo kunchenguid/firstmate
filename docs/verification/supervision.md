@@ -55,6 +55,13 @@ Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
 A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why the secondmate launch names no `-e` and the per-task worker extension lives in `state/`.
 
+### omp bun-installed identity, 2026-09-13
+
+omp 18.1.15 installed by `bun i -g @oh-my-pi/pi-coding-agent` runs as `bun /Users/author/.bun/bin/omp` (env-bun shebang into the package's `dist/cli.js`), so `ps -o comm=` reports `bun` and the omp identity rides in the script path at argv[1].
+Verified live on the primary session of that install (process 71113, `ps -o pid,ppid,comm=,args= -p 71113` printing `71113 7411 bun bun /Users/author/.bun/bin/omp`): `bash -c '. bin/fm-session-lock-lib.sh; fm_harness_ancestry_pid'` from a tool child printed `71113`, and `env -u CLAUDECODE bin/fm-harness.sh` printed `omp`.
+A stale `CLAUDECODE=1` exported into the launching shell still labels a raw ancestry-less probe `claude` (marker precedence), while the sanitized session-start wrapper path and `FM_OMP_HARNESS=omp` under the real omp ancestry both print `omp`.
+`tests/fm-omp-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin the bun arm and its negatives portably; the negative fixtures run orphaned so a host whose test runner sits under a real omp cannot lend that ancestry to them.
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.

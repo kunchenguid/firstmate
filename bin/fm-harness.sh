@@ -118,7 +118,7 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
+  local pid=$$ comm args argv0 script
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
@@ -167,6 +167,21 @@ detect_own() {
       # named `claude` with its own node child, and that fallback's *claude*
       # args glob would otherwise claim it if that subtree were ever walked.
       omp) echo omp; return ;;
+      # omp installed through bun's global bin runs as `bun .../bin/omp`
+      # (env-bun shebang), so its comm is always `bun` and the identity rides
+      # in the script path at argv[1] (verified, omp 18.1.15 installed by
+      # `bun i -g @oh-my-pi/pi-coding-agent`: `ps -o comm=` reports bun while
+      # argv[1] is the ~/.bun/bin/omp symlink into dist/cli.js). Match path
+      # components exactly, never an args glob, for the same reason the
+      # MainThread note above rejects widening the node arm: a glob would let
+      # any bun command carrying a harness name in its arguments claim that
+      # identity.
+      bun)
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        script=${args#* }; script=${script%% *}
+        case "/$script/" in
+          */omp/*) echo omp; return ;;
+        esac ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -194,10 +209,18 @@ detect_own() {
 # same anchored match as the ancestry walk in detect_own, kept separate so the
 # marker precedence above can demand real process evidence.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args script
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(basename -- "$comm")" in
+      omp) return 0 ;;
+      # The same bun-scripted omp form the ancestry walk in detect_own
+      # accepts, so the marker precedence above sees it as real omp ancestry.
+      bun)
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        script=${args#* }; script=${script%% *}
+        case "/$script/" in */omp/*) return 0 ;; esac ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done

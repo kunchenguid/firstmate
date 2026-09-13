@@ -60,6 +60,20 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   done
   printf '%s' "$dir"
 }
+# Run <cmd...> orphaned from this suite's own process tree and echo its
+# output. Negative detection fixtures need this: on a host whose test runner
+# itself sits under a real omp, an attached ancestry climb would find that omp
+# above the fixture and the negative assertion would go wrong through no fault
+# of the fixture.
+orphan_out() {  # <outfile> <cmd...>
+  local outfile=$1 i; shift
+  ( "$@" > "$outfile" 2>&1 & )
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$outfile" ] && break
+    sleep 0.2
+  done
+  cat "$outfile" 2>/dev/null
+}
 
 # --- 1. Detection --------------------------------------------------------------
 
@@ -72,8 +86,8 @@ test_detection_anchored_name_and_marker_precedence() {
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+    out=$(orphan_out "$TMP_ROOT/named-$decoy.out" env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
@@ -81,12 +95,45 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. Orphaned:
+  # this suite may itself run under a real omp, whose ancestry the negative
+  # fixture must never borrow (see orphan_out above).
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+  out=$(orphan_out "$TMP_ROOT/named-leak.out" env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    CLAUDECODE=1 FM_OMP_HARNESS=omp bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+}
+
+# omp installed through bun's global bin runs as `bun .../bin/omp` (env-bun
+# shebang), so its comm is `bun` and only the script path at argv[1] carries
+# the omp identity (verified, omp 18.1.15). The named shell below is the same
+# macOS comm signal the fixture above uses, and the script under an exact `omp`
+# path component is the bun-global install shape.
+test_detection_bun_scripted_omp() {
+  local dir out
+  dir="$TMP_ROOT/bun-named"
+  mkdir -p "$dir/tools/omp" "$dir/tools"
+  ln -sf /bin/bash "$dir/bun"
+  # shellcheck disable=SC2016 # the script body expands $HARNESS inside the fixture child
+  printf '#!/bin/sh\nexec "$HARNESS"\n' > "$dir/tools/omp/run-harness"
+  # shellcheck disable=SC2016 # the script body expands $HARNESS inside the fixture child
+  printf '#!/bin/sh\nexec "$HARNESS"\n' > "$dir/tools/run-harness"
+  chmod +x "$dir/tools/omp/run-harness" "$dir/tools/run-harness"
+  # shellcheck disable=SC2016 # the script body expands $HARNESS inside the fixture child
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    HARNESS="$HARNESS" "$dir/bun" "$dir/tools/omp/run-harness")
+  [ "$out" = omp ] || fail "a bun process running an omp-component script must detect as omp, got '$out'"
+  # Orphaned: this suite may itself run under a real omp, whose ancestry a
+  # negative fixture must never borrow (see orphan_out above).
+  out=$(orphan_out "$dir/ordinary.out" env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS HARNESS="$HARNESS" "$dir/bun" "$dir/tools/run-harness")
+  [ "$out" != omp ] || fail "a bun process running an ordinary script must not detect as omp"
+  # shellcheck disable=SC2016 # the script body expands $HARNESS inside the fixture child
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    HARNESS="$HARNESS" "$dir/bun" "$dir/tools/omp/run-harness")
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS under a bun-scripted omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
+  pass "fm-harness: a bun-scripted omp detects through its script path; an ordinary bun script stays out"
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -94,6 +141,9 @@ test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
+  fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp' || fail "session-lock identity must accept bun running the omp global-bin script"
+  ! fm_harness_process_matches bun 'bun /repo/tools/bundle.js' || fail "session-lock identity must not claim an ordinary bun script"
+  ! fm_harness_process_matches bun 'bun' || fail "session-lock identity must not claim a bare bun with no script"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -575,6 +625,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_bun_scripted_omp
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers

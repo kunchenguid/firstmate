@@ -61,7 +61,7 @@ fm_harness_path_name() {  # <path>
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -74,10 +74,26 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
+  # A bare `bun` never joins that arm and gets its own exact-match arm below:
+  # omp installed through bun's global bin runs as `bun .../bin/omp`
+  # (env-bun shebang), so its comm is always `bun` and the identity rides
+  # entirely in the script path at argv[1] (verified, omp 18.1.15 via
+  # `bun i -g @oh-my-pi/pi-coding-agent`), where the anchored alternatives of
+  # FM_HARNESS_RE can never match a substring. bun also launches far too many
+  # unrelated scripts for the loose node-style args grep to stay safe here, so
+  # only an exact harness path component in the script argument claims an
+  # identity.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
+      ;;
+    *bun*)
+      script=${args#* }; script=${script%% *}
+      if name=$(fm_harness_path_name "$script"); then
+        case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
       ;;

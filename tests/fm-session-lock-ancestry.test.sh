@@ -134,6 +134,67 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+# omp installed through bun's global bin runs as `bun .../bin/omp` (env-bun
+# shebang), so its comm is always `bun` and the identity rides entirely in the
+# script path at argv[1]. The bunx shape covers `bunx` as the comm, whose
+# argv[1] is the same omp script path.
+test_bun_scripted_omp_session_is_identified() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/bun-omp"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_BUN_SHAPE:-omp}" in
+  900:comm=:omp) printf '%s\n' bun ;;
+  900:args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp' ;;
+  900:comm=:bunx) printf '%s\n' bunx ;;
+  900:args=:bunx) printf '%s\n' 'bunx /Users/u/.bun/bin/omp' ;;
+  900:comm=:unrelated) printf '%s\n' bun ;;
+  900:args=:unrelated) printf '%s\n' 'bun /repo/tools/bundle.js' ;;
+  900:comm=:bare) printf '%s\n' bun ;;
+  900:args=:bare) printf '%s\n' 'bun' ;;
+  900:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:*) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '900\n' > "$dir/state/.lock"
+
+  for shape in omp bunx; do
+    got=$(FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: a bun process running the omp script was not found in the ancestry"
+    [ "$got" = 900 ] || fail "$shape: ancestry resolved '$got', expected the bun omp pid 900"
+    FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 900' \
+      || fail "$shape: a live bun omp process was not recognized as a harness"
+    FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the bun omp session holding the lock did not recognize itself as the owner"
+  done
+  for shape in unrelated bare; do
+    if FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "$shape: an ordinary bun command was treated as a harness process"
+    fi
+    if FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 900'; then
+      fail "$shape: an ordinary bun command passed the harness-liveness predicate"
+    fi
+    if FM_TEST_BUN_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: an ordinary bun command claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: a bun-scripted omp session is identified by its script path; ordinary bun commands stay out"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -358,6 +419,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_bun_scripted_omp_session_is_identified
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
