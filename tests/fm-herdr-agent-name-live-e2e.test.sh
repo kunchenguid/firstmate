@@ -4,8 +4,8 @@
 # A token-free Claude stand-in registers through Herdr's documented agent
 # registry, so the real spawn path must rename the exact response-derived pane
 # and prove the alias by reading that pane back. A second spawn meets a real
-# session-global name collision and must stop visibly while leaving its pane
-# and Treehouse copy available for inspection.
+# session-global name collision and must stop visibly, close its exact pane so
+# the launched agent cannot outlive task control, and keep its Treehouse copy.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -168,17 +168,19 @@ assert_contains "$(cat "$HOME_DIR/state/collision-agent.status")" \
 [ ! -e "$HOME_DIR/state/collision-agent.meta" ] \
   || fail 'a naming failure must not publish authoritative task metadata'
 
-FAIL_TARGET=$(sed -n 's/.*inspect window \([^ ]*\) and local copy .*/\1/p' "$FAIL_ERR" | tail -1)
+FAIL_TARGET=$(sed -n 's/.*closing window \([^ ]*\) and keeping local copy .*/\1/p' "$FAIL_ERR" | tail -1)
 FAIL_PANE=${FAIL_TARGET#*:}
-FAIL_WT=$(sed -n 's/.*and local copy \(.*\)$/\1/p' "$FAIL_ERR" | tail -1)
+FAIL_WT=$(sed -n 's/.*and keeping local copy \(.*\)$/\1/p' "$FAIL_ERR" | tail -1)
 [ -n "$FAIL_TARGET" ] && [ "$FAIL_PANE" != "$FAIL_TARGET" ] \
-  || fail 'the naming failure did not identify its exact inspectable pane'
-lab pane get "$FAIL_PANE" >/dev/null \
-  || fail 'the naming failure removed the exact task pane instead of preserving it for inspection'
+  || fail 'the naming failure did not identify its exact pane'
+[ -n "$FAIL_WT" ] && WORKTREES+=("$FAIL_WT")
+FAIL_PANE_READ=$(lab pane get "$FAIL_PANE" 2>&1) \
+  && fail 'the naming failure left the launched agent running in its exact pane outside task control'
+assert_contains "$FAIL_PANE_READ" 'pane_not_found' \
+  'the naming failure pane read did not prove that exact pane closed'
 [ -d "$FAIL_WT" ] \
   || fail 'the naming failure removed the task copy instead of preserving it for inspection'
-WORKTREES+=("$FAIL_WT")
-pass 'real Herdr: an unresolvable name collision stops visibly and preserves the exact pane and task copy'
+pass 'real Herdr: an unresolvable name collision stops visibly, closes the exact pane, and keeps the task copy'
 
 # The failed target never receives the decoy's name, and the already-named
 # sibling stays unchanged. This proves the gate neither selects nor verifies

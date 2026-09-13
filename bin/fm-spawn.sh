@@ -87,9 +87,12 @@
 #   same-id tasks from homes sharing one Herdr session remain distinguishable.
 #   Rename success is read back from that exact pane. A bounded retry handles a
 #   lost rename response; absent registration, a collision, or failed readback
-#   stops the spawn and leaves the exact pane, task copy, and failure event for
+#   stops the spawn, closes that exact pane so the launched agent cannot keep
+#   working outside task control, and leaves the task copy and failure event for
 #   inspection. Raw launch commands and secondmate primaries keep their existing
-#   behavior because neither is a ship/scout supported-adapter launch.
+#   behavior because neither is a ship/scout supported-adapter launch. Rovo is
+#   skipped because Herdr has no rovo integration and live `agent get` returns
+#   agent_not_found for a running rovo pane (docs/verification/rovo.md).
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -3011,7 +3014,7 @@ EOF
     ;;
 esac
 fi
-if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ] \
+if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != rovo ] \
    && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
   HERDR_AGENT_NAME=$(fm_backend_herdr_task_agent_name "$ID") || {
     echo "error: could not derive a valid herdr agent name for task $ID" >&2
@@ -4208,7 +4211,8 @@ if [ "$BACKEND" = herdr ] && [ -n "${HERDR_AGENT_NAME:-}" ]; then
   if ! fm_backend_herdr_name_agent "$T" "$HERDR_AGENT_NAME"; then
     printf 'failed: herdr agent naming did not verify for %s in exact pane %s\n' \
       "$HERDR_AGENT_NAME" "$T" >> "$STATE/$ID.status"
-    echo "error: spawn stopped because herdr agent naming did not verify; inspect window $T and local copy $WT" >&2
+    echo "error: spawn stopped because herdr agent naming did not verify; closing window $T and keeping local copy $WT" >&2
+    rovo_endpoint_cleanup
     exit 1
   fi
 fi
