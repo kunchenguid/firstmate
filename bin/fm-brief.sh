@@ -514,10 +514,11 @@ $INBOX_SECTION
 Run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree only when THIS task has something to record in project memory: it produced durable project-intrinsic knowledge, or the task itself is about this project's agent instruction files.
 An existing or missing \`AGENTS.md\` or \`CLAUDE.md\` is never a trigger on its own.
 The helper renames, rewrites, and adds instruction files, so running it for an unrelated task lands an agent-memory restructure in a PR about something else.
-Never run it against firstmate's own repo root, where \`AGENTS.md\` is the supervisor contract rather than project memory.
+Never run it against firstmate's own repo root, where \`AGENTS.md\` is the supervisor contract rather than project memory; knowledge general to every firstmate user belongs in that repo's shared tracked surface instead.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
 EOF

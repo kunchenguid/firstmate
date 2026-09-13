@@ -487,6 +487,10 @@ test_ship_project_memory_is_gated_on_this_task() {
       "mode $mode: project-memory gate no longer admits a task whose own subject is project memory"
     assert_contains "$section" "Never run it against firstmate's own repo root" \
       "mode $mode: project-memory section lost the firstmate supervisor-contract carve-out"
+    assert_contains "$section" "belongs in that repo's shared tracked surface instead" \
+      "mode $mode: firstmate carve-out no longer names where firstmate-repo knowledge belongs"
+    assert_contains "$section" "Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge." \
+      "mode $mode: project-memory section lost the proportionality bar on hand-editing AGENTS.md"
   done
   pass "fm-brief.sh: project-memory helper fires only when the task has something to record"
 }
