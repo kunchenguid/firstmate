@@ -618,7 +618,7 @@ if not claims:
 if len(set(claims.values())) > 1:
     print("fm-fleet: routing dimensions disagree %r; refusing to guess" % (claims,))
     sys.exit(1)
-by = sorted(claims)[0]
+by = [k for k in ("secondmates", "projects", "domains") if k in claims][0]
 print("%s (by %s)" % (claims[by], by))
 PY
     ;;
