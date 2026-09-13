@@ -66,13 +66,13 @@ $ tea pulls ls --repo https://example.com/owner/repo -o simple
 Error: path segment [1] is empty
 ```
 
-Three logins were registered on the verification machine, real production ones plus the throwaway fixture:
+Three logins were registered on the verification machine, two real ones on a private instance plus the throwaway fixture; those two are on a private network and their identifiers stay out of this record, the same way `docs/gitlab-merge-watch.md` withholds identifiers from its private-instance runs:
 
 ```
 $ tea login list --output json
 [
-  { "name": "forgejo", "url": "http://git.hipponix.local:3000", ... },
-  { "name": "forgejo-admin", "url": "http://192.168.2.190:3000", ... },
+  { "name": "forgejo", "url": "<redacted, private instance>", ... },
+  { "name": "forgejo-admin", "url": "<redacted, private instance>", ... },
   { "name": "fm-fixture", "url": "http://localhost:3980", ... }
 ]
 ```
@@ -184,4 +184,4 @@ Standing up a Forgejo Actions runner was out of scope for this pass; the merge g
 ## Registered `tea login`s used
 
 `fm-fixture` (`http://localhost:3980`) was created solely for this verification and removed afterward, along with the fixture instance itself.
-The two pre-existing real logins listed above (`forgejo`, `forgejo-admin`) were read only through `tea login list` to prove the host-matching logic against real data; no pull request on either was read, merged, or otherwise touched.
+The two pre-existing real logins on the private instance (`forgejo`, `forgejo-admin`) were read only through `tea login list` to prove the host-matching logic against real data; no pull request on either was read, merged, or otherwise touched.
