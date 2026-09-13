@@ -11,6 +11,8 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) meta records branch=<custom-prefix> -> the recorded ship branch is
+#       reviewed even when the worktree HEAD has moved off it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -169,8 +171,30 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_recorded_branch_beats_moved_worktree_head() {
+  local case_dir out
+  case_dir=$(make_case recorded-branch)
+  # The task ships on its recorded custom-prefix branch; the worktree's HEAD
+  # has since moved to an unrelated branch and the legacy fm/<id> branch is
+  # gone, so only meta can anchor the diff to the shipped work.
+  git -C "$case_dir/wt" checkout -q -b fix/task-x1
+  printf 'recorded-ship\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "recorded ship work"
+  git -C "$case_dir/wt" checkout -q -b roam main
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  write_task_meta "$case_dir" "branch=fix/task-x1"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+recorded-ship' \
+    "recorded-branch: diff must use the meta-recorded ship branch, not the moved worktree HEAD"
+  pass "fm-review-diff reviews the meta-recorded ship branch even when the worktree HEAD moved off it"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_branch_beats_moved_worktree_head
