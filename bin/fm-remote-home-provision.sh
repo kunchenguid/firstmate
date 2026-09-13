@@ -26,6 +26,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-treehouse-pool-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-pool-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -230,6 +232,7 @@ EOF
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    fm_treehouse_configure_pool_root "$DEST" "$FM_HOME" || die "could not configure treehouse pool root for project $NAME"
     if [ "$MODE" = no-mistakes ]; then
       command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
       (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
