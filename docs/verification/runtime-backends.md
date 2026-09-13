@@ -980,7 +980,7 @@ Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `
 `fm_backend_herdr_send_text_submit` therefore cannot treat native idle as proof of a swallow.
 The portable regressions in `tests/fm-backend-herdr.test.sh` and `tests/fm-composer-lib.test.sh` pin the verdicts: native idle plus a cleared composer is delivery, proven pending plus idle is a swallow, and proven pending plus a generating busy signal is a queued Enter.
 Muse registers no Herdr agent state, so its steers take the same fallback with an unreadable native probe, and the shared classifier's bare `⟩` row is what proves the composer cleared.
-The same guard checks every installed Muse Code through that path; an absent Muse is printed as unverified and an installed Muse must render its reply.
+The same guard checks every installed and credentialed Muse Code through that path; a Muse that is absent, or installed without the credential `fm-spawn` requires, is printed as unverified, and a Muse that runs must reach a live agent process with a cleared composer and then render its reply.
 Refresh the live submit-confirmation proof with:
 
 ```sh
