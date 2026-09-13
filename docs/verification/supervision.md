@@ -550,12 +550,12 @@ The modeless-fs-scope decision below replaced that refusal with a signature fall
 
 The captain decided modeless-fs-scope option C: replace the permission-mode protection above with integrity verification by signature on a filesystem that cannot hold restricted modes, without moving artifacts and without a per-home opt-out.
 `fm_pr_private_file_valid` and its write-side counterpart `fm_pr_secure_file`, both in `bin/fm-pr-lib.sh`, are the single owner every private-artifact call site in the tree routes through (PR-poll artifacts, registered custom checks, condition->action watch specs, and the tool-update and mail-check shims).
-A directory is probed for mode capability with a throwaway file before either function decides which path to take, so a filesystem is only ever treated as incapable on positive proof, never by assumption; a capable directory keeps the exact `chmod`-and-compare behaviour it always had.
+A directory is probed with a throwaway file before either function decides which path to take, and the probe reports incapacity only on positive proof - a probe that was created and then failed to hold the requested mode. A probe that could not be created at all (ENOSPC, a read-only remount) proves nothing and leaves the caller on the strict mode path, so a capable directory keeps the exact `chmod`-and-compare behaviour it always had even while it is transiently unwritable.
 On a proven-incapable directory, `fm_pr_secure_file` writes a keyed sha256 signature sidecar (`<artifact>.fm-sig`) instead of relying on the mode, and `fm_pr_private_file_valid` verifies the artifact's current bytes against that sidecar instead of its mode.
 The key is a per-state-directory secret established on first use; the signature is content-only (not path-bound), so a sidecar travels correctly with the same atomic mktemp-then-rename pattern every call site already used for its mode-capable path.
 This defends against corruption, partial writes, and a writer that does not hold the key; it does not defend against a co-resident actor who can already read every byte in a directory the filesystem cannot restrict; file-mode enforcement could not defend against that actor there either.
 
-Verified with `tests/fm-pr-lib-mode-signature.test.sh` cases folded into `tests/fm-pr-check-security.test.sh` (`test_mode_incapable_device_seals_and_verifies_by_signature`, `test_mode_capable_device_behavior_is_unchanged`), on the same class of real mode-reverting mount as the entry above, reproducing the revert before trusting it:
+Verified with `tests/fm-pr-check-security.test.sh` (`test_mode_incapable_device_seals_and_verifies_by_signature`, `test_mode_capable_device_behavior_is_unchanged`), on the same class of real mode-reverting mount as the entry above, reproducing the revert before trusting it:
 
 ```sh
 bin/fm-test-run.sh tests/fm-pr-check-security.test.sh

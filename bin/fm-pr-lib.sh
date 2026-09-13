@@ -289,8 +289,6 @@ fm_pr_sha256_stdin() {
     shasum -a 256 2>/dev/null | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
     sha256sum 2>/dev/null | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
   else
     return 1
   fi
@@ -300,16 +298,20 @@ fm_pr_sha256_stdin() {
 # case) accept the chmod(2) call without the mode ever sticking, so a single
 # file's reported mode cannot tell "attacker loosened this" apart from
 # "this mount cannot hold restricted modes at all." A throwaway probe written
-# in the SAME directory answers that question directly: only a directory
-# PROVEN incapable falls back to fm_pr_artifact_signature below, so a capable
-# filesystem's mode enforcement is never weakened by a false negative here.
-fm_pr_dir_mode_capable() {
+# in the SAME directory answers that question directly. This reports incapacity
+# only on POSITIVE PROOF - a probe that was created and then failed to hold the
+# requested mode. A probe that could not be created or stat'ed at all (a
+# transient condition on a perfectly capable device: ENOSPC, a read-only
+# remount) proves nothing, so it leaves every caller on the strict mode path it
+# had before this fallback existed rather than funnelling it into a signature
+# path this directory never sealed anything on.
+fm_pr_dir_mode_incapable() {
   local dir=$1 probe got
   probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$probe" 2>/dev/null
   got=$(fm_pr_file_mode "$probe")
   rm -f -- "$probe"
-  [ "$got" = 600 ]
+  [ -n "$got" ] && [ "$got" != 600 ]
 }
 
 # Root secret for fm_pr_artifact_signature, established once per state
@@ -317,14 +319,20 @@ fm_pr_dir_mode_capable() {
 # but callers on an incapable device cannot rely on that mode holding, so its
 # trust rests on the structural checks (regular file, no symlink, one
 # hardlink, same device) rather than on its own mode.
+fm_pr_signing_key_read() {
+  local key_path=$1 device=$2 key
+  [ -f "$key_path" ] && [ ! -L "$key_path" ] || return 1
+  [ "$(fm_pr_file_device "$key_path")" = "$device" ] || return 1
+  [ "$(fm_pr_file_link_count "$key_path")" = 1 ] || return 1
+  key=$(cat "$key_path" 2>/dev/null) || return 1
+  [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$key"
+}
+
 fm_pr_signing_key() {
   local state=$1 device=$2 tmp key
   local key_path=$state/.fm-artifact-signing-key
-  if [ -f "$key_path" ] && [ ! -L "$key_path" ] \
-    && [ "$(fm_pr_file_device "$key_path")" = "$device" ] \
-    && [ "$(fm_pr_file_link_count "$key_path")" = 1 ]; then
-    key=$(cat "$key_path" 2>/dev/null) || return 1
-    [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
+  if key=$(fm_pr_signing_key_read "$key_path" "$device"); then
     printf '%s' "$key"
     return 0
   fi
@@ -342,12 +350,11 @@ fm_pr_signing_key() {
   # A concurrent caller may have won the race to create the key file; either
   # way, re-read whatever is on disk now rather than trust the key generated
   # in this call, so every reader of this state directory converges on one key.
+  # The re-read runs the same structural checks as the first read, so a name
+  # pre-created by someone else is refused here exactly as it was above.
   mv -n -- "$tmp" "$key_path" 2>/dev/null
   rm -f -- "$tmp"
-  [ -f "$key_path" ] && [ ! -L "$key_path" ] || return 1
-  key=$(cat "$key_path" 2>/dev/null) || return 1
-  [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
-  printf '%s' "$key"
+  fm_pr_signing_key_read "$key_path" "$device"
 }
 
 # Keyed digest over the artifact's exact bytes. This is deliberately a keyed
@@ -358,7 +365,7 @@ fm_pr_signing_key() {
 # instant the rename made it real. Content-only signing also means the sidecar
 # just has to travel with a `mv` for a rename to keep validating, with no
 # identity bookkeeping. The only tool guaranteed present is a bare sha256
-# implementation (shasum, sha256sum, or openssl dgst), and this construction
+# implementation (shasum or sha256sum), and this construction
 # needs nothing more than that. It defends against corruption, partial
 # writes, and a writer that does not hold the key - never against a
 # co-resident actor who can already read every byte in a directory the
@@ -378,20 +385,32 @@ fm_pr_artifact_signature() {
 # same point in their write sequence; fm_pr_private_file_valid below is the
 # matching read-side check. Nothing else about the call site's sequence
 # changes, and a mode-capable device behaves exactly as before: this function
-# only takes the signature path once fm_pr_dir_mode_capable has proven mode
+# only takes the signature path once fm_pr_dir_mode_incapable has proven mode
 # enforcement absent. When the caller later renames path to its real
 # destination, it must also rename path.fm-sig alongside it.
 fm_pr_secure_file() {
-  local path=$1 mode=$2 state=$3 device=$4 dir key sig
+  local path=$1 mode=$2 state=$3 device=$4 dir key sig tmp
   dir=$(dirname -- "$path")
-  if fm_pr_dir_mode_capable "$dir"; then
-    chmod "$mode" "$path"
+  if ! fm_pr_dir_mode_incapable "$dir"; then
+    chmod "$mode" "$path" || return 1
     return 0
   fi
   key=$(fm_pr_signing_key "$state" "$device") || return 1
   sig=$(fm_pr_artifact_signature "$key" "$path") || return 1
-  printf '%s\n' "$sig" > "$path.fm-sig" || return 1
-  chmod 0600 "$path.fm-sig" 2>/dev/null
+  # The sidecar is published with the same staged-write-then-rename discipline
+  # every other artifact in this file uses. A bare redirect FOLLOWS a symlink,
+  # and one call site (fm-check-register.sh) names its sidecar predictably, so
+  # on the very filesystem this fallback exists for a co-resident actor could
+  # pre-create that name and have the digest written outside the state
+  # directory; rename(2) onto a validated destination cannot do that.
+  tmp=$(mktemp "$dir/.fm-artifact-sig.XXXXXX") || return 1
+  printf '%s\n' "$sig" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null
+  if ! fm_pr_regular_destination_or_absent "$path.fm-sig" \
+    || ! mv -f -- "$tmp" "$path.fm-sig"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   return 0
 }
 
@@ -406,7 +425,7 @@ fm_pr_private_file_valid() {
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ] || return 1
   dir=$(dirname -- "$path")
-  if fm_pr_dir_mode_capable "$dir"; then
+  if ! fm_pr_dir_mode_incapable "$dir"; then
     [ "$(fm_pr_file_mode "$path")" = "$mode" ]
     return $?
   fi

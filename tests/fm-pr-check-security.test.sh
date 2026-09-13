@@ -2944,6 +2944,36 @@ test_mode_incapable_device_seals_and_verifies_by_signature() {
   pass "a mode-incapable device seals a fresh artifact by signature and still catches tampering"
 }
 
+test_mode_incapable_device_refuses_a_symlinked_sidecar_destination() {
+  local root state device path outside
+  if ! root=$(mode_incapable_dir); then
+    printf 'skip: no filesystem on this host reverts chmod; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    return 0
+  fi
+  state="$root/state"
+  mkdir -p "$state" || fail "could not create $state"
+  device=$(fm_pr_file_device "$state") || fail "could not read state device"
+  path="$state/named-artifact"
+  printf 'content\n' > "$path" || fail "could not write $path"
+
+  # This is the one call site whose sidecar name is predictable
+  # (fm-check-register.sh seals $STATE/<id>.check.sh), on the very filesystem
+  # that cannot deny a co-resident actor the right to pre-create that name.
+  outside="$root/outside-the-state-dir"
+  printf 'untouched\n' > "$outside" || fail "could not write $outside"
+  if ! ln -s "$outside" "$path.fm-sig" 2>/dev/null; then
+    printf 'skip: this mount cannot create symlinks, so the destination attack is unreachable here\n'
+    return 0
+  fi
+
+  fm_pr_secure_file "$path" 600 "$state" "$device" \
+    && fail "fm_pr_secure_file published a sidecar through a symlink"
+  [ "$(cat "$outside")" = untouched ] \
+    || fail "the sidecar write escaped the state directory through a symlink"
+
+  pass "a symlinked sidecar destination is refused instead of written through"
+}
+
 test_mode_capable_device_behavior_is_unchanged() {
   local state device path
   state="$TMP_ROOT/mode-capable/state"
@@ -2970,6 +3000,41 @@ test_mode_capable_device_behavior_is_unchanged() {
     || fail "a correctly-moded artifact on a mode-capable device failed validation"
 
   pass "a mode-capable device keeps its exact mode-only behavior, with no signature sidecar"
+}
+
+test_mode_capable_device_keeps_mode_enforcement_when_it_cannot_be_probed() {
+  local state device path probe
+  state="$TMP_ROOT/mode-capable-unwritable/state"
+  mkdir -p "$state" || fail "could not create $state"
+  device=$(fm_pr_file_device "$state") || fail "could not read state device"
+  path="$state/artifact"
+  printf 'content\n' > "$path" || fail "could not write $path"
+  chmod 600 "$path" || fail "could not chmod $path"
+  if [ "$(fm_pr_file_mode "$path")" != 600 ]; then
+    printf 'skip: TMPDIR on this host does not hold restricted modes, so this control proves nothing\n'
+    return 0
+  fi
+
+  # A capable device whose directory is transiently unwritable (ENOSPC, a
+  # read-only remount) cannot be probed at all. That proves nothing about mode
+  # capability, so validation must stay on the mode path it used before the
+  # signature fallback existed - not demand a sidecar this device never wrote.
+  chmod 500 "$state" || fail "could not make $state unwritable"
+  if probe=$(mktemp "$state/.probe.XXXXXX" 2>/dev/null); then
+    rm -f "$probe"
+    chmod 700 "$state"
+    printf 'skip: this user can still write an unwritable directory, so the probe never fails\n'
+    return 0
+  fi
+
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    || { chmod 700 "$state"; fail "an unprobeable capable device rejected a correctly-moded artifact"; }
+  chmod 644 "$path" || { chmod 700 "$state"; fail "could not loosen $path"; }
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    && { chmod 700 "$state"; fail "an unprobeable capable device accepted a loosened artifact"; }
+  chmod 700 "$state" || fail "could not restore $state"
+
+  pass "a capable device that cannot be probed keeps enforcing modes"
 }
 
 test_parser_matrix
@@ -3013,4 +3078,6 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_mode_incapable_device_seals_and_verifies_by_signature
+test_mode_incapable_device_refuses_a_symlinked_sidecar_destination
 test_mode_capable_device_behavior_is_unchanged
+test_mode_capable_device_keeps_mode_enforcement_when_it_cannot_be_probed

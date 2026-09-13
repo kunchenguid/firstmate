@@ -25,14 +25,7 @@ TRUST="$STATE/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
-if fm_pr_dir_mode_capable "$STATE"; then
-  # Unchanged from before this device gained a signature fallback: the check
-  # must already be mode 700 when this script is asked to trust it, so a
-  # stray or carelessly-permissioned file is refused rather than silently
-  # tightened on its way in.
-  fm_pr_private_file_valid "$CHECK" 700 "$STATE" "$STATE_DEVICE" \
-    || { echo "error: custom check is unavailable" >&2; exit 1; }
-else
+if fm_pr_dir_mode_incapable "$STATE"; then
   # A mode-incapable device cannot express "was already private" at all, so
   # that signal is unavailable here regardless of what this script does; the
   # deliberate act of registering IS the operator's trust decision. Binding to
@@ -40,6 +33,13 @@ else
   # moment such a device seals the check's signature.
   fm_pr_secure_file "$CHECK" 700 "$STATE" "$STATE_DEVICE" \
     || { echo "error: custom check is unavailable" >&2; exit 1; }
+  fm_pr_private_file_valid "$CHECK" 700 "$STATE" "$STATE_DEVICE" \
+    || { echo "error: custom check is unavailable" >&2; exit 1; }
+else
+  # Unchanged from before this device gained a signature fallback: the check
+  # must already be mode 700 when this script is asked to trust it, so a
+  # stray or carelessly-permissioned file is refused rather than silently
+  # tightened on its way in.
   fm_pr_private_file_valid "$CHECK" 700 "$STATE" "$STATE_DEVICE" \
     || { echo "error: custom check is unavailable" >&2; exit 1; }
 fi
