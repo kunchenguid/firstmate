@@ -11,6 +11,7 @@ The command addresses the active home's configured data directory, so the existi
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp as the leading line of the task body, then invokes the underlying tasks-axi hold operation and verifies both records.
+After that verification, an exact match between the held task id and an open keyed decision in the named origin's status stream (or the held task's own stream when no origin is named) appends the `captain-held` transfer immediately, so a running ship does not need the investigation-only `complete` gate to align its two records.
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 Retries of an active hold preserve its hold-set timestamp, while re-holding released work starts a new timestamped lifecycle; a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 

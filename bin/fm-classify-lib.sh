@@ -1799,7 +1799,7 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
+crew_current_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
@@ -1808,9 +1808,25 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in run-step|pane) printf '%s' "$src"; return ;; esac
   fi
   printf 'none'
+}
+
+crew_absorb_class() {  # <id>
+  case "$(crew_current_class "$1")" in
+    run-step|pane) printf 'working' ;;
+    paused)        printf 'paused' ;;
+    *)             printf 'none' ;;
+  esac
+}
+
+# 0 only while the authoritative reader still attributes an actively working
+# pipeline step to this crew. The wedge timer rechecks this at its alarm boundary:
+# a quiet pane is expected while the pipeline owns execution, but a busy pane or
+# an old working: status line alone is not enough to suppress a real wedge.
+crew_has_active_run_step() {  # <id>
+  [ "$(crew_current_class "$1")" = run-step ]
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

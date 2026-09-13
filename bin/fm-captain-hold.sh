@@ -43,6 +43,9 @@
 # question gates over minting a new row. The command records a UTC `Captain
 # hold set:` timestamp in the task body: repeating an active hold preserves the
 # existing timestamp, while re-holding released work starts a new lifecycle.
+# When the held task id exactly matches an open keyed decision in its origin's
+# status stream, `hold` also appends the verified `captain-held` transfer that
+# closes that live copy; the backlog task remains the durable open call.
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
@@ -817,8 +820,30 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
   verify_hold_durable "${resolved%% *}"
 }
 
+# Close the status-stream copy of a decision only when the durable hold's task id
+# is that decision's exact key. A newly created call can name a separate origin;
+# holding work in place uses its own status stream. The guarded append advances
+# the seen cursor only when every prior byte was already announced, so a foreign
+# concurrent append still wakes normally. An append failure leaves the durable
+# hold intact and makes the command fail for an idempotent retry.
+transfer_matching_status_decision() {  # <origin-id> <held-task-id>
+  local origin=$1 id=$2 status_file open key _verb _summary transfer_rc
+  status_file="$STATE/$origin.status"
+  open=$(status_open_decisions "$status_file")
+  [ -n "$open" ] || return 0
+  while IFS=$'\t' read -r key _verb _summary; do
+    [ "$key" = "$id" ] || continue
+    transfer_rc=0
+    fm_wake_status_append_self_announced "$STATE" "$status_file" \
+      "captain-held [key=$key]: tracked by $id" || transfer_rc=$?
+    [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+  done <<EOF
+$open
+EOF
+}
+
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence status_origin
   local existing_hold_kind='' existing_held='' preserve_hold_set=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -907,6 +932,8 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
+  status_origin=${origin:-$id}
+  transfer_matching_status_decision "$status_origin" "$id"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
