@@ -116,6 +116,45 @@ retire_unconsumable_rows_locked() {
     "$FM_WAKE_QUEUE" "$STATE" >&2
 }
 
+# Retire duplicate stale rows only when the backend proves their endpoint is
+# absent and no current task record owns it. This runs before main presentation,
+# so an obsolete endpoint is not presented as an irrecoverable hint forever.
+# The original rows are printed as bounded evidence before the atomic replacement;
+# no task record, status log, lease, report, or captain decision is touched.
+retire_obsolete_stale_rows_locked() {
+  local retired=0 shown=0 tmp epoch sequence kind key payload
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  tmp=$(mktemp "$STATE/.wake-queue.obsolete.XXXXXX") || {
+    printf 'wake drain: obsolete stale-row check could not create a temporary queue; retaining every row\n' >&2
+    return 0
+  }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 0; }
+  while IFS=$(printf '\t') read -r epoch sequence kind key payload; do
+    if [ "$kind" = stale ] && case "$sequence" in ''|*[!0-9]*) false ;; *) true ;; esac \
+      && fm_wake_stale_row_is_obsolete "$key" "$STATE"; then
+      retired=$((retired + 1))
+      if [ "$shown" -lt 20 ]; then
+        printf 'wake drain:   %s\t%s\t%s\t%s\t%s\n' "$epoch" "$sequence" "$kind" "$key" "$payload" >&2
+        shown=$((shown + 1))
+      fi
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$sequence" "$kind" "$key" "$payload" >> "$tmp" || {
+        rm -f -- "$tmp"
+        printf 'wake drain: obsolete stale-row check could not preserve the queue; retaining every row\n' >&2
+        return 0
+      }
+    fi
+  done < "$FM_WAKE_QUEUE"
+  [ "$retired" -gt 0 ] || { rm -f -- "$tmp"; return 0; }
+  if _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE"; then
+    printf 'wake drain: retired %s obsolete stale wake row(s) whose endpoint was absent and had no current task owner\n' "$retired" >&2
+    [ "$retired" -le 20 ] || printf 'wake drain:   ... %s further obsolete row(s) retired\n' "$((retired - 20))" >&2
+  else
+    rm -f -- "$tmp"
+    printf 'wake drain: obsolete stale wake rows could not be retired safely; retaining them for retry\n' >&2
+  fi
+}
+
 # One bounded line naming the rows a live branch grant is holding, so a main
 # drain with nothing of its own never looks like a silently swallowed wake.
 print_branch_held_notice() {
@@ -640,6 +679,7 @@ else
 fi
 DRAIN_LOCK_HELD=true
 reclaim_stale_branch_grant_locked || exit 1
+[ "$ACTOR" != main ] || retire_obsolete_stale_rows_locked
 [ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
