@@ -481,6 +481,13 @@ fm_spawn_verify_worker_started() {
     [ "$i" -ge "$max_polls" ] || sleep "$poll_interval"
   done
 
+  case "$backend:$agent_state" in
+    zellij:unverified|cmux:unverified|orca:unverified)
+      FM_SPAWN_START_FAILURE_REASON="unverified-backend"
+      return 0
+      ;;
+  esac
+
   # Timed out without positive start proof
   pane_out=$(fm_backend_capture "$backend" "$target" 20 "fm-$id" 2>/dev/null || true)
   if [ -z "$pane_out" ] || [ "$pane_out" = "" ]; then

@@ -3458,6 +3458,9 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+if [ "$RELAUNCH" -eq 0 ]; then
+  rm -f "$TURNEND" "$STATE_REAL/$ID.progress"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
