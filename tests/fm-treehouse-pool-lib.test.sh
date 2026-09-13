@@ -80,8 +80,8 @@ warning=$(fm_treehouse_configure_pool_root "$TMP_ROOT/home-a/projects/owned" "$T
 [ "$(cat "$TMP_ROOT/home-a/projects/owned/treehouse.toml")" = 'root = "/srv/owned"' ] \
   || fail "fm_treehouse_configure_pool_root overwrote a project-owned treehouse.toml"
 case "$warning" in
-  *owned*"refused until reconciled"*) : ;;
-  *) fail "fm_treehouse_configure_pool_root did not name the project whose pool config it left alone: $warning" ;;
+  *"owned"*"treehouse.toml"*"per-home pool root was not applied"*"may be refused"*) : ;;
+  *) fail "fm_treehouse_configure_pool_root did not name the project and file whose pool config it left alone: $warning" ;;
 esac
 pass "a project-owned treehouse.toml is left untouched with a named warning, not a seed abort"
 

@@ -44,7 +44,7 @@ fm_treehouse_configure_pool_root() {
   local clone=$1 home=$2 toml exclude pool_root
   toml="$clone/treehouse.toml"
   if git -C "$clone" ls-files --error-unmatch treehouse.toml >/dev/null 2>&1; then
-    echo "warning: project $(basename "$clone") keeps its own treehouse pool configuration; its worker spawns will be refused until reconciled" >&2
+    echo "warning: project $(basename "$clone") keeps its own treehouse pool configuration in treehouse.toml, so this home's per-home pool root was not applied; worker spawns from this home may be refused if that configuration resolves to a pool shared with another home. Give that configuration a root unique to this home to avoid the collision." >&2
     return 0
   fi
   pool_root=$(fm_treehouse_pool_root "$home")
