@@ -102,6 +102,10 @@
 #   "ring X every time Y changes", which is what a worker waiting on its own
 #   pipeline needs: that state changes several times per run, and a watch that
 #   died on the first change left every later change to a model turn.
+#   A fire also marks that the next run must see the condition go false before
+#   a true poll counts toward another fire, so a level that stays continuously
+#   true rings the action once and then holds silent instead of refiring on
+#   every reconcile - "every time Y changes" means an actual edge.
 #   Under --repeat, a successful fire releases the single-fire claim, appends one
 #   line to the watch's fire journal (state/when/<source-id>.fires), and emits a
 #   `repeat: continues` outcome. That outcome is silent and non-terminal, so the
@@ -109,12 +113,12 @@
 #   deadline is then measured from the last fire rather than from arming, so it
 #   means "the condition stopped changing" instead of "the watch got old".
 #   Everything else is unchanged: a failed action, a condition error past its
-#   budget, a deadline, a mutated spec or action, and an uncaptured claimed fire
-#   are all still terminal and still wake firstmate with the evidence. The
-#   single-fire claim still makes one fire unrepeatable within its own poll, so
-#   only a fire whose outcome was emitted lets the next one happen. A repeat
-#   action must therefore be safe to run again, which is the standard the
-#   one-shot action already had to meet.
+#   budget, a deadline, a mutated spec or action, an uncaptured claimed fire, and
+#   a failed edge-marker write are all still terminal and still wake firstmate
+#   with the evidence. The single-fire claim still makes one fire unrepeatable
+#   within its own poll, so only a fire whose outcome was emitted lets the next
+#   one happen. A repeat action must therefore be safe to run again, which is
+#   the standard the one-shot action already had to meet.
 #
 # Outcome document (the captured result named by the wake):
 #   when: <source-id>
