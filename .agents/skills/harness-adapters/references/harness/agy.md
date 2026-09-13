@@ -1,70 +1,55 @@
-# Agy (Antigravity CLI)
+# Antigravity CLI
 
-Verified crewmate/scout 2026-08-28 on Antigravity CLI 1.1.22.
-Antigravity CLI is a CREWMATE and SCOUT adapter only.
-`../../../bin/fm-spawn.sh` refuses `--secondmate` on agy, and agy has no supervision protocol under `../../../docs/supervision-protocols/`, so a firstmate primary detected as agy falls back to the `unknown` protocol.
-The refusal rests on stronger evidence than Muse's: agy 1.1.22 has no lifecycle-hook surface at all (`agy plugin`, `agy mcp`, and `agy agents` were each checked), so there is nothing a primary turn-end supervision cycle could be armed on.
+Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
+Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
+`../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
 
 | Fact | Value |
 |---|---|
-| Binary | Executable `agy` resolved from `PATH`; spawning refuses if it does not exist. |
-| Launch | Interactive TUI with the brief delivered through `-i/--prompt-interactive`; agy accepts no positional prompt. |
-| Models | `agy models` lists the account's catalog. Pass bare base names (`gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.1-pro`) plus a separate `--effort`; the listed ids already bake in an effort suffix (`gemini-3.6-flash-medium`), and passing `--effort` alongside one of those is rejected as a conflict. `--effort` is unsupported outright on the `claude-*` and `gpt-oss-*` catalog entries, so firstmate omits it there. |
-| Busy | Its own per-conversation SQLite step table, bound by the per-task `--log-file`. A pull source with no writer, like Muse's session log and Cursor's transcript. |
-| Exit | `/exit` |
-| Interrupt | Single Escape or single Ctrl+C; the composer is left clean and needs no follow-up clear key, and the cancelled step settles to the ordinary finished status. |
-| Skill | None usable. An unmatched slash command is intercepted client-side and never reaches the model; use natural language. |
-| Autonomy | `--dangerously-skip-permissions`, which suppresses BOTH edit and shell-command approvals. `--mode accept-edits` covers edits only and stalls on every new shell command. |
-| Trust | Exact-path workspace trust that NO flag suppresses; firstmate pre-writes the grant. See below. |
-| Slash submission | The popup swallows the first Enter, and an unmatched command is dropped entirely rather than submitted as text. |
-| Marker | `ANTIGRAVITY_AGENT=1` on child/tool processes; ancestry matches the exact process name `agy`. |
-| Composer | The `separated` shape: content between two dim-gray horizontal rules, with a bright-blue `>` prompt glyph and no idle ghost or placeholder text. |
-| Effort | `--effort <low\|medium\|high>`, conditional on the model; see the Models row above for the suffix conflict. Verified 2026-08-28 on Antigravity CLI 1.1.22: the ceiling is `high`, `xhigh` and `max` are rejected explicitly, so firstmate omits them. |
+| Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
+| Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
+| Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
+| Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
+| Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
+| Exit | `/quit`, one Enter; the process exits. |
+| Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
+| Skill | No verified slash-skill form; use natural language. |
+| Autonomy | `--dangerously-skip-permissions` auto-approves tool calls for the run. |
+| Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
+| Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
+| Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
+| Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
+| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
-## Trust is exact-path and must be pre-established on every worktree
+## Trust, and where the decision persists
 
-agy gates a workspace behind a trust dialog whose matching is EXACT, not by prefix: launching in a fresh subdirectory of an already-trusted parent still raises it.
-Every new task worktree therefore hits it, every time, and no CLI flag suppresses it - `--dangerously-skip-permissions` covers tool approvals only and leaves this dialog untouched.
-`../../../bin/fm-spawn.sh` handles it by writing the exact worktree path into the `trustedWorkspaces` array of `~/.gemini/antigravity-cli/settings.json` BEFORE the pane is created, because agy reads that array at startup.
+Every task worktree is a path agy has never seen, so an unregistered launch stops on `Do you trust the contents of this project?` with the safe choice `Yes, I trust this folder` preselected, and an unanswered dialog sends the turn into agy's scratch directory instead of the worktree.
+There is no launch flag that suppresses the dialog, but agy honours a `trustedWorkspaces` entry in the captain's own `~/.gemini/antigravity-cli/settings.json` written ahead of launch (verified live), so `../../../../../bin/fm-spawn.sh` pre-registers the worktree through `../../../../../bin/fm-agy-trust.sh` before launch, the claude shape: the helper refuses anything but a linked worktree of the spawning project, records both the logical pane path and its resolved form because agy compares the logical cwd, and preserves every other key in the store.
+The post-launch readiness gate is the backstop: it answers a dialog that renders anyway with a single Enter, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success, and on a path that was not pre-registered it never counts a busy verdict as ready until the dialog has been answered, because Herdr's native verdict can precede the dialog.
+A pane whose brief cannot be confirmed to run in the worktree fails the spawn, records the failure in the task status, and closes the endpoint.
+Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.
 
-That file is the captain's own live settings, shared with their interactive use, so the write only ever appends, never reorders or removes an entry, refuses outright rather than rewriting a file that is not valid JSON, and replaces atomically under a firstmate-owned lock.
-The path is stored verbatim rather than canonicalized: agy normalizes redundant separators but does NOT resolve symlinks, and the grant and the pane's working directory both come from the same recorded worktree, so canonicalizing one side would break a symlinked worktree.
-Trust grants are retired at teardown: `../../../bin/fm-teardown.sh` reclaims the `trustedWorkspaces` entry so a torn-down worktree path does not stay trusted for whatever later recreates that path.
+## Credential precondition
 
-## Busy state is the conversation database, not the screen
+A verified agy worker ran under a signed-in Google account with no key export and no dialog.
+The unauthenticated failure mode was not observed, so treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
 
-agy persists one SQLite database per conversation under `~/.gemini/antigravity-cli/conversations/<id>.db`, whose `steps` table carries a `status` that is 3 exactly when that step has finished.
-The busy predicate is "ANY row is not status 3", never "the highest-idx row is not status 3".
-Those are not equivalent: a step that finishes AFTER the enclosing step that owns a running shell command leaves a settled row at the highest idx while the turn is still in flight, so the last-row form reads a FALSE IDLE mid-turn.
-An interrupted step settles to 3 as well, so cancelling a turn leaves no permanent non-3 row that would pin the fold at busy; the only non-3 values observed are 2 and 8, both meaning a step is running.
-`../../../bin/fm-busy-lib.sh` owns the fold and the two read-only open modes it needs.
+## Detection
 
-The binding is by LOG FILE.
-`fm-spawn` gives each task its own `--log-file`, removes any predecessor's copy first, and agy writes a `Created conversation <id>` line into it.
-Do not bind by grepping the database blobs for the worktree path: that path appears only because agy happens to mention its cwd in first-turn reasoning, which nothing guarantees.
-Pre-assigning the id does not work either - `--conversation <unknown-id>` warns `not found` and mints a fresh id anyway, and a pre-set `ANTIGRAVITY_CONVERSATION_ID` in the launch environment is ignored.
+Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
+No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
+agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
 
-agy's rendered `esc to cancel` footer is a DELIVERY guard only and could not be a state source: agy auto-promotes a long shell command to its own background-task tracker and restores the idle footer while that turn is still running.
+## Worker busy state and turn end
 
-## Interrupt does not kill a backgrounded shell command
+`../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
+`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
+Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
-Escape and Ctrl+C both cancel agy's current model turn on a single press.
-Neither kills a shell command agy has already promoted to its background-task tracker: the command runs to completion and agy resumes reporting on it afterwards.
-A hard stop of in-flight shell work needs the pane or process tree killed, which is `exit` or `relaunch`, not the interrupt key.
+## Primary integration
 
-## Resume and eager reading
-
-`--continue`/`-c` and `--conversation <id>` both genuinely restore prior conversation state.
-`relaunch` remains the deterministic path for every adapter, because the brief on disk is the durable instruction.
-
-agy treats project instructions as live orders: on its first turn, unprompted, it read this repo's `AGENTS.md` and ran `../../../bin/fm-session-start.sh` on its own initiative.
-A crewmate brief for an agy worker in a firstmate checkout should say plainly that the worker is a crewmate and must not run primary-session commands.
-
-## Secondmate refusal
-
-`fm_control_harness_supports_kind` refuses agy for a secondmate before any stop is attempted, the same pre-stop guard Muse uses, so `fm-control relaunch <secondmate> --harness agy` is refused before the running secondmate is stopped rather than after.
-`../../../bin/fm-spawn.sh`'s secondmate positional arm also recognizes agy explicitly rather than falling to the catch-all, which previously misreported the refusal as "not a valid firstmate home".
-
-Refresh every fact above with `FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh` after an agy upgrade.
+Unsupported and unverified.
+`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
+`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.

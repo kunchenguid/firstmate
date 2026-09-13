@@ -1203,6 +1203,99 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
+# config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
+# must both produce today's launch byte-for-byte, `auto` swaps only the
+# permission flag, and any other token refuses before endpoint or metadata.
+claude_expected_launch() {  # <home> <id> <permission-flag>
+  local home=$1 id=$2 flag=$3
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+}
+
+test_claude_permission_mode_bypass_matches_absent_launch() {
+  local rec id out status launch expected
+  id=permmode-bypass-z19
+  rec=$(make_spawn_case permmode-bypass claude "$id")
+  read_case_record "$rec"
+  printf 'bypass\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-permission-mode=bypass should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  [ "$launch" = "$expected" ] || fail "explicit bypass did not reproduce the absent-file launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "config/claude-permission-mode=bypass launches exactly as an absent file does"
+}
+
+test_claude_permission_mode_auto_swaps_only_the_permission_flag() {
+  local rec id out status launch expected
+  id=permmode-auto-z20
+  rec=$(make_spawn_case permmode-auto claude "$id")
+  read_case_record "$rec"
+  # Surrounding whitespace is trimmed, so an editor's trailing newline or indent is fine.
+  printf '  auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-permission-mode=auto should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "auto spawn did not report claude"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" '--permission-mode auto')
+  [ "$launch" = "$expected" ] || fail "auto changed more than the permission flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" "auto launch must not request bypass mode"
+  pass "config/claude-permission-mode=auto replaces --dangerously-skip-permissions with --permission-mode auto"
+}
+
+test_claude_permission_mode_auto_reaches_scout_launch() {
+  local rec id out status launch
+  id=permmode-scout-z21
+  rec=$(make_spawn_case permmode-scout claude "$id")
+  read_case_record "$rec"
+  printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with claude-permission-mode=auto should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --permission-mode auto --settings" "scout launch did not carry --permission-mode auto"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
+  pass "config/claude-permission-mode=auto reaches scout launches too"
+}
+
+test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=permmode-invalid-z22
+  rec=$(make_spawn_case permmode-invalid claude "$id")
+  read_case_record "$rec"
+  printf 'yolo\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unrecognized claude-permission-mode token must refuse the spawn"
+  assert_contains "$out" "config/claude-permission-mode holds 'yolo'" "refusal must name the file and the offending token"
+  assert_contains "$out" "bypass" "refusal must list bypass as an accepted value"
+  assert_contains "$out" "--permission-mode auto" "refusal must list auto as an accepted value"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an invalid permission mode must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "an unrecognized config/claude-permission-mode token refuses before any endpoint or metadata"
+}
+
+test_non_claude_harness_ignores_claude_permission_mode() {
+  local rec id out status launch
+  id=permmode-codex-z23
+  rec=$(make_spawn_case permmode-codex codex "$id")
+  read_case_record "$rec"
+  printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "codex spawn under claude-permission-mode=auto should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex " "codex launch did not run codex"
+  assert_not_contains "$launch" "--permission-mode" "the claude permission flag must not leak into a codex launch"
+  pass "config/claude-permission-mode changes claude launches only"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1236,6 +1329,11 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
+test_claude_permission_mode_bypass_matches_absent_launch
+test_claude_permission_mode_auto_swaps_only_the_permission_flag
+test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
+test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy

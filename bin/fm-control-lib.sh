@@ -36,8 +36,7 @@
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
-# exit, opencode and agy resume the most recent session for the cwd with
-# --continue (agy also accepts an explicit --conversation <id>),
+# exit, opencode resumes the most recent session for the cwd with --continue,
 # and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract
 # at all. `relaunch` covers the same need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
@@ -75,13 +74,15 @@ fm_control_harness_supported() {  # <harness>
 # harness= that way), which is why the spawn adapters match `claude*`, `muse*`,
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
-# `omp` is exact because an `omp*` prefix would claim unrelated commands, and an
+# `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
+# is exact for the same reason on an even shorter name, and an
 # unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
+    agy) printf 'agy' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -91,20 +92,16 @@ fm_control_harness_family() {  # <recorded-harness>
     gemini*) printf 'gemini' ;;
     muse*) printf 'muse' ;;
     rovo*) printf 'rovo' ;;
-    agy*) printf 'agy' ;;
     *) return 1 ;;
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, and agy are
-# crewmate/scout adapters only: none has a primary supervision protocol,
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, and agy
+# are crewmate/scout adapters only: none has a primary supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
-# been stopped. Every adapter fm-spawn refuses for a kind must therefore be
-# listed here too: a name missing from this case passes the pre-stop gate, the
-# running agent is stopped, and only then does the launch owner refuse - which
-# leaves the task down with no agent at all.
+# been stopped.
 fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
@@ -119,19 +116,11 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # gemini names its own key in the running turn's status row
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,
-# 202609.1.2). omp (Oh My Pi) shares Pi's single Escape, empty composer
+# 202609.1.2). agy cancels on a single Escape, printing the Interrupted row
+# with an idle composer and no repollution (verified live, agy 1.2.0 through
+# Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
 # through Herdr).
-#
-# agy accepts either a single Escape or a single Ctrl+C, both verified to stop a
-# foreground turn and leave a clean composer, so it takes the fleet default.
-# It carries one caveat this plane cannot fix with a key: agy auto-promotes a
-# long shell command to its own background-task tracker, and NEITHER key kills
-# that already-backgrounded child - the command runs to completion and agy
-# resumes reporting on it afterwards (verified live, agy 1.1.22). `interrupt`
-# therefore cancels agy's current turn, exactly as its name says, and a hard
-# stop of in-flight shell work still needs the pane or process tree killed,
-# which is `exit` or `relaunch`, not this key.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy) printf 'Escape' ;;
@@ -189,8 +178,8 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo|agy) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini) printf '/quit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -261,15 +250,6 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
-    agy)
-      # agy installs no hook either: agy 1.1.22 exposes no lifecycle-hook
-      # surface at all, so its busy source is its own conversation database,
-      # bound to the pane by these two firstmate-owned artifacts. A relaunch
-      # ONTO agy rewrites them, and a relaunch AWAY from agy must retire them so
-      # no retired incarnation's conversation binding outlives the agent.
-      printf '%s\n' "$state/$id.agy-session"
-      printf '%s\n' "$state/$id.agy-log"
-      ;;
   esac
 }
 

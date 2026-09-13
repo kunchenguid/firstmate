@@ -17,7 +17,7 @@ The router owns Muse's task-kind boundary.
 | Resume | `muse resume --last` or `muse resume <session-uuid>`; bare `muse resume` opens a picker. |
 | Autonomy | `--yolo` disables approval and sandbox and trusts the workspace. |
 | Trust | Dialog `Do you trust this workspace?`, choice `1 Trust and continue` preselected for Enter; `--yolo` suppresses it, which fresh task paths require. |
-| Marker | None; detect anchored `muse-bin-*` ancestry after clearing foreign primary markers, while `MUSE_CURRENT_SESSION_LOG` is a path rather than identity and its export to tools is unverified. |
+| Marker | None; identity comes from anchored `muse-bin-*` ancestry, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding, while `MUSE_CURRENT_SESSION_LOG` is a path rather than identity and its export to tools is unverified. |
 | Composer | Bordered `⟩`, truecolor `38;2;90;160;255`, luminance about 149.9 and narrowly above ghost threshold 128; typed text is `38;2;204;211;219`, about 209.8, with no observed placeholder or ghost. |
 | Effort | `--reasoning-effort`, default `high`, accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra`; shared values expose low through xhigh, explicit captain `max` maps to `ultra`, and `none` or `minimal` remain unreachable. |
 

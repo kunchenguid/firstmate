@@ -73,6 +73,17 @@ FM_BACKLOG_ROW_HOLD_KIND=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
+# Bounded execution is fm-timeout-lib.sh's alone; source it rather than
+# re-deriving a deadline here. It is stateless, so the memoisation reason this
+# library does not source fm-tasks-axi-lib.sh does not apply.
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+
+# Latched when a row read hits its bound. fm_backlog_row_show runs inside a
+# command substitution, so the subshell can READ this latch but cannot set it;
+# the callers that capture its status own the write.
+FM_BACKLOG_ROW_SHOW_WEDGED=0
+
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
 # curated PATH (tests/fm-teardown.test.sh make_path_without_lsof pins that set)
@@ -382,22 +393,64 @@ fm_tasks_axi() {
   exit 127
 }
 
-# Print one row's `tasks-axi show` output (plus stderr); the exit status is
-# tasks-axi's. Extra flags (such as --full) are passed through.
+# Print one row's `tasks-axi show` output (plus stderr) from the addressing
+# fm_backlog_tasks_axi_addressing resolved, with `--file` only for the markdown
+# backend. Addressing or backend-resolution errors return before tasks-axi runs;
+# otherwise its exit status is preserved. Extra flags (--full) pass through.
+#
+# Every read is bounded, because a wedged backend read here is what blinds a
+# whole session start: bin/fm-bootstrap.sh's reconcile and close-replay sweeps
+# call this once per item, and one unbounded read consumes the entire
+# FM_SESSION_START_TIMEOUT and truncates the digest before the wake queue,
+# supervision instructions, fleet state and context sections ever print. The
+# bound turns that into a loud partial reconcile: the caller reports the item it
+# could not read and moves to the next one.
+#
+# A per-item bound alone is not enough on a home carrying a large fleet, because
+# N wedged items still cost N bounds and the digest is truncated anyway. So the
+# first bound hit latches FM_BACKLOG_ROW_SHOW_WEDGED and every later read in the
+# same sweep returns immediately, still naming its own item so nothing is
+# silently skipped. This function only READS that latch: it runs inside a
+# command substitution, and a write here would die with the subshell, so the
+# callers that capture its status set it. The latch is deliberately
+# process-wide because these scripts are short-lived and a backend that wedged
+# once will wedge again within the same run.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 addressing_status
+  local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   shift 2
+  # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
+  # such as 00 is still zero, so the digits test alone would let the very read
+  # this bound exists to prevent back in. Compare arithmetically, tolerating a
+  # value too large for the shell to compare at all.
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
   fm_backlog_tasks_axi_addressing "$data"
   addressing_status=$?
   if [ "$addressing_status" -ne 0 ]; then
     [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
     return "$addressing_status"
   fi
-  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
-  else
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
+  if [ "$FM_BACKLOG_ROW_SHOW_WEDGED" = 1 ]; then
+    printf 'tasks-axi show %s skipped: the backlog backend already exceeded its %ss read bound\n' "$id" "$secs"
+    return 124
   fi
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    set -- "$@" --file "$FM_BACKLOG_AXI_FILE"
+  fi
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+    _ "$FM_BACKLOG_AXI_ROOT" "$id" "$@" 2>&1)
+  status=$?
+  # A backend that wrote a header or a progress line before wedging leaves that
+  # fragment as the first output line, and every caller reads the first line as
+  # the failure reason. Whatever a timed-out read managed to emit is incomplete
+  # by definition, so the bound speaks for it instead.
+  if [ "$status" -eq 124 ]; then
+    printf 'tasks-axi show %s exceeded its %ss backlog read bound\n' "$id" "$secs"
+  else
+    printf '%s\n' "$out"
+  fi
+  return "$status"
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
@@ -436,6 +489,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   fi
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
       FM_BACKLOG_ROW_RESULT=not_found
@@ -559,6 +613,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   if [ -n "$deliverable" ]; then
     out=$(fm_backlog_row_show "$data" "$id" --full)
     command_status=$?
+    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
     if [ "$command_status" -ne 0 ]; then
       FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
       [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \

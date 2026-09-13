@@ -21,6 +21,9 @@
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
 #   spend_max_concurrent_workers: <n>
+#   merge_grants: - |            task ids that may merge while this record exists
+#     - <task-id>                (empty is `merge_grants: -`; a missing field on
+#     ...                        a pre-field v1 record reads as an empty list)
 #   confirmed: <UTC ISO 8601>
 #   confirmed_epoch: <seconds>
 #   words: | or |-                 the captain's words, verbatim, never edited,
@@ -82,12 +85,14 @@
 # Usage:
 #   fm-afk-contract.sh propose [--words-file <path> | --words <text>]
 #       [--action <verb> --object <text> --when <text> [--stop <text>]]...
-#       [--expected-return <UTC ISO 8601>] [--spend <n>]
+#       [--expected-return <UTC ISO 8601>] [--spend <n>] [--grant <task-id>]...
 #     Compile and write the proposal, then print the read-back. Exit 0 with every
 #     clause accepted, 3 when at least one clause was refused (the read-back names
 #     the missing part), and 2 on a usage error. --words-file keeps the file's
 #     bytes verbatim, trailing newlines included. A refused clause remains in the
-#     proposal so the captain can restate it before saying go.
+#     proposal so the captain can restate it before saying go. Repeatable --grant
+#     records captain-named task ids that may merge-when-green while the record
+#     exists; invalid or duplicate ids are a usage error, never a refused clause.
 #   fm-afk-contract.sh confirm
 #     Promote the proposal into the record with the confirmed timestamp and
 #     print the entry announcement. A proposal is required when no confirmed
@@ -103,12 +108,31 @@
 #     (`\\`, `\t`, `\r`, and `\n`) so every record remains one row per clause;
 #     a literal `-` is `\x2d` to distinguish it from the empty-stop marker.
 #   fm-afk-contract.sh refused [--proposal | --path <record>]   TSV: id text missing
+#   fm-afk-contract.sh grants [--proposal | --path <record>]    one task id per line
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
 #
-# Sourceable: with the BASH_SOURCE guard, other scripts get the path and
-# presence helpers (fm_afk_contract_path, fm_afk_contract_present,
-# fm_afk_contract_proposal_path, fm_afk_contract_archive_dir) without running main.
+# CROSS-SUBSYSTEM LOCK (state/.afk-contract.lock; this script is its one owner).
+# This record is authority another subsystem reads and then ACTS on outside this
+# script: bin/fm-pr-merge.sh reads the merge grants and afterwards hands a merge
+# to the forge. A publication, replacement, or archive landing between that read
+# and the forge handoff would land a merge on authority that no longer holds, so
+# the two subsystems share one lock instead of each locking its own records: the
+# record-mutating subcommands (confirm, archive) hold it across their mutation,
+# and a reader that acts on the record holds it across both its read and that
+# action (fm_afk_contract_lock_hold / fm_afk_contract_lock_release). The
+# read-only subcommands never take it, so a holder can still read the record it
+# locked. Neither side ever proceeds without it: the acquire is bounded, and a
+# bound that is hit refuses and names the live holder rather than racing. That
+# fixed bound is 120 seconds, sized so only a genuinely wedged holder trips it.
+# A lock left by a killed process is reclaimed
+# by the ordinary stale-owner recovery in bin/fm-wake-lib.sh, which owns the lock
+# primitive itself.
+#
+# Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
+# and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
+# fm_afk_contract_proposal_path, fm_afk_contract_archive_dir,
+# fm_afk_contract_lock_hold, fm_afk_contract_lock_release) without running main.
 set -u
 
 FM_AFK_CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,6 +147,10 @@ FM_AFK_CONTRACT_VERSION=1
 FM_AFK_CONTRACT_VERBS="merge land prerelease install rerun dispatch abort-run answer discard wake-me"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
+# Generous against the longest legitimate holder, a merge waiting on the forge,
+# so the bound only ever trips on something genuinely wedged.
+_FM_AFK_CONTRACT_LOCK_TIMEOUT=120
+FM_AFK_CONTRACT_LOCK_HELD=
 
 fm_afk_contract_path() {  # [state-dir]
   printf '%s/.afk-contract' "${1:-$FM_AFK_CONTRACT_STATE}"
@@ -138,6 +166,54 @@ fm_afk_contract_archive_dir() {  # [state-dir]
 
 fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
+}
+
+fm_afk_contract_lock_path() {  # [state-dir]
+  printf '%s/.afk-contract.lock' "${1:-$FM_AFK_CONTRACT_STATE}"
+}
+
+# Lazily reach the lock primitive. bin/fm-wake-lib.sh is a canonical lint root
+# in its own right, so keep this an analysis boundary for the same reason
+# bin/fm-lease-lib.sh's fm_lease_lock_helpers does.
+fm_afk_contract_lock_helpers() {
+  command -v fm_lock_acquire_wait_bounded >/dev/null 2>&1 && return 0
+  # shellcheck source=/dev/null
+  . "$FM_AFK_CONTRACT_DIR/fm-wake-lib.sh"
+}
+
+# fm_afk_contract_lock_hold [state-dir]: take the cross-subsystem lock described
+# in the header. The acquire is bounded so a wedged holder is refused instead of
+# blocking a merge or a captain return forever, and returns 1 WITHOUT the lock so
+# every caller refuses rather than proceeding unlocked.
+fm_afk_contract_lock_hold() {  # [state-dir]
+  local lock rc=0 STATE timeout
+  STATE=${1:-$FM_AFK_CONTRACT_STATE}
+  lock=$(fm_afk_contract_lock_path "$STATE")
+  timeout=${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}
+  fm_afk_contract_lock_helpers || {
+    fm_afk_contract_log "could not load the lock primitive for $lock"
+    return 1
+  }
+  fm_lock_acquire_wait_bounded "$lock" "$timeout" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      fm_afk_contract_log "the away-posture record is locked by live process $FM_LOCK_HELD_PID (an in-flight merge, or another change to this record); nothing was changed"
+    else
+      fm_afk_contract_log "could not take the away-posture record lock at $lock; nothing was changed"
+    fi
+    return 1
+  fi
+  FM_AFK_CONTRACT_LOCK_HELD=$lock
+}
+
+# Release the lock taken by fm_afk_contract_lock_hold. Idempotent, so callers can
+# invoke it unconditionally from their own cleanup.
+fm_afk_contract_lock_release() {
+  local lock=$FM_AFK_CONTRACT_LOCK_HELD
+  [ -n "$lock" ] || return 0
+  FM_AFK_CONTRACT_LOCK_HELD=
+  fm_afk_contract_lock_helpers || return 1
+  fm_lock_release "$lock"
 }
 
 fm_afk_contract_log() { printf 'fm-afk-contract: %s\n' "$*" >&2; }
@@ -160,6 +236,15 @@ fm_afk_contract_action() {  # <text>
 
 fm_afk_contract_blank() {  # <text>
   [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]
+}
+
+# Same alphabet as fm_pr_task_id_valid / fm_task_id_path_safe in bin/fm-pr-lib.sh.
+# Kept local so sourcing this file cannot reset that library's parse globals.
+fm_afk_contract_grant_id_valid() {  # <id>
+  local LC_ALL=C id=${1-}
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
 }
 
 fm_afk_contract_escape() {  # <text>
@@ -266,9 +351,10 @@ fm_afk_contract_validate_iso() {  # <ts>
 
 # Compile every input into a record body on stdout (everything except the
 # confirmed fields). Inputs: WORDS (verbatim), the parallel clause field arrays
-# CLAUSE_ACTIONS CLAUSE_OBJECTS CLAUSE_WHENS CLAUSE_STOPS, EXPECTED_RETURN, SPEND.
+# CLAUSE_ACTIONS CLAUSE_OBJECTS CLAUSE_WHENS CLAUSE_STOPS, EXPECTED_RETURN,
+# SPEND, MERGE_GRANTS.
 fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
-  local entered=$1 entered_epoch=$2 ordinal=0 i as_given
+  local entered=$1 entered_epoch=$2 ordinal=0 i as_given grant
   local accepted_block="" refused_block=""
   i=0
   while [ "$i" -lt "${#CLAUSE_ACTIONS[@]}" ]; do
@@ -303,6 +389,14 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
   printf 'reach_channels: none\n'
   printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
+  if [ "${#MERGE_GRANTS[@]}" -eq 0 ]; then
+    printf 'merge_grants: -\n'
+  else
+    printf 'merge_grants:\n'
+    for grant in "${MERGE_GRANTS[@]}"; do
+      printf '  - %s\n' "$grant"
+    done
+  fi
   if [ -n "$WORDS" ]; then
     local words_body=$WORDS words_indicator='|-'
     case "$words_body" in
@@ -366,6 +460,52 @@ fm_afk_contract_read_words() {  # <path>
         printf "%s", lines[i]
         if (i < count || keep_final) printf "\n"
       }
+    }
+  ' "$path"
+}
+
+# One granted task id per line. A missing merge_grants field is an empty list
+# so a pre-field v1 record fails closed for non-yolo merges instead of skipping
+# the grant check. A present but unreadable field fails rather than guessing.
+fm_afk_contract_read_grants() {  # <path>
+  local path=$1
+  [ -f "$path" ] || return 1
+  awk -v record="$path" '
+    function die(reason) {
+      printf "fm-afk-contract: record %s has an invalid merge_grants field: %s\n", record, reason > "/dev/stderr"
+      bad = 1
+      exit 2
+    }
+    function valid_id(value) {
+      if (value == "" || substr(value, 1, 1) == ".") return 0
+      return value ~ /^[A-Za-z0-9._-]+$/
+    }
+    /^merge_grants:/ {
+      if (found) die("the field is defined more than once")
+      found = 1
+      if ($0 == "merge_grants: -") { empty = 1; next }
+      if ($0 == "merge_grants:") { inlist = 1; next }
+      die("the empty form is merge_grants: -")
+    }
+    inlist && /^  - / {
+      id = substr($0, 5)
+      if (!valid_id(id)) die("task id \"" id "\" is not a valid task id")
+      if (seen[id]++) die("task id \"" id "\" is listed more than once")
+      print id
+      count++
+      next
+    }
+    inlist && /^[^ ]/ {
+      if (count == 0) die("the list form has no stored ids")
+      inlist = 0
+      next
+    }
+    empty && /^[^ ]/ { empty = 0; next }
+    inlist || empty { die("a stored grant line is malformed") }
+    END {
+      if (bad) exit 2
+      if (!found) exit 0
+      if (inlist && count == 0) die("the list form has no stored ids")
     }
   ' "$path"
 }
@@ -466,6 +606,10 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
   words_header=$(sed -n '/^words: /{p;q;}' "$path")
   case "$words_header" in 'words: -'|'words: |'|'words: |-') ;; *) fm_afk_contract_log "record $path has no valid words field"; return 1 ;; esac
   fm_afk_contract_read_words "$path" >/dev/null || return 1
+  fm_afk_contract_read_grants "$path" >/dev/null || {
+    fm_afk_contract_log "record $path has no valid merge_grants field"
+    return 1
+  }
   if [ "$require_confirmed" -eq 1 ]; then
     confirmed=$(fm_afk_contract_read_field "$path" confirmed)
     fm_afk_contract_validate_iso "$confirmed" || { fm_afk_contract_log "record $path has no valid confirmed time"; return 1; }
@@ -526,13 +670,22 @@ EOF
 # --- rendering --------------------------------------------------------------
 
 fm_afk_contract_render_readback() {  # <path> <title>
-  local path=$1 title=$2 words count id action object when stop text missing expected spend flag
+  local path=$1 title=$2 words count id action object when stop text missing expected spend flag grants grant_list
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
+  grants=$(fm_afk_contract_read_grants "$path") || return 1
+  grant_list=
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    grant_list="${grant_list:+$grant_list, }$id"
+  done <<EOF
+$grants
+EOF
   printf '%s\n' "$title"
   printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
   printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
   printf '  spend cap: %s concurrent workers\n' "$spend"
+  printf '  merge when green (task ids): %s\n' "${grant_list:-(none)}"
   printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
   words=$(fm_afk_contract_read_words "$path"; printf x)
   words=${words%x}
@@ -601,10 +754,11 @@ fm_afk_contract_render_announcement() {  # <path>
 
 # --- subcommands ------------------------------------------------------------
 
-fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, EXPECTED_RETURN, SPEND
-  local words_file='' open=-1
+fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, EXPECTED_RETURN, SPEND, MERGE_GRANTS
+  local words_file='' open=-1 grant
   WORDS=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT
   CLAUSE_ACTIONS=(); CLAUSE_OBJECTS=(); CLAUSE_WHENS=(); CLAUSE_STOPS=(); CLAUSE_STOP_GIVENS=()
+  MERGE_GRANTS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --words-file)
@@ -642,6 +796,23 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, 
         case "$2" in ''|*[!0-9]*|0) fm_afk_contract_log "--spend must be a positive integer, got '$2'"; return 2 ;; esac
         SPEND=$2
         shift 2 ;;
+      --grant)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log '--grant requires a task id'; return 2; }
+        fm_afk_contract_grant_id_valid "$2" || {
+          fm_afk_contract_log "--grant must be a valid task id, got '$2'"
+          return 2
+        }
+        for grant in "${MERGE_GRANTS[@]+"${MERGE_GRANTS[@]}"}"; do
+          [ "$grant" != "$2" ] || {
+            fm_afk_contract_log "--grant lists '$2' more than once"
+            return 2
+          }
+        done
+        MERGE_GRANTS+=("$2")
+        shift 2 ;;
+      --grant=*)
+        fm_afk_contract_log '--grant takes a separate task-id argument'
+        return 2 ;;
       *)
         fm_afk_contract_log "unknown option '$1'"
         return 2 ;;
@@ -773,13 +944,28 @@ fm_afk_contract_select_path() {  # <args...> -> prints the record path chosen by
   printf '%s' "$path"
 }
 
+# The record-mutating subcommands run inside the cross-subsystem lock, so no
+# publication, replacement, or archive can land between another subsystem's
+# authority read and the action it takes on that authority.
+fm_afk_contract_locked_cmd() {  # <command> [args...]
+  local rc=0
+  fm_afk_contract_lock_hold || return 1
+  trap 'fm_afk_contract_lock_release || true' EXIT
+  "$@" || rc=$?
+  trap - EXIT
+  fm_afk_contract_lock_release || true
+  return "$rc"
+}
+
 fm_afk_contract_main() {
   local cmd=${1:-} path
   [ -n "$cmd" ] || { fm_afk_contract_usage >&2; return 2; }
   shift
   case "$cmd" in
     propose) fm_afk_contract_cmd_propose "$@" ;;
-    confirm) [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }; fm_afk_contract_cmd_confirm ;;
+    confirm)
+      [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }
+      fm_afk_contract_locked_cmd fm_afk_contract_cmd_confirm ;;
     readback)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
@@ -812,7 +998,11 @@ fm_afk_contract_main() {
     refused)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_read_list "$path" refused ;;
-    archive) fm_afk_contract_cmd_archive ;;
+    grants)
+      path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
+      [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
+      fm_afk_contract_read_grants "$path" ;;
+    archive) fm_afk_contract_locked_cmd fm_afk_contract_cmd_archive ;;
     archived)
       [ "$#" -eq 1 ] || { fm_afk_contract_usage >&2; return 2; }
       path="$(fm_afk_contract_archive_dir)/$1.afk-contract"
