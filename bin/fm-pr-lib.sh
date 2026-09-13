@@ -116,7 +116,11 @@ fm_task_id_creation_valid() {
 # GitHub's own host and never a GitLab instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
 # would otherwise be armed as a GitLab watch that can never succeed.
-fm_pr_gitlab_host_valid() {
+#
+# Forgejo (and Gitea) serve self-hosted instances the same way, so the same
+# rule - and the same anti-spoofing refusal of github.com - applies to
+# fm_pr_forgejo_host_valid below.
+fm_pr_dns_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
@@ -132,6 +136,10 @@ fm_pr_gitlab_host_valid() {
       -*|*-) return 1 ;;
     esac
   done
+}
+
+fm_pr_gitlab_host_valid() {
+  fm_pr_dns_host_valid "${1-}"
 }
 
 # A GitLab project path is group[/subgroup...]/project, so at least two
@@ -156,27 +164,8 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Forgejo (and Gitea) serve self-hosted instances like GitLab, so the host is
-# part of the identity here too. The rule is otherwise identical to GitLab's:
-# a lowercase DNS name with no userinfo, port, or trailing dot, and never
-# github.com, which is refused for the same anti-spoofing reason
-# fm_pr_gitlab_host_valid refuses it.
 fm_pr_forgejo_host_valid() {
-  local host=${1-} label
-  local LC_ALL=C
-  local -a labels
-  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
-  case "$host" in
-    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
-  esac
-  IFS=. read -ra labels <<< "$host"
-  for label in "${labels[@]}"; do
-    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
-    case "$label" in
-      -*|*-) return 1 ;;
-    esac
-  done
+  fm_pr_dns_host_valid "${1-}"
 }
 
 # Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
