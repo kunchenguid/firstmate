@@ -19,6 +19,19 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
+## Effort: `max` is accepted on 0.151.0
+
+Verified 2026-09-05 on codex-cli **0.151.0** by live probe:
+
+    codex exec --model gpt-5.6-luna -c 'model_reasoning_effort="max"' "reply with exactly: MAXOK"
+    -> MAXOK (30,096 tokens, hook: Stop Completed)
+
+The table row above records the 0.142.1 catalog, which omitted `max`. That is no longer
+current: `max` IS accepted on 0.151.0, and the operator's own `~/.codex/config.toml`
+already sets `model_reasoning_effort = "max"` without error. Pass `max` through to codex
+rather than capping at `xhigh`; capping silently DELIVERS LESS reasoning than requested,
+because fm-spawn omits the flag entirely for an unaccepted value.
+
 ## Skill popup
 
 A `$<skill>` invocation opens a `$` autocomplete popup.
