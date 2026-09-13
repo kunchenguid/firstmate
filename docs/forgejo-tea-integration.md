@@ -71,9 +71,27 @@ Three logins were registered on the verification machine, two real ones on a pri
 ```
 $ tea login list --output json
 [
-  { "name": "forgejo", "url": "<redacted, private instance>", ... },
-  { "name": "forgejo-admin", "url": "<redacted, private instance>", ... },
-  { "name": "fm-fixture", "url": "http://localhost:3980", ... }
+  {
+    "name": "forgejo",
+    "url": "<redacted, private instance>",
+    "ssh_host": "<redacted, private instance>",
+    "user": "",
+    "default": "true"
+  },
+  {
+    "name": "forgejo-admin",
+    "url": "<redacted, private instance>",
+    "ssh_host": "<redacted, private instance>",
+    "user": "",
+    "default": "false"
+  },
+  {
+    "name": "fm-fixture",
+    "url": "http://localhost:3980",
+    "ssh_host": "localhost",
+    "user": "",
+    "default": "false"
+  }
 ]
 ```
 
