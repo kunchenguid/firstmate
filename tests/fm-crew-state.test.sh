@@ -1506,6 +1506,26 @@ test_no_run_herdr_unreadable_agent_status_stays_unknown() {
   pass "an unreadable Herdr agent status remains fail-closed"
 }
 
+test_no_run_herdr_done_agent_status_is_not_crew_done() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr done agent-status fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-codex-status-done)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-codex-done
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-codex-done.meta" "window=default:w1:p2" \
+    "worktree=$d/wt" "kind=ship" "backend=herdr" "harness=codex"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=done
+  FM_FAKE_HERDR_PROCESS=agent
+  local out; out=$(run_crew_state "$d" feat-herdr-codex-done)
+  assert_contains "$out" "state: unknown" "a completed Herdr turn without a task outcome stays unknown"
+  assert_not_contains "$out" "state: done" "Herdr done does not become crew done"
+  assert_not_contains "$out" "source: herdr-agent-status" "Herdr done does not become a terminal state source"
+  pass "Herdr agent_status=done remains activity evidence, not a crew outcome"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -2577,6 +2597,7 @@ test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_codex_uses_agent_status_fallback
 test_no_run_herdr_unreadable_agent_status_stays_unknown
+test_no_run_herdr_done_agent_status_is_not_crew_done
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

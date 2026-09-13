@@ -262,10 +262,10 @@ crew_busy_verdict() {  # <target>
 # a current-state source after harness-specific busy telemetry has no answer.
 # The recovery-grade classifier must first prove the registered agent is still
 # backed by a live process, so a stale `working` registration cannot hide a
-# dead worker. Prints <state>\t<agent_status> for statuses that map to this
-# helper's state vocabulary, or nothing for an unreadable, unsupported, idle,
-# or agent-free result. The raw read is delegated to the adapter's existing
-# agent-status owner; this helper does not issue a parallel Herdr query shape.
+# dead worker. Prints <state>\t<agent_status> for a live working agent, or
+# nothing for an unreadable, unsupported, idle, or agent-free result. The raw
+# read is delegated to the adapter's existing agent-status owner; this helper
+# does not issue a parallel Herdr query shape.
 herdr_agent_status_fallback() {
   local agent_state raw
   [ "$TASK_BACKEND" = herdr ] || return 0
@@ -274,10 +274,8 @@ herdr_agent_status_fallback() {
   fm_backend_herdr_parse_target "$BACKEND_TARGET" || return 0
   raw=$(fm_backend_herdr_agent_status_raw \
     "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
-  case "$raw" in
-    working|done) printf '%s\t%s' "$raw" "$raw" ;;
-    blocked) printf 'parked\t%s' "$raw" ;;
-  esac
+  [ "$raw" = working ] || return 0
+  printf 'working\t%s' "$raw"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -870,11 +868,7 @@ if [ "$KIND" != secondmate ]; then
           HERDR_STATUS_STATE=$(herdr_agent_status_fallback)
           if [ -n "$HERDR_STATUS_STATE" ]; then
             HERDR_STATUS=${HERDR_STATUS_STATE#*$'\t'}
-            case "${HERDR_STATUS_STATE%%$'\t'*}" in
-              working|done|parked)
-                emit "${HERDR_STATUS_STATE%%$'\t'*}" herdr-agent-status "agent_status=$HERDR_STATUS"
-                ;;
-            esac
+            emit working herdr-agent-status "agent_status=$HERDR_STATUS"
           fi
           ;;
       esac
