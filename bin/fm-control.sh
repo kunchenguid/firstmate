@@ -317,25 +317,18 @@ if [ ! -f "$META" ]; then
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
 fi
 
-# The control lock is the lifetime authority for the lifecycle action. Take the
-# metadata lock only for the final generation precondition, then release it so
-# relaunch can publish its replacement record through fm-spawn.sh without lock
-# inversion or send starvation. Spawn, relaunch, and teardown all honor the
-# control lock before publishing metadata.
-CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || die "could not resolve task metadata lock for $ID"
-fm_lock_acquire_wait "$CONTROL_META_LOCK" \
-  || die "task $ID metadata could not be locked for generation validation"
-CONTROL_META_LOCK_HELD=1
 if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
+  CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || die "could not resolve task metadata lock for $ID"
+  fm_lock_acquire_wait "$CONTROL_META_LOCK" \
+    || die "task $ID metadata could not be locked for generation validation"
+  CONTROL_META_LOCK_HELD=1
   CONTROL_SPAWN_GEN=$(fm_backend_meta_exact_value "$META" spawn_gen 2>/dev/null || true)
-else
-  CONTROL_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
+  if ! fm_command_guard_check_optional control spawn-generation "$CONTROL_SPAWN_GEN"; then
+    die "task $ID's current spawn generation does not match FM_CONTROL_EXPECTED_SPAWN_GEN; refusing before lifecycle action"
+  fi
+  fm_lock_release "$CONTROL_META_LOCK"
+  CONTROL_META_LOCK_HELD=0
 fi
-if ! fm_command_guard_check_optional control spawn-generation "$CONTROL_SPAWN_GEN"; then
-  die "task $ID's current spawn generation does not match FM_CONTROL_EXPECTED_SPAWN_GEN; refusing before lifecycle action"
-fi
-fm_lock_release "$CONTROL_META_LOCK"
-CONTROL_META_LOCK_HELD=0
 
 # A remotely placed secondmate records its endpoint on ANOTHER host, so every
 # postcondition this plane verifies - the agent-state classification, the busy

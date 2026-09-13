@@ -62,6 +62,21 @@ new_home() {
   printf '%s\n' "$dir"
 }
 
+state_snapshot() {
+  local dir=$1 path
+  for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    printf '%s\n' "${path##*/}"
+  done | sort
+}
+
+replace_file() {
+  local file=$1 expression=$2 tmp
+  tmp=$(mktemp "${file}.XXXXXX")
+  sed "$expression" "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
 write_send_meta() {
   local dir=$1
   cat > "$dir/home/state/t1.meta" <<EOF
@@ -83,7 +98,7 @@ test_probe_protocol() {
   local dir out rc before after
   dir=$(new_home probe)
   write_send_meta "$dir"
-  before=$(find "$dir/home/state" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  before=$(state_snapshot "$dir/home/state")
   out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json); rc=$?
   expect_code 0 "$rc" "send capability probe should succeed"
   [ "$out" = '{"schema":"fm-command-guard-proof.v1","command":"send","verified":true,"guards":["spawn-generation","endpoint","remote-host"]}' ] \
@@ -92,7 +107,7 @@ test_probe_protocol() {
   expect_code 0 "$rc" "control capability probe should succeed"
   [ "$out" = '{"schema":"fm-command-guard-proof.v1","command":"control","verified":true,"guards":["spawn-generation"]}' ] \
     || fail "control proof has the wrong exact shape: $out"
-  after=$(find "$dir/home/state" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  after=$(state_snapshot "$dir/home/state")
   [ "$before" = "$after" ] || fail "the probe created state: before=<$before> after=<$after>"
 
   dir=$(new_home probe-empty)
@@ -180,6 +195,32 @@ test_send_typed_path_guard() {
   pass "fm-send guards: typed task selectors are guarded and explicit targets stay outside the proof"
 }
 
+test_unguarded_typed_send_avoids_metadata_lock() {
+  local dir lock marker release holder rc i
+  dir=$(new_home send-unguarded); write_send_meta "$dir"; : > "$dir/send.log"
+  lock="$dir/home/state/.meta-t1.lock"; marker="$dir/locked"; release="$dir/release"
+  bash -c '
+    . "$1"
+    fm_task_inbox_lock_acquire "$2" || exit 91
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.02; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$marker" "$release" &
+  holder=$!
+  i=0
+  while [ ! -e "$marker" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$marker" ] || fail "unguarded typed lock holder did not start"
+  rc=0
+  run_send "$dir" env FM_TASK_INBOX_LOCK_WAIT_SECS=0 \
+    "$SEND" t1 /ordinary-command >/dev/null 2>"$dir/err" || rc=$?
+  : > "$release"
+  wait "$holder" || fail "unguarded typed lock holder failed"
+  expect_code 0 "$rc" "an unguarded typed send must not acquire the metadata lock"
+  assert_contains "$(cat "$dir/send.log")" "/ordinary-command" \
+    "an unguarded typed send did not reach the backend"
+  pass "fm-send guards: unset guards preserve the unguarded typed path"
+}
+
 test_generation_races_refuse_after_snapshot() {
   local dir lock marker release holder sender rc i
   dir=$(new_home send-race); write_send_meta "$dir"; : > "$dir/send.log"
@@ -200,7 +241,7 @@ test_generation_races_refuse_after_snapshot() {
     "$SEND" t1 "race steer" >"$dir/out" 2>"$dir/err" &
   sender=$!
   sleep 0.1
-  sed -i 's/^window=.*/window=sess:fm-t2/; s/^spawn_gen=.*/spawn_gen=gen-2/' "$dir/home/state/t1.meta"
+  replace_file "$dir/home/state/t1.meta" 's/^window=.*/window=sess:fm-t2/; s/^spawn_gen=.*/spawn_gen=gen-2/'
   : > "$release"
   wait "$sender" || rc=$?
   wait "$holder" || fail "send race lock holder failed"
@@ -233,7 +274,7 @@ EOF
     "$CONTROL" t1 interrupt >"$dir/out" 2>"$dir/err" &
   sender=$!
   sleep 0.1
-  sed -i 's/^spawn_gen=.*/spawn_gen=gen-2/' "$dir/home/state/t1.meta"
+  replace_file "$dir/home/state/t1.meta" 's/^spawn_gen=.*/spawn_gen=gen-2/'
   : > "$release"
   wait "$sender" || rc=$?
   wait "$holder" || fail "control race lock holder failed"
@@ -257,7 +298,7 @@ EOF
   [ "$rc" -ne 0 ] || fail "a stale control generation was accepted"
   [ ! -s "$dir/send.log" ] || fail "stale control generation sent lifecycle bytes"
 
-  sed -i '/^spawn_gen=/d' "$dir/home/state/t1.meta"
+  replace_file "$dir/home/state/t1.meta" '/^spawn_gen=/d'
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_GUARD_SEND_LOG="$dir/send.log" FM_CONTROL_EXPECTED_SPAWN_GEN=gen-1 \
     "$CONTROL" t1 interrupt 2>&1); rc=$?
@@ -269,5 +310,6 @@ EOF
 test_probe_protocol
 test_send_generation_and_endpoint_guards
 test_send_typed_path_guard
+test_unguarded_typed_send_avoids_metadata_lock
 test_generation_races_refuse_after_snapshot
 test_control_generation_guard

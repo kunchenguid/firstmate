@@ -149,9 +149,11 @@
 # FM_SEND_EXPECTED_ENDPOINT, or FM_SEND_EXPECTED_REMOTE_HOST to require that
 # sampled identity to still match during the final locked task-selector
 # validation; unset or empty guards do not change ordinary sends. The exact
-# --guard-capabilities --json probe advertises all three guards for owned task
-# selectors, including typed local sends. Explicit backend-target sends name an
-# endpoint outside this home's task ledger and are excluded from that proof.
+# --guard-capabilities --json probe advertises all three guards for owned local
+# task selectors, including typed local sends. Remote task selectors are outside
+# the advertised spawn-generation and endpoint proof boundary in v1. Explicit
+# backend-target sends name an endpoint outside this home's task ledger and are
+# excluded from that proof.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -468,9 +470,12 @@ fm_send_task_selector_validate_locked() {
   fi
   current_remote_host=$(fm_meta_get "$TARGET_META" remote_host)
   [ "$current_id" = "${TARGET_TASK_ID:-$current_id}" ] || return 1
-  [ -n "$current_target" ] || return 1
+  if [ "$TARGET_BACKEND" != remote ] || [ -n "${FM_SEND_EXPECTED_ENDPOINT:-}" ]; then
+    [ -n "$current_target" ] || return 1
+  fi
   if [ "$TARGET_BACKEND" = remote ]; then
     [ -n "$current_remote_host" ] || return 1
+    [ "$current_remote_host" = "$TARGET_REMOTE_HOST" ] || return 1
     [ "$current_target" = "$TARGET_REMOTE_TARGET" ] || return 1
   else
     [ -z "$current_remote_host" ] || return 1
@@ -508,18 +513,13 @@ fm_send_cleanup() {
   fm_lease_guard_release || true
   return "$status"
 }
-if [ -n "$TARGET_META" ]; then
-  LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
-  if [ -n "$LEASE_GUARD_TASK" ]; then
-    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
-    trap 'fm_send_cleanup' EXIT
-  fi
-fi
-if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ]; then
-  SEND_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+fm_send_lock_task_selector() {
+  [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ] || return 0
+  [ "$SEND_META_LOCK_HELD" = 1 ] && return 0
+  SEND_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || return 1
   if ! fm_task_inbox_lock_acquire "$SEND_META_LOCK"; then
     echo "error: steer not sent: task metadata could not be locked for final guard validation" >&2
-    exit 1
+    return 1
   fi
   SEND_META_LOCK_HELD=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -529,8 +529,22 @@ if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ]; then
     else
       echo "error: steer not sent to $TARGET_TASK_ID: the task retired or changed endpoint during target resolution" >&2
     fi
-    exit 1
+    return 1
   fi
+  return 0
+}
+if [ -n "$TARGET_META" ]; then
+  LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$LEASE_GUARD_TASK" ]; then
+    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    trap 'fm_send_cleanup' EXIT
+  fi
+fi
+if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ] \
+  && { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
+    || [ -n "${FM_SEND_EXPECTED_ENDPOINT:-}" ] \
+    || [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ]; }; then
+  fm_send_lock_task_selector || exit 1
 fi
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
@@ -810,6 +824,7 @@ if [ "${1:-}" = "--key" ]; then
   fi
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
+  fm_send_release_task_guard
 else
   MESSAGE=$*
   if [ "$TARGET_BACKEND" = remote ]; then
@@ -824,6 +839,22 @@ else
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
+  if [ -n "$TARGET_SELECTOR" ]; then
+    if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$TARGET_BACKEND" = remote ]; then
+      INBOX_PLANE=1
+    else
+      case "$RESOLVE_ANSWER_TEXT" in
+        /*) INBOX_PLANE=0 ;;
+        \$*) [ "$TARGET_HARNESS" = codex ] && INBOX_PLANE=0 || INBOX_PLANE=1 ;;
+        *) INBOX_PLANE=1 ;;
+      esac
+    fi
+  else
+    INBOX_PLANE=0
+  fi
+  if [ "$INBOX_PLANE" = 1 ]; then
+    fm_send_lock_task_selector || exit 1
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
     fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
     MESSAGE="${FM_FROMFIRST_MARK}delivery=${FIRE_AND_FORGET_ID} ${MESSAGE#"$FM_FROMFIRST_MARK"}"
@@ -875,32 +906,6 @@ else
       exit 1
     fi
   fi
-  # Data-plane selection (see the header): text addressed to a task selector
-  # resolved through this home's metadata rides the inbox plane, unless it is
-  # a LOCAL harness-native invocation that must reach the harness's own parser
-  # - a leading "/" (slash command), or a leading "$" to a codex target (skill
-  # invocation). A remote secondmate selector always rides the inbox: its
-  # requests are marked, and a marked request reaches the harness as
-  # marker-prefixed chat rather than a parser command anyway, so no remote
-  # text has a typed plane to lose. An explicit backend target stays typed
-  # even when it happens to match local metadata: it names an endpoint, not a
-  # task, the same boundary that keeps it unmarked and outside --resolve-key.
-  # Classification reads the pre-marker text so a marked secondmate request
-  # and a plain crewmate steer classify identically. It deliberately does NOT
-  # promise that a marked parser-native secondmate request executes as a parser
-  # command: the pre-existing marker-first wire bytes are retained in stage 1.
-  INBOX_PLANE=0
-  if [ -n "$TARGET_SELECTOR" ]; then
-    if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$TARGET_BACKEND" = remote ]; then
-      INBOX_PLANE=1
-    else
-      case "$RESOLVE_ANSWER_TEXT" in
-        /*) ;;
-        \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
-        *) INBOX_PLANE=1 ;;
-      esac
-    fi
-  fi
   if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
     # Remote inbox leg: the message becomes a durable record in the remote
     # home's steering inbox, written idempotently by the host-local leg, then
@@ -912,23 +917,6 @@ else
     # (default 30, overridable) so a busy remote queue cannot hold this send
     # open indefinitely; a bound hit exits through the same
     # unconfirmed-delivery contract.
-    CURRENT_REMOTE_ID=$(fm_send_id_from_meta "$TARGET_META")
-    CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
-    CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-    CURRENT_REMOTE_TARGET=$(fm_meta_get "$TARGET_META" remote_target)
-    if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
-      || [ "$CURRENT_REMOTE_TARGET" != "$TARGET_REMOTE_TARGET" ] \
-      || [ -z "$CURRENT_REMOTE_HOST" ] \
-      || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ] \
-      || ! fm_command_guard_check_optional send spawn-generation "$CURRENT_REMOTE_SPAWN_GEN" \
-      || ! fm_command_guard_check_optional send endpoint "$CURRENT_REMOTE_TARGET" \
-      || ! fm_command_guard_check_optional send remote-host "$CURRENT_REMOTE_HOST"; then
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
-      exit 1
-    fi
     remote_rc=0
     remote_completion_unknown=0
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
@@ -950,6 +938,7 @@ else
       fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
         fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
     fi
+    fm_send_release_task_guard
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then      if [ -n "$FIRE_AND_FORGET_ID" ]; then
         echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
         exit 3
@@ -1018,6 +1007,17 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
       exit 1
     fi
+    # Ring the doorbell, best-effort: no ring outcome changes the exit status,
+    # because the watcher owns loss detection from here, either through its
+    # bounded re-ring ladder or direct unavailable-endpoint recovery.
+    ring_rc=0
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    case "$ring_rc" in
+      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    esac
+    fm_send_release_task_guard
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
@@ -1047,16 +1047,6 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
-    # Ring the doorbell, best-effort: no ring outcome changes the exit status,
-    # because the watcher owns loss detection from here, either through its
-    # bounded re-ring ladder or direct unavailable-endpoint recovery.
-    ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
-    case "$ring_rc" in
-      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-      3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
-    esac
     exit 0
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
@@ -1100,6 +1090,7 @@ else
   else
     send_rc=$?
   fi
+  fm_send_release_task_guard
   if [ "$send_rc" -ne 0 ]; then
     fm_send_known_undelivered_cleanup || \
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2

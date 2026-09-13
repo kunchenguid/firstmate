@@ -217,6 +217,13 @@ send_env() {  # <fakebin> <parent-home> <ssh-log> [extra env...] -- <cmd...>
     "$@"
 }
 
+replace_file() {
+  local file=$1 expression=$2 tmp
+  tmp=$(mktemp "${file}.XXXXXX")
+  sed "$expression" "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
 test_remote_steer_lands_in_remote_inbox() {
   local dir fb ssh_log home rhome rc err rec recs body pend
   dir="$TMP_ROOT/remote-inbox"; mkdir -p "$dir"
@@ -492,24 +499,6 @@ test_remote_expected_host_revalidates_final_route() {
 
   rc=0
   send_env "$fb" "$home" "$ssh_log" \
-    FM_SEND_EXPECTED_ENDPOINT=fm-remote:p1 \
-    "$SEND" rsm --fire-and-forget 3333333333333333 "matching expected endpoint" \
-    >"$dir/endpoint-match.out" 2>"$dir/endpoint-match.err" || rc=$?
-  expect_code 0 "$rc" "a matching expected remote endpoint must allow delivery"
-  count=$(remote_inbox_records "$rhome" | grep -c . || true)
-  [ "$count" = 2 ] || fail "a matching expected remote endpoint did not deliver exactly once"
-
-  rc=0
-  send_env "$fb" "$home" "$ssh_log" \
-    FM_SEND_EXPECTED_ENDPOINT=stale-remote:p1 \
-    "$SEND" rsm --fire-and-forget 4444444444444444 "stale expected endpoint" \
-    >"$dir/endpoint-mismatch.out" 2>"$dir/endpoint-mismatch.err" || rc=$?
-  [ "$rc" -ne 0 ] || fail "a mismatched expected remote endpoint reported delivery"
-  count=$(remote_inbox_records "$rhome" | grep -c . || true)
-  [ "$count" = 2 ] || fail "a mismatched expected remote endpoint reached the remote inbox"
-
-  rc=0
-  send_env "$fb" "$home" "$ssh_log" \
     FM_SEND_EXPECTED_SPAWN_GEN="" FM_SEND_EXPECTED_REMOTE_HOST=retired-mac \
     "$SEND" rsm --fire-and-forget 2222222222222222 "stale expected host" \
     >"$dir/mismatch.out" 2>"$dir/mismatch.err" || rc=$?
@@ -518,8 +507,25 @@ test_remote_expected_host_revalidates_final_route() {
   assert_contains "$err" "retired or changed route" \
     "a mismatched expected remote host did not report the route replacement: $err"
   count=$(remote_inbox_records "$rhome" | grep -c . || true)
-  [ "$count" = 2 ] || fail "a mismatched expected remote host reached the remote inbox"
-  pass "fm-send remote: expected endpoint and host are enforced by final route validation"
+  [ "$count" = 1 ] || fail "a mismatched expected remote host reached the remote inbox"
+  pass "fm-send remote: expected host is enforced by final route validation"
+}
+
+test_remote_legacy_route_without_target() {
+  local dir fb ssh_log home rhome rc count
+  dir="$TMP_ROOT/remote-legacy-route"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-legacy-route)
+  home=$(setup_remote_parent_home remote-legacy-route "$rhome")
+  replace_file "$home/state/rsm.meta" '/^remote_target=/d'
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "legacy route steer" >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 0 "$rc" "an unguarded legacy remote route without remote_target must remain deliverable"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "the legacy remote route did not deliver exactly once"
+  pass "fm-send remote: unguarded legacy routes without remote_target remain ordinary"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
@@ -810,6 +816,7 @@ test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_expected_host_revalidates_final_route
+test_remote_legacy_route_without_target
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails
