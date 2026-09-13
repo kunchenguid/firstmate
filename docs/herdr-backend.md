@@ -92,8 +92,10 @@ Further attempts remain bounded and repeat only this pane-id operation.
 
 An absent registration, name collision, or mismatched readback stops the spawn instead of leaving a misleading generic name as a reported success.
 The failure event records the expected name and exact pane.
-Firstmate then closes that exact pane, because the harness may already hold its brief and would otherwise keep working with no task record owning it; the Treehouse copy remains available for inspection.
-Fresh provisional metadata and backlog state are not committed on that failure.
+Firstmate then asks Herdr to close that exact pane, because the harness may already hold its brief.
+Only a structured `pane_not_found` response confirms the close and permits rollback of a fresh task record.
+If the close is refused, fails, or cannot be confirmed, Firstmate retains the task record with its exact endpoint metadata and keeps the Treehouse copy for teardown or recovery.
+The backlog transition remains uncommitted on the naming failure.
 Mandatory task-based naming is reserved for ordinary ship and scout dispatch through a verified harness adapter.
 A raw launch command is the verification-only exception: it is the escape hatch for trying an unverified adapter, so Firstmate never renames it and naming never blocks or fails that spawn, and its agent keeps Herdr's default presentation.
 Secondmate-primary launches also keep their existing behavior, in their own per-home workspace.

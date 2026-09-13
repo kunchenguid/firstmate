@@ -4,9 +4,9 @@
 # A token-free Claude stand-in registers through Herdr's documented agent
 # registry, so the real spawn path must rename the exact response-derived pane
 # and prove the alias by reading that pane back. Lab panes use a profile-free
-# shell, and the named pane must still be running the stand-in. A second spawn meets a real
-# session-global name collision and must stop visibly, close its exact pane so
-# the launched agent cannot outlive task control, and keep its Treehouse copy.
+# shell, and the named pane must still be running the stand-in. Naming failures
+# must remove metadata only after a confirmed close and retain it when a close
+# is unconfirmed, so every launched agent remains owned by a durable record.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -93,6 +93,11 @@ set -- "${args[@]}"
 for arg in "$@"; do
   case "$arg" in --session|--session=*) exit 9 ;; esac
 done
+if [ "${FM_TEST_HERDR_SKIP_PANE_CLOSE:-0}" = 1 ] \
+  && [ "${1:-}" = pane ] && [ "${2:-}" = close ]; then
+  printf '%s\n' '{"result":{"type":"pane_closed"}}'
+  exit 0
+fi
 exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
 SH
 chmod +x "$FAKEBIN/herdr"
@@ -134,6 +139,7 @@ spawn_task() {  # <task-id> <polls> <out> <err>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH \
     PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" \
     FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_HERDR_SKIP_PANE_CLOSE="${FM_TEST_HERDR_SKIP_PANE_CLOSE:-0}" \
     FM_HERDR_AGENT_NAME_POLLS="$2" FM_HERDR_AGENT_NAME_INTERVAL=0.1 \
     "$ROOT/bin/fm-spawn.sh" "$1" "$PROJECT" --harness claude \
       --mode local-only --yolo off --backend herdr >"$3" 2>"$4"
@@ -188,9 +194,9 @@ assert_contains "$(cat "$HOME_DIR/state/collision-agent.status")" \
   "failed: herdr agent naming did not verify for $COLLISION_NAME in exact pane" \
   'the failed spawn did not preserve an inspectable status event'
 [ ! -e "$HOME_DIR/state/collision-agent.meta" ] \
-  || fail 'a naming failure must not publish authoritative task metadata'
+  || fail 'a naming failure with confirmed pane closure must roll back its task metadata'
 
-FAIL_TARGET=$(sed -n 's/.*closing window \([^ ]*\) and keeping local copy .*/\1/p' "$FAIL_ERR" | tail -1)
+FAIL_TARGET=$(sed -n 's/.*closed window \([^ ]*\) after confirmation.*/\1/p' "$FAIL_ERR" | tail -1)
 FAIL_PANE=${FAIL_TARGET#*:}
 FAIL_WT=$(sed -n 's/.*and keeping local copy \(.*\)$/\1/p' "$FAIL_ERR" | tail -1)
 [ -n "$FAIL_TARGET" ] && [ "$FAIL_PANE" != "$FAIL_TARGET" ] \
@@ -204,10 +210,46 @@ assert_contains "$FAIL_PANE_READ" 'pane_not_found' \
   || fail 'the naming failure removed the task copy instead of preserving it for inspection'
 pass 'real Herdr: an unresolvable name collision stops visibly, closes the exact pane, and keeps the task copy'
 
+# Make the same real collision fail while the shim acknowledges but suppresses
+# the explicit close. The follow-up pane read stays present, so the spawn must
+# retain its published record and exact endpoint identity for recovery.
+write_brief unconfirmed-close-agent
+UNCONFIRMED_NAME=$(derive_name unconfirmed-close-agent)
+lab agent rename "$DECOY_PANE" "$UNCONFIRMED_NAME" >/dev/null \
+  || fail 'could not reserve the deterministic name for the unconfirmed-close case'
+
+UNCONFIRMED_OUT="$TMP_ROOT/unconfirmed.out"; UNCONFIRMED_ERR="$TMP_ROOT/unconfirmed.err"
+if FM_TEST_HERDR_SKIP_PANE_CLOSE=1 \
+  spawn_task unconfirmed-close-agent 2 "$UNCONFIRMED_OUT" "$UNCONFIRMED_ERR"; then
+  fail 'an unconfirmed close after a naming failure must still stop the spawn'
+fi
+UNCONFIRMED_META="$HOME_DIR/state/unconfirmed-close-agent.meta"
+[ -f "$UNCONFIRMED_META" ] \
+  || fail 'an unconfirmed naming-failure close removed the task record that owns the launched agent'
+UNCONFIRMED_TARGET=$(grep '^window=' "$UNCONFIRMED_META" | cut -d= -f2-)
+UNCONFIRMED_PANE=$(grep '^herdr_pane_id=' "$UNCONFIRMED_META" | cut -d= -f2-)
+UNCONFIRMED_WT=$(grep '^worktree=' "$UNCONFIRMED_META" | cut -d= -f2-)
+[ "$UNCONFIRMED_TARGET" = "$HERDR_LAB_SESSION:$UNCONFIRMED_PANE" ] \
+  || fail 'retained metadata does not identify the exact launched Herdr pane'
+[ -n "$UNCONFIRMED_WT" ] && WORKTREES+=("$UNCONFIRMED_WT")
+lab pane get "$UNCONFIRMED_PANE" >/dev/null \
+  || fail 'the unconfirmed-close fixture did not leave the exact launched pane present'
+UNCONFIRMED_PID=$(cat "$STANDIN_MARKERS/$UNCONFIRMED_PANE" 2>/dev/null) \
+  || fail 'the retained task pane never ran the token-free Claude stand-in'
+kill -0 "$UNCONFIRMED_PID" 2>/dev/null \
+  || fail 'the retained task record no longer owns a running stand-in'
+assert_contains "$(cat "$HOME_DIR/state/unconfirmed-close-agent.status")" \
+  'pane closure unconfirmed, task record retained' \
+  'the unconfirmed close did not leave an inspectable recovery status'
+assert_contains "$(cat "$UNCONFIRMED_ERR")" \
+  "task record $UNCONFIRMED_META and local copy $UNCONFIRMED_WT are retained for recovery" \
+  'the unconfirmed close did not report the retained recovery state'
+pass 'real Herdr: an unconfirmed naming-failure close retains the exact task record owning the live pane'
+
 # The failed target never receives the decoy's name, and the already-named
 # sibling stays unchanged. This proves the gate neither selects nor verifies
 # through a mutable name.
-[ "$(lab agent get "$DECOY_PANE" | jq -r '.result.agent.name // empty')" = "$COLLISION_NAME" ] \
+[ "$(lab agent get "$DECOY_PANE" | jq -r '.result.agent.name // empty')" = "$UNCONFIRMED_NAME" ] \
   || fail 'the exact-pane failure path renamed or displaced the decoy agent'
 [ "$(lab agent get "$SUCCESS_PANE" | jq -r '.result.agent.name // empty')" = "$SUCCESS_NAME" ] \
   || fail 'the collision path changed the previously named sibling agent'

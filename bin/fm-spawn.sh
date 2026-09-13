@@ -82,11 +82,13 @@
 #   exception: it stands up that secondmate home's own workspace.
 #   A Herdr ship or scout launched through a verified harness adapter also gets
 #   a deterministic task-based agent name, read back from its exact pane; a
-#   naming failure stops the spawn and closes that exact pane so the launched
-#   agent cannot keep working outside task control. Raw launch commands are
-#   never renamed, and fm_backend_herdr_harness_registers owns the adapter
-#   exclusions. docs/herdr-backend.md "Agent names" owns the name format,
-#   verification, failure handling, and exclusions.
+#   naming failure stops the spawn and asks Herdr to close that exact pane.
+#   Fresh task metadata is rolled back only after the exact pane is confirmed
+#   gone; an unconfirmed close keeps the record that owns the launched agent.
+#   Raw launch commands are never renamed, and
+#   fm_backend_herdr_harness_registers owns the adapter exclusions.
+#   docs/herdr-backend.md "Agent names" owns the name format, verification,
+#   failure handling, and exclusions.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -3207,6 +3209,26 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# Naming runs after the fresh task record is published but before its backlog
+# transition commits. Herdr close is best-effort, so only the adapter's strict
+# structured-presence proof may let the EXIT trap roll that record back.
+# An unconfirmed close keeps the full endpoint record and local copy for
+# ordinary teardown or recovery instead of orphaning a launched agent.
+herdr_naming_failure_cleanup() {
+  rovo_endpoint_cleanup
+  if declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1 \
+     && fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    printf 'failed: herdr agent naming did not verify for %s in exact pane %s; pane closure confirmed\n' \
+      "$HERDR_AGENT_NAME" "$T" >> "$STATE/$ID.status"
+    echo "error: spawn stopped because herdr agent naming did not verify; closed window $T after confirmation and keeping local copy $WT" >&2
+    return 0
+  fi
+  SPAWN_FRESH_COMMIT_PENDING=0
+  printf 'failed: herdr agent naming did not verify for %s in exact pane %s; pane closure unconfirmed, task record retained\n' \
+    "$HERDR_AGENT_NAME" "$T" >> "$STATE/$ID.status"
+  echo "error: spawn stopped because herdr agent naming did not verify; exact pane $T is not confirmed gone, so task record $STATE/$ID.meta and local copy $WT are retained for recovery" >&2
+}
+
 # agy carries its brief on the launch command, so it needs no delivery gate,
 # but a worktree agy does not trust parks the TUI on the folder-trust dialog
 # and an unanswered dialog sends the turn into agy's scratch directory instead
@@ -4204,10 +4226,7 @@ fi
 spawn_send_key "$T" Enter
 if [ "$BACKEND" = herdr ] && [ -n "${HERDR_AGENT_NAME:-}" ]; then
   if ! fm_backend_herdr_name_agent "$T" "$HERDR_AGENT_NAME"; then
-    printf 'failed: herdr agent naming did not verify for %s in exact pane %s\n' \
-      "$HERDR_AGENT_NAME" "$T" >> "$STATE/$ID.status"
-    echo "error: spawn stopped because herdr agent naming did not verify; closing window $T and keeping local copy $WT" >&2
-    rovo_endpoint_cleanup
+    herdr_naming_failure_cleanup
     exit 1
   fi
 fi
