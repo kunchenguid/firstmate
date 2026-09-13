@@ -939,9 +939,10 @@ missing_tool_diagnostic() {
 # Required-tool detection combines the universal toolchain, the provider tools
 # derived from registered project origins, and the resolved backend's delta from
 # fm_backend_required_tools (bin/fm-backend.sh). Thus GitLab-only homes do not
-# require GitHub tooling, inactive backends do not add tools, and a backend value
-# with no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+# require GitHub tooling, inactive backends do not add tools, and an invalid
+# backend or a value with no verified dependency set is reported before the
+# universal checks continue.
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi tasks-axi quota-axi"
 FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
 FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
   [ -n "${_proj_provider:-}" ] || continue
