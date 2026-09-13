@@ -2052,11 +2052,11 @@ for argument in "$@"; do
 done
 case "$*" in
   *"comm="*)
-    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' /usr/local/bin/claude
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' /usr/local/bin/codex
     else printf '%s\n' /bin/bash; fi
     ;;
   *"args="*)
-    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' claude
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' codex
     else printf '%s\n' bash; fi
     ;;
   *"ppid="*) /bin/ps -o ppid= -p "$pid" ;;
@@ -2082,6 +2082,7 @@ SH
 
   # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
 
@@ -2089,8 +2090,10 @@ SH
     "the runtime bound's wrapper processes pushed the harness out of the bounded ancestry walk"
   assert_not_contains "$out" "READ-ONLY SESSION" \
     "a session start eight shells below its harness was wrongly refused the lock"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" \
+    "the deep Codex session acquired the lock but lost its harness attribution"
 
-  pass "the runtime bound leaves enough ancestry headroom for a deeply nested session to take the lock"
+  pass "the runtime bound preserves lock ownership and harness attribution for a deeply nested session"
 }
 
 # --- context re-emit (--reemit) ----------------------------------------------
