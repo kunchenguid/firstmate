@@ -642,11 +642,32 @@ The CLI matrix was checked directly:
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
+| Agent name | `herdr agent rename <pane> <name> --session <name>` followed by `agent get <pane>` | The exact registered pane received the alias, and the readback returned the same pane id and name. A duplicate live alias was rejected without changing either pane. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+Deterministic Firstmate agent naming was refreshed 2026-09-13 on Herdr 0.7.4, protocol 16, through a generated non-default lab session:
+
+```sh
+HERDR_LAB_HELPER=/Users/ezcorps/firstmate/bin/fm-herdr-lab.sh \
+  FM_HERDR_AGENT_NAME_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-herdr-agent-name-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Herdr: a supported-harness spawn receives its deterministic name on the exact new pane
+ok - real Herdr: an unresolvable name collision stops visibly and preserves the exact pane and task copy
+ok - real Herdr: mutable names never select the rename target or disturb a sibling pane
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+The live guard uses a token-free registered Claude stand-in, drives the real `fm-spawn.sh` path, routes every Herdr operation through `fm-herdr-lab.sh`, and relies on the helper's unchanged-default-session tripwire.
+The portable companion cases in `tests/fm-backend-herdr.test.sh` cover format bounds, cross-home and full-task identity, exact-pane mismatch, lost rename responses, invalid names, and failed readback.
 
 ### fm-remote server birth and login-keychain access
 

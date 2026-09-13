@@ -72,6 +72,12 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared per-installation home identity. Herdr's task workspaces are split by
+# home, but agent names share one named-session namespace, so names need the
+# same cross-home discriminator used by the Zellij and cmux adapters.
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-backend-hometag-lib.sh"
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -2924,6 +2930,101 @@ fm_backend_herdr_parse_target() {  # <target>
   FM_BACKEND_HERDR_SESSION=${target%%:*}
   FM_BACKEND_HERDR_PANE=${target#*:}
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
+}
+
+# fm_backend_herdr_task_agent_name: derive the Herdr live-agent name for one
+# validated Firstmate task id.
+#
+# Herdr names are session-global, limited to 32 lowercase ASCII characters,
+# and must begin with a letter. The visible task prefix makes the common case
+# easy to scan, while the 10-hex digest binds the complete task id to the
+# existing per-installation home tag. A hash collision is not adopted: Herdr's
+# uniqueness check makes rename fail, and fm_backend_herdr_name_agent then
+# stops the spawn.
+fm_backend_herdr_task_agent_name() {  # <task-id>
+  local id=$1 readable scope digest
+  [ -n "$id" ] || return 1
+  readable=$(printf '%s' "$id" | LC_ALL=C tr '[:upper:].' '[:lower:]-' \
+    | LC_ALL=C sed 's/[^a-z0-9_-]/-/g')
+  readable=${readable:0:17}
+  [ -n "$readable" ] || readable=task
+  scope="$(fm_backend_hometag)/$id"
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$scope" | shasum -a 256 | awk '{print substr($1,1,10)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$scope" | sha256sum | awk '{print substr($1,1,10)}')
+  else
+    digest=$(printf '%s' "$scope" | cksum | awk '{printf "%010x", $1}')
+    digest=${digest:0:10}
+  fi
+  case "$digest" in
+    ??????????) ;;
+    *) return 1 ;;
+  esac
+  printf 'fm-%s-%s' "$readable" "$digest"
+}
+
+# fm_backend_herdr_name_agent: wait for the agent launched in one exact pane,
+# rename that pane's current registration, and read it back by pane id.
+#
+# A failed rename response is not decisive because the server may have applied
+# the write before the client lost the response. Each attempt therefore reads
+# the exact pane again before retrying. Success requires a complete AgentInfo
+# for that pane and the exact expected name. Mutable names are never used to
+# find or select the target.
+fm_backend_herdr_name_agent() {  # <target> <name>
+  local target=$1 name=$2 polls=${FM_HERDR_AGENT_NAME_POLLS:-120}
+  local interval=${FM_HERDR_AGENT_NAME_INTERVAL:-0.25} attempt=0 out registered=0
+  fm_backend_herdr_parse_target "$target" || return 1
+  case "$name" in
+    [a-z]*) ;;
+    *) echo "error: invalid herdr agent name '$name' for exact pane $target" >&2; return 1 ;;
+  esac
+  case "$name" in
+    *[!a-z0-9_-]*) echo "error: invalid herdr agent name '$name' for exact pane $target" >&2; return 1 ;;
+  esac
+  [ "${#name}" -le 32 ] || {
+    echo "error: herdr agent name '$name' exceeds 32 characters for exact pane $target" >&2
+    return 1
+  }
+  case "$polls" in ''|*[!0-9]*|0) polls=120 ;; esac
+  while [ "$attempt" -lt "$polls" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || out=
+    if printf '%s' "$out" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+      .result.agent.pane_id == $pane
+      and (.result.agent.terminal_id | type) == "string"
+      and (.result.agent.terminal_id | length) > 0
+      and (.result.agent.agent | type) == "string"
+      and (.result.agent.agent | length) > 0
+    ' >/dev/null 2>&1; then
+      registered=1
+      if printf '%s' "$out" | jq -e --arg name "$name" \
+        '.result.agent.name == $name' >/dev/null 2>&1; then
+        return 0
+      fi
+      fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent rename \
+        "$FM_BACKEND_HERDR_PANE" "$name" >/dev/null 2>&1 || true
+      out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || out=
+      if printf '%s' "$out" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" --arg name "$name" '
+        .result.agent.pane_id == $pane
+        and .result.agent.name == $name
+        and (.result.agent.terminal_id | type) == "string"
+        and (.result.agent.terminal_id | length) > 0
+        and (.result.agent.agent | type) == "string"
+        and (.result.agent.agent | length) > 0
+      ' >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$polls" ] || sleep "$interval"
+  done
+  if [ "$registered" -eq 1 ]; then
+    echo "error: herdr agent in exact pane $target did not verify with name '$name' after $polls attempts" >&2
+  else
+    echo "error: herdr did not report a registered agent in exact pane $target after $polls attempts" >&2
+  fi
+  return 1
 }
 
 fm_backend_herdr_target_ready() {  # <target>

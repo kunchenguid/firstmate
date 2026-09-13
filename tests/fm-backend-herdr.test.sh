@@ -339,6 +339,125 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
+# --- task agent names: deterministic identity and exact-pane verification ---
+
+task_agent_name() {  # <root> <home> <task-id>
+  FM_ROOT_OVERRIDE="$1" FM_HOME="$2" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_task_agent_name "$1"
+  ' "$ROOT" "$3"
+}
+
+test_task_agent_name_is_readable_bounded_and_home_scoped() {
+  local root1 root2 home1 home2 task same other_home other_task
+  root1="$TMP_ROOT/name-root-one"; root2="$TMP_ROOT/name-root-two"
+  home1="$TMP_ROOT/name-home-one"; home2="$TMP_ROOT/name-home-two"
+  mkdir -p "$root1" "$root2" "$home1" "$home2"
+  task='Audit.API/V2 With Spaces'
+
+  same=$(task_agent_name "$root1" "$home1" "$task")
+  [ "$same" = "$(task_agent_name "$root1" "$home1" "$task")" ] \
+    || fail 'the same home and complete task id must derive the same Herdr agent name'
+  case "$same" in
+    fm-audit-api-v2-with-??????????) ;;
+    *) fail "task agent name '$same' did not retain the normalized readable prefix and 10-hex scope digest" ;;
+  esac
+  case "$same" in *[!a-z0-9_-]*) fail "task agent name '$same' contains a character Herdr rejects" ;; esac
+  [ "${#same}" -le 32 ] || fail "task agent name '$same' exceeds Herdr's 32-character limit"
+
+  other_home=$(task_agent_name "$root2" "$home2" "$task")
+  [ "$same" != "$other_home" ] \
+    || fail 'the same task id in distinct Firstmate installations must not derive the same Herdr agent name'
+  other_task=$(task_agent_name "$root1" "$home1" 'Audit.API/V2 With Spices')
+  [ "$same" != "$other_task" ] \
+    || fail 'different complete task ids with the same visible prefix must not derive the same Herdr agent name'
+  pass 'task agent names are deterministic, readable, bounded, and scoped by complete task and home identity'
+}
+
+test_name_agent_renames_and_verifies_the_exact_pane() {
+  local dir log resp fb name calls
+  dir="$TMP_ROOT/name-agent-success"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  name='fm-audit-api-v2-0123456789'
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p2","terminal_id":"term-2","agent":"claude","name":null}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p2","terminal_id":"term-2","agent":"claude","name":"fm-audit-api-v2-0123456789"}}}' > "$resp/3.out"
+
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_AGENT_NAME_POLLS=1 FM_HERDR_AGENT_NAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent fmtest:w1:p2 "$1"' "$ROOT" "$name"
+  expect_code 0 $? 'exact-pane Herdr agent naming should succeed after verified readback'
+  calls=$(cat "$log")
+  assert_contains "$calls" $'agent\x1fget\x1fw1:p2\x1f--session\x1ffmtest' \
+    'agent naming did not read the exact response-derived pane in the named session'
+  assert_contains "$calls" $'agent\x1frename\x1fw1:p2\x1f'"$name"$'\x1f--session\x1ffmtest' \
+    'agent naming did not rename the exact response-derived pane in the named session'
+  pass 'agent naming targets the exact pane and accepts only an exact verified readback'
+}
+
+test_name_agent_accepts_verified_readback_after_lost_rename_response() {
+  local dir log resp fb name
+  dir="$TMP_ROOT/name-agent-lost-response"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  name='fm-lost-response-0123456789'
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w2:p3","terminal_id":"term-3","agent":"codex","name":null}}}' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w2:p3","terminal_id":"term-3","agent":"codex","name":"fm-lost-response-0123456789"}}}' > "$resp/3.out"
+
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_AGENT_NAME_POLLS=1 FM_HERDR_AGENT_NAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent fmtest:w2:p3 "$1"' "$ROOT" "$name"
+  expect_code 0 $? 'verified readback should settle a lost rename response without a second blind write'
+  pass 'agent naming safely settles a lost rename response through exact-pane readback'
+}
+
+test_name_agent_refuses_mismatched_pane_without_renaming() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/name-agent-wrong-pane"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w9:p9","terminal_id":"term-9","agent":"claude","name":null}}}' > "$resp/1.out"
+
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_AGENT_NAME_POLLS=1 FM_HERDR_AGENT_NAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent fmtest:w1:p2 fm-task-0123456789' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'a response for another pane must not verify the requested pane'
+  assert_contains "$out" 'did not report a registered agent in exact pane fmtest:w1:p2' \
+    'mismatched-pane refusal did not identify the exact requested pane'
+  assert_not_contains "$(cat "$log")" $'agent\x1frename' \
+    'a mismatched pane response must never authorize a rename'
+  pass 'agent naming refuses mismatched pane identity without issuing a rename'
+}
+
+test_name_agent_refuses_unverified_rename_and_invalid_name() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/name-agent-unverified"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w3:p4","terminal_id":"term-4","agent":"pi","name":null}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"pane_id":"w3:p4","terminal_id":"term-4","agent":"pi","name":null}}}' > "$resp/3.out"
+
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_AGENT_NAME_POLLS=1 FM_HERDR_AGENT_NAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent fmtest:w3:p4 fm-task-0123456789' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'an unverified rename must fail the naming gate'
+  assert_contains "$out" "did not verify with name 'fm-task-0123456789'" \
+    'unverified-rename refusal did not name the missing proof'
+
+  : > "$log"; rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent fmtest:w3:p4 Bad.Name' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'an invalid Herdr agent name must fail before the CLI runs'
+  [ ! -s "$log" ] || fail 'an invalid Herdr agent name must not make any Herdr call'
+  assert_contains "$out" "invalid herdr agent name 'Bad.Name'" \
+    'invalid-name refusal did not report the rejected name'
+  pass 'agent naming fails closed on unverified writes and invalid names'
+}
+
 # --- client selection: a stale client shadowing a compatible one -------------
 #
 # Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
@@ -5179,6 +5298,11 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_task_agent_name_is_readable_bounded_and_home_scoped
+test_name_agent_renames_and_verifies_the_exact_pane
+test_name_agent_accepts_verified_readback_after_lost_rename_response
+test_name_agent_refuses_mismatched_pane_without_renaming
+test_name_agent_refuses_unverified_rename_and_invalid_name
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
