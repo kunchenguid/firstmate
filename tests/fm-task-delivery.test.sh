@@ -790,6 +790,41 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+# A worker never reads brief.md; it is launched with the assembled
+# launch-brief.md, which is the scaffolded brief plus fm_brief_intent_overlay.
+# That overlay explicitly supersedes every earlier instruction about building
+# `--intent`, and the commit-attribution ban is the worker's only lever over the
+# commits the pipeline writes on its branch, so the ban has to survive that
+# supersession in the artifact the worker actually receives.
+test_assembled_launch_brief_carries_the_attribution_ban_into_intent() {
+  local rec home proj fakebin id launch ban overlay_rule
+  rec=$(make_home attribution-overlay)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=delivery-attribution-overlay
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Fix the dispatch boundary." \
+    "Keep the compatibility path."
+  run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off >/dev/null 2>&1
+  launch="$home/data/$id/launch-brief.md"
+  assert_present "$launch" "no-mistakes spawn did not render the assembled launch contract"
+
+  ban=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$launch")
+  printf '%s\n' "$ban" | grep -Eiq "co-author" \
+    || fail "the assembled launch brief lost the commit co-author trailer ban"
+  overlay_rule=$(sed -n '/supersedes every earlier brief instruction about constructing/,/^## Captain intent authorized/p' "$launch")
+  [ -n "$overlay_rule" ] || fail "the assembled launch brief lost its intent overlay"
+  printf '%s\n' "$overlay_rule" | grep -Eiq "commit-attribution ban[^.]*exception|exception[^.]*commit-attribution ban" \
+    || fail "the intent overlay supersedes the attribution ban instead of naming it as the standing exception"
+  printf '%s\n' "$overlay_rule" | grep -Eiq "(never|do not|don't)[^.]*commit-attribution ban" \
+    && fail "the intent overlay names the commit-attribution ban only to exclude it from --intent"
+  pass "fm-spawn.sh: the assembled launch brief carries the attribution ban into --intent"
+}
+
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
@@ -801,4 +836,5 @@ test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
+test_assembled_launch_brief_carries_the_attribution_ban_into_intent
 echo "# all fm-task-delivery tests passed"

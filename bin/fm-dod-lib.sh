@@ -151,6 +151,7 @@ fm_brief_intent_overlay() {  # <captain-intent>
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+The Definition of done's commit-attribution ban is the one standing exception to that supersession: carry it into `--intent` as well, because the pipeline commits on your branch and only you can tell it that rule.
 
 ## Captain intent authorized for --intent
 EOF
