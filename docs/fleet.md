@@ -37,6 +37,7 @@ AutoDev is a temporary migration backstop, not a duplicate orchestration authori
 A manager is one physical FirstMate process holding one `FM_HOME` lease.
 A shard is that manager's bounded portfolio: its scope, SecondMates, projects, and domains.
 The fleet root holds `fleet.json`, the control-plane source of truth for manager registration, ownership, and cross-shard dependencies.
+The fleet root and every manager home live on durable storage (for example `~/.fm-fleet`), never in `/tmp`, because restart recovery depends on leases, heartbeats, and progress surviving process death.
 The fleet root performs no reasoning and relays no routine messages.
 Each manager supervises 2–4 active SecondMates initially, which is an operating range rather than a product limit.
 A fleet with one manager is the supported degenerate case and behaves like today's single FirstMate home.
