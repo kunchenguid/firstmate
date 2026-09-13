@@ -2,7 +2,7 @@
 # firstmate launcher — `firstmate [harness|command] [extra args...]`
 # Canonical copy of ~/.local/bin/firstmate. Starts the primary session from the
 # firstmate home. Does not auto-register projects and does not launch from
-# container directories ($HOME, /, ~/Desktop, ~/Desktop/projects).
+# reserved container directories under the home.
 #
 #   firstmate           -> firstmate opencode (or default)
 #   firstmate codex     -> FM_BACKEND=herdr codex
@@ -62,8 +62,6 @@ is_forbidden_launch_dir() {
   [ "$dir" = "$FM_HOME_DIR" ] && return 1
   case "$dir" in
     "$HOME"|"/"|"$HOME/Desktop"|"$HOME/Desktop/projects"|"$HOME/projects"|"$HOME/workspace")
-      return 0 ;;
-    */projects|*/Projects|*/workspace|*/Workspace)
       return 0 ;;
   esac
   return 1
