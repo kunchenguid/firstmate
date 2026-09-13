@@ -5,9 +5,10 @@
 # a busy-queued Enter can keep proven pending text visible. Muse can also leave
 # the native probe unreadable while a bare U+27E9 composer proves its message
 # landed. A stub cannot prove any of those signals. This guard launches real
-# Claude Code and every runnable Muse Code in an isolated Herdr lab, requiring
-# fm_backend_herdr_send_text_submit to report empty for each landed steer. It
-# fails naming the harness and version rather than degrading quietly.
+# Claude Code, and an installed Muse Code on its echo provider, in an isolated
+# Herdr lab, requiring fm_backend_herdr_send_text_submit to report empty for
+# each landed steer. It fails naming the harness and version rather than
+# degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr, Claude, or
 # Muse upgrade, and before trusting a refreshed
@@ -130,45 +131,48 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 
 # Muse normally has no registered Herdr agent state, so this probes the exact
 # fallback path that once reported a false unconfirmed send despite a visible
-# Muse turn. The runnable-harness rule is deliberate: a Muse that fm-spawn
-# itself would refuse to launch here is reported rather than fabricated as a
-# pass, while a Muse that it would launch must prove its current renderer and
-# send behavior before it can be trusted.
+# Muse turn. The installed-harness rule is deliberate: an absent Muse is
+# reported rather than fabricated as a pass, while an installed Muse must prove
+# its current renderer and send behavior before it can be trusted.
+# The leg drives a real Muse with --provider echo under an isolated XDG lab,
+# the same credential-free shape tests/fm-muse-signals-live-e2e.test.sh already
+# proves a real Muse with, so it is runnable wherever muse is installed and
+# never points a sandbox-disabled --yolo Muse at the operator's real config
+# home, data home, or repository.
+# The tradeoff is stated plainly rather than hidden: an echo reply is a runtime
+# echo and not a model answer, so what this asserts is delivery to the Muse
+# runtime, which is exactly the delivery mechanic this repair exists to prove.
+# Subscription-login routing for real model work is governed separately, in
+# docs/verification/muse.md.
 MUSE_BIN=$(PATH="$ORIGINAL_PATH" command -v muse 2>/dev/null || true)
-# The credential this preflight proves is the one the launched pane consumes:
-# the config and data homes are pinned into the launch command below from the
-# same values checked here, exactly as bin/fm-spawn.sh pins what it checks, so
-# a custom XDG root in this shell and a plain one in the Herdr daemon can never
-# disagree about where the credential lives.
-# The stored subscription credential is the only path accepted here, with no
-# META_API_KEY escape: muse_credential_present's key branch can only prove a
-# key inside a tmux worker session, so fm-spawn refuses an API-key-only host on
-# every other backend and this guard must refuse it identically.
-# An unauthenticated muse does not exit, it parks on an OAuth device-code
-# prompt, so without this preflight the leg would steer a pane that never
-# became Muse and then blame the send path for the missing reply.
-MUSE_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-}/.config}
-MUSE_DATA_HOME=${XDG_DATA_HOME:-${HOME:-}/.local/share}
-MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
 if [ -z "$MUSE_BIN" ]; then
   printf '# muse is not installed; Muse-on-Herdr submit confirmation was not verified here\n'
-elif [ ! -s "$MUSE_AUTH_FILE" ]; then
-  printf '# muse is installed but has no stored credential at %s, which is the only credential a Herdr pane can use; Muse-on-Herdr submit confirmation was not verified here\n' \
-    "$MUSE_AUTH_FILE"
 else
-  MUSE_VERSION=$(PATH="$ORIGINAL_PATH" "$MUSE_BIN" --version 2>/dev/null | head -1 || printf 'version-unknown')
-  MUSE_TAB_JSON=$(lab tab create --workspace "$(printf '%s' "$WS_JSON" | jq -er '.result.workspace.workspace_id')" --cwd "$ROOT" --label fm-submitlive-muse --no-focus) \
+  MUSE_VERSION=$(PATH="$ORIGINAL_PATH" "$MUSE_BIN" --version 2>/dev/null | head -1)
+  [ -n "$MUSE_VERSION" ] || MUSE_VERSION=version-unknown
+  MUSE_CONFIG_HOME="$TMP_ROOT/muse-config"
+  MUSE_DATA_HOME="$TMP_ROOT/muse-data"
+  MUSE_WORKSPACE="$TMP_ROOT/muse-workspace"
+  mkdir -p "$MUSE_CONFIG_HOME" "$MUSE_DATA_HOME" "$MUSE_WORKSPACE" \
+    || fail "could not create the isolated Muse lab under $TMP_ROOT"
+  git -C "$MUSE_WORKSPACE" init -q \
+    || fail "could not initialize the isolated Muse workspace at $MUSE_WORKSPACE"
+  MUSE_TAB_JSON=$(lab tab create --workspace "$(printf '%s' "$WS_JSON" | jq -er '.result.workspace.workspace_id')" --cwd "$MUSE_WORKSPACE" --label fm-submitlive-muse --no-focus) \
     || fail "could not create a Muse tab in the isolated Herdr workspace"
   MUSE_PANE=$(printf '%s' "$MUSE_TAB_JSON" | jq -er '.result.root_pane.pane_id') \
     || fail "Muse tab create did not return a pane id"
   MUSE_TARGET="$SESSION:$MUSE_PANE"
-  # The launch shape here is bin/fm-spawn.sh's verified muse template minus its
-  # positional brief, since this guard needs an idle composer to steer: the same
-  # env -u marker scrub, the same XDG pins, the same absolute resolved binary,
-  # and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the privacy
-  # control, which is the control used because the interactive TUI rejects exec
-  # mode's --no-foreign-personal-context flag.
-  MUSE_LAUNCH=$(printf 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on %s --yolo' \
+  # The launch shape here is the launch bin/fm-spawn.sh actually composes for
+  # muse minus its positional brief, since this guard needs an idle composer to
+  # steer: the shared outer marker scrub (bin/fm-spawn.sh:3898) wrapping the
+  # verified muse template (bin/fm-spawn.sh:1625), the same absolute resolved
+  # binary, and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the
+  # privacy control, which is the control used because the interactive TUI
+  # rejects exec mode's --no-foreign-personal-context flag.
+  # Two deviations are deliberate: the XDG homes point at this guard's isolated
+  # lab rather than the operator's, and --provider echo replaces the
+  # credentialed provider so the leg needs no credential.
+  MUSE_LAUNCH=$(printf 'env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on %s --provider echo --yolo' \
     "$(shell_quote "$MUSE_CONFIG_HOME")" "$(shell_quote "$MUSE_DATA_HOME")" "$(shell_quote "$MUSE_BIN")")
   lab pane run "$MUSE_PANE" "$MUSE_LAUNCH" >/dev/null \
     || fail "could not launch Muse Code ($MUSE_VERSION) in the isolated Herdr pane"
@@ -193,6 +197,16 @@ else
   [ "$muse_idle" = 1 ] \
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live agent process with a shared empty composer in the lab pane (last process state '$muse_process', last composer state '$muse_state')"
 
+  # This leg exists for the unreadable-native fallback, so the route is asserted
+  # rather than assumed: fm_backend_herdr_send_text_submit reaches empty either
+  # from native agent state or from the shared composer classifier, and only the
+  # second is what a Muse steer must travel. A Herdr that starts registering an
+  # agent for a Muse pane would silently move this guard onto the native route
+  # while it kept printing ok, so an unreadable probe is required here instead.
+  muse_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
+  [ -z "$muse_raw" ] \
+    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: this leg proves the unreadable-native composer fallback, but the native agent probe now reads '$muse_raw', so the submit verdict would no longer travel that route"
+
   MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
   muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
     || fail "send_text_submit failed to run against Muse Code ($MUSE_VERSION) on $HERDR_VER"
@@ -201,8 +215,8 @@ else
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: a landed steer must confirm empty, got '$muse_verdict'"
 
   # Same two-occurrence rule as the Claude leg: the token must appear in the
-  # submitted prompt and again in Muse's reply, so a merely cleared composer
-  # cannot pass for a delivered instruction.
+  # submitted prompt and again in the echo provider's reply, so a merely
+  # cleared composer cannot pass for a delivered instruction.
   muse_landed=0
   i=0
   while [ "$i" -lt 90 ]; do
@@ -217,7 +231,7 @@ else
   done
   [ "$muse_landed" = 1 ] \
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
-  pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER reports empty and renders the requested reply in isolated session $SESSION"
+  pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER reports empty through the unreadable-native composer fallback and renders the requested reply from its echo provider in isolated session $SESSION"
 fi
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

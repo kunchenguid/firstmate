@@ -205,14 +205,18 @@ That is the same terminal shape the `echo`-provider interrupt produced, now conf
 
 ## Refreshing this record
 
-Run both live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
+Run all three live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
 
 ```
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
+FM_HERDR_SUBMIT_CONFIRM_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ```
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
+The Herdr submit-confirm guard covers the same styled composer and the same `muse-bin-*` process anchoring on the Herdr runtime, where a Muse steer's delivery verdict depends on both.
+It needs a real `muse` binary, `herdr`, and `claude` for its Claude leg, drives Muse on `--provider echo` under an isolated XDG lab so it needs no credential either, and reports an uninstalled Muse as unverified rather than passing silently.
+Its Muse-on-Herdr entry in [`runtime-backends.md`](runtime-backends.md#submit-confirmation) is still marked authored and not yet executed, so the first guarded run is what turns it into a measurement.
 The guard follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
 
 muse's launcher can replace the running binary underneath the fleet, so an upgrade that changes the session protocol also invalidates the credentialed evidence above.

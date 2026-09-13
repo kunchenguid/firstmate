@@ -997,7 +997,9 @@ ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8
 Muse registers no Herdr agent state, so its steers take the same fallback with an unreadable native probe, and the shared classifier's bare `⟩` row is what proves the composer cleared.
 That shape is current fact: the portable regression in `tests/fm-backend-herdr.test.sh` drives it end to end and passes, asserting the confirmed verdict and that exactly one Enter was sent.
 The live Muse leg of `tests/fm-herdr-submit-confirm-live-e2e.test.sh` is authored and registered but has NOT been executed, so no measured Muse-on-Herdr claim exists here and none of the 2026-08-19 Claude measurement above extends to Muse.
-That leg skips with an explicit unverified line when Muse is absent or has no stored credential, and otherwise requires a live agent process, a cleared composer, and the token rendered in Muse's own reply.
+That leg skips with an explicit unverified line when muse is not installed, and otherwise drives a real Muse on `--provider echo` under an isolated `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and workspace, the same credential-free shape `tests/fm-muse-signals-live-e2e.test.sh` already uses.
+It requires a live agent process and a cleared composer before it steers, requires the native agent probe to still be unreadable at the moment of the steer so the verdict cannot quietly travel the native route instead, and requires the token to come back in the reply.
+The echo provider makes that assertion delivery to the Muse runtime rather than a model answer, which is the delivery mechanic this entry is about; credentialed model routing is recorded in [muse.md](muse.md).
 A Herdr-lab-guarded run of that guard is what will replace this entry with an observed line carrying its Muse version and date.
 
 ### Prune and respawn
