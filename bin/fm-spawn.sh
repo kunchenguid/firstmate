@@ -89,8 +89,11 @@
 #   lost rename response; absent registration, a collision, or failed readback
 #   stops the spawn, closes that exact pane so the launched agent cannot keep
 #   working outside task control, and leaves the task copy and failure event for
-#   inspection. Raw launch commands and secondmate primaries keep their existing
-#   behavior because neither is a ship/scout supported-adapter launch. Rovo is
+#   inspection. A raw launch command is the verification-only exception: it is
+#   the escape hatch for trying an unverified adapter, so it is never renamed
+#   and naming never blocks it; mandatory naming is reserved for ordinary
+#   verified ship/scout dispatch. Secondmate primaries keep their existing
+#   behavior in their own per-home workspace. Rovo is
 #   skipped because Herdr has no rovo integration and live `agent get` returns
 #   agent_not_found for a running rovo pane (docs/verification/rovo.md).
 #   Herdr additionally uses a presentation-only layout by default when the
