@@ -61,7 +61,13 @@ case "${1:-}" in
       for a in "$@"; do
         case "$a" in
           "export TRACEPARENT="*)
-            chmod a-w "$FM_FAKE_META_PATH"
+            # Fresh spawn delays publication until start-proof, so the carrier
+            # is rewritten on the staged record. Make both that file and any
+            # already-published dest unwritable so the append fails closed.
+            chmod a-w "$FM_FAKE_META_PATH" 2>/dev/null || true
+            meta_dir=${FM_FAKE_META_PATH%/*}
+            meta_base=${FM_FAKE_META_PATH##*/}
+            chmod a-w "$meta_dir/.$meta_base."* 2>/dev/null || true
             ;;
         esac
       done

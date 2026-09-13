@@ -105,18 +105,84 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+FAKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMM:-claude}"; exit 0 ;;
+      *'#{pane_tty}'*) printf '%s\n' "${FM_FAKE_PANE_TTY:-}"; exit 0 ;;
+      *'#{pane_id}'*) printf '%s\n' "${FM_FAKE_PANE_ID:-%1}"; exit 0 ;;
+      *'#{window_id}'*) printf '%s\n' "@1"; exit 0 ;;
+    esac
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  new-window)
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-n" ]; then
+        printf '%s\n' "$a" >> "$FAKE_DIR/windows"
+      fi
+      prev=$a
+    done
+    printf '@1\n'
+    exit 0
+    ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    elif [ -f "$FAKE_DIR/windows" ]; then
+      cat "$FAKE_DIR/windows"
+    elif [ -n "${FM_FAKE_WINDOW_NAME:-}" ]; then
+      printf '%s\n' "$FM_FAKE_WINDOW_NAME"
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  list-panes)
+    printf '%s\n' "${FM_FAKE_TMUX_COMM:-claude}"
+    exit 0
+    ;;
+  capture-pane)
+    if [ "${FM_FAKE_CAPTURE_PANE+set}" = set ]; then
+      # Distinguish unset (default welcome text) from empty (no output, used
+      # to inject a worker that never starts processing instructions).
+      [ -z "$FM_FAKE_CAPTURE_PANE" ] || printf '%s\n' "$FM_FAKE_CAPTURE_PANE"
+    else
+      printf '%s\n' "welcome to agent, reading brief..."
+    fi
+    exit 0
+    ;;
+  kill-window)
+    target_win=
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-t" ]; then
+        target_win=$a
+        # tmux kill uses =session:=window exact-name targeting. Strip those
+        # prefixes plus an ordinary session:window form so the recorded
+        # window name matches what new-window stored.
+        target_win=${target_win#=}
+        case "$target_win" in
+          *:*) target_win=${target_win#*:} ;;
+        esac
+        target_win=${target_win#=}
+      fi
+      prev=$a
+    done
+    if [ -f "$FAKE_DIR/windows" ]; then
+      if [ -n "$target_win" ]; then
+        grep -vxF "$target_win" "$FAKE_DIR/windows" > "$FAKE_DIR/windows.tmp" 2>/dev/null || true
+        mv -f "$FAKE_DIR/windows.tmp" "$FAKE_DIR/windows" 2>/dev/null || true
+      else
+        rm -f "$FAKE_DIR/windows"
+      fi
+    fi
+    exit 0
+    ;;
+  has-session|new-session|set-window-option|start-server) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

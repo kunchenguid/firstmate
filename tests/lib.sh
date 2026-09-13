@@ -47,6 +47,12 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Skip worker-start proof in the ordinary spawn suite. Most custom tmux stubs
+# answer pane-path and send-keys only; treating a missing inventory as a
+# failed start would explode those tests. Circuit-breaker coverage opts in by
+# setting FM_SKIP_WORKER_VERIFY=0 around the spawn under test.
+export FM_SKIP_WORKER_VERIFY=1
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary

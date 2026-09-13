@@ -176,3 +176,29 @@ $pids
 EOF
   return 1
 }
+
+# Safely garbage collect state/.lock if the holding PID is confirmed dead or not a valid harness.
+# Returns 0 if lock was freed or was already free, 1 if held by an active live process.
+fm_session_lock_gc() {
+  local state=$1 lock_file="$1/.lock" lock_pid
+  [ -f "$lock_file" ] || return 0
+  lock_pid=$(cat "$lock_file" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*)
+      rm -f "$lock_file" 2>/dev/null || true
+      return 0
+      ;;
+  esac
+
+  if ! kill -0 "$lock_pid" 2>/dev/null; then
+    # PID is definitely dead
+    rm -f "$lock_file" 2>/dev/null || true
+    return 0
+  elif ! fm_harness_pid_alive "$lock_pid"; then
+    # PID is alive but not a recognized harness process
+    rm -f "$lock_file" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
