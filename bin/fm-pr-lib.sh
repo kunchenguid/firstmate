@@ -290,18 +290,28 @@ fm_pr_regular_destination_on_device_or_absent() {
 #
 # Exactly one pr= line may exist: that count, not its position, is what makes
 # the identity unambiguous. Position carries a separate obligation - the pr=
-# block must be the record's TRAILING block. Only pr=, pr_head= and the x_*
-# keys may follow pr=; anything else means some writer appended to the record
-# after the poll was armed, and the record is refused.
+# block must be the record's TRAILING block. Only pr=, pr_head= and the five
+# x_ reply-link keys enumerated in the case below may follow pr=. That is a
+# closed list of literal keys, not an x_ prefix: a sixth x_ key appended past
+# pr= breaks the record exactly as any other key would. Anything else means
+# some writer appended to the record after the poll was armed, and the record
+# is refused.
 #
 # Every writer that adds a key to a task record therefore has to put it BEFORE
-# the pr= block: bin/fm-pr-check.sh strips and re-appends that block when it
-# arms the poll, and bin/fm-spawn.sh's relaunch rewrite holds it back to the
-# end. A writer that appends past it costs the task its merge poll outright -
-# bin/fm-watch.sh refuses the check on every cycle and reports it as
+# the pr= block. A writer that appends past it costs the task its merge poll
+# outright - bin/fm-watch.sh refuses the check on every cycle and reports it as
 # unauthenticated, so the merge the poll exists to catch is never noticed.
 # Widening the list below instead of fixing such a writer only moves the next
 # occurrence to the next new key.
+#
+# bin/fm-pr-check.sh keeps the contract by stripping and re-appending the block
+# when it arms the poll, and bin/fm-spawn.sh's relaunch rewrite and trace-carrier
+# write hold it back to the end. Three writers are known to STILL violate it and
+# are tracked as separate work - bin/fm-promote.sh's kind=/mode=/yolo= rewrite,
+# bin/fm-captain-hold.sh's attestation keys, and bin/fm-teardown.sh's legacy
+# incarnation stamp. Read that as an open defect list, not as the inventory of
+# every writer: the conforming writers above are not a complete set either, and
+# a new writer is this contract's problem whether or not it is named here.
 #
 # A pr_head= line is validated only where it follows pr=, which is where this
 # contract puts it and where its consumers' `tail -1` read resolves.
