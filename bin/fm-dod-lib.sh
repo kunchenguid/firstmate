@@ -187,11 +187,11 @@ fm_brief_task_content_valid() {  # <file>
 # from bin/fm-promote.sh - carries the same text; this is the single owner, so a
 # change here reaches both callers without a second copy to drift.
 # It also covers a commit a pipeline step made on the worker's behalf. The
-# prohibition is identical in every mode; only the check point differs, because
-# branch ownership does - each mode names an event that actually happens in it,
-# and in no-mistakes mode the pipeline owns the branch while a run is active, so
-# the worker checks once the run is terminal and escalates a pipeline-authored
-# trailer instead of rewriting under the pipeline.
+# prohibition is identical in every mode; only the check point and the remedy
+# differ, because branch ownership does - each mode names an event that actually
+# happens in it, and no-mistakes mode escalates rather than rewriting, because
+# the pipeline owns the branch and its pushed PR head from the moment a run
+# starts, so a worker-side rewrite could not change what merges.
 # Never touching the default branch is absolute in every mode.
 fm_commit_attribution_block() {  # <task-id> <mode>
   local id=$1 mode=$2
@@ -203,10 +203,9 @@ EOF
   case "$mode" in
     no-mistakes)
       cat <<EOF
-While a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter, or hand-commit on it to strip a trailer, not even your own.
-Check this branch's commits for that trailer once the run has reached a terminal outcome and the branch is yours again, before the PR merges.
-If you find one on a commit you wrote, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
-If you find one on a pipeline-authored commit you did not write, report it to firstmate before merge and let the captain decide; do not rewrite it yourself.
+Check every commit on this branch for that trailer before you append your \`done:\` report.
+If any commit carries it - one you wrote or one a pipeline step wrote on your behalf - say so plainly in that \`done:\` report and name the commits, rather than shipping silently; firstmate decides what happens before merge.
+Do not rebase, amend, filter, force-push, or hand-commit on \`fm/$id\` to strip a trailer yourself: the pipeline owns this branch and its pushed PR head from the moment a run starts.
 EOF
       ;;
     direct-PR)
