@@ -181,11 +181,12 @@ class Bridge:
                  "failed": "Falhou", "answered": "Resposta", "blocked": "Bloqueado"}
 
         def describe(row):
-            return f"{names[row['state']]}: {row['body']}" if row["body"] else names[row["state"]]
+            summary = f"{names[row['state']]}: {row['body']}" if row["body"] else names[row["state"]]
+            return summary[:179] + "…" if len(summary) > 180 else summary
 
         if len(active) > 1:
             body = "Há mais de um pedido em andamento. Qual deles?\n" + "\n".join(
-                f"{i+1}. {describe(r)[:180]}" for i, r in enumerate(active[:10]))
+                f"{i+1}. {describe(r)}" for i, r in enumerate(active[:10]))
             if len(active) > 10:
                 body += "\nHá outros pedidos em andamento além destes."
         elif active:

@@ -10,6 +10,7 @@ durable. It never instantiates the HTTP client or reads a credential file.
 
 import email.utils
 import getpass
+import http.client
 import json
 import os
 import random
@@ -117,6 +118,7 @@ class HTTP:
         req = urllib.request.Request(url, data=data, headers={
             "Authorization": "Bearer " + read_secret(self.config.token_file),
             "Content-Type": "application/json"})
+        status, headers = 0, {}
         try:
             try:
                 response = self.opener.open(req, timeout=timeout)
@@ -134,8 +136,8 @@ class HTTP:
                 except (ValueError, UnicodeError):
                     return Reply(status, headers=headers, fault="invalid_json")
                 return Reply(status, body, headers)
-        except (OSError, urllib.error.URLError, TimeoutError):
-            return Reply(fault="connection_or_timeout")
+        except (OSError, urllib.error.URLError, http.client.HTTPException):
+            return Reply(status, headers=headers, fault="connection_or_timeout")
 
 
 class Simulator:

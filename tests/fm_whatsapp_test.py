@@ -7,6 +7,7 @@ main CLI, executes no LLM, and is killed only by its owning test. No live home,
 network client, token, service registration or Herdr lifecycle is used.
 """
 
+from http.client import IncompleteRead
 import io
 import json
 import os
@@ -193,6 +194,33 @@ for line in sys.stdin:
                 self.bridge.forward()
             elif expected == "Enfileirado":
                 self.claim(row)
+
+    def test_status_after_maximum_result_advances_cursor_and_preserves_result(self):
+        row, _ = self.claim()
+        result = "x" * 200000
+        event = self.emit(row, "completed", result, evidence=["fixture"])["event"]
+        query = self.message("/status")
+        following = self.message("Novo pedido após consultar")
+        self.bridge.ingest(poll([query, following], offset=50))
+        self.assertEqual(self.store.get("cursor"), "50")
+        status = self.store.rows("SELECT * FROM inbound WHERE wamid=?", (query["id"],))[0]
+        self.assertEqual(status["state"], "answered")
+        summary = self.store.rows("SELECT body FROM responses WHERE event=?", (status["request"] + ".status",))[0]["body"]
+        self.assertLessEqual(len(summary), 180)
+        self.assertTrue(summary.startswith("Concluído: "))
+        self.assertTrue(summary.endswith("…"))
+        self.assertEqual(self.store.rows("SELECT state FROM inbound WHERE wamid=?", (following["id"],)),
+                         [{"state": "received"}])
+        reopened = Store(self.config, clock=lambda: self.now)
+        try:
+            Bridge(reopened, Sequence([poll([query], offset=51)])).poll()
+            self.assertEqual(reopened.get("cursor"), "51")
+            self.assertEqual(len(reopened.rows("SELECT * FROM responses WHERE event=?", (status["request"] + ".status",))), 1)
+            self.assertEqual(reopened.rows("SELECT body FROM responses WHERE event=?", (event,))[0]["body"], result)
+            self.assertEqual("".join(r["body"] for r in reopened.rows(
+                "SELECT body FROM outbox WHERE event=? ORDER BY part", (event,))), result)
+        finally:
+            reopened.db.close()
 
     def test_quoted_status_reaches_main_with_exact_correlation(self):
         first, _ = self.claim()
@@ -656,6 +684,65 @@ for line in sys.stdin:
                 self.assertEqual(self.store.get("cursor"), "0")
                 if status == 429:
                     self.assertGreaterEqual(float(self.store.get("poll_due")), self.now + 75)
+
+    def test_http_interrupted_reads_keep_decisive_status_backoff_and_redaction(self):
+        config = Config(self.path)
+        config.mode = "live"
+        http = HTTP(config)
+        sentinel = "PRIVATE_HTTP_FAILURE_SENTINEL"
+        failures = [TimeoutError(sentinel), ConnectionResetError(sentinel),
+                    IncompleteRead(sentinel.encode(), 1000)]
+        for index, failure in enumerate(failures):
+            for status, expected in ((0, "delivery_unknown"), (200, "delivery_unknown"),
+                                     (400, "permanent"), (401, "auth_failed"), (429, "pending"),
+                                     (500, "delivery_unknown"), (503, "delivery_unknown")):
+                with self.subTest(failure=type(failure).__name__, status=status):
+                    path = self.dir / f"read-failure-{index}-{status}.json"
+                    path.write_text(json.dumps(dict(self.values, state_dir=str(self.dir / f"read-state-{index}-{status}"))))
+                    store = Store(Config(path), clock=lambda: self.now)
+                    try:
+                        with store.tx():
+                            store.emit("fixture-response", "fixture-request", "notice", "Mensagem de fixture", "bridge")
+                        response = urllib.error.HTTPError("https://api.whatsapp.com/agent/v1/messages", status,
+                                                          sentinel, {"Retry-After": "75"}, io.BytesIO())
+                        replies = []
+                        original = http.call
+
+                        def capture(endpoint, payload):
+                            reply = original(endpoint, payload)
+                            replies.append(reply)
+                            return reply
+
+                        with patch("fm_whatsapp_transport.read_secret", return_value="SYNTHETIC_TEST_CREDENTIAL"), \
+                                patch.object(response, "read", side_effect=failure), \
+                                patch.object(http.opener, "open", side_effect=failure if status == 0 else
+                                             response if status >= 400 else None, return_value=response) as opened, \
+                                patch.object(http, "call", side_effect=capture):
+                            bridge = Bridge(store, http)
+                            self.assertFalse(bridge.send_one())
+                            self.assertEqual(store.snapshot()["outbox"][0]["state"], expected)
+                            self.assertEqual(replies[0].http, status)
+                            self.assertEqual(replies[0].headers, {"Retry-After": "75"} if status else {})
+                            self.assertIsNone(replies[0].body)
+                            self.assertNotIn(sentinel, encode(replies[0].__dict__) + encode(store.snapshot()) +
+                                             encode(store.rows("SELECT * FROM attempts")))
+                            bridge.recover()
+                            self.assertFalse(bridge.send_one())
+                            self.assertEqual(opened.call_count, 1)
+                            if status == 429:
+                                due = store.rows("SELECT due FROM outbox")[0]["due"]
+                                self.assertGreaterEqual(due, self.now + 75)
+                                self.now += 74
+                                self.assertFalse(bridge.send_one())
+                                self.assertEqual(opened.call_count, 1)
+                                self.now += 2
+                                opened.side_effect = urllib.error.HTTPError(
+                                    "https://api.whatsapp.com/agent/v1/messages", 429, "fixture",
+                                    {"Retry-After": "75"}, io.BytesIO(b"rate limited"))
+                                self.assertFalse(bridge.send_one())
+                                self.assertEqual(opened.call_count, 2)
+                    finally:
+                        store.db.close()
 
     def test_scripted_poll_cli_disabled_service_and_backup(self):
         script = [{"endpoint": "updates", "http": 200, "body": poll([self.message()]).body}]

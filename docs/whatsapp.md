@@ -17,6 +17,7 @@ O diagnóstico informa `checkpoint` ou `unavailable`, e sempre `unattended_wake_
 Pedidos ficam preservados enquanto o principal está ausente; confirmações de execução só vêm de eventos explícitos do principal.
 Consultar `/status`, `/tarefas` e algumas perguntas naturais seleciona pedidos pelos estados persistidos antes de limitar a apresentação, incluindo recebidos, enfileirados e reivindicados sem início confirmado.
 Respostas conversacionais encerradas não contam como trabalho ativo; havendo mais de um pedido ativo, a ponte pede desambiguação.
+Cada resumo de pedido tem no máximo 180 caracteres, incluindo o rótulo de estado e reticências quando necessário; o resultado integral persistido e suas partes de envio permanecem intactos.
 Uma consulta citada segue ao principal com correlação por `context.id`, sem substituir a tarefa citada pelo andamento global.
 Outras perguntas naturais chegam ao principal com histórico e correlação; ambiguidade entre tarefas exige uma pergunta.
 
@@ -42,7 +43,7 @@ python3 bin/fm-whatsapp.py --config "$FM_HOME/config/whatsapp.json" doctor
 O primeiro comando oculta a digitação e não deve ser executado por agentes nem receber chave pelo chat.
 A ponte lê o arquivo por chamada, sem exportar a chave a subprocessos, prompts ou logs.
 Para rotação, regenere a chave no aplicativo e repita esse comando; a chave anterior é invalidada segundo o manual.
-Se houver um halt de autenticação, corrija a configuração e execute `resume`, preservando o banco.
+Se houver um halt de autenticação, siga a sequência de [Recuperação](#recuperação), preservando o banco.
 
 Antes de habilitar tráfego real, obtenha a autorização para o destino e conteúdo exatos do teste.
 Então defina localmente `mode:"live"`, `enabled:true` e `outbound_authorized:true` em um novo estado de ativação.
@@ -84,6 +85,16 @@ O serviço não despeja corpos de mensagens continuamente em logs; o banco cont�
 
 ## Recuperação
 
+`run` mantém a trava exclusiva mesmo durante um halt; `resume`, `resolve-send` e `redeliver` exigem essa mesma trava.
+Para recuperar, siga esta ordem:
+
+1. Pare somente esta ponte e aguarde sua saída: no LaunchAgent, use o comando `stop` (`launchctl bootout`) impresso por `service-render`; em execução manual, envie `SIGTERM` apenas ao PID desse `run` e aguarde seu término.
+2. Corrija a causa e, com a ponte parada, execute `resume` para limpar o halt e/ou `resolve-send` e `redeliver` para os envios específicos, conforme os critérios abaixo.
+3. Inicie somente esta ponte novamente: depois de `bootout`, use o comando `start` (`launchctl bootstrap`) impresso por `service-render`; em execução manual, repita o mesmo `run`, mantendo configuração e estado.
+
+`kickstart` não substitui `bootstrap` depois de `bootout`; não pare nem reinicie o Firstmate principal, seus trabalhadores ou o Herdr para recuperar a ponte.
+Se ainda houver partes pendentes que precisam ser enviadas antes de `redeliver`, retome a ponte para processá-las e repita a sequência de parada antes de autorizar a reentrega.
+
 Reinícios retomam o cursor exato e deduplicam pelo agente/wamid antes dos efeitos externos.
 Na primeira ativação `offset=0` preserva o backlog, mas `new-only` não executa entradas anteriores ao instante persistido de ativação.
 Esse instante é gravado pelo primeiro `run` habilitado, antes do primeiro poll, e preservado nos reinícios; `doctor`, `status` e abertura do banco não ativam a ponte.
@@ -95,8 +106,8 @@ O encaminhamento usa as notas idempotentes de [fm_inbox_key.py](../bin/fm_inbox_
 Uma trava exclusiva impede consumidores locais concorrentes do mesmo agente/usuário de sistema.
 Em outra máquina ou conta de sistema, 409/1752041 interrompe o polling de forma persistente; identifique e pare a outra ponte antes de `resume`.
 429 e 503/131016 usam backoff; erros permanentes interrompem a repetição do envio, mesmo quando uma resposta 4xx não contém JSON.
-`Retry-After` recebido continua valendo em respostas não JSON; sucesso malformado sem wamid e 5xx sem o código recuperável de 503 permanecem incertos.
-500, reset, timeout e queda após iniciar envio ficam `delivery_unknown` e bloqueiam partes posteriores para preservar a ordem.
+HTTP e `Retry-After` já recebidos continuam valendo quando o corpo não contém JSON ou sua leitura é interrompida.
+Sem resposta HTTP decisiva, reset, timeout, sucesso malformado sem wamid, 5xx sem o código recuperável de 503 e queda após iniciar envio ficam `delivery_unknown` e bloqueiam partes posteriores para preservar a ordem.
 Não há promessa de entrega exatamente uma vez.
 Depois de verificar o aplicativo e os registros, `resolve-send --seq N --disposition accepted --wamid ID` associa uma aceitação comprovada e aplica recibos já persistidos, preservando `read` sobre `delivered`; `--disposition abandoned` abandona conscientemente aquela parte e libera a fila.
 Não há reenvio automático de um resultado incerto nem inferência de um wamid perdido.
