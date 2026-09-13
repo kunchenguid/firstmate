@@ -271,6 +271,17 @@ ROWS
     || fail "no-mistakes: co-author ban did not name force-push among the forbidden active-run rewrites"
   printf '%s\n' "$block" | grep -Eiq "note:.*(before|preced).*done:" \
     || fail "no-mistakes: post-run disclosure did not keep off the terminal done: line"
+  # The worker cannot amend a pipeline-authored commit while the run owns the
+  # branch, so its only lever is the two channels it drives itself: the run's
+  # `--intent` and the fix instructions it sends back through a gate response.
+  printf '%s\n' "$block" | grep -Eq '\-\-intent' \
+    || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via --intent"
+  printf '%s\n' "$block" | grep -Eiq "respond|fix instruction|gate" \
+    || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via its fix responses"
+  # That lever must not contradict the --intent provenance rules in the same
+  # brief, which otherwise admit only the captain's own words.
+  sed -n '/Do not include/p' "$home/data/brief-coauthor-nm/brief.md" | grep -Eiq "attribution|exception" \
+    || fail "no-mistakes: --intent provenance rules still exclude the attribution ban the block tells the worker to pass"
 
   # The attribution block lands mid-section in the no-mistakes arm, so it must
   # be a subsection: everything after it - the `--intent` provenance rules, the
@@ -301,8 +312,15 @@ test_scout_brief_forbids_agent_coauthor_trailer() {
   block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
   assert_contains "$block" "co-author" "scout brief did not mention the co-author trailer ban at all"
   assert_contains "$block" "HARD RULE" "scout brief did not phrase the ban as a hard, unmissable rule"
-  printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
-    || fail "scout brief's ban did not cover pipeline-authored commits on the worker's behalf"
+  printf '%s\n' "$block" | grep -Eiq "scratch commit" \
+    || fail "scout brief's ban did not reach the scratch commits a scout actually writes"
+  # A scout sits at a detached HEAD and never drives the pipeline, so its arm
+  # must not borrow ship prose; the default-branch absolute is the one line
+  # allowed to say "branch", so drop it before checking.
+  printf '%s\n' "$block" | grep -v 'default branch' | grep -Eiq "branch" \
+    && fail "scout brief's ban talks about a branch a scout does not have"
+  printf '%s\n' "$block" | grep -Eiq "pipeline|no-mistakes|--intent" \
+    && fail "scout brief's ban talks about a pipeline a scout never runs"
   printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
     || fail "scout brief's ban did not forbid touching commits already on the default branch"
   printf '%s\n' "$block" | grep -Eiq "before you push|open or update its PR|report this branch ready|no-mistakes run" \
