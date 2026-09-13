@@ -7,7 +7,7 @@
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
 #
-# Covers three fixes:
+# Covers four fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
@@ -19,6 +19,9 @@
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
+#   - symlinked Treehouse root: the recorded physical path is matched to the
+#     registry spelling before return, so Treehouse's textual membership check
+#     still finds the slot.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -3833,6 +3836,58 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_treehouse_return_resolves_symlinked_root_registry_path() {
+  local case_dir rc physical pool_link registry
+  case_dir=$(make_case treehouse-symlinked-root)
+  mkdir -p "$case_dir/pool-real/project-hash/1"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" \
+    "$case_dir/pool-real/project-hash/1/project"
+  physical=$(cd "$case_dir/pool-real/project-hash/1/project" && pwd -P)
+  ln -s "$case_dir/pool-real" "$case_dir/pool-link"
+  pool_link="$case_dir/pool-link/project-hash/1/project"
+  registry="$pool_link"
+  printf '%s\n' '{"worktrees":[]}' > "$case_dir/pool-real/project-hash/treehouse-state.json"
+  ln -s "$physical" "$case_dir/wt"
+  write_meta "$case_dir" no-mistakes ship
+  sed -i "s|worktree=$case_dir/wt|worktree=$physical|" "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '[{"name":"1","path":"%s"}]\n' "${FM_FAKE_TREEHOUSE_REGISTRY_PATH:?}"
+  exit 0
+fi
+if [ "${1:-}" = return ]; then
+  shift
+  returned=
+  for arg in "$@"; do
+    [ "$arg" = --force ] || returned=$arg
+  done
+  printf '%s\n' "$returned" > "${FM_FAKE_TREEHOUSE_RETURN_PATH:?}"
+  [ "$returned" = "${FM_FAKE_TREEHOUSE_REGISTRY_PATH:?}" ] || {
+    echo "worktree $returned is not managed by treehouse" >&2
+    exit 1
+  }
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_TREEHOUSE_REGISTRY_PATH="$registry" \
+  FM_FAKE_TREEHOUSE_RETURN_PATH="$case_dir/treehouse-return-path" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "treehouse-symlinked-root: teardown should succeed"
+  [ "$(cat "$case_dir/treehouse-return-path")" = "$registry" ] || \
+    fail "treehouse-symlinked-root: teardown passed the physical path instead of the registry spelling"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "treehouse-symlinked-root: teardown retained metadata after returning the slot"
+  pass "teardown returns a slot whose recorded path and Treehouse registry path differ only by a symlink"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3922,3 +3977,4 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_treehouse_return_resolves_symlinked_root_registry_path
