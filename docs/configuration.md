@@ -934,6 +934,8 @@ Never describe this path as at-least-once, no-loss, or lossless.
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
+The separate optional text bridge uses `config/whatsapp.json`; [WhatsApp setup](whatsapp.md) owns configuration, disabled launchd rendering, activation and recovery, while `bin/fm-whatsapp.py --help` owns commands.
+
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
