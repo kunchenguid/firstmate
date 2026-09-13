@@ -28,6 +28,7 @@ Calm's built-in wrappers preserve Pi's execution behavior, and input delivery, o
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+After updating Calm in a running Pi session, `/reload` refreshes the assistant visibility adapter, including upgrades from the previous implementation that hid all mid-turn text.
 
 Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.

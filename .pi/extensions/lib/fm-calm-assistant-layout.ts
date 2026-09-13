@@ -73,8 +73,8 @@ function hasExplicitCaptainFacingPhase(block: AssistantTextBlock): boolean {
   }
 }
 
-// Keep the introduction-version symbol stable so a compatible upgrade cannot
-// double-patch a live process.
+// Keep the introduction-version symbol stable so reload can find and replace the
+// installed filter while reusing its original delegate.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-assistant-layout:pi-0.81.1",
 );
@@ -97,6 +97,8 @@ export function installCalmAssistantLayout(): void {
   }
 
   if (installed && !installed.originalUpdateContent) {
+    // Older adapters did not retain their delegate in the registry. Disable their
+    // filtering before wrapping them so they cannot strip the newly retained text.
     installed.hidesThinking = () => false;
     installed.hidesWorkingNote = () => false;
   }
