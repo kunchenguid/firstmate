@@ -255,6 +255,23 @@ test_record_only_refuses_without_valid_spawn_gen() {
   pass "fm-teardown --record-only refuses a record with no exact incarnation"
 }
 
+test_record_only_refuses_a_legacy_incarnation_stamp() {
+  local dir
+  dir=$(make_case legacy-stamp)
+  fm_write_meta "$dir/home/state/$ID.meta" \
+    "window=firstmate:fm-$ID" "endpoint_task_id=$ID" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=legacy-20240101T000000Z-999"
+  claim_pool_slot "$dir" other-task
+  seed_backlog_in_flight "$dir" ship
+  write_done_status "$dir"
+  set_pr_merged "$dir"
+  assert_refused_without_mutation "$dir" "legacy incarnation stamp"
+  assert_contains "$(cat "$dir/stderr")" "legacy incarnation stamp" \
+    "legacy-stamp: wrong refusal reason"
+  pass "fm-teardown --record-only refuses a legacy- stamp left by an abandoned --legacy-record teardown"
+}
+
 test_record_only_refuses_when_status_not_done() {
   local dir
   dir=$(make_case status-not-done)
@@ -518,6 +535,7 @@ test_record_only_refuses_when_slot_claim_absent
 test_record_only_refuses_when_not_a_pool_slot
 test_record_only_refuses_when_endpoint_not_confidently_gone
 test_record_only_refuses_without_valid_spawn_gen
+test_record_only_refuses_a_legacy_incarnation_stamp
 test_record_only_refuses_when_status_not_done
 test_record_only_refuses_ship_without_merged_pr
 test_record_only_refuses_ship_with_open_pr

@@ -435,7 +435,9 @@ remove_pr_poll_artifacts() {
 #     (fm_backlog_transition_applies); a manual-backend or no-backlog-file
 #     home is out of scope for this operation.
 #   - the record carries exactly one valid spawn_gen
-#     (fm_backlog_meta_spawn_gen); --legacy-record is never accepted here.
+#     (fm_backlog_meta_spawn_gen); --legacy-record is never accepted here,
+#     and neither is a legacy- stamp left by an abandoned --legacy-record
+#     teardown - only an incarnation a spawn published qualifies.
 #   - fm_backend_validate_task_endpoint reads a well-formed, exactly-this-task
 #     endpoint from the record.
 #   - the worktree sits in a genuine Treehouse-managed pool (a
@@ -557,6 +559,12 @@ fm_teardown_record_only() {
     return 1
   fi
   spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
+  case "$spawn_gen" in
+    legacy-*)
+      echo "REFUSED: task $id's record carries the legacy incarnation stamp $spawn_gen left by an abandoned --legacy-record teardown, not an incarnation any spawn published; record-only archival never accepts a legacy incarnation. Reconcile it by hand instead. Nothing was changed." >&2
+      return 1
+      ;;
+  esac
 
   fm_backend_validate_task_endpoint "$meta" "$id" || return 1
   backend=$FM_BACKEND_VALIDATED_BACKEND
