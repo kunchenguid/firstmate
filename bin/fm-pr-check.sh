@@ -74,8 +74,7 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: watching a Forgejo pull request requires tea on PATH" >&2
     exit 1
   fi
-  FORGEJO_LOGIN=$(
-    tea login list --output json 2>/dev/null | awk -F'"' -v h="$HOST" '
+  tea login list --output json 2>/dev/null | awk -F'"' -v h="$HOST" '
       /"name":/ { name = $4 }
       /"url":/ {
         u = $4
@@ -85,8 +84,7 @@ if [ "$PROVIDER" = forgejo ]; then
         if (u == h) { print name; n++ }
       }
       END { exit (n == 1) ? 0 : 1 }
-    '
-  ) || {
+    ' >/dev/null || {
     echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
