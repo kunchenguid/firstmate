@@ -316,22 +316,21 @@ if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
 else
   fm_lease_guard "$ID" "lifecycle control (fm-control)"
 fi
-if [ -z "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
-  CONTROL_LOCK="$STATE/.control-$ID.lock"
-  fm_lock_try_acquire "$CONTROL_LOCK" \
-    || die "another lifecycle action is already running for task $ID"
-  CONTROL_LOCK_HELD=1
-  if [ ! -f "$META" ]; then
-    case "$RAW_ID" in
-      fm-*)
-        if [ -f "$STATE/${RAW_ID#fm-}.meta" ]; then
-          die "'$RAW_ID' is a window label, not a task id; pass the exact task id '${RAW_ID#fm-}'"
-        fi
-        ;;
-    esac
-    die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
-  fi
-else
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+fm_lock_try_acquire "$CONTROL_LOCK" \
+  || die "another lifecycle action is already running for task $ID"
+CONTROL_LOCK_HELD=1
+if [ ! -f "$META" ]; then
+  case "$RAW_ID" in
+    fm-*)
+      if [ -f "$STATE/${RAW_ID#fm-}.meta" ]; then
+        die "'$RAW_ID' is a window label, not a task id; pass the exact task id '${RAW_ID#fm-}'"
+      fi
+      ;;
+  esac
+  die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
+fi
+if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
   CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || die "could not resolve task metadata lock for $ID"
   fm_lock_acquire_wait "$CONTROL_META_LOCK" \
     || die "task $ID metadata could not be locked for generation validation"
@@ -344,10 +343,6 @@ else
     || die "task $ID lease could not be revalidated after generation validation"
   fm_lock_release "$CONTROL_META_LOCK"
   CONTROL_META_LOCK_HELD=0
-  CONTROL_LOCK="$STATE/.control-$ID.lock"
-  fm_lock_try_acquire "$CONTROL_LOCK" \
-    || die "another lifecycle action is already running for task $ID"
-  CONTROL_LOCK_HELD=1
 fi
 
 # A remotely placed secondmate records its endpoint on ANOTHER host, so every

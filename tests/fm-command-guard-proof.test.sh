@@ -282,6 +282,38 @@ EOF
   wait "$holder" || fail "control race lock holder failed"
   [ "${rc:-0}" -ne 0 ] || fail "control acted on metadata replaced after the client snapshot"
   [ ! -s "$dir/send.log" ] || fail "control race reached the backend"
+
+  dir=$(new_home control-lock-race)
+  mkdir -p "$dir/home/data"
+  cat > "$dir/home/state/t1.meta" <<EOF
+window=sess:fm-t1
+spawn_gen=gen-1
+EOF
+  : > "$dir/send.log"
+  lock="$dir/home/state/.control-t1.lock"; marker="$dir/locked"; release="$dir/release"
+  bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 91
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.02; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$marker" "$release" &
+  holder=$!
+  i=0
+  while [ ! -e "$marker" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$marker" ] || fail "control lifecycle lock holder did not start"
+  rc=0
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_GUARD_SEND_LOG="$dir/send.log" FM_CONTROL_EXPECTED_SPAWN_GEN=gen-1 \
+    "$CONTROL" t1 interrupt >"$dir/out" 2>"$dir/err" &
+  sender=$!
+  sleep 0.1
+  replace_file "$dir/home/state/t1.meta" 's/^spawn_gen=.*/spawn_gen=gen-2/'
+  : > "$release"
+  wait "$sender" || rc=$?
+  wait "$holder" || fail "control lifecycle lock holder failed"
+  [ "${rc:-0}" -ne 0 ] || fail "control acted after its generation changed while waiting for lifecycle serialization"
+  [ ! -s "$dir/send.log" ] || fail "control lock race reached the backend"
   pass "command guard races: metadata replacement after the client snapshot is refused before mutation"
 }
 
