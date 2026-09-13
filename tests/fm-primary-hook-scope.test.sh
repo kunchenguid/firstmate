@@ -24,6 +24,7 @@ test_shared_primary_scope_excludes_task_workers() {
   status=$?
   [ "$status" -eq 1 ] || fail "task-worker primary-scope probe exited $status, not 1"
 
+  # shellcheck disable=SC2016 # single quotes intentional: $1/$2/$3 expand inside the bash -c script, not here
   env -u FM_TASK_ID bash -c '. "$1"; fm_primary_scope_matches "$2" "$3"' \
     _ "$ROOT/bin/fm-primary-scope-lib.sh" "$repo" "$state" >/dev/null 2>&1
   status=$?
