@@ -283,7 +283,8 @@ family_for_basename() {
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-harness-precedence.test.sh|\
-    fm-idle-compact.test.sh|\
+    fm-idle-compact-config.test.sh|fm-idle-compact-send.test.sh|fm-idle-compact-lifecycle.test.sh|\
+    fm-idle-compact-backstop.test.sh|fm-idle-compact-absorption.test.sh|fm-idle-compact-tick.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
