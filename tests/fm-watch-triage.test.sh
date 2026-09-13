@@ -3131,6 +3131,37 @@ SH
   chmod +x "$1/control" "$1/send"
 }
 
+soft_lock_non_verdict_repeat_does_not_interrupt() {  # <name> <line>
+  local name=$1 line=$2 dir state fakebin out capture window task sig pid
+  dir=$(make_case "soft-lock-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-soft-lock-$name"; task="soft-lock-$name"
+  soft_lock_fake_bins "$dir"
+  printf '%s\n%s\n' "$line" "$line" > "$capture"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: verifying the watcher\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$name repeated text interrupted the worker: $(cat "$out")"; }
+  [ ! -e "$dir/control.log" ] || { reap "$pid"; fail "$name repeated text interrupted the worker"; }
+  [ ! -e "$dir/send.log" ] || { reap "$pid"; fail "$name repeated text steered the worker"; }
+  [ ! -e "$state/.wake-queue" ] || { reap "$pid"; fail "$name repeated text queued a soft-lock wake"; }
+  reap "$pid"
+}
+
+test_soft_lock_non_verdict_repeats_do_not_interrupt() {
+  soft_lock_non_verdict_repeat_does_not_interrupt green-summary 'fm test summary total 61 failed 0 passed 61'
+  soft_lock_non_verdict_repeat_does_not_interrupt echoed-source '+ echo "error: failed assertion"'
+  soft_lock_non_verdict_repeat_does_not_interrupt ast-grep-hint 'ast-grep hint: not ok - rule text'
+  pass "soft-lock ignores repeated green summaries, source lines, and ast-grep hints"
+}
+
 test_soft_lock_repeated_failure_interrupts_once() {
   local dir state fakebin out capture window task sig pid
   dir=$(make_case soft-lock-repeat); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3138,9 +3169,9 @@ test_soft_lock_repeated_failure_interrupts_once() {
   soft_lock_fake_bins "$dir"
   cat > "$capture" <<'EOF'
 $ bin/fm-lint.sh
-error: DoD item lint failed with exit code 1
+not ok - lint command exits nonzero
 retrying the lint item
-error: DoD item lint failed with exit code 2
+not ok - lint command exits nonzero
 EOF
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
   record_pi_busy "$state" "$task"
@@ -3162,7 +3193,7 @@ EOF
     || fail "soft-lock steer did not tell the worker to file the DoD blocker with the exact output"
   grep -F "soft-lock:$task" "$state/.wake-queue" >/dev/null \
     || fail "soft-lock did not queue a check wake naming the task"
-  grep -F 'repeated-failure: error dod item lint failed with exit code #' "$state/.wake-queue" >/dev/null \
+  grep -F 'repeated-failure: not ok lint command exits nonzero' "$state/.wake-queue" >/dev/null \
     || fail "soft-lock check wake did not name the normalized repeated line"
   [ "$(grep -c '"op":"soft-lock"' "$dir/data/telemetry/liveness.jsonl" 2>/dev/null || true)" -eq 1 ] \
     || fail "soft-lock did not record exactly one liveness telemetry row"
@@ -5135,6 +5166,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 test_busy_silent_stalls_and_recovers_once
+test_soft_lock_non_verdict_repeats_do_not_interrupt
 test_soft_lock_repeated_failure_interrupts_once
 test_soft_lock_turnends_without_new_status_do_not_fire
 test_soft_lock_healthy_progressing_worker_not_classed

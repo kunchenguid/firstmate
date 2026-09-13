@@ -1357,11 +1357,11 @@ busy_silent_check() {  # <window> <task> <hash> <busy-flag>
 
 # Soft-lock guard: a pane can keep churning - never stale, never silent - while
 # the worker loops on one Definition-of-done item it cannot tick, so every other
-# guard absorbs it as healthy. The same failure line (normalized: lowercased,
-# digits and punctuation folded) appearing twice or more in the worker's recent
-# pane output or status tail classes that loop as a soft-lock. The DoD contract
-# (bin/fm-dod-lib.sh) caps any item at two attempts, so a second showing IS the
-# out-of-contract loop.
+# guard absorbs it as healthy. The same genuine failure verdict (normalized:
+# lowercased, digits and punctuation folded) appearing twice or more in the
+# worker's recent pane output or status tail classes that loop as a soft-lock.
+# The DoD contract (bin/fm-dod-lib.sh) caps any item at two attempts, so a
+# second verdict showing IS the out-of-contract loop.
 # One classification fires one recovery: the claim marker is written before any
 # external call (the busy-silent precedent, so a watcher restart can never send
 # a second interrupt), then an interrupt through fm-control, one steer through
@@ -1373,15 +1373,19 @@ busy_silent_check() {  # <window> <task> <hash> <busy-flag>
 # the backstop behind that deliberate ceiling).
 SOFT_LOCK_SEND_BIN=${FM_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}
 
-soft_lock_repeated_failure() {  # <tail40> <status-file>: print the normalized failure line seen 2+ times
+soft_lock_repeated_failure() {  # <tail40> <status-file>: print the normalized repeated failure verdict
   local tail40=$1 status=$2
   {
     printf '%s\n' "$tail40"
     [ -f "$status" ] && tail -40 "$status"
   } | awk '
     {
-      norm = tolower($0)
-      if (norm !~ /error|failed|failure|fatal|panic|denied|not ok/) next
+      raw = $0
+      norm = tolower(raw)
+      if (norm ~ /total|passed|summary|skipped/) next
+      if (raw ~ /^[+#$>]/ || raw ~ /^-/) next
+      if (norm ~ /echo|printf|throw|assert|expect/) next
+      if (norm !~ /^[[:space:]]*not ok([[:space:]:-]|$)/ && raw !~ /^[[:space:]]*FAIL([[:space:]:-]|$)/ && norm !~ /^[[:space:]]*error:/ && norm !~ /exit( code)?[[:space:]]+[1-9][0-9]*/) next
       gsub(/[0-9]+/, "#", norm)
       gsub(/[^a-z#]+/, " ", norm)
       gsub(/^ +| +$/, "", norm)
