@@ -19,8 +19,8 @@
 # a Captain label or address (bin/fm-dod-lib.sh). A pre-subsection scout
 # brief contributes only Task lines explicitly marked as captain words to intent.
 # A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode, --yolo, and --branch-prefix are written into the
-# meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
+# contract is decided: --mode, --yolo, and the ship branch resolved from
+# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
