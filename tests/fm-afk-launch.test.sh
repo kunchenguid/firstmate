@@ -399,6 +399,10 @@ unit_dead_pid_recovery_native() {
   confirm_posture "$st" || fail "dead-pid recovery (native): could not confirm fixture posture"
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   sleep 600 &
+  # Captured immediately after the background job starts; the later
+  # ( . "$ROOT/bin/fm-wake-lib.sh"; ... ) subshell below cannot
+  # retroactively change this value.
+  # shellcheck disable=SC2031
   dead_pid=$!
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
@@ -424,6 +428,10 @@ unit_dead_pid_recovery_terminal() {
   mkdir -p "$st/state"
   confirm_posture "$st" || fail "dead-pid recovery (terminal): could not confirm fixture posture"
   sleep 600 &
+  # Captured immediately after the background job starts; the later
+  # ( . "$ROOT/bin/fm-wake-lib.sh"; ... ) subshell below cannot
+  # retroactively change this value.
+  # shellcheck disable=SC2031
   dead_pid=$!
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
