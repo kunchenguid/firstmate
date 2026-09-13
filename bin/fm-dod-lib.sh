@@ -151,7 +151,7 @@ fm_brief_intent_overlay() {  # <captain-intent>
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
-The Definition of done's commit-attribution ban is the one standing exception to that supersession: carry it into `--intent` as well, because the pipeline commits on your branch and only you can tell it that rule.
+The commit-attribution ban is the one standing exception to that supersession: carry into `--intent` the rule that no commit on this branch may carry an agent name as a co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`), because the pipeline commits on your branch and only you can tell it that rule.
 
 ## Captain intent authorized for --intent
 EOF
@@ -194,9 +194,10 @@ fm_brief_task_content_valid() {  # <file>
 # while the branch is still its own, must not touch the branch while a run owns
 # it, and reports rather than rewriting a pushed PR head afterwards.
 # Never touching the default branch is absolute in every mode.
-# A scout sits at a detached HEAD, has no branch to ship and never drives the
-# pipeline, so it gets its own subject line covering every commit it writes,
-# with no branch clause, no pipeline clause and no check point or remedy.
+# A scout sits at a detached HEAD and a secondmate supervises a domain; neither
+# has a branch to ship and neither drives the pipeline, so each gets its own
+# subject line covering every commit it writes, with no branch clause, no
+# pipeline clause and no check point or remedy.
 fm_commit_attribution_block() {  # <task-id> <mode>
   local id=$1 mode=$2 checkpoint=''
   cat <<'EOF'
@@ -205,6 +206,10 @@ EOF
   if [ "$mode" = scout ]; then
     cat <<'EOF'
 NEVER put an agent name as a commit co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`) on any commit you write here, including the scratch commits discarded at teardown.
+EOF
+  elif [ "$mode" = secondmate ]; then
+    cat <<'EOF'
+NEVER put an agent name as a commit co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`) on any commit you write, including a merge you perform yourself under standing merge authority.
 EOF
   else
     cat <<EOF

@@ -338,6 +338,32 @@ test_scout_brief_forbids_agent_coauthor_trailer() {
   pass "fm-brief.sh: a scout brief forbids an agent co-author commit trailer too"
 }
 
+# A secondmate charter is a generated brief too, and a secondmate authors real
+# commits - including a merge it performs itself under standing merge authority.
+# It has no delivery mode and no task branch, so its arm must carry the ban with
+# no branch clause, no pipeline clause and no ship-path check point.
+test_secondmate_charter_forbids_agent_coauthor_trailer() {
+  local home brief block
+  home="$TMP_ROOT/coauthor-secondmate-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-coauthor-sm --secondmate some-proj >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold failed"
+  brief="$home/data/brief-coauthor-sm/brief.md"
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
+  assert_contains "$block" "co-author" "secondmate charter did not mention the co-author trailer ban at all"
+  assert_contains "$block" "HARD RULE" "secondmate charter did not phrase the ban as a hard, unmissable rule"
+  printf '%s\n' "$block" | grep -Eiq "merge you perform" \
+    || fail "secondmate charter's ban did not reach the merges a secondmate authors itself"
+  printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
+    || fail "secondmate charter's ban did not forbid touching commits already on the default branch"
+  printf '%s\n' "$block" | grep -v 'default branch' | grep -Eiq "branch" \
+    && fail "secondmate charter's ban talks about a task branch a secondmate does not have"
+  printf '%s\n' "$block" | grep -Eiq "pipeline|no-mistakes|--intent|before you push|report this branch ready" \
+    && fail "secondmate charter's ban borrowed ship-path pipeline or check-point prose"
+  assert_no_grep "EOF" "$brief" "secondmate charter leaked a heredoc EOF marker"
+  pass "fm-brief.sh: a secondmate charter forbids an agent co-author commit trailer too"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -462,8 +488,6 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must require --intent to be the Captain's intent subsection"
   assert_grep "plus any later words the captain actually said" "$brief" \
     "no-mistakes DOD must allow later captain words in --intent"
-  assert_grep "plus the standing commit-attribution ban above" "$brief" \
-    "no-mistakes DOD must admit the commit-attribution ban into --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
     "no-mistakes DOD must keep Firstmate spec out of --intent"
   assert_grep "or your own decisions and tradeoffs" "$brief" \
@@ -1027,6 +1051,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_briefs_forbid_agent_coauthor_trailer
 test_scout_brief_forbids_agent_coauthor_trailer
+test_secondmate_charter_forbids_agent_coauthor_trailer
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

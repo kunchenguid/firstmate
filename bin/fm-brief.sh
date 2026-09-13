@@ -302,6 +302,8 @@ On startup and restart, run normal firstmate bootstrap and recovery through \`bi
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
+
+$(fm_commit_attribution_block "$ID" secondmate)
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
   echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
