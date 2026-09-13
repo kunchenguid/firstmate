@@ -269,16 +269,29 @@ test_a_silent_poll_prints_nothing() {
   pass "fm-gram-check: a poll with nothing new prints nothing"
 }
 
+# The watcher dispatches every check as `timeout <FM_CHECK_TIMEOUT> bash <shim>`
+# and hands it the same FM_CHECK_TIMEOUT, so a check that bounds its own poll
+# with that value loses the race to the watcher's timeout every time: the process
+# group is killed and no line is ever printed. Driving this case through the same
+# outer bound the watcher applies is the only way the assertion means anything,
+# because without it the branch passes here while being dead in production.
 test_a_slow_poll_is_bounded_and_reported() {
-  local bin home out
+  local bin home out status=0
   bin=$(make_tool slow 'sleep 30')
   home=$(make_home slow_home)
   out="$home/out.txt"
-  run_check "$home" "$out" "$bin/fm-gram-check.sh" FM_CHECK_TIMEOUT=3
-  assert_contains "$(cat "$out")" "did not finish inside 3s" \
-    "a poll past the watcher's bound is reported, not left silent"
+  # fm_run_timed is the same bounded-execution owner bin/fm-watch.sh uses to
+  # dispatch a check, so this is the watcher's own outer bound, portable to a
+  # host with no GNU timeout.
+  # shellcheck disable=SC2016 # $1/$2 must expand inside the child shell.
+  env -u FM_GRAM_BUDGET FM_CHECK_TIMEOUT=8 FM_HOME="$home" \
+    bash -c '. "$1"; fm_run_timed 8 "$2" check' _ "$ROOT/bin/fm-timeout-lib.sh" \
+    "$bin/fm-gram-check.sh" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "the check must finish inside the watcher's own bound, not be killed by it"
+  assert_contains "$(cat "$out")" "did not finish inside" \
+    "a hung poll must report under the watcher's outer bound, not die silently"
   assert_equals 1 "$(grep -c . "$out")" "the timeout report is exactly one line"
-  pass "fm-gram-check: a poll past its bound is reported in one line"
+  pass "fm-gram-check: a hung poll reports in one line under the watcher's own outer bound"
 }
 
 test_help_and_usage

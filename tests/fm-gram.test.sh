@@ -364,6 +364,69 @@ JSON'
   pass "fm-gram: a purge is scoped to the store the listing describes"
 }
 
+# A capture that never recorded which note it produced cannot be purged: the note
+# and its wake row are on disk with nothing left to find them by. Deleting such a
+# capture would make the message LOOK purged while both copies of the body
+# survive, which is the one outcome the deletion guarantee cannot afford. So the
+# capture is kept and the poll says so.
+test_a_capture_with_no_recorded_note_is_reported_not_silently_dropped() {
+  local home out capture status
+  home=$(make_home purge_unrecorded)
+  fake_herdr "$(store_json "$(msg gram-orphan owner_to_agent '"firstmate"' 'orphaned secret sk-abc123' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  capture=$(find "$home/state/gram-inbox" -name '*.json' -print -quit)
+  [ -n "$capture" ] || fail "the poll must have captured the message"
+
+  # Reproduce a capture whose note id never landed, the state a failed
+  # capture_note leaves behind.
+  jq 'del(.note_id)' "$capture" > "$capture.tmp" && mv "$capture.tmp" "$capture"
+
+  fake_herdr "$(store_json)"
+  status=$(run_poll "$home" "$out" HERDR_PANE_ID=w1:p1)
+  expect_code 1 "$status" "a purge it cannot honour must fail the poll, not pass quietly"
+  assert_equals 1 "$(captures_of "$home")" \
+    "the capture is kept, because deleting it would hide a note and wake row that still exist"
+  assert_contains "$(cat "$out")" "could not clear" "the poll reports the copy it could not clear"
+  assert_not_contains "$(cat "$out")" "sk-abc123" "and never prints the body while reporting it"
+  pass "fm-gram: a capture with no recorded note id is reported rather than silently dropped"
+}
+
+# The note id is the only handle on the other two copies, so failing to learn it
+# has to be loud at publish time as well, not only later at purge time. An inbox
+# that queues the note but does not report its id reproduces that exactly.
+test_a_publish_that_reports_no_note_id_is_reported() {
+  local home bin out status lib
+  home=$(make_home note_record_fail)
+  bin="$TMP_ROOT/note_record_fail_tool/bin"
+  mkdir -p "$bin"
+  cp "$ROOT/bin/fm-gram.sh" "$bin/fm-gram.sh"
+  chmod +x "$bin/fm-gram.sh"
+  for lib in fm-timeout-lib.sh fm-wake-lib.sh; do
+    [ -e "$bin/$lib" ] || ln -s "$ROOT/bin/$lib" "$bin/$lib"
+  done
+  # An inbox that saves the note and wakes, but whose output carries no
+  # "queued <id>" line for the poll to read back.
+  cat > "$bin/fm-inbox.sh" <<'SH'
+#!/usr/bin/env bash
+mkdir -p "$FM_HOME/state/inbox"
+printf '%s\n' "$3" > "$FM_HOME/state/inbox/opaque.note"
+printf 'saved, but this build does not say which id\n'
+SH
+  chmod +x "$bin/fm-inbox.sh"
+
+  fake_herdr "$(store_json "$(msg gram-rec owner_to_agent '"firstmate"' 'record me' 1000)")"
+  out="$home/out.txt"
+  status=0
+  env HERDR_PANE_ID=w1:p1 FM_HOME="$home" PATH="$FAKEBIN:$PATH" \
+    "$bin/fm-gram.sh" poll >"$out" 2>&1 || status=$?
+  expect_code 1 "$status" "a note id the poll cannot learn must fail the poll"
+  assert_contains "$(cat "$out")" "could not record which inbox note" \
+    "the poll names the copy it can no longer find"
+  assert_not_contains "$(cat "$out")" "record me" "and never prints the body while reporting it"
+  pass "fm-gram: a publish that reports no note id is reported, not passed over"
+}
+
 test_help_and_usage
 test_only_addressed_owner_messages_are_taken
 test_message_bodies_never_reach_stdout
@@ -379,3 +442,5 @@ test_a_purge_drops_only_its_own_wake_row
 test_acking_a_purged_note_degrades_cleanly
 test_a_purged_message_is_never_republished
 test_a_purge_never_touches_another_stores_capture
+test_a_capture_with_no_recorded_note_is_reported_not_silently_dropped
+test_a_publish_that_reports_no_note_id_is_reported

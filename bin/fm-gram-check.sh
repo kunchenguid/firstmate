@@ -27,9 +27,14 @@
 #
 # The poll must finish inside the watcher's per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from this check's own environment because the watcher runs it
-# as a direct child). FM_GRAM_BUDGET is cut down to whatever fits inside that
-# bound before the poll starts, and a poll that does not finish reports one line
-# naming the budget rather than leaving the check silent.
+# as a direct child). The watcher applies that same bound to this whole check
+# from the outside, so the poll is run on a STRICTLY SMALLER deadline: bounding
+# it with FM_CHECK_TIMEOUT itself would always lose the race to the watcher's
+# own timeout, which kills the process group and leaves no line at all. The
+# margin covers the shim exec and this file's library sourcing. FM_GRAM_BUDGET is
+# cut down to fit inside the same margin before the poll starts, and a poll that
+# does not finish reports one line naming the budget rather than leaving the
+# check silent.
 set -u
 export LC_ALL=C
 
@@ -115,10 +120,10 @@ action_check() {
   local out rc line news=0
   mkdir -p "$STATE" || return 1
   out=$(FM_HOME="$FM_HOME" FM_GRAM_BUDGET="$BUDGET_SECS" \
-    fm_run_timed "$CHECK_TIMEOUT" "$GRAM_BIN" poll 2>&1)
+    fm_run_timed "$BUDGET_MAX" "$GRAM_BIN" poll 2>&1)
   rc=$?
   if [ "$rc" -eq 124 ]; then
-    line="Gram intake did not finish inside ${CHECK_TIMEOUT}s"
+    line="Gram intake did not finish inside ${BUDGET_MAX}s"
   else
     line=$(printf '%s\n' "$out" | sed -n 's/^fm-gram: //p' | head -n 1)
   fi

@@ -323,11 +323,12 @@ Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabi
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Codex's async Stop hook owns the same re-arm and delivers its wake as a queued message into the Codex thread, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Codex's async Stop hook owns the same re-arm and delivers its wake as a queued message into the Codex thread with bounded foreground checkpoints as its fallback, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 Codex is the one harness whose hooks need a one-time operator approval before any of this runs, and upgrading to the Codex auto-arm needs TWO approvals rather than one.
 Codex persists hook trust per entry, keyed by the hash of that entry's command, so both `Stop` entries in `.codex/hooks.json` are untrusted on the first session after this upgrade: `bin/fm-codex-stop-autoarm.sh` is a brand-new entry, and the turn-end guard entry beside it had `--codex` appended to its command, which invalidates whatever hash was already approved for it.
-Until both are approved once, a Codex primary is silently unsupervised rather than loudly unsupervised: there is no auto-arm to re-arm the watcher and no turn-end guard to block the blind turn, so nothing says the supervision is off.
+Until both are approved once, neither hook fires: there is no auto-arm to re-arm the watcher and no turn-end guard to block the blind turn, so nothing announces that supervision is off.
 Approve both entries in the first Codex session after pulling this change, and treat that as the step that turns supervision back on rather than an optional prompt to dismiss.
+Until they are approved, that home is on Codex's fallback path and supervises itself with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, which is also the standing answer for a spawned worktree whose project hooks never fire at all.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
@@ -1066,7 +1067,7 @@ FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, r
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
-FM_CODEX_WATCH_CHECKPOINT=180   # seconds per bin/fm-watch-checkpoint.sh run, an attended diagnostic only; no harness supervision protocol uses it
+FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint, Codex's fallback supervision path when its Stop hook is not firing
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when the runs ledger is consulted: axi status cannot be attributed directly, or its answer is terminal and may have a live sibling run

@@ -40,9 +40,10 @@ The Stop payload includes `cwd`, but the tracked hook does not use it to choose 
 Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is Firstmate-shaped and hook-bearing, and then invokes the guard with the original payload.
 
-Codex's primary watcher protocol is the async Stop hook `../../../bin/fm-codex-stop-autoarm.sh`, registered beside the guard in `.codex/hooks.json`, not a model command.
+Codex's preferred watcher protocol is the async Stop hook `../../../bin/fm-codex-stop-autoarm.sh`, registered beside the guard in `.codex/hooks.json`, not a model command.
 Verified on codex-cli 0.154.0: an async Stop hook runs concurrently with the turn end and survives across later turns, but its exit status and stderr are discarded, so it cannot use Claude's exit-2 rewake; a SYNCHRONOUS Stop hook does get exit-2 delivered as `Blocked by hook`, at the cost of holding the turn open for the hook's whole duration.
 The hook therefore re-arms `../../../bin/fm-watch-arm.sh` in its own process tree and delivers the wake with `codex queue --thread <session_id> --message ...`, using the `session_id` Codex hands every Stop hook.
 A queued message reaches an idle session within seconds, waits for an in-flight turn rather than interleaving, and preserves order; it is also accepted with exit 0 for a dead session, so delivery is best effort and the durable wake queue remains the reliable record.
-`../../../bin/fm-watch-checkpoint.sh` is no longer Codex's supervision command and survives only as an attended diagnostic.
+`../../../bin/fm-watch-checkpoint.sh` remains Codex's fallback supervision path for any home whose Stop hook cannot be shown to be firing, which includes a spawned worktree and a primary whose per-entry hook hashes are not approved yet.
+The pair is preferred-hook, fallback-checkpoint: a Codex home is never left with no way to arm a watcher.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.

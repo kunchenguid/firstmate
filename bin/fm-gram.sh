@@ -201,10 +201,13 @@ publish() {  # <capture-path> <from>
 }
 
 # Record which inbox note this capture produced, so honouring a later deletion
-# can remove both halves of the copy rather than only the capture.
+# can remove every copy rather than only the capture. A note id that cannot be
+# recorded - unreadable, or never parsed out of the inbox's own output - is a
+# failure, not a no-op: the note and its wake row exist either way, and without
+# this record nothing can ever find them again.
 capture_note() {  # <capture-path> <note-id>
   local path=$1 note=$2 tmp
-  [ -n "$note" ] || return 0
+  [ -n "$note" ] || return 1
   tmp=$(umask 077; mktemp "$CAPTURE_DIR/.capture.XXXXXX" 2>/dev/null) || return 1
   if ! jq --arg note "$note" '. + {note_id: $note}' "$path" >"$tmp" 2>/dev/null; then
     rm -f -- "$tmp"
@@ -251,6 +254,10 @@ purge_wake_row() {  # <note-id>
 # capture removed ahead of a row that could not be dropped would strand that row
 # with nothing left to identify it. So a row this poll cannot drop leaves the
 # whole capture in place, counts a failure, and the next poll retries the lot.
+# A capture carrying no usable note id is the same situation permanently, so it
+# is counted and kept rather than deleted: deleting it would make a message whose
+# note and wake row are still on disk look purged, which is the one outcome the
+# deletion guarantee cannot afford.
 # A capture for another store is never touched, and state/.gram-seen is left
 # alone so a purged message can never be published a second time.
 PURGE_FAILED=0
@@ -267,15 +274,16 @@ purge_deleted() {  # <store> <live-ids>
     printf '%s\n' "$live" | grep -Fqx -- "$cap_id" && continue
     note=$(jq -r '.note_id // empty' "$f" 2>/dev/null)
     case "$note" in
-      ''|*[!A-Za-z0-9._-]*) note='' ;;
-    esac
-    if [ -n "$note" ]; then
-      if ! purge_wake_row "$note"; then
+      ''|*[!A-Za-z0-9._-]*)
         PURGE_FAILED=$((PURGE_FAILED + 1))
         continue
-      fi
-      rm -f -- "$STATE/inbox/$note.note" "$STATE/inbox/handled/$note.note"
+        ;;
+    esac
+    if ! purge_wake_row "$note"; then
+      PURGE_FAILED=$((PURGE_FAILED + 1))
+      continue
     fi
+    rm -f -- "$STATE/inbox/$note.note" "$STATE/inbox/handled/$note.note"
     rm -f -- "$f"
   done
 }
@@ -333,7 +341,10 @@ action_poll() {
       failed=$((failed + 1))
       continue
     fi
-    capture_note "$path" "$note" || true
+    if ! capture_note "$path" "$note"; then
+      say "published Gram message $id but could not record which inbox note it produced; a later deletion cannot clear that note or its wake row"
+      failed=$((failed + 1))
+    fi
     if ! seen_record "$store" "$id"; then
       # Published but unrecorded: say so, because this exact message is the one
       # that can appear twice after a crash here.
@@ -353,7 +364,7 @@ EOF
     say "$published new Gram message(s) from the owner are waiting in the captain inbox"
   fi
   if [ "$PURGE_FAILED" -gt 0 ]; then
-    say "could not clear this home's copy of $PURGE_FAILED deleted Gram message(s); their wake rows are still queued and the next poll retries"
+    say "could not clear this home's copy of $PURGE_FAILED deleted Gram message(s); their captures are kept so nothing looks purged that is not"
     return 1
   fi
   return 0

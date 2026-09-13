@@ -25,8 +25,11 @@
 # Tier 1 (token-free, runs wherever codex is installed) proves fact 1.
 # Tier 2 (opt-in, spends tokens) drives a real interactive Codex under tmux and
 # proves facts 2, 3, and 4 end to end.
+# Tier 3 (opt-in, spends tokens) proves the FALLBACK still works: the hook is
+# preferred, not exclusive, and a Codex home whose project hooks do not fire has
+# only the foreground checkpoint left, so that path must keep working too.
 #
-# Both tiers fail naming the codex version rather than degrading quietly.
+# Every tier fails naming the codex version rather than degrading quietly.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -202,5 +205,56 @@ HOOK
   printf 'ok - codex %s: async Stop hook fires with a session_id, starts beside a synchronous hook rather than after it, does not hold the turn, and its exit-2 stderr stays discarded\n' "$CODEX_VERSION"
 }
 
+# --- tier 3: the fallback path still works ------------------------------------
+#
+# The Stop hook is preferred, not exclusive. A Codex home whose project hooks do
+# not fire - a spawned worktree, or a primary whose per-entry hook hashes are not
+# approved yet - still has to be able to supervise itself, and the foreground
+# checkpoint is the only thing left there. This tier is the pre-existing proof
+# that a real Codex turn runs that checkpoint in the foreground and does not
+# quietly substitute the background arm path; it is kept alongside the hook tiers
+# rather than replaced by them.
+test_foreground_checkpoint_fallback() {
+  case "${FM_CODEX_LIVE_CHECKPOINT_E2E:-${FM_LIVE:-}}" in
+    1) ;;
+    *)
+      printf 'skip: live: credentialed checkpoint fallback proof is opt-in; set FM_CODEX_LIVE_CHECKPOINT_E2E=1 to run\n'
+      return 0
+      ;;
+  esac
+
+  local lab project home_dir transcript
+  lab="$TMP_ROOT/checkpoint-fallback"
+  project="$lab/project"
+  home_dir="$lab/fmhome"
+  transcript="$lab/codex.jsonl"
+  mkdir -p "$lab"
+  git clone -q "$ROOT" "$project" || die "could not clone the checkout under test"
+  mkdir -p "$home_dir/state" "$home_dir/config"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  local prompt='Run exactly `bin/fm-watch-checkpoint.sh --seconds 1` as one foreground shell call. Do not use a background task and do not run fm-watch-arm.sh. After the checkpoint returns, reply briefly.'
+
+  (
+    cd "$project" || exit 1
+    printf '%s\n' "$$" > "$home_dir/state/.lock"
+    FM_HOME="$home_dir" FM_ROOT_OVERRIDE="$project" codex exec \
+      --dangerously-bypass-hook-trust \
+      --dangerously-bypass-approvals-and-sandbox \
+      --skip-git-repo-check \
+      -c 'model_reasoning_effort="low"' \
+      --json \
+      "$prompt"
+  ) > "$transcript" 2>&1 \
+    || die "credentialed checkpoint turn failed: $(tail -20 "$transcript")"
+
+  grep -F 'checkpoint: no actionable wake within 1s' "$transcript" >/dev/null \
+    || die "the transcript omitted the real foreground checkpoint result, so the fallback path no longer runs"
+  if grep -F 'watcher: started pid=' "$transcript" >/dev/null; then
+    die "the checkpoint fallback switched to the background arm path"
+  fi
+  printf 'ok - codex %s: the one-second foreground checkpoint fallback still runs without switching to the background arm\n' "$CODEX_VERSION"
+}
+
 test_queue_surface_exists
 test_async_stop_hook_contract
+test_foreground_checkpoint_fallback

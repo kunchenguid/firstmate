@@ -41,7 +41,7 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex owns the same shape through its own async Stop hook (`bin/fm-codex-stop-autoarm.sh`), which delivers the wake as a queued message rather than an exit-2 rewake.
+Codex owns the same shape through its own async Stop hook (`bin/fm-codex-stop-autoarm.sh`), which delivers the wake as a queued message rather than an exit-2 rewake, and retains its bounded foreground checkpoint protocol as the fallback wherever that hook is not firing.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
@@ -128,7 +128,7 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Codex depends on `codex queue` reaching the thread named by the `session_id` in that Stop payload, Cursor depends on its awaited stop-hook park, and Grok retains native background-completion notifications.
+Claude depends on the Stop `asyncRewake` rewake, Codex depends on `codex queue` reaching the thread named by the `session_id` in that Stop payload and falls back to bounded foreground checkpoints when that hook is not firing, Cursor depends on its awaited stop-hook park, and Grok retains native background-completion notifications.
 Codex delivery is best effort: `codex queue` accepts a message for a thread whose session is already gone, so the durable wake queue, not the push, is what makes an event survive.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
