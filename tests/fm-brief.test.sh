@@ -227,27 +227,42 @@ test_ship_modes_generate_clean_briefs() {
 # fm_commit_attribution_block, the single owner shared with bin/fm-promote.sh).
 # Assert the shape - a standing rule, that it reaches pipeline-authored
 # commits too, and that only the task's own unmerged branch may be rewritten -
-# not the exact sentence, so the wording stays free to improve.
+# not the exact sentence, so the wording stays free to improve. The check point
+# is mode-specific, so each mode must also name an event that happens in it.
 test_ship_briefs_forbid_agent_coauthor_trailer() {
-  local home id mode brief
+  local home id mode brief block checkpoint
   home="$TMP_ROOT/coauthor-home"
   write_registry "$home"
 
-  for id_mode in "brief-coauthor-nm:no-mistakes" "brief-coauthor-dp:direct-PR" "brief-coauthor-lo:local-only"; do
-    id=${id_mode%%:*}
-    mode=${id_mode##*:}
+  while IFS='|' read -r id mode checkpoint; do
+    [ -n "$id" ] || continue
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
       || fail "$id: --mode $mode scaffold failed"
     brief="$home/data/$id/brief.md"
-    assert_grep "co-author" "$brief" "$id: brief did not mention the co-author trailer ban at all"
-    assert_grep "HARD RULE" "$brief" "$id: co-author ban was not phrased as a hard, unmissable rule"
-    grep -Eiq "pipeline.*on your behalf" "$brief" \
+    # Scope every assertion to the rendered attribution block, so unrelated
+    # brief prose cannot stand in for a clause that went missing.
+    block=$(sed -n '/^# Commit attribution/,/default branch/p' "$brief")
+    assert_contains "$block" "co-author" "$id: brief did not mention the co-author trailer ban at all"
+    assert_contains "$block" "HARD RULE" "$id: co-author ban was not phrased as a hard, unmissable rule"
+    printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
       || fail "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
-    assert_grep "own unmerged branch" "$brief" \
+    assert_contains "$block" "own unmerged branch" \
       "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
-    grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" "$brief" \
+    printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
       || fail "$id: co-author ban did not forbid touching commits already on the default branch"
-  done
+    printf '%s\n' "$block" | grep -Eiq "$checkpoint" \
+      || fail "$id: co-author ban named no check point belonging to mode $mode"
+  done <<'ROWS'
+brief-coauthor-nm|no-mistakes|run .*(is|has reached).*terminal|terminal outcome
+brief-coauthor-dp|direct-PR|before you push|open or update its PR
+brief-coauthor-lo|local-only|before you report this branch ready
+ROWS
+  # local-only never pushes or opens a PR, so its check point must not borrow
+  # direct-PR's events.
+  block=$(sed -n '/^# Commit attribution/,/default branch/p' "$home/data/brief-coauthor-lo/brief.md")
+  if printf '%s\n' "$block" | grep -Eiq "push|PR"; then
+    fail "local-only: co-author check point named a push or PR event that mode forbids"
+  fi
   pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
 }
 
