@@ -406,6 +406,20 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
+## Launch environment forwarding (config/launch-env-forward)
+
+Do not assume a value newly exported into the primary firstmate process's own environment reaches a worker: a long-lived backend daemon or session (a tmux server, for example) captures its own environment once and keeps it, so a later change to the launching process's environment - even from the same launcher script - never arrives on its own (measured 08.09.2026: `SUPABASE_DB_URL` exported by a launcher script into firstmate's process failed a worker's push hook twice, on 04.09.2026 and 08.09.2026, until exported by hand inside the worker).
+The optional local, gitignored `config/launch-env-forward` closes that gap explicitly, for ship, scout, secondmate, and raw-command launches alike, including relaunches.
+It is a distinct opt-in from `config/launch-env-allowlist` above: the allowlist only permits already-present ambient names through the exec-boundary filter and never copies a value from the invoking Firstmate process, while `launch-env-forward` does exactly that, deliberately, for the names it lists.
+Absent means no change: nothing is copied, matching every home that predates this option.
+
+Create the file with one environment variable **name** per line, in the same format as `launch-env-allowlist` (never a value, assignment, wildcard, or shell command; blank lines and `#` comments allowed).
+For each valid name currently set in firstmate's own process at spawn time, `bin/fm-spawn.sh` sends one literal, quoted `export NAME=value` into the fresh pane through the same pre-launch channel already used for `GOTMPDIR`, `FM_TASK_ID`, and `TRACEPARENT`, before the harness launch command.
+A listed name that is unset in firstmate's own process is skipped, never forced empty.
+When `launch-env-allowlist` is also enabled, every forwarded name is added to its retained set automatically, so the explicit export a forwarding name produces is not then stripped by the exec-boundary filter.
+The file is inherited into secondmate homes through the same [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md) as `launch-env-allowlist`.
+Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh); the underlying tmux staleness this closes is demonstrated against a real, isolated tmux server in [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh).
+
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
