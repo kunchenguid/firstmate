@@ -24,6 +24,14 @@ LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+# Same quoting bin/fm-spawn.sh applies to the values it substitutes into a
+# launch command, so a path holding spaces or quotes survives the pane shell.
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
 
 [ -x "$LAB_HELPER" ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but the Herdr lab helper is not executable at $LAB_HELPER"
@@ -122,37 +130,47 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 
 # Muse normally has no registered Herdr agent state, so this probes the exact
 # fallback path that once reported a false unconfirmed send despite a visible
-# Muse turn. The installed-harness rule is deliberate: a Muse that cannot run
-# here is reported rather than fabricated as a pass, while a Muse that can must
-# prove its current renderer and send behavior before it can be trusted.
+# Muse turn. The runnable-harness rule is deliberate: a Muse that fm-spawn
+# itself would refuse to launch here is reported rather than fabricated as a
+# pass, while a Muse that it would launch must prove its current renderer and
+# send behavior before it can be trusted.
 MUSE_BIN=$(PATH="$ORIGINAL_PATH" command -v muse 2>/dev/null || true)
-# Same credential contract bin/fm-spawn.sh gates a muse spawn with
-# (muse_credential_present): a stored credential under the config home, or a
-# META_API_KEY the launched pane can actually read.
+# The credential this preflight proves is the one the launched pane consumes:
+# the config and data homes are pinned into the launch command below from the
+# same values checked here, exactly as bin/fm-spawn.sh pins what it checks, so
+# a custom XDG root in this shell and a plain one in the Herdr daemon can never
+# disagree about where the credential lives.
+# The stored subscription credential is the only path accepted here, with no
+# META_API_KEY escape: muse_credential_present's key branch can only prove a
+# key inside a tmux worker session, so fm-spawn refuses an API-key-only host on
+# every other backend and this guard must refuse it identically.
 # An unauthenticated muse does not exit, it parks on an OAuth device-code
 # prompt, so without this preflight the leg would steer a pane that never
 # became Muse and then blame the send path for the missing reply.
 MUSE_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-}/.config}
+MUSE_DATA_HOME=${XDG_DATA_HOME:-${HOME:-}/.local/share}
 MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
 if [ -z "$MUSE_BIN" ]; then
   printf '# muse is not installed; Muse-on-Herdr submit confirmation was not verified here\n'
-elif [ ! -s "$MUSE_AUTH_FILE" ] && [ -z "${META_API_KEY:-}" ]; then
-  printf '# muse is installed but has no reachable credential (%s is absent or empty and META_API_KEY is unset); Muse-on-Herdr submit confirmation was not verified here\n' \
+elif [ ! -s "$MUSE_AUTH_FILE" ]; then
+  printf '# muse is installed but has no stored credential at %s, which is the only credential a Herdr pane can use; Muse-on-Herdr submit confirmation was not verified here\n' \
     "$MUSE_AUTH_FILE"
 else
-  MUSE_VERSION=$(PATH="$ORIGINAL_PATH" muse --version 2>/dev/null | head -1 || printf 'version-unknown')
+  MUSE_VERSION=$(PATH="$ORIGINAL_PATH" "$MUSE_BIN" --version 2>/dev/null | head -1 || printf 'version-unknown')
   MUSE_TAB_JSON=$(lab tab create --workspace "$(printf '%s' "$WS_JSON" | jq -er '.result.workspace.workspace_id')" --cwd "$ROOT" --label fm-submitlive-muse --no-focus) \
     || fail "could not create a Muse tab in the isolated Herdr workspace"
   MUSE_PANE=$(printf '%s' "$MUSE_TAB_JSON" | jq -er '.result.root_pane.pane_id') \
     || fail "Muse tab create did not return a pane id"
   MUSE_TARGET="$SESSION:$MUSE_PANE"
-  # The interactive TUI rejects exec mode's --no-foreign-personal-context, so
-  # the launch shape here matches bin/fm-spawn.sh's verified muse template
-  # minus its positional brief: this guard needs an idle composer to steer.
-  # The env -u scrub is part of that template, so a guard run from inside a
-  # harness session proves the launch firstmate actually performs rather than
-  # one carrying inherited foreign harness markers.
-  lab pane run "$MUSE_PANE" 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on muse --yolo' >/dev/null \
+  # The launch shape here is bin/fm-spawn.sh's verified muse template minus its
+  # positional brief, since this guard needs an idle composer to steer: the same
+  # env -u marker scrub, the same XDG pins, the same absolute resolved binary,
+  # and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the privacy
+  # control, which is the control used because the interactive TUI rejects exec
+  # mode's --no-foreign-personal-context flag.
+  MUSE_LAUNCH=$(printf 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on %s --yolo' \
+    "$(shell_quote "$MUSE_CONFIG_HOME")" "$(shell_quote "$MUSE_DATA_HOME")" "$(shell_quote "$MUSE_BIN")")
+  lab pane run "$MUSE_PANE" "$MUSE_LAUNCH" >/dev/null \
     || fail "could not launch Muse Code ($MUSE_VERSION) in the isolated Herdr pane"
 
   # An empty composer alone is not proof Muse is up: the shared classifier reads

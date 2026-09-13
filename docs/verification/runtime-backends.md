@@ -301,7 +301,8 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
-Herdr's Claude idle-native and Muse unreadable-native submit confirmations are pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
+Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
+Herdr's Muse unreadable-native submit confirmation is pinned by the portable regression in `tests/fm-backend-herdr.test.sh`, while the live Muse leg of that same guard is authored but not yet executed, as recorded in [Submit confirmation](#submit-confirmation).
 
 ### Cleanup endpoint identity
 
@@ -979,9 +980,7 @@ Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `
 `herdr agent get` reported `agent_status=idle` on every sample across a landed one-word turn and an 8-second `sleep` tool call, while the pane rendered `Pontificating…` then `Sock-hopping… (11s · ↓ 234 tokens)`.
 `fm_backend_herdr_send_text_submit` therefore cannot treat native idle as proof of a swallow.
 The portable regressions in `tests/fm-backend-herdr.test.sh` and `tests/fm-composer-lib.test.sh` pin the verdicts: native idle plus a cleared composer is delivery, proven pending plus idle is a swallow, and proven pending plus a generating busy signal is a queued Enter.
-Muse registers no Herdr agent state, so its steers take the same fallback with an unreadable native probe, and the shared classifier's bare `⟩` row is what proves the composer cleared.
-The same guard checks every installed and credentialed Muse Code through that path; a Muse that is absent, or installed without the credential `fm-spawn` requires, is printed as unverified, and a Muse that runs must reach a live agent process with a cleared composer and then render its reply.
-Refresh the live submit-confirmation proof with:
+Refresh the live Claude submit-confirmation proof with:
 
 ```sh
 FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
@@ -992,6 +991,14 @@ Observed 2026-08-19:
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
+
+#### Muse on Herdr, authored and not yet executed
+
+Muse registers no Herdr agent state, so its steers take the same fallback with an unreadable native probe, and the shared classifier's bare `⟩` row is what proves the composer cleared.
+That shape is current fact: the portable regression in `tests/fm-backend-herdr.test.sh` drives it end to end and passes, asserting the confirmed verdict and that exactly one Enter was sent.
+The live Muse leg of `tests/fm-herdr-submit-confirm-live-e2e.test.sh` is authored and registered but has NOT been executed, so no measured Muse-on-Herdr claim exists here and none of the 2026-08-19 Claude measurement above extends to Muse.
+That leg skips with an explicit unverified line when Muse is absent or has no stored credential, and otherwise requires a live agent process, a cleared composer, and the token rendered in Muse's own reply.
+A Herdr-lab-guarded run of that guard is what will replace this entry with an observed line carrying its Muse version and date.
 
 ### Prune and respawn
 
