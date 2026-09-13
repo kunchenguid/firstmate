@@ -12,25 +12,23 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
-| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
+| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`; `max` is forwarded only when the installed Codex CLI reports version 0.151.0 or newer. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
-## Effort: `max` is accepted on 0.151.0
+## Effort: `max` is version-gated
 
 Verified 2026-09-05 on codex-cli **0.151.0** by live probe:
 
     codex exec --model gpt-5.6-luna -c 'model_reasoning_effort="max"' "reply with exactly: MAXOK"
     -> MAXOK (30,096 tokens, hook: Stop Completed)
 
-The table row above records the 0.142.1 catalog, which omitted `max`. That is no longer
-current: `max` IS accepted on 0.151.0, and the operator's own `~/.codex/config.toml`
-already sets `model_reasoning_effort = "max"` without error. Pass `max` through to codex
-rather than capping at `xhigh`; capping silently DELIVERS LESS reasoning than requested,
-because fm-spawn omits the flag entirely for an unaccepted value.
+Codex CLI 0.142.1's bundled catalog omitted `max`, while codex-cli 0.151.0 accepts it.
+The operator's own `~/.codex/config.toml` also sets `model_reasoning_effort = "max"` without error.
+Firstmate forwards `max` when the installed Codex CLI reports version 0.151.0 or newer and otherwise records it in task metadata while omitting the unsupported flag.
 
 ## Skill popup
 
