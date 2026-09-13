@@ -294,19 +294,8 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
-# Supervision lease guard: lifecycle control is overlap territory between the
-# two Pi supervision actors; refuse while the OTHER actor holds this task's
-# live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_guard "$ID" "lifecycle control (fm-control)"
-CONTROL_LOCK="$STATE/.control-$ID.lock"
-trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
-CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ]; then
+if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ] && [ ! -f "$META" ]; then
   case "$RAW_ID" in
     fm-*)
       if [ -f "$STATE/${RAW_ID#fm-}.meta" ]; then
@@ -316,8 +305,33 @@ if [ ! -f "$META" ]; then
   esac
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
 fi
-
+# Supervision lease guard: lifecycle control is overlap territory between the
+# two Pi supervision actors; refuse while the OTHER actor holds this task's
+# live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+trap control_cleanup EXIT
 if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
+  fm_lease_guard "$ID" "lifecycle control (fm-control)" defer-stale
+else
+  fm_lease_guard "$ID" "lifecycle control (fm-control)"
+fi
+if [ -z "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_try_acquire "$CONTROL_LOCK" \
+    || die "another lifecycle action is already running for task $ID"
+  CONTROL_LOCK_HELD=1
+  if [ ! -f "$META" ]; then
+    case "$RAW_ID" in
+      fm-*)
+        if [ -f "$STATE/${RAW_ID#fm-}.meta" ]; then
+          die "'$RAW_ID' is a window label, not a task id; pass the exact task id '${RAW_ID#fm-}'"
+        fi
+        ;;
+    esac
+    die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
+  fi
+else
   CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || die "could not resolve task metadata lock for $ID"
   fm_lock_acquire_wait "$CONTROL_META_LOCK" \
     || die "task $ID metadata could not be locked for generation validation"
@@ -326,8 +340,14 @@ if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
   if ! fm_command_guard_check_optional control spawn-generation "$CONTROL_SPAWN_GEN"; then
     die "task $ID's current spawn generation does not match FM_CONTROL_EXPECTED_SPAWN_GEN; refusing before lifecycle action"
   fi
+  fm_lease_guard "$ID" "lifecycle control (fm-control)" \
+    || die "task $ID lease could not be revalidated after generation validation"
   fm_lock_release "$CONTROL_META_LOCK"
   CONTROL_META_LOCK_HELD=0
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_try_acquire "$CONTROL_LOCK" \
+    || die "another lifecycle action is already running for task $ID"
+  CONTROL_LOCK_HELD=1
 fi
 
 # A remotely placed secondmate records its endpoint on ANOTHER host, so every

@@ -153,6 +153,7 @@ test_send_generation_and_endpoint_guards() {
 
   rm -rf "$dir/home/state/t1.inbox" "$dir/home/state/pending-replies"
   rm -f "$dir/home/state/.guard-watcher-stale-banner"
+  printf 'main\t999999\t1\n' > "$dir/home/state/.lease-t1"
   : > "$dir/send.log"
   run_send "$dir" env FM_SEND_EXPECTED_SPAWN_GEN=stale \
     "$SEND" t1 "stale generation" >/dev/null 2>"$dir/err"; rc=$?
@@ -160,6 +161,7 @@ test_send_generation_and_endpoint_guards() {
   [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "stale generation created an inbox record"
   [ ! -s "$dir/send.log" ] || fail "stale generation rang a doorbell"
   [ ! -e "$dir/home/state/.guard-watcher-stale-banner" ] || fail "stale generation changed guard state"
+  [ -e "$dir/home/state/.lease-t1" ] || fail "stale send generation cleared the lease before refusing"
 
   run_send "$dir" env FM_SEND_EXPECTED_ENDPOINT=stale:sess \
     "$SEND" t1 "stale endpoint" >/dev/null 2>"$dir/err"; rc=$?
@@ -292,11 +294,13 @@ window=sess:fm-t1
 spawn_gen=gen-1
 EOF
   : > "$dir/send.log"
+  printf 'main\t999999\t1\n' > "$dir/home/state/.lease-t1"
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_GUARD_SEND_LOG="$dir/send.log" FM_CONTROL_EXPECTED_SPAWN_GEN=stale \
     "$CONTROL" t1 interrupt 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "a stale control generation was accepted"
   [ ! -s "$dir/send.log" ] || fail "stale control generation sent lifecycle bytes"
+  [ -e "$dir/home/state/.lease-t1" ] || fail "stale control generation cleared the lease before refusing"
 
   replace_file "$dir/home/state/t1.meta" '/^spawn_gen=/d'
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \

@@ -167,7 +167,7 @@ fm_lease_clear_stale() {
 # This closes the check/use race with a concurrent claim. Outside Pi, stale
 # records are still cleaned but the lock is released before returning.
 fm_lease_guard() {
-  local task=$1 action=$2 actor lock lease_actor active=0
+  local task=$1 action=$2 defer_stale=${3:-} actor lock lease_actor active=0
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
@@ -183,6 +183,9 @@ fm_lease_guard() {
     FM_LEASE_GUARD_LOCK=$lock
   fi
   if ! fm_lease_live "$task"; then
+    if [ "$defer_stale" = defer-stale ]; then
+      return 0
+    fi
     fm_lease_clear_stale "$task" || { fm_lease_guard_release; return 1; }
     if [ "$active" != 1 ]; then
       fm_lease_guard_release

@@ -536,7 +536,14 @@ fm_send_lock_task_selector() {
 if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
-    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    if [ -n "$TARGET_SELECTOR" ] \
+      && { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
+        || [ -n "${FM_SEND_EXPECTED_ENDPOINT:-}" ] \
+        || [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ]; }; then
+      fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)" defer-stale
+    else
+      fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    fi
     trap 'fm_send_cleanup' EXIT
   fi
 fi
@@ -545,6 +552,9 @@ if [ -n "$TARGET_META" ] && [ -n "$TARGET_SELECTOR" ] \
     || [ -n "${FM_SEND_EXPECTED_ENDPOINT:-}" ] \
     || [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ]; }; then
   fm_send_lock_task_selector || exit 1
+  [ -z "${LEASE_GUARD_TASK:-}" ] \
+    || fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)" \
+    || exit 1
 fi
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
