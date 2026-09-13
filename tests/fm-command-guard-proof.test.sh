@@ -339,7 +339,7 @@ EOF
     FM_GUARD_SEND_LOG="$dir/send.log" FM_CONTROL_EXPECTED_SPAWN_GEN=gen-1 \
     "$CONTROL" t1 interrupt 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "missing current control generation was accepted"
-  [ "$out" != *"interrupt key"* ] || fail "missing generation reached lifecycle validation"
+  [[ "$out" != *"interrupt key"* ]] || fail "missing generation reached lifecycle validation"
   pass "fm-control guard: stale and missing generations refuse before lifecycle bytes"
 }
 
