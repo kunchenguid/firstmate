@@ -4995,6 +4995,7 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 # here costs a slower poll, never the spawn, so it warns and continues.
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     NM_SNAPSHOT="$STATE/$ID.nm-state"
+    rm -f -- "$NM_SNAPSHOT"
     if "$FM_ROOT/bin/fm-procevent-when.sh" arm "nm-state-$ID" \
         --interval 45 --stable 1 --condition-timeout 60 --action-timeout 120 \
         --repeat --edge --action-env "FM_HOME=$FM_HOME" \
@@ -5003,7 +5004,6 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
             "no-mistakes state changed: run \`no-mistakes axi status\` in your worktree, append \`resolved: run returned\`, and answer the parked gate." \
         >/dev/null 2>&1
     then
-        rm -f -- "$NM_SNAPSHOT"
         echo "armed: when-nm-state-$ID (pipeline-state watch)"
     else
         echo "warning: could not arm the pipeline-state watch for $ID; the worker will fall back to a single status check per resume" >&2

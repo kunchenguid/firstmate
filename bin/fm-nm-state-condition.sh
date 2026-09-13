@@ -51,10 +51,18 @@ SNAPSHOT=$2
 
 [ -d "$WORKTREE" ] || exit 2
 
+write_snapshot() {  # <content>
+    local tmp
+    tmp=$(umask 077; mktemp "$(dirname "$SNAPSHOT")/.$(basename "$SNAPSHOT").XXXXXX" 2>/dev/null) || return 1
+    printf '%s\n' "$1" > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+    chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$SNAPSHOT" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+}
+
 CURRENT=$(projection "$WORKTREE") || exit 2
 
 if [ ! -f "$SNAPSHOT" ]; then
-    printf '%s\n' "$CURRENT" > "$SNAPSHOT" 2>/dev/null || exit 2
+    write_snapshot "$CURRENT" || exit 2
     exit 1
 fi
 
@@ -63,5 +71,5 @@ if [ "$CURRENT" = "$PREVIOUS" ]; then
     exit 1
 fi
 
-printf '%s\n' "$CURRENT" > "$SNAPSHOT" 2>/dev/null || exit 2
+write_snapshot "$CURRENT" || exit 2
 exit 0
