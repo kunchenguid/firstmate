@@ -194,7 +194,7 @@ fm_brief_task_content_valid() {  # <file>
 # it, and reports rather than rewriting a pushed PR head afterwards.
 # Never touching the default branch is absolute in every mode.
 fm_commit_attribution_block() {  # <task-id> <mode>
-  local id=$1 mode=$2
+  local id=$1 mode=$2 checkpoint=''
   cat <<EOF
 # Commit attribution - HARD RULE, no exceptions
 NEVER put an agent name as a commit co-author trailer (for example \`Co-Authored-By: Claude ... <noreply@anthropic.com>\`) on any commit on this branch.
@@ -209,18 +209,16 @@ Once the run is terminal, check the branch again and report a surviving trailer 
 EOF
       ;;
     direct-PR)
-      cat <<EOF
-Before you push this branch and before you open or update its PR, check this branch's commits for that trailer.
-If you find one, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
-EOF
-      ;;
+      checkpoint='Before you push this branch and before you open or update its PR' ;;
     local-only)
-      cat <<EOF
-Before you report this branch ready for the merge authority, check this branch's commits for that trailer.
+      checkpoint='Before you report this branch ready for the merge authority' ;;
+  esac
+  if [ -n "$checkpoint" ]; then
+    cat <<EOF
+$checkpoint, check this branch's commits for that trailer.
 If you find one, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
 EOF
-      ;;
-  esac
+  fi
   cat <<'EOF'
 Never rewrite a commit that has already reached the default branch; that is the captain's call, not yours.
 EOF
