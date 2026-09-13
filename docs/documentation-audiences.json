@@ -353,6 +353,14 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fleet-autodev-convergence.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/fleet.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },

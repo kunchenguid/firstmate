@@ -135,6 +135,28 @@ wait_state fm-only idle 15 || wait_state fm-only running 5 || fail "single manag
 "$FLEET" stop --all >/dev/null || fail "single stop"
 export FM_FLEET_ROOT=$FROOT
 
+if command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HROOT=$TMP_ROOT/herdfleet
+  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" init >/dev/null || fail "herdr fleet init"
+  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" register --id fm-h \
+    --home "$HROOT/homes/fm-h" --scope trial --secondmates sm-h1 >/dev/null || fail "herdr register"
+  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" start >/dev/null || fail "herdr start"
+  i=0
+  hstate=""
+  while [ "$i" -lt 20 ]; do
+    hstate=$(FM_FLEET_ROOT=$HROOT "$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-h"][0])')
+    [ "$hstate" = "running" ] || [ "$hstate" = "idle" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  [ "$hstate" = "running" ] || [ "$hstate" = "idle" ] || fail "herdr manager never live: $hstate"
+  [ -s "$HROOT/homes/fm-h/state/.fleet-herdr-target" ] || fail "herdr target not recorded"
+  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" stop --all >/dev/null || fail "herdr stop"
+else
+  echo "skip: herdr backend not available"
+fi
+export FM_FLEET_ROOT=$FROOT
+unset FM_FLEET_BACKEND
 "$FLEET" status --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)["managers"])==3' || fail "status json loses managers"
 "$FLEET" attach fm-a | grep -q "homes/fm-a" || fail "attach does not name the manager home"
 

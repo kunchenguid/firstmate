@@ -103,6 +103,9 @@ If fleet control itself is unavailable, running managers keep supervising from t
 Managers run under tmux when it is present and under `nohup` otherwise.
 `FM_FLEET_BACKEND=tmux` or `=nohup` pins the choice.
 Both backends run real processes; tmux additionally survives the launching shell.
+`FM_FLEET_BACKEND=herdr` runs each manager as one tab per manager inside one `fm-fleet` workspace in the resolved Herdr session, so managers stay visible on the operator's normal Herdr surface.
+The Herdr backend reuses the verified tab-create, submit, and kill primitives from `bin/backends/herdr.sh`; tabs are labeled `fleet-<id>` and never collide with task tabs.
+Explicit selection stays required for Herdr because it is experimental and session-dependent.
 
 ## Migration
 

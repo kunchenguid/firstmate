@@ -91,6 +91,18 @@ fleet_backend() {
   fi
 }
 
+fleet_backend_check() {
+  case "$1" in
+    tmux|nohup) return 0 ;;
+    herdr)
+      command -v herdr >/dev/null 2>&1 || { echo "fm-fleet: herdr backend needs the herdr CLI" >&2; return 1; }
+      command -v jq >/dev/null 2>&1 || { echo "fm-fleet: herdr backend needs jq" >&2; return 1; }
+      return 0
+      ;;
+    *) echo "fm-fleet: unsupported backend $1 (want tmux, nohup, or herdr)" >&2; return 1 ;;
+  esac
+}
+
 fleet_tmux_session() {
   printf 'fm-fleet-%s-%s' "$(printf '%s' "$FLEET_ROOT" | cksum | cut -d' ' -f1)" "$1"
 }
@@ -274,7 +286,7 @@ PY
     done
     # shellcheck disable=SC2086
     backend=$(fleet_backend)
-    case "$backend" in tmux|nohup) ;; *) echo "fm-fleet: unsupported backend $backend (want tmux or nohup)" >&2; exit 2 ;; esac
+    fleet_backend_check "$backend" || exit 2
     if [ "$backend" = "tmux" ]; then
       # shellcheck disable=SC2086
       for mid in $managers; do
@@ -295,6 +307,11 @@ PY
         fi
         tmux new-session -d -s "$(fleet_tmux_session "$mid")" -x 200 -y 50 "$MANAGER_BIN" "$FLEET_ROOT" "$mid" >> "$log" 2>&1 || {
           echo "fm-fleet: tmux failed to launch $mid; see $log" >&2
+          exit 1
+        }
+      elif [ "$backend" = "herdr" ]; then
+        FM_FLEET_POLL="${FM_FLEET_POLL:-2}" "$SCRIPT_DIR/fm-fleet-herdr.sh" launch "$FLEET_ROOT" "$mid" "$home" "$MANAGER_BIN" >> "$log" 2>&1 || {
+          echo "fm-fleet: herdr failed to launch $mid; see $log" >&2
           exit 1
         }
       else
@@ -368,6 +385,7 @@ PY
         if command -v tmux >/dev/null 2>&1 && fleet_tmux_alive "$mid"; then
           tmux kill-session -t "$(fleet_tmux_session "$mid")" 2>/dev/null || true
         fi
+        "$SCRIPT_DIR/fm-fleet-herdr.sh" close "$FLEET_ROOT" "$mid" "$home" >/dev/null 2>&1 || true
         continue
       fi
       kill "$pid" 2>/dev/null || true
@@ -386,6 +404,7 @@ PY
       if command -v tmux >/dev/null 2>&1 && fleet_tmux_alive "$mid"; then
         tmux kill-session -t "$(fleet_tmux_session "$mid")" 2>/dev/null || true
       fi
+      "$SCRIPT_DIR/fm-fleet-herdr.sh" close "$FLEET_ROOT" "$mid" "$home" >/dev/null 2>&1 || true
     done
     ;;
 
