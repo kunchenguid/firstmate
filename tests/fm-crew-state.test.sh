@@ -1997,6 +1997,26 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+test_stored_code_selector_resolves_task() {
+  reset_fakes
+  local d out
+  d=$(new_case stored-code-selector)
+  make_repo_on_branch "$d/wt" fm/stored-code-selector
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selector.meta" \
+    "window=fm:fm-selector" \
+    "worktree=$d/wt" \
+    "kind=ship" \
+    "code=A2-eng.1"
+  printf 'paused: waiting for fixture\n' > "$d/state/selector.status"
+  arm_idle_record "$d/state" selector
+
+  out=$(run_crew_state "$d" '[A2-eng.1]')
+  assert_contains "$out" "state: paused" "stored bracketed code did not resolve to task state"
+  assert_not_contains "$out" "no metadata" "stored code was treated as a literal task id"
+  pass "fm-crew-state resolves stored bracketed task identity"
+}
+
 test_worker_liveness_structural_absence() {
   reset_fakes
   local d out
@@ -2843,6 +2863,7 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
+test_stored_code_selector_resolves_task
 test_worker_liveness_structural_absence
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped

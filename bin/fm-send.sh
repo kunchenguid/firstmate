@@ -2,9 +2,9 @@
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
-#   <target> may be an exact task id, a legacy fm-<id> task label resolved
-#   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target. fm-send refuses unresolved guesses rather than falling back to a
+#   <target> may be an exact task id; a stored code body, bracketed body, or
+#   unique full-code prefix; a legacy fm-<id> task label; or an explicit
+#   well-formed backend target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Structured same-home messages: <target[,target...]> [--thread <name>]
@@ -264,8 +264,37 @@ case "${1:-}" in --reply|--retry|*,*) STRUCTURED_MESSAGE=1 ;; esac
 case "${2:-}" in --thread|--kind|--ref) STRUCTURED_MESSAGE=1 ;; esac
 # shellcheck source=bin/fm-peer-message-lib.sh
 . "$SCRIPT_DIR/fm-peer-message-lib.sh"
+
+fm_send_resolve_structured_targets() {  # <target[,target...]>
+  local remaining=$1 target resolved output=
+  while :; do
+    case "$remaining" in
+      *,*) target=${remaining%%,*}; remaining=${remaining#*,} ;;
+      *) target=$remaining; remaining= ;;
+    esac
+    resolved=$target
+    case "$target" in
+      supervisor) ;;
+      *)
+        if [ ! -e "$STATE/services/$target.json" ] && [ ! -L "$STATE/services/$target.json" ]; then
+          resolved=$(fm_backend_task_id_for_selector "$target" "$STATE" 2>/dev/null || printf '%s' "$target")
+        fi
+        ;;
+    esac
+    [ -z "$output" ] || output="$output,"
+    output="$output$resolved"
+    [ -n "$remaining" ] || break
+  done
+  printf '%s' "$output"
+}
+
 if [ -n "${FM_TASK_ID:-}${FM_SERVICE_ID:-}" ] || [ "$STRUCTURED_MESSAGE" = 1 ] \
   || [ -e "$STATE/services/${1:-}.json" ] || [ -L "$STATE/services/${1:-}.json" ]; then
+  case "${1:-}" in
+    --reply|--retry) ;;
+    ''|,*|*,|*,,*) echo 'error: invalid empty message recipient' >&2; exit 1 ;;
+    *) set -- "$(fm_send_resolve_structured_targets "$1")" "${@:2}" ;;
+  esac
   fm_peer_send "$@"
   exit $?
 fi

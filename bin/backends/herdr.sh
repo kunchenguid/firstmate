@@ -85,6 +85,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # through fm_transition_policy - it never re-encodes the mapping.
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+# shellcheck source=bin/fm-task-code-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-task-code-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
@@ -795,79 +797,28 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
-# fm_backend_herdr_sidebar_tail: keep the distinctive tail of an ASCII id in
-# the fixed-width sidebar budget. Herdr renders the two glyphs used below as
-# one cell each on the supported terminal surfaces.
-fm_backend_herdr_sidebar_tail() {  # <text> <max-cells>
-  local text=$1 max=$2 start
-  case "$max" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$max" -gt 0 ] || return 0
-  if [ "${#text}" -gt "$max" ]; then
-    start=$(( ${#text} - max ))
-    text=${text:$start:$max}
-  fi
-  printf '%s' "$text"
+# fm_backend_herdr_sidebar_label: pure display clipping for a stored code.
+fm_backend_herdr_sidebar_label() {  # <stored-code>
+  fm_task_code_visible "$1"
 }
 
-# fm_backend_herdr_sidebar_parent_suffix: compact parent identity used when
-# Herdr shows agents without their workspace nesting.
-fm_backend_herdr_sidebar_parent_suffix() {  # <workspace-label>
-  local parent=$1 id
-  case "$parent" in
-    firstmate|main) printf 'main' ;;
-    2ndmate-*)
-      id=${parent#2ndmate-}
-      printf '%s' "${id:0:2}" | tr '[:upper:]' '[:lower:]'
-      ;;
-    *) printf '%s' "${parent:0:2}" | tr '[:upper:]' '[:lower:]' ;;
-  esac
-}
-
-# fm_backend_herdr_sidebar_label: the only owner of visible Herdr agent names.
-# Parent labels use a role marker and the full identity within twelve cells; worker
-# labels use a corner, the distinctive task tail, and a compact parent suffix.
-# The underlying workspace and tab labels remain longer recovery correlators.
-fm_backend_herdr_sidebar_label() {  # <main|secondmate|worker> <id> [<parent-label>]
-  local role=$1 id=$2 parent=${3:-} prefix suffix available task parent_id
-  case "$role" in
-    main)
-      printf '%s' '● main'
-      ;;
-    secondmate)
-      case "$id" in 2ndmate-*) parent_id=${id#2ndmate-} ;; *) parent_id=$id ;; esac
-      parent_id=$(fm_backend_herdr_sidebar_tail "$parent_id" 10)
-      printf '● %s' "$parent_id"
-      ;;
-    worker)
-      prefix='└ '
-      task=$(fm_backend_herdr_projection_concise_task_label "$id")
-      suffix=
-      if [ -n "$parent" ]; then
-        suffix=" ·$(fm_backend_herdr_sidebar_parent_suffix "$parent")"
-      fi
-      available=$((12 - ${#prefix} - ${#suffix}))
-      [ "$available" -gt 0 ] || { suffix=; available=$((12 - ${#prefix})); }
-      task=$(fm_backend_herdr_sidebar_tail "$task" "$available")
-      printf '%s%s%s' "$prefix" "$task" "$suffix"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-# fm_backend_herdr_report_sidebar_metadata: apply one display-only title to an
-# exact pane. A metadata failure is caller-visible but never changes endpoint
-# authority or lifecycle state.
-fm_backend_herdr_report_sidebar_metadata() {  # <session> <pane> <role> <id> [<parent-label>] [<parent-workspace>]
-  local session=$1 pane=$2 role=$3 id=$4 parent=${5:-} parent_workspace=${6:-} title
-  title=$(fm_backend_herdr_sidebar_label "$role" "$id" "$parent") || return 1
-  if [ "$role" = worker ] && [ -n "$parent_workspace" ]; then
+# fm_backend_herdr_report_sidebar_metadata: publish one stored code to the exact
+# pane and, for a projected one-task workspace, that exact workspace. The tab's
+# fm-<id> recovery label remains the human-readable second sidebar row.
+fm_backend_herdr_report_sidebar_metadata() {  # <session> <pane> <stored-code> [<parent-workspace>] [<workspace>]
+  local session=$1 pane=$2 code=$3 parent_workspace=${4:-} workspace=${5:-} title
+  title=$(fm_backend_herdr_sidebar_label "$code") || return 1
+  if [ -n "$parent_workspace" ]; then
     fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
       --source firstmate --title "$title" --display-agent "$title" \
-      --token "parent-workspace=$parent_workspace" >/dev/null 2>&1
+      --token "code=$title" --token "parent-workspace=$parent_workspace" >/dev/null 2>&1 || return 1
   else
     fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
-      --source firstmate --title "$title" --display-agent "$title" >/dev/null 2>&1
+      --source firstmate --title "$title" --display-agent "$title" \
+      --token "code=$title" >/dev/null 2>&1 || return 1
   fi
+  [ -z "$workspace" ] || fm_backend_herdr_cli "$session" workspace report-metadata "$workspace" \
+    --source firstmate --token "code=$title" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_projection_workspace_bind_parent: retain the exact parent

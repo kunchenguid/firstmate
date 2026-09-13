@@ -13,8 +13,8 @@ HELP=$("$ROOT/bin/fm-spawn.sh" --help) || fail "fm-spawn.sh --help failed"
 
 test_spawn_header_names_base_meta_keys() {
   local key
-  for key in window= endpoint_task_id= worktree= project= harness= kind= \
-    mode= yolo= tasktmp= model= effort=; do
+  for key in window= endpoint_task_id= worktree= project= harness= kind= code= \
+    code_parent= parent= child_seq= mode= yolo= tasktmp= model= effort=; do
     assert_contains "$HELP" "$key" \
       "spawn header does not document base meta key $key"
   done
@@ -49,6 +49,8 @@ test_spawn_publishes_dispatched_pipeline_record() {
     "$id" "$project" --mode no-mistakes --yolo off) || rc=$?
   expect_code 0 "$rc" "real spawn should publish its task record"
   assert_contains "$out" "spawned $id" "real spawn did not complete"
+  assert_grep "code=PC-$id" "$home/state/$id.meta" \
+    "fresh spawn did not persist its deterministic task code"
   record=$(cat "$home/state/$id.pipeline")
   assert_contains "$record" "schema=fm-pipeline.v3 task=$id" \
     "spawn did not create the v3 pipeline header"
@@ -57,6 +59,81 @@ test_spawn_publishes_dispatched_pipeline_record() {
   assert_contains "$record" "rev=1 " "spawn did not record the first revision"
   assert_contains "$record" "step=dispatched" "spawn did not record dispatch"
   pass "real spawn publishes a dispatched owner record"
+}
+
+test_spawn_uses_seeded_home_identity_as_code_parent() {
+  local case_dir="$TMP_ROOT/spawn-seeded-parent" parent_home home project worktree fakebin id parent_id out rc=0
+  id=child
+  parent_id=artemis-reviewer
+  case_dir="$TMP_ROOT/spawn-seeded-parent"
+  parent_home="$case_dir/parent-home"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_home "$parent_home" codex
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  printf '%s\n' "$parent_id" > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent_home" \
+    > "$home/.fm-secondmate-parent"
+  printf 'kind=secondmate\ncode=A2-reviewer\n' > "$parent_home/state/$parent_id.meta"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+  fm_git_worktree "$project" "$worktree" "pool-seeded-parent"
+
+  out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+    "$id" "$project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "seeded-home child spawn should complete: $out"
+  grep -Fx -- 'code=A2-reviewer.1' "$home/state/$id.meta" >/dev/null \
+    || fail "seeded-home child did not inherit its controller code"
+  grep -Fx -- "code_parent=$parent_id" "$home/state/$id.meta" >/dev/null \
+    || fail "seeded-home child did not persist its controller code parent"
+  if grep -q '^parent=' "$home/state/$id.meta"; then
+    fail "seeded-home controller code ancestry changed helper report authority"
+  fi
+  grep -Fx -- 'child_seq=1' "$home/state/$id.meta" >/dev/null \
+    || fail "seeded-home child did not persist its parent-local sequence"
+  cat > "$fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message)
+    case "\$*" in *pane_current_command*) printf 'codex\\n' ;; *) printf 'firstmate\\n' ;; esac ;;
+  list-windows) printf 'fm-$id\\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$fakebin/tmux"
+  rc=0
+  out=$(cd "$worktree" && PATH="$fakebin:$PATH" FM_TASK_ID="$id" FM_HOME="$home" \
+    "$ROOT/bin/fm-message.sh" send supervisor --kind note 'normal worker report' 2>&1) || rc=$?
+  expect_code 0 "$rc" "seeded-home child should retain ordinary supervisor reporting: $out"
+  pass "seeded-home dispatch inherits controller code identity without changing report authority"
+}
+
+test_spawn_in_remote_seeded_home_does_not_require_remote_code_parent() {
+  local case_dir="$TMP_ROOT/spawn-remote-seeded" home project worktree fakebin id out rc=0
+  id='remote-child'
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  printf 'remote-controller\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\n' \
+    > "$home/.fm-secondmate-parent"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+  fm_git_worktree "$project" "$worktree" "pool-remote-seeded"
+
+  out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+    "$id" "$project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "remote-seeded-home worker spawn should preserve the existing launch path: $out"
+  grep -Fx -- "code=PC-$id" "$home/state/$id.meta" >/dev/null \
+    || fail "remote-seeded-home worker did not mint a local root code"
+  if grep -Eq '^(code_parent|parent|child_seq)=' "$home/state/$id.meta"; then
+    fail "remote-seeded-home worker introduced unsupported remote code ancestry"
+  fi
+  pass "remote-seeded homes preserve worker launch without remote code ancestry"
 }
 
 test_spawn_warns_and_preserves_unsafe_pipeline_record() {
@@ -91,7 +168,8 @@ test_spawn_warns_and_preserves_unsafe_pipeline_record() {
 }
 
 test_spawn_relaunch_warns_and_preserves_foreign_pipeline_record() {
-  local case_dir="$TMP_ROOT/spawn-relaunch" home project worktree fakebin id out rc=0 before_file
+  local case_dir="$TMP_ROOT/spawn-relaunch" home project worktree child_worktree fakebin id out rc=0 before_file code_before
+  local child_id='helper-child'
   id=spawn-relaunch-s2c
   home="$case_dir/home"
   project="$case_dir/project"
@@ -130,6 +208,8 @@ EOF
   expect_code 0 "$rc" "relaunch fixture's first spawn should complete"
   before_file="$case_dir/pipeline.before"
   cp -- "$home/state/$id.pipeline" "$before_file"
+  code_before=$(awk -F= '$1 == "code" { print $2 }' "$home/state/$id.meta")
+  printf 'code_parent=parent-task\nparent=helper-parent\nchild_seq=3\n' >> "$home/state/$id.meta"
   rc=0
   out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" "$id" --relaunch) || rc=$?
   expect_code 0 "$rc" "relaunch should complete when its endpoint is agent-free"
@@ -137,9 +217,100 @@ EOF
     "relaunch did not report the foreign-generation owner refusal"
   assert_contains "$out" "refused:foreign-gen" \
     "relaunch warning omitted the foreign-generation refusal"
+  [ "$(awk -F= '$1 == "code" { print $2 }' "$home/state/$id.meta")" = "$code_before" ] \
+    || fail "relaunch changed the stored task code"
+  grep -Fx -- 'code_parent=parent-task' "$home/state/$id.meta" >/dev/null \
+    || fail "relaunch discarded the stored code parent"
+  grep -Fx -- 'parent=helper-parent' "$home/state/$id.meta" >/dev/null \
+    || fail "relaunch discarded the stored helper-report parent"
+  grep -Fx -- 'child_seq=3' "$home/state/$id.meta" >/dev/null \
+    || fail "relaunch discarded the stored parent-local sequence"
   cmp -s "$before_file" "$home/state/$id.pipeline" \
     || fail "relaunch changed the prior-generation lifecycle record after owner refusal"
-  pass "relaunch preserves a prior-generation pipeline record when reconciliation is fenced"
+  awk -F= '$1 !~ /^(code|code_parent|parent|child_seq)$/' "$home/state/$id.meta" > "$case_dir/uncoded.meta"
+  mv "$case_dir/uncoded.meta" "$home/state/$id.meta"
+  rc=0
+  out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" "$id" --relaunch) || rc=$?
+  expect_code 0 "$rc" "relaunch should preserve a legacy uncoded local record: $out"
+  if grep -q '^code=' "$home/state/$id.meta"; then
+    fail "relaunch migrated a legacy uncoded record inside the narrowed local-spawn path"
+  fi
+  grep -Fx -- "endpoint_task_id=$id" "$home/state/$id.meta" >/dev/null \
+    || fail "legacy parent relaunch lost its local endpoint identity"
+  fm_test_fake_tmux_spawn "$fakebin"
+  child_worktree="$case_dir/child-worktree"
+  fm_test_spawn_brief "$home" "$child_id"
+  fm_test_write_active_treehouse_fake "$fakebin" "$child_worktree"
+  git -C "$project" worktree add --quiet -b pool-helper-child "$child_worktree"
+  rc=0
+  out=$(FM_TASK_ID="$id" fm_test_run_spawn "$home" "$child_worktree" "$fakebin" \
+    "$child_id" "$project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "relaunched legacy parent should still spawn a helper child: $out"
+  grep -Fx -- "parent=$id" "$home/state/$child_id.meta" >/dev/null \
+    || fail "helper child lost its report-authority parent"
+  grep -Fx -- 'code=PC-helper-child' "$home/state/$child_id.meta" >/dev/null \
+    || fail "helper child of an uncoded parent did not mint a root code"
+  if grep -Eq '^(code_parent|child_seq)=' "$home/state/$child_id.meta"; then
+    fail "helper child of an uncoded parent retained unsupported code ancestry"
+  fi
+  pass "relaunch preserves coded identity and an uncoded parent spawns a root-coded child"
+}
+
+test_spawn_relaunch_refuses_damaged_present_code() {
+  local case_dir="$TMP_ROOT/spawn-corrupt-code" home project worktree fakebin id out rc=0 before_file mutations_before mutations_after
+  id=spawn-corrupt-code-s2c
+  case_dir="$TMP_ROOT/spawn-corrupt-code"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+  fm_git_worktree "$project" "$worktree" "pool-corrupt-code"
+  cat > "$fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$worktree"; exit 0 ;;
+  *"#{pane_tty}"*) printf '/dev/pts/0\n'; exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ -e "$case_dir/live" ] && printf 'fm-$id\n'; exit 0 ;;
+  send-keys) printf 'send-keys\n' >> "$case_dir/mutations"; : > "$case_dir/live"; exit 0 ;;
+  new-session|new-window|kill-window) printf '%s\n' "\${1:-}" >> "$case_dir/mutations"; exit 0 ;;
+  has-session|set-window-option) exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'-t pts/0'*) printf ' 123 123 123 bash\n'; exit 0 ;;
+  *) exec /bin/ps "$@" ;;
+esac
+EOF
+  chmod +x "$fakebin/ps"
+
+  out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+    "$id" "$project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "corrupt-code fixture's first spawn should complete: $out"
+  printf 'code=damaged-duplicate\n' >> "$home/state/$id.meta"
+  before_file="$case_dir/meta.before"
+  cp "$home/state/$id.meta" "$before_file"
+  mutations_before=$(wc -l < "$case_dir/mutations" | tr -d ' ')
+  rc=0
+  out=$(fm_test_run_spawn "$home" "$worktree" "$fakebin" "$id" --relaunch) || rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch accepted duplicate stored task-code identity"
+  assert_contains "$out" "stored task code is malformed or duplicated" \
+    "relaunch did not identify the damaged present code"
+  cmp -s "$before_file" "$home/state/$id.meta" \
+    || fail "relaunch changed metadata carrying a damaged present code"
+  mutations_after=$(wc -l < "$case_dir/mutations" | tr -d ' ')
+  [ "$mutations_after" = "$mutations_before" ] \
+    || fail "relaunch mutated the endpoint after finding a damaged present code"
+  pass "relaunch refuses damaged present task-code identity without mutation"
 }
 
 test_spawn_reclaims_stale_owner_lock_and_preserves_temp() {
@@ -381,8 +552,11 @@ SH
 test_spawn_header_names_base_meta_keys
 test_spawn_header_names_routing_and_remote_meta_keys
 test_spawn_publishes_dispatched_pipeline_record
+test_spawn_uses_seeded_home_identity_as_code_parent
+test_spawn_in_remote_seeded_home_does_not_require_remote_code_parent
 test_spawn_warns_and_preserves_unsafe_pipeline_record
 test_spawn_relaunch_warns_and_preserves_foreign_pipeline_record
+test_spawn_relaunch_refuses_damaged_present_code
 test_spawn_reclaims_stale_owner_lock_and_preserves_temp
 test_spawn_recovers_an_interrupted_owner_on_relaunch
 test_spawn_publishes_phase_timings

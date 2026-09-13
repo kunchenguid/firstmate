@@ -747,7 +747,7 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta original_meta id kind harness model mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta original_meta id code kind harness model mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file decisions_capture observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -758,6 +758,7 @@ task_json_lines() {
     index=$((index + 1))
     id=$(basename "$meta" .meta)
     original_meta="$STATE/$id.meta"
+    code=$(meta_value "$meta" code)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -860,6 +861,7 @@ task_json_lines() {
 
     jq -n \
       --arg id "$id" \
+      --arg code "$code" \
       --arg kind "$kind" \
       --arg harness "$harness" \
       --arg model "$model" \
@@ -892,6 +894,7 @@ task_json_lines() {
       --argjson report_present "$(bool_json "$report_present")" \
       '{
         id:$id,
+        code:($code | if . == "" then null else . end),
         kind:$kind,
         harness:($harness // ""),
         model:($model // ""),
@@ -1048,7 +1051,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,
+         | {id,code,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all

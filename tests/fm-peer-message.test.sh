@@ -182,6 +182,17 @@ printf '%s\n%s\n' "$encoded" "$encoded" > "$TMP_ROOT/two.json"
 refuse 'multiple JSON messages on one validation call' "$ROOT/bin/fm-message.sh" validate "$TMP_ROOT/two.json"
 pass 'service port uses the same codec and preserves trailing text newlines'
 
+printf 'code=A2-recipient\n' >> "$FM_HOME/state/b.meta"
+send a '[A2-recipient]' --thread bracketed-code 'bracketed code delivery' >/dev/null
+jq -se '.[-1].to==["b"]' "$FM_HOME/data/threads/bracketed-code.md" >/dev/null \
+  || fail 'bracketed stored code did not resolve before structured delivery'
+send a A2-recip --thread prefixed-code 'prefixed code delivery' >/dev/null
+jq -se '.[-1].to==["b"]' "$FM_HOME/data/threads/prefixed-code.md" >/dev/null \
+  || fail 'unique stored-code prefix did not resolve before structured delivery'
+refuse 'leading empty structured recipient' send a ',b' --thread empty-recipient nope
+refuse 'trailing empty structured recipient' send a 'b,' --thread empty-recipient nope
+pass 'structured sends resolve stored code selectors without dropping empty recipients'
+
 FM_HOME="$FM_HOME" "$ROOT/bin/fm-message.sh" stats > "$TMP_ROOT/stats"
 jq -e '.accepted>=8 and .rejected>=13 and .errors==1 and .delivered>=9' "$TMP_ROOT/stats" >/dev/null || fail "telemetry stats differ: $(<"$TMP_ROOT/stats")"
 if grep -R -E 'scope needs approval|private-value-not-an-id' "$FM_HOME/state/fm-message/telemetry"; then fail 'private text or rejected input leaked into telemetry'; fi

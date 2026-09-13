@@ -56,6 +56,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_DISABLED_ADAPTERS_CONFIG="$FM_BACKEND_CONFIG_DIR/disabled-adapters"
 # shellcheck source=bin/fm-disabled-adapters-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-disabled-adapters-lib.sh"
+# shellcheck source=bin/fm-task-code-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-task-code-lib.sh"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
@@ -609,7 +611,7 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
 }
 
 fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 id
+  local raw=$1 state=$2 id meta
   case "$raw" in
     *:*) return 1 ;;
   esac
@@ -625,7 +627,9 @@ fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
       return 0
       ;;
   esac
-  return 1
+  meta=$(fm_task_code_meta_for_selector "$raw" "$state") || return 1
+  id=${meta##*/}
+  printf '%s' "${id%.meta}"
 }
 
 fm_backend_meta_for_selector() {  # <raw-target> <state-dir>
@@ -699,7 +703,7 @@ fm_backend_source() {  # <name>
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
-# selector to a live session-provider target. Four forms, in order:
+# selector to a live session-provider target. Five forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
 #                      this firstmate home) - backend-independent, a literal string.
 #   exact task id      routed through <state-dir>/<id>.meta's backend target
@@ -711,6 +715,8 @@ fm_backend_source() {  # <name>
 #   "fm-<id>"          legacy task window label fallback routed through
 #                      <state-dir>/<id>.meta when no exact
 #                      <state-dir>/fm-<id>.meta exists.
+#   stored code        exact body, bracketed body, or one unique full-code
+#                      prefix; clipped display values never resolve.
 #   anything else      first matched against recorded `window=`/`terminal=`
 #                      metadata, then treated as an ad hoc bare window name and
 #                      resolved by searching the legacy tmux live inventory.

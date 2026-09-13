@@ -76,7 +76,7 @@ test_page_groups_tasks_and_labels_status_age_sources() {
   fakebin=$(make_fakebin "$home")
   tasks="$home/tasks.json"
   jq -n '{tasks:[
-    {id:"decision",backlog:{title:"Choose status colors",repo:"sample"},harness:"claude",model:"sonnet",current_state:{state:"parked"},hints:{open_decisions:[{verb:"needs-decision"}]},paths:{status_log:{last_event:{raw:"needs-decision: 2026-08-02T00:03:00Z choose a palette"}}}},
+    {id:"decision",code:"A2-eng",backlog:{title:"Choose status colors",repo:"sample"},harness:"claude",model:"sonnet",current_state:{state:"parked"},hints:{open_decisions:[{verb:"needs-decision"}]},paths:{status_log:{last_event:{raw:"needs-decision: 2026-08-02T00:03:00Z choose a palette"}}}},
     {id:"blocked",backlog:{title:"Repair source owner",repo:"sample"},harness:"codex",model:"gpt-5.6-luna",current_state:{state:"blocked"},hints:{open_decisions:[]},paths:{status_log:{mtime_epoch:1785628800,last_event:{raw:"blocked: waiting for the source owner"}}}},
     {id:"working",backlog:{title:"Render the projection",repo:"sample"},harness:"cursor-agent",model:"composer-2.5",current_state:{state:"working"},hints:{open_decisions:[]},paths:{status_log:{mtime_epoch:1785628800,last_event:{raw:"working: rendering cards"}}}},
     {id:"paused",backlog:{title:"Await upstream release",repo:"sample"},harness:"pi",model:"qwen3.8-max",current_state:{state:"paused"},hints:{open_decisions:[]},paths:{status_log:{mtime_epoch:1785628800,last_event:{raw:"paused: upstream release window"}}}},
@@ -93,7 +93,7 @@ test_page_groups_tasks_and_labels_status_age_sources() {
   assert_contains "$html" "Paused <span>1</span>" "paused count missing"
   assert_contains "$html" "Done awaiting merge <span>1</span>" "done count missing"
   assert_contains "$html" "Unknown <span>1</span>" "unknown count missing"
-  assert_contains "$html" "Choose status colors" "plain task title missing"
+  assert_contains "$html" "[A2-eng] Choose status colors" "stored code was not shown with the task title"
   assert_contains "$html" "claude / sonnet" "agent tuple missing"
   assert_contains "$html" "2m · timestamp" "durable timestamp age label missing"
   assert_contains "$html" "5m · status file mtime" "mtime age label missing"
@@ -180,6 +180,7 @@ EOF
 EOF
   jq -n --arg home "$mate" '{
     schema:"fm-secondmate-home-summary.v1",
+    hold_classifier_schema:"fm-captain-hold-buckets.v1",
     generated:"2026-08-02T00:00:00Z",
     generated_epoch:1785628800,
     home:$home,

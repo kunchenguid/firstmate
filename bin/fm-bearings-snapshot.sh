@@ -454,7 +454,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
-       | {id, kind,
+       | {id, code, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
         doing: ((.current_state.detail // "") as $d
@@ -463,6 +463,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
          | {id:($m.id + "/" + .id),
+            code:(.code // null),
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),

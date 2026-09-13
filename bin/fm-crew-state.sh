@@ -17,6 +17,9 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# <id> may also be a stored task code body, bracketed body, or unique full-code
+# prefix; display-clipped codes fail closed as unknown selectors.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -109,12 +112,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
-ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
-
+REQUESTED_ID=${1:-}
+[ -n "$REQUESTED_ID" ] || { echo "usage: fm-crew-state.sh <id-or-code>" >&2; exit 2; }
+ID=$REQUESTED_ID
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
-META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
+if [ -n "${FM_CREW_STATE_META_OVERRIDE:-}" ]; then
+  META=$FM_CREW_STATE_META_OVERRIDE
+else
+  RESOLVED_ID=$(fm_backend_task_id_for_selector "$REQUESTED_ID" "$STATE" 2>/dev/null || true)
+  [ -z "$RESOLVED_ID" ] || ID=$RESOLVED_ID
+  META="$STATE/$ID.meta"
+fi
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac

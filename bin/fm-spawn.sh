@@ -375,12 +375,12 @@
 # Cursor Agent uses task-root-local .cursor/hooks.json, excluded through Git
 # info/exclude for writer worktrees so Firstmate machinery never enters project diffs.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [access=reader] [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
-# Every spawn's state/<id>.meta opens with the same base inventory:
-# window=, endpoint_task_id=, worktree=, project=, harness=, kind=, tasktmp=,
+# Every fresh local spawn's state/<id>.meta opens with the same base inventory:
+# window=, endpoint_task_id=, worktree=, project=, harness=, kind=, code=, tasktmp=,
 # model=, and effort= (model= and effort= record the literal default when the
 # axis is unset); busy_gen= is recorded when the busy-state contract was armed
-# for the harness. The conditional access=, dispatch, quota, remote-route,
-# backend, telemetry, and traceparent fields are owned by their own entries in
+# for the harness. The conditional code_parent=, parent=, child_seq=, access=,
+# dispatch, quota, remote-route, backend, telemetry, and traceparent fields are owned by their own entries in
 # this header, and backend-specific fields resolve through bin/fm-backend.sh.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
@@ -523,6 +523,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -3201,6 +3203,83 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+
+# Mint one durable human-facing code before any local backend presentation uses it.
+# FM_TASK_ID remains helper-report authority. Code ancestry is stored separately
+# so a seeded controller can name a child without restricting ordinary reports.
+# Remote parent ancestry is deferred; those homes mint local roots.
+TASK_PARENT_ID=
+TASK_CODE_PARENT_ID=
+TASK_CHILD_SEQ=
+if [ "$RELAUNCH" -eq 1 ]; then
+  TASK_PARENT_ID=$(fm_meta_get "$STATE/$ID.meta" parent)
+  TASK_CODE_PARENT_ID=$(fm_meta_get "$STATE/$ID.meta" code_parent)
+  TASK_CHILD_SEQ=$(fm_meta_get "$STATE/$ID.meta" child_seq)
+  TASK_CODE_COUNT=$(grep -c '^code=' "$STATE/$ID.meta" 2>/dev/null || true)
+  case "$TASK_CODE_COUNT" in
+    0) TASK_CODE= ;;
+    1)
+      TASK_CODE=$(fm_task_code_of_meta "$STATE/$ID.meta" 2>/dev/null) || {
+        echo "error: task $ID stored task code is malformed or duplicated; refusing relaunch" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "error: task $ID stored task code is malformed or duplicated; refusing relaunch" >&2
+      exit 1
+      ;;
+  esac
+else
+  TASK_PARENT_ID=${FM_TASK_ID:-}
+  TASK_CODE_PARENT_ID=$TASK_PARENT_ID
+  if [ -z "$TASK_CODE_PARENT_ID" ]; then
+    parent_rc=0
+    TASK_CODE_PARENT_ID=$(fm_parent_channel_home_id "$FM_HOME") || parent_rc=$?
+    case "${parent_rc:-0}" in
+      0)
+        fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" || {
+          echo "error: this home's persistent controller binding is malformed; refusing to mint an unparented task code" >&2
+          exit 1
+        }
+        [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || TASK_CODE_PARENT_ID=
+        ;;
+      1) TASK_CODE_PARENT_ID= ;;
+      *)
+        echo "error: this home's persistent controller identity is malformed; refusing to mint an unparented task code" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  [ "$TASK_CODE_PARENT_ID" != "$ID" ] || {
+    echo "error: task $ID cannot be its own code parent" >&2
+    exit 1
+  }
+  if [ -n "$TASK_CODE_PARENT_ID" ]; then
+    TASK_CODE_PARENT_META=$(fm_task_code_parent_meta "$FM_HOME" "$TASK_CODE_PARENT_ID" "$STATE") || {
+      echo "error: parent task $TASK_CODE_PARENT_ID has missing or ambiguous stored code/sequence identity" >&2
+      exit 1
+    }
+    TASK_CODE_PARENT_COUNT=$(grep -c '^code=' "$TASK_CODE_PARENT_META" 2>/dev/null || true)
+    if [ "$TASK_CODE_PARENT_COUNT" -eq 0 ]; then
+      if [ ! -r "$TASK_CODE_PARENT_META" ] \
+        || ! fm_backend_validate_task_endpoint "$TASK_CODE_PARENT_META" "$TASK_CODE_PARENT_ID" >/dev/null; then
+        echo "error: uncoded parent task $TASK_CODE_PARENT_ID does not have valid local identity" >&2
+        exit 1
+      fi
+      TASK_CODE_PARENT_ID=
+    else
+      TASK_CHILD_SEQ=$(fm_task_code_child_seq_next "$FM_HOME" "$TASK_CODE_PARENT_ID" "$STATE") || {
+        echo "error: parent task $TASK_CODE_PARENT_ID has missing or ambiguous stored code/sequence identity" >&2
+        exit 1
+      }
+    fi
+  fi
+  TASK_CODE=$(fm_task_code_mint "$FM_HOME" "$PROJ_ABS" "$KIND" "$ID" "$TASK_CODE_PARENT_ID" "$TASK_CHILD_SEQ" "$STATE") || {
+    echo "error: task $ID code could not be minted uniquely from its stored identity inputs" >&2
+    exit 1
+  }
+fi
+
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -4281,32 +4360,21 @@ if [ "$BACKEND" = herdr ]; then
     HERDR_PARENT_LABEL=$(FM_HOME="${HERDR_LABEL_HOME:-$FM_HOME}" fm_backend_herdr_workspace_label)
   fi
   if [ "$KIND" = secondmate ]; then
-    if ! fm_backend_herdr_report_sidebar_metadata \
-      "$HERDR_SES" "$HERDR_PANE_ID" secondmate "$HERDR_PARENT_LABEL"; then
-      echo "warning: herdr could not publish the secondmate sidebar title; the technical workspace label remains available" >&2
+    if [ -n "$TASK_CODE" ] && ! fm_backend_herdr_report_sidebar_metadata \
+      "$HERDR_SES" "$HERDR_PANE_ID" "$TASK_CODE"; then
+      echo "warning: herdr could not publish the secondmate sidebar code; the technical workspace label remains available" >&2
     fi
     if [ -n "${FM_BACKEND_HERDR_LAUNCHER_PANE_ID:-}" ] \
       && ! fm_backend_herdr_report_sidebar_metadata \
-        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" main firstmate; then
-      echo "warning: herdr could not refresh the main sidebar title" >&2
+        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" FM1; then
+      echo "warning: herdr could not refresh the main sidebar code" >&2
     fi
   else
-    if ! fm_backend_herdr_report_sidebar_metadata \
-      "$HERDR_SES" "$HERDR_PANE_ID" worker "$ID" "$HERDR_PARENT_LABEL" \
-      "${HERDR_PARENT_WORKSPACE_ID:-}"; then
-      echo "warning: herdr could not publish the worker sidebar title; the technical task label remains available" >&2
-    fi
-    if [ -n "${FM_BACKEND_HERDR_LAUNCHER_PANE_ID:-}" ]; then
-      if [ "$HERDR_PARENT_LABEL" = firstmate ]; then
-        HERDR_PARENT_ROLE=main
-      else
-        HERDR_PARENT_ROLE=secondmate
-      fi
-      if ! fm_backend_herdr_report_sidebar_metadata \
-        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" \
-        "$HERDR_PARENT_ROLE" "$HERDR_PARENT_LABEL"; then
-        echo "warning: herdr could not refresh the parent sidebar title" >&2
-      fi
+    if [ -n "$TASK_CODE" ] && ! fm_backend_herdr_report_sidebar_metadata \
+      "$HERDR_SES" "$HERDR_PANE_ID" "$TASK_CODE" \
+      "${HERDR_PARENT_WORKSPACE_ID:-}" \
+      "$([ -n "${HERDR_PARENT_WORKSPACE_ID:-}" ] && printf '%s' "$HERDR_WORKSPACE_ID")"; then
+      echo "warning: herdr could not publish the worker sidebar code; the technical task label remains available" >&2
     fi
   fi
 fi
@@ -5524,7 +5592,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen telemetry_session_id billing_pool_ref traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind code code_parent parent child_seq access mode yolo tasktmp model effort busy_gen spawn_gen telemetry_session_id billing_pool_ref traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5539,6 +5607,10 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  [ -z "$TASK_CODE" ] || echo "code=$TASK_CODE"
+  [ -z "$TASK_CODE_PARENT_ID" ] || echo "code_parent=$TASK_CODE_PARENT_ID"
+  [ -z "$TASK_PARENT_ID" ] || echo "parent=$TASK_PARENT_ID"
+  [ -z "$TASK_CHILD_SEQ" ] || echo "child_seq=$TASK_CHILD_SEQ"
   # access= is written only for readers, so every writer meta stays
   # byte-identical (absent access= means writer, mirroring absent backend=).
   [ "$ACCESS" != reader ] || echo "access=reader"

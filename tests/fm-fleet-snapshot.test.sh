@@ -28,6 +28,22 @@ test_empty_local_snapshot_contract() {
   pass "empty local snapshot preserves the stable schema and absence markers"
 }
 
+test_snapshot_publishes_stored_task_code() {
+  local home out
+  home="$TMP_ROOT/stored-code"
+  mkdir -p "$home"/{config,data,projects,state}
+  fm_write_meta "$home/state/sidebar.meta" \
+    "project=firstmate" \
+    "kind=ship" \
+    "code=FMC-sidebar"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --local-json) \
+    || fail "stored-code snapshot should succeed"
+  printf '%s' "$out" | jq -e '.tasks[0].id == "sidebar" and .tasks[0].code == "FMC-sidebar"' >/dev/null \
+    || fail "snapshot did not publish the stored task code: $out"
+  pass "fleet snapshot publishes stored task identity without recomputing it"
+}
+
 test_invalid_mode_fails_closed() {
   local home err rc
   home="$TMP_ROOT/invalid"
@@ -314,6 +330,7 @@ EOF
 }
 
 test_empty_local_snapshot_contract
+test_snapshot_publishes_stored_task_code
 test_invalid_mode_fails_closed
 test_large_snapshot_assembly_does_not_use_argv
 test_large_backlog_end_to_end_snapshot

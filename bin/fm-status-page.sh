@@ -74,7 +74,8 @@ html=$(jq -nr \
   def card($task):
     ($task.paths.status_log.last_event.raw // $task.current_state.detail // $task.current_state.state // "unknown") as $status
     | (status_age($task).label) as $age
-    | "<article class=\"card\"><h3>\(($task.backlog.title // $task.id) | esc)</h3><dl><dt>Repository</dt><dd>\(($task.backlog.repo // $task.project // "unknown") | esc)</dd><dt>Agent</dt><dd>\((($task.harness // "unknown") + " / " + ($task.model // "unknown")) | esc)</dd><dt>Status</dt><dd>\(($status | trim(160)) | esc)</dd><dt>Age</dt><dd>\($age | esc)</dd></dl></article>";
+    | ((if ($task.code // "") == "" then "" else "[" + $task.code + "] " end) + ($task.backlog.title // $task.id)) as $heading
+    | "<article class=\"card\"><h3>\($heading | esc)</h3><dl><dt>Repository</dt><dd>\(($task.backlog.repo // $task.project // "unknown") | esc)</dd><dt>Agent</dt><dd>\((($task.harness // "unknown") + " / " + ($task.model // "unknown")) | esc)</dd><dt>Status</dt><dd>\(($status | trim(160)) | esc)</dd><dt>Age</dt><dd>\($age | esc)</dd></dl></article>";
   def status_column($snapshot; $id; $title):
     ([ $snapshot.tasks[]? | select(.kind != "secondmate" and column(.) == $id) ]) as $items
     | "<section class=\"column\"><h2>\($title) <span>\($items | length)</span></h2><div class=\"cards\">"
