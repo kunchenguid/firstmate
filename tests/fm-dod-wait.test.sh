@@ -28,4 +28,17 @@ case "$BLOCK" in
   *) echo "FAIL - the declared-wait line was lost"; FAIL=1 ;;
 esac
 
+case "$BLOCK" in
+  *"Background that one call"*)
+    echo "FAIL - the block still prescribes backgrounding a single drive call"
+    FAIL=1
+    ;;
+  *) echo "ok - the block does not prescribe backgrounding a single drive call" ;;
+esac
+
+case "$BLOCK" in
+  *"--wait"*"8m0s"*) echo "ok - the block names the bounded foreground hold and its default" ;;
+  *) echo "FAIL - the block does not name --wait's bounded foreground hold"; FAIL=1 ;;
+esac
+
 exit "$FAIL"

@@ -287,9 +287,10 @@ While a pipeline round runs, do NOT poll and do NOT sleep. Append \`paused: no-m
 A \`sleep\` between status checks is a defect here, not patience: every wake-up is a full model turn that re-reads your whole context to learn nothing.
 If the ring never comes and you are resumed for another reason, one \`no-mistakes axi status\` call is fine; a loop of them is not.
 
-A single drive call (\`no-mistakes axi run\` or \`axi respond\`) blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-Background that one call rather than sitting in a blocking hold your harness will kill, and resume from its result once it finishes - this is a harness-timeout workaround for a single call, not the between-rounds wait the deterministic watch above already covers.
-Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-resume shape.
+A single drive call (\`no-mistakes axi run\` or \`axi respond\`) blocks until the next gate or outcome, which routinely outlives one fix round (capped around thirty minutes, with up to three rounds chaining).
+\`--wait\` bounds that hold (default 8m0s, chosen to return before Claude Code's ten-minute command ceiling) so a long-running drive call returns a structured elapsed-wait result instead of being killed outright.
+An elapsed wait is not a pipeline failure: re-run the same drive call (no new \`--intent\` needed on \`axi run\`; a bare \`axi run\` re-attaches to the existing run) to reattach and keep going, as many times as the run takes.
+This bounded foreground hold is a harness-timeout workaround for a single call, not the between-rounds wait the deterministic watch above already covers.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
