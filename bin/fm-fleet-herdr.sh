@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
-# fm-fleet-herdr.sh - herdr backend for fleet manager processes.
+# fm-fleet-herdr.sh - Herdr backend for interactive fleet reasoning managers.
 #
 # Usage: fm-fleet-herdr.sh workspace <fleet-root>
-#        fm-fleet-herdr.sh launch <fleet-root> <manager-id> <home> <daemon-bin>
+#        fm-fleet-herdr.sh launch <fleet-root> <manager-id> <home> <harness>
 #        fm-fleet-herdr.sh close <fleet-root> <manager-id> <home>
 #        fm-fleet-herdr.sh target <home>
 #
-# Managers run as one workspace per manager home (label fm-fleet-<id>) with
-# one tab per manager (label fleet-<id>) in the resolved herdr session, so they stay
+# Managers run as one workspace per manager home (FirstMate 1..4) with one
+# prompt-ready harness tab (Manager 1..4) in the resolved Herdr session, so they stay
 # visible on the operator's normal Herdr surface. Tab creation reuses
 # fm_backend_herdr_create_task, which refuses live duplicate labels and
 # reclaims husks; command submit reuses fm_backend_herdr_send_text_submit;
 # removal reuses fm_backend_herdr_kill. The recorded herdr target lives in
-# <home>/state/.fleet-herdr-target and is transport, never authority:
-# pidfile and heartbeat remain the liveness truth read by fleet status.
+# <home>/state/.fleet-herdr-target and is transport, never authority. The live
+# home session lock is the reasoning authority read by fleet status and start.
+# FM_FLEET_HERDR_LAUNCH_HOOK and FM_FLEET_HERDR_CLOSE_HOOK replace only the
+# transport in process tests; they receive the resolved human labels.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 fleet_ws_label() {
-  printf 'firstmate-%s' "$1"
+  case "$1" in manager-[1-4]) printf 'FirstMate %s' "${1#manager-}" ;; *) printf 'FirstMate %s' "$1" ;; esac
+}
+
+fleet_tab_label() {
+  case "$1" in manager-[1-4]) printf 'Manager %s' "${1#manager-}" ;; *) printf 'Manager %s' "$1" ;; esac
 }
 
 usage() {
@@ -88,21 +94,37 @@ case "$SUB" in
     ;;
 
   launch)
-    need_tools
     [ $# -eq 4 ] || { usage; exit 2; }
-    root=$1 mid=$2 home=$3 daemon=$4
+    root=$1 mid=$2 home=$3 harness=$4
+    case "$harness" in codex|claude|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;; *)
+      echo "fm-fleet-herdr: unsupported interactive manager harness '$harness'" >&2
+      exit 1
+      ;;
+    esac
+    command -v "$harness" >/dev/null 2>&1 || {
+      [ -n "${FM_FLEET_HERDR_LAUNCH_HOOK:-}" ] || {
+        echo "fm-fleet-herdr: manager harness '$harness' not found" >&2
+        exit 1
+      }
+    }
+    if [ -n "${FM_FLEET_HERDR_LAUNCH_HOOK:-}" ]; then
+      "$FM_FLEET_HERDR_LAUNCH_HOOK" "$root" "$mid" "$home" "$harness" \
+        "$(fleet_ws_label "$mid")" "$(fleet_tab_label "$mid")"
+      exit $?
+    fi
+    need_tools
     FM_HOME="$home" load_adapter
     fm_backend_herdr_version_check || exit 1
     session=$(fm_backend_herdr_session)
     fm_backend_herdr_server_ensure "$session" || exit 1
-    wsinfo=$(fleet_workspace "$root" "$session" "$(fleet_ws_label "$mid")") || exit 1
+    wsinfo=$(fleet_workspace "$FM_ROOT" "$session" "$(fleet_ws_label "$mid")") || exit 1
     wsid=${wsinfo%%$'\t'*}
     seeded=${wsinfo#*$'\t'}
-    ids=$(FM_HOME="$home" fm_backend_herdr_create_task "$session:$wsid" "fleet-$mid" "$home" "$seeded") || exit 1
+    ids=$(FM_HOME="$home" fm_backend_herdr_create_task "$session:$wsid" "$(fleet_tab_label "$mid")" "$FM_ROOT" "$seeded") || exit 1
     tab=${ids%% *}
     pane=${ids#* }
     [ -n "$tab" ] && [ -n "$pane" ] || { echo "fm-fleet-herdr: no tab/pane for $mid" >&2; exit 1; }
-    cmd="FM_FLEET_POLL=${FM_FLEET_POLL:-2} exec $(sq "$daemon") $(sq "$root") $(sq "$mid")"
+    cmd="cd $(sq "$FM_ROOT") && FM_HOME=$(sq "$home") FM_FLEET_ROOT=$(sq "$root") FM_FLEET_MANAGER_ID=$(sq "$mid") exec $(sq "$harness")"
     verdict=$(fm_backend_herdr_send_text_submit "$session:$pane" "$cmd" 3 1 0.5 2>/dev/null) || verdict="send-failed"
     if [ "$verdict" = "send-failed" ]; then
       echo "fm-fleet-herdr: command submit for $mid failed; check the tab" >&2
@@ -110,16 +132,21 @@ case "$SUB" in
       exit 1
     fi
     if [ "$verdict" != "empty" ]; then
-      echo "fm-fleet-herdr: command submit for $mid unconfirmed ('$verdict'); heartbeat decides" >&2
+      echo "fm-fleet-herdr: command submit for $mid unconfirmed ('$verdict'); session lock decides" >&2
     fi
     printf '%s:%s' "$session" "$pane" > "$home/state/.fleet-herdr-target" || exit 1
     printf '%s:%s\n' "$session" "$pane"
     ;;
 
   close)
-    need_tools
     [ $# -eq 3 ] || { usage; exit 2; }
     root=$1 mid=$2 home=$3
+    if [ -n "${FM_FLEET_HERDR_CLOSE_HOOK:-}" ]; then
+      "$FM_FLEET_HERDR_CLOSE_HOOK" "$root" "$mid" "$home" \
+        "$(fleet_ws_label "$mid")" "$(fleet_tab_label "$mid")"
+      exit $?
+    fi
+    need_tools
     FM_HOME="$home" load_adapter
     target=""
     [ -f "$home/state/.fleet-herdr-target" ] && target=$(cat "$home/state/.fleet-herdr-target" 2>/dev/null || true)

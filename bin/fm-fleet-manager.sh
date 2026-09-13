@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# fm-fleet-manager.sh - supervised manager heartbeat daemon for one fleet shard.
+# fm-fleet-manager.sh - capacity heartbeat daemon for one fleet manager home.
 #
 # Usage: fm-fleet-manager.sh <fleet-root> <manager-id>
 #
-# This process is the live authority placeholder for one FirstMate manager.
-# It holds that manager's per-home lease, publishes a periodic heartbeat with
+# This process is a capacity placeholder and is never reasoning authority or an
+# assignable SecondMate supervisor. It publishes a periodic heartbeat with
 # model-wait, blocked, progress, and activity signals, and exits cleanly on
 # SIGTERM so fleet status can distinguish a clean stop from a crash.
 # A real reasoning FirstMate session replaces this daemon by stopping it first
-# and holding the same lease; inspection-only attach never takes the lease.
+# and holding the home session lock; inspection-only attach never takes it.
 # Marker files driving the heartbeat live under <home>/state and are owned by
 # bin/fm-fleet.sh: .fleet-wait (model/provider wait), .fleet-blocked (blocked
 # with an optional first-line reason). bin/fm-fleet.sh owns the registry and

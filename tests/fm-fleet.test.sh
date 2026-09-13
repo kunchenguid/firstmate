@@ -1,206 +1,273 @@
 #!/usr/bin/env bash
-# Behavior tests for the thin multi-manager fleet control plane.
-#
-# Covers real process-level concurrency: three isolated manager processes with
-# isolated FM_HOMEs, duplicate SecondMate and duplicate authority refusal,
-# model-wait isolation, crash isolation with durable restart, deterministic
-# single-owner routing, cross-shard dependencies without joint ownership, no
-# fleet-level completion claims, and the single-manager degenerate case.
+# Process and transaction tests for fleet registry schema version 2.
 set -u
 
 # shellcheck source=tests/lib.sh
-# shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 FLEET="$ROOT/bin/fm-fleet.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet)
-export FM_FLEET_POLL=1
-export FM_FLEET_STALL_SECS=300
-
-FROOT=$TMP_ROOT/fleet
+FROOT="$TMP_ROOT/fleet"
 export FM_FLEET_ROOT=$FROOT
+export FM_FLEET_BACKEND=nohup
+export FM_FLEET_POLL=1
+HOLDERS=""
+LAST_HOLDER=""
+holder_2=""
 
 cleanup() {
   "$FLEET" stop --all >/dev/null 2>&1 || true
+  for pid in $HOLDERS; do kill "$pid" >/dev/null 2>&1 || true; done
   fm_test_cleanup
 }
 trap cleanup EXIT INT TERM
 
-wait_state() {  # <id> <want> <deadline-secs>
-  local id=$1 want=$2 deadline=$3 i=0 got=""
-  while [ "$i" -lt "$deadline" ]; do
-    got=$("$FLEET" status --json | python3 -c 'import json,sys; print("\n".join(r["manager"]+":"+r["state"] for r in json.load(sys.stdin)["managers"]))' 2>/dev/null | grep "^$id:" | cut -d: -f2 || true)
-    [ "$got" = "$want" ] && return 0
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
+json_value() { python3 -c "import json,sys; print($1)"; }
+
+add_lock() {  # <home>
+  local home=$1 pid
+  mkdir -p "$home/state"
+  bash -c 'exec -a /opt/homebrew/bin/codex sleep 300' & pid=$!
+  HOLDERS="$HOLDERS $pid"
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  LAST_HOLDER=$pid
 }
 
-"$FLEET" init || fail "fleet init"
-[ -f "$FROOT/fleet.json" ] || fail "fleet init writes a registry"
-
-"$FLEET" register --id fm-a --home "$FROOT/homes/fm-a" --scope runtime \
-  --secondmates sm-a1,sm-a2 --projects proj-a --domains runtime || fail "register fm-a"
-"$FLEET" register --id fm-b --home "$FROOT/homes/fm-b" --scope governance \
-  --secondmates sm-b1 --projects proj-b --domains governance || fail "register fm-b"
-"$FLEET" register --id fm-c --home "$FROOT/homes/fm-c" --scope integrations \
-  --secondmates sm-c1 --projects proj-c --domains integrations || fail "register fm-c"
-"$FLEET" validate || fail "fleet validates with three shards"
-
-if "$FLEET" register --id fm-d --home "$FROOT/homes/fm-d" --scope x \
-  --secondmates sm-a1 >/dev/null 2>&1; then
-  fail "duplicate SecondMate assignment is accepted"
-fi
-ids=$(python3 -c 'import json; print(" ".join(sorted(m["id"] for m in json.load(open("'"$FROOT"'/fleet.json"))["managers"])))')
-[ "$ids" = "fm-a fm-b fm-c" ] || fail "failed registration pollutes the registry: $ids"
-
-if "$FLEET" register --id fm-d --home "$FROOT/homes/fm-d" --scope x \
-  --projects proj-a >/dev/null 2>&1; then
-  fail "overlapping project routing is accepted"
-fi
-"$FLEET" validate || fail "registry still valid after refused registrations"
-
-"$FLEET" start || fail "fleet start with three managers"
-wait_state fm-a idle 15 || wait_state fm-a running 5 || fail "fm-a never becomes live"
-wait_state fm-b idle 15 || wait_state fm-b running 5 || fail "fm-b never becomes live"
-wait_state fm-c idle 15 || wait_state fm-c running 5 || fail "fm-c never becomes live"
-
-homes=$(python3 -c 'import json; print(" ".join(sorted(m["home"] for m in json.load(open("'"$FROOT"'/fleet.json"))["managers"])))')
-[ "$(printf '%s' "$homes" | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" = "3" ] || fail "manager homes are not isolated: $homes"
-for mid in fm-a fm-b fm-c; do
-  pid=$(cat "$FROOT/homes/$mid/state/.fleet-manager.pid" 2>/dev/null || true)
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || fail "$mid has no live process"
-done
-
-if "$FLEET" start --managers fm-a >/dev/null 2>&1; then
-  fail "duplicate live authority over fm-a is accepted"
-fi
-
-"$FLEET" progress fm-b --note "shard work" --active 2 >/dev/null || fail "progress fm-b"
-"$FLEET" set-wait fm-a --on >/dev/null || fail "set-wait fm-a"
-wait_state fm-a model-wait 15 || fail "fm-a never reports model-wait"
-i=0
-bstate=""
-while [ "$i" -lt 15 ]; do
-  bstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-b"][0])')
-  [ "$bstate" = "running" ] && break
-  sleep 1
-  i=$((i + 1))
-done
-[ "$bstate" = "running" ] || fail "fm-b stopped progressing while fm-a waits: $bstate"
-cstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-c"][0])')
-[ "$cstate" = "idle" ] || [ "$cstate" = "running" ] || fail "fm-c affected by fm-a wait: $cstate"
-
-bpid=$(cat "$FROOT/homes/fm-b/state/.fleet-manager.pid")
-kill -9 "$bpid" 2>/dev/null || fail "cannot kill fm-b for crash test"
-wait_state fm-b dead 15 || fail "crashed fm-b never reports dead"
-astate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-a"][0])')
-[ "$astate" = "model-wait" ] || fail "fm-a affected by fm-b crash: $astate"
-browns=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["secondmates"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-b"][0])')
-[ "$browns" = "['sm-b1']" ] || fail "crashed shard loses its SecondMate list: $browns"
-
-"$FLEET" restart fm-b >/dev/null || fail "restart fm-b after crash"
-wait_state fm-b running 15 || fail "restarted fm-b never recovers"
-bactive=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["active"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-b"][0])')
-[ "$bactive" = "2" ] || fail "restarted fm-b loses durable shard state: active=$bactive"
-
-[ "$("$FLEET" route --secondmate sm-c1)" = "fm-c (by secondmates)" ] || fail "route by secondmate"
-[ "$("$FLEET" route --project proj-b)" = "fm-b (by projects)" ] || fail "route by project"
-[ "$("$FLEET" route --domain runtime)" = "fm-a (by domains)" ] || fail "route by domain"
-if "$FLEET" route --project unknown-proj >/dev/null 2>&1; then
-  fail "route resolves an unowned project"
-fi
-
-"$FLEET" dep add --owner fm-a --from T1 --needs fm-c --task T9 >/dev/null || fail "dep add"
-[ "$("$FLEET" route --project proj-a)" = "fm-a (by projects)" ] || fail "dependency transfers ownership"
-depstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-a"][0])')
-[ "$depstate" = "model-wait" ] || [ "$depstate" = "blocked" ] || fail "dep owner state is wrong: $depstate"
-"$FLEET" set-wait fm-a --off >/dev/null || fail "clear fm-a wait"
-wait_state fm-a blocked 15 || fail "dep owner never reports blocked"
-"$FLEET" dep "done" --owner fm-a --from T1 >/dev/null || fail "dep done"
-wait_state fm-a idle 15 || wait_state fm-a running 5 || fail "dep close never unblocks the owner"
-if "$FLEET" status | grep -Ei "complete|done|closed" | grep -v "LAST-PROGRESS" >/dev/null 2>&1; then
-  fail "fleet status claims completion"
-fi
-
-SROOT=$TMP_ROOT/single
-export FM_FLEET_ROOT=$SROOT
-"$FLEET" init >/dev/null || fail "single fleet init"
-"$FLEET" register --id fm-only --home "$SROOT/homes/fm-only" --scope everything \
-  --secondmates sm-1 --projects p1 --domains d1 >/dev/null || fail "single register"
-"$FLEET" start >/dev/null || fail "single start"
-wait_state fm-only idle 15 || wait_state fm-only running 5 || fail "single manager never live"
-[ "$("$FLEET" route --project p1)" = "fm-only (by projects)" ] || fail "single route"
-"$FLEET" stop --all >/dev/null || fail "single stop"
-export FM_FLEET_ROOT=$FROOT
-
-if command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  HROOT=$TMP_ROOT/herdfleet
-  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" init >/dev/null || fail "herdr fleet init"
-  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" register --id fm-h \
-    --home "$HROOT/homes/fm-h" --scope trial --secondmates sm-h1 >/dev/null || fail "herdr register"
-  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" start >/dev/null || fail "herdr start"
+remove_lock() {  # <home> <pid>
+  kill "$2" >/dev/null 2>&1 || true
   i=0
-  hstate=""
-  while [ "$i" -lt 20 ]; do
-    hstate=$(FM_FLEET_ROOT=$HROOT "$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-h"][0])')
-    [ "$hstate" = "running" ] || [ "$hstate" = "idle" ] && break
-    sleep 1
-    i=$((i + 1))
-  done
-  [ "$hstate" = "running" ] || [ "$hstate" = "idle" ] || fail "herdr manager never live: $hstate"
-  [ -s "$HROOT/homes/fm-h/state/.fleet-herdr-target" ] || fail "herdr target not recorded"
-  FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr "$FLEET" stop --all >/dev/null || fail "herdr stop"
-else
-  echo "skip: herdr backend not available"
-fi
-export FM_FLEET_ROOT=$FROOT
-unset FM_FLEET_BACKEND
-"$FLEET" status --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)["managers"])==3' || fail "status json loses managers"
-"$FLEET" attach fm-a | grep -q "homes/fm-a" || fail "attach does not name the manager home"
-if "$FLEET" ask bogus hello >/dev/null 2>&1; then
-  fail "ask accepts an unknown manager"
-fi
-if "$FLEET" ask fm-a hello >/dev/null 2>&1; then
-  fail "ask accepts a manager with no Herdr tab"
-fi
-if "$FLEET" ask >/dev/null 2>&1; then
-  fail "ask accepts no arguments"
-fi
+  while kill -0 "$2" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+  rm -f "$1/state/.lock"
+}
 
-"$FLEET" stop --all >/dev/null || fail "fleet stop --all"
-for mid in fm-a fm-b fm-c; do
-  if [ -f "$FROOT/homes/$mid/state/.fleet-manager.pid" ]; then
-    pid=$(cat "$FROOT/homes/$mid/state/.fleet-manager.pid")
-    kill -0 "$pid" 2>/dev/null && fail "$mid still alive after stop"
-  fi
+register_manager() {
+  "$FLEET" manager register --id "$1" --home "$FROOT/homes/$1" >/dev/null
+}
+
+register_owner() {
+  "$FLEET" owner register --secondmate "$1" --home "$FROOT/secondmates/$1" \
+    --projects "$2" --domains "$3" >/dev/null
+}
+
+manager_for() {
+  python3 - "$FROOT/fleet.json" "$1" <<'PY'
+import json,sys
+with open(sys.argv[1]) as handle: reg=json.load(handle)
+print(next(row["manager"] for row in reg["assignments"] if row["secondmate"]==sys.argv[2]))
+PY
+}
+
+generation_for() {
+  python3 - "$FROOT/fleet.json" "$1" <<'PY'
+import json,sys
+with open(sys.argv[1]) as handle: reg=json.load(handle)
+print(next(row["generation"] for row in reg["assignments"] if row["secondmate"]==sys.argv[2]))
+PY
+}
+
+"$FLEET" init >/dev/null || fail "schema-v2 init"
+for n in 1 2 3 4; do register_manager "manager-$n" || fail "register manager-$n"; done
+register_owner harness 'AutoDev,dotcodex' harness || fail "register harness owner"
+register_owner paperclip paperclip orchestration || fail "register paperclip owner"
+register_owner interview interview interview || fail "register interview owner"
+register_owner financials financials markets || fail "register financials owner"
+"$FLEET" validate >/dev/null || fail "four-manager registry validates"
+
+python3 - "$FROOT/fleet.json" <<'PY' || fail "manager rows contain semantic ownership"
+import json,sys
+with open(sys.argv[1]) as handle: reg=json.load(handle)
+assert all(set(row)=={"id","home"} for row in reg["managers"])
+PY
+if "$FLEET" manager register --id manager-1 --home "$FROOT/homes/duplicate" >/dev/null 2>&1; then fail "duplicate manager id replaced a durable home"; fi
+if "$FLEET" manager register --id manager-x --home "$FROOT/homes/manager-1" >/dev/null 2>&1; then fail "duplicate manager home was accepted"; fi
+if "$FLEET" owner register --secondmate duplicate --home "$FROOT/secondmates/duplicate" --projects AutoDev >/dev/null 2>&1; then fail "duplicate project owner was accepted"; fi
+
+# Four process-level capacity daemons stay isolated through wait, crash, and restart.
+"$FLEET" start >/dev/null || fail "start four capacity daemons"
+for n in 1 2 3 4; do
+  pid=$(cat "$FROOT/homes/manager-$n/state/.fleet-manager.pid" 2>/dev/null || true)
+  if [ -z "$pid" ] || ! kill -0 "$pid" >/dev/null 2>&1; then fail "manager-$n daemon is not live"; fi
 done
-"$FLEET" validate || fail "registry invalid after stop"
+if "$FLEET" start --managers manager-1 >/dev/null 2>&1; then fail "duplicate live manager authority was accepted"; fi
+"$FLEET" set-wait manager-1 --on
+states=$("$FLEET" status --json)
+[ "$(printf '%s' "$states" | json_value 'next(r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="manager-1")')" = capacity-ready ] || fail "daemon wait marker masquerades as reasoning wait"
+[ "$(printf '%s' "$states" | json_value 'next(r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="manager-4")')" = capacity-ready ] || fail "one manager wait affected another daemon"
+crashed=$(cat "$FROOT/homes/manager-2/state/.fleet-manager.pid")
+kill -9 "$crashed" >/dev/null 2>&1 || fail "crash manager-2"
+sleep 1
+[ "$("$FLEET" status --json | json_value 'next(r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="manager-2")')" = dead ] || fail "crashed manager was not isolated as dead"
+"$FLEET" restart manager-2 >/dev/null || fail "restart crashed manager"
+"$FLEET" stop --all >/dev/null || fail "stop capacity daemons"
+"$FLEET" set-wait manager-1 --off
 
-# A live reasoning session holding the home lock (no daemon) is real authority.
-"$FLEET" register --id fm-s --home "$FROOT/homes/fm-s" --scope sessions >/dev/null || fail "register fm-s"
-mkdir -p "$FROOT/homes/fm-s/state"
-bash -c 'exec -a /opt/homebrew/bin/codex sleep 300' & SHOLDER=$!
-printf '%s\n' "$SHOLDER" > "$FROOT/homes/fm-s/state/.lock"
-sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sstate" = "idle" ] || fail "session-held home not idle: $sstate"
-sdetail=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["detail"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sdetail" = "agent" ] || fail "session authority not labeled agent: $sdetail"
-"$FLEET" progress fm-s --active 2 --note "session work" >/dev/null || fail "session progress"
-sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sstate" = "running" ] || fail "session progress not running: $sstate"
-"$FLEET" set-wait fm-s --on >/dev/null || fail "session set-wait"
-sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sstate" = "model-wait" ] || fail "session wait not model-wait: $sstate"
-"$FLEET" set-wait fm-s --off >/dev/null || fail "session clear-wait"
-if "$FLEET" start --managers fm-s >/dev/null 2>&1; then
-  fail "fleet started a daemon over a session-held home"
-fi
-sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["detail"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sstate" = "agent" ] || fail "session authority lost after refused start: $sstate"
-kill "$SHOLDER" 2>/dev/null || true
-sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
-[ "$sstate" = "ready" ] || [ "$sstate" = "dead" ] || [ "$sstate" = "stopped" ] || fail "released home not quiescent: $sstate"
+# A daemon is capacity-ready only. Assignment requires a live reasoning lock.
+if "$FLEET" assign --secondmate harness >/dev/null 2>&1; then fail "assignment accepted a heartbeat-only manager"; fi
+for n in 1 2 3 4; do add_lock "$FROOT/homes/manager-$n"; eval "holder_$n=$LAST_HOLDER"; done
+"$FLEET" assign --secondmate harness >/dev/null || fail "assign harness"
+[ "$(manager_for harness)" = manager-1 ] || fail "least-loaded tie did not choose manager-1"
+[ "$(generation_for harness)" = 1 ] || fail "initial generation is not one"
+"$FLEET" assign --secondmate harness >/dev/null || fail "sticky reassignment"
+[ "$(manager_for harness):$(generation_for harness)" = manager-1:1 ] || fail "healthy assignment was not sticky"
+"$FLEET" assign --secondmate paperclip >/dev/null || fail "assign paperclip"
+[ "$(manager_for paperclip)" = manager-2 ] || fail "least-loaded choice ignored assignment load"
+"$FLEET" set-wait manager-3 --on
+"$FLEET" assign --secondmate interview >/dev/null || fail "model-wait manager should remain eligible"
+[ "$(manager_for interview)" = manager-3 ] || fail "model-wait manager was not selected deterministically"
+"$FLEET" set-wait manager-3 --off
 
-pass "fleet control plane"
+"$FLEET" assign --secondmate financials >/dev/null & assign_one=$!
+"$FLEET" assign --secondmate financials >/dev/null & assign_two=$!
+wait "$assign_one" || fail "first colliding assignment failed"
+wait "$assign_two" || fail "second colliding assignment failed"
+[ "$(manager_for financials):$(generation_for financials)" = manager-4:1 ] || fail "colliding assignment duplicated or skipped a generation"
+
+route=$("$FLEET" route --project AutoDev --issue MIX-900)
+case "$route" in *"harness -> manager-1 (generation 1)"*) ;; *) fail "complete route missing: $route" ;; esac
+"$FLEET" route --project unknown --issue MIX-X >/dev/null 2>&1 || true
+"$FLEET" route --project unknown --issue MIX-X >/dev/null 2>&1 || true
+[ "$("$FLEET" status --json | json_value 'len(json.load(sys.stdin)["unassigned"])')" = 1 ] || fail "unknown route duplicated triage"
+[ "$("$FLEET" status --json | json_value 'json.load(sys.stdin)["unassigned"][0]["attempts"]')" = 2 ] || fail "triage attempt count"
+
+"$FLEET" dep add --owner harness --from MIX-900 --needs paperclip --task PC-1
+deps=$("$FLEET" dep list)
+case "$deps" in *owner_secondmate*) ;; *) fail "dependency owner is not SecondMate-keyed" ;; esac
+case "$deps" in *needs_secondmate*) ;; *) fail "dependency target is not SecondMate-keyed" ;; esac
+"$FLEET" dep "done" --owner harness --from MIX-900
+
+# Recovery refuses a possibly live manager, then selects the least-loaded healthy peer.
+if "$FLEET" recover --secondmate paperclip >/dev/null 2>&1; then fail "recovery replaced a live reasoning manager"; fi
+remove_lock "$FROOT/homes/manager-2" "$holder_2"
+"$FLEET" recover --secondmate paperclip >/dev/null || fail "recover paperclip after manager death"
+[ "$(manager_for paperclip):$(generation_for paperclip)" = manager-1:2 ] || fail "recovery was not deterministic or generation-safe"
+
+python3 - "$FROOT/fleet.json" <<'PY' || fail "assignment crossed the root completion boundary"
+import json,sys
+with open(sys.argv[1]) as handle: reg=json.load(handle)
+for row in reg["assignments"]: assert not ({"done","reviewed","landed","accepted","complete"} & set(row))
+PY
+if "$FLEET" status | grep -Ei 'complete|landed|reviewed|accepted' >/dev/null 2>&1; then fail "fleet status claimed root completion"; fi
+
+# Herdr start launches an interactive harness and waits for its home lock.
+HROOT="$TMP_ROOT/herdr"
+HERDR_LOG="$TMP_ROOT/herdr-hooks.log"
+HERDR_LAUNCH="$TMP_ROOT/herdr-launch.sh"
+cat > "$HERDR_LAUNCH" <<'SH'
+#!/usr/bin/env bash
+home=$3
+bash -c 'exec -a /opt/homebrew/bin/codex sleep 300' >/dev/null 2>&1 &
+pid=$!
+printf '%s\n' "$pid" > "$home/state/.lock"
+printf 'test:test\n' > "$home/state/.fleet-herdr-target"
+printf '%s|%s|%s|%s\n' "$2" "$4" "$5" "$6" >> "$FM_TEST_HERDR_LOG"
+SH
+chmod +x "$HERDR_LAUNCH"
+HERDR_CLOSE="$TMP_ROOT/herdr-close.sh"
+cat > "$HERDR_CLOSE" <<'SH'
+#!/usr/bin/env bash
+home=$3
+pid=$(cat "$home/state/.lock")
+kill "$pid" >/dev/null 2>&1 || true
+rm -f "$home/state/.lock" "$home/state/.fleet-herdr-target"
+SH
+chmod +x "$HERDR_CLOSE"
+FM_FLEET_ROOT=$HROOT "$FLEET" init >/dev/null
+FM_FLEET_ROOT=$HROOT "$FLEET" manager register --id manager-1 --home "$HROOT/manager-1" >/dev/null
+FM_TEST_HERDR_LOG=$HERDR_LOG FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr \
+  FM_FLEET_MANAGER_HARNESS=codex FM_FLEET_HERDR_LAUNCH_HOOK=$HERDR_LAUNCH \
+  FM_FLEET_HERDR_CLOSE_HOOK=$HERDR_CLOSE "$FLEET" start >/dev/null || fail "interactive Herdr start"
+grep -q 'manager-1|codex|FirstMate 1|Manager 1' "$HERDR_LOG" || fail "Herdr labels or harness launch are wrong"
+[ "$(FM_FLEET_ROOT=$HROOT "$FLEET" status --json | json_value 'json.load(sys.stdin)["managers"][0]["authority"]')" = reasoning ] || fail "Herdr start returned before reasoning lock"
+FM_FLEET_ROOT=$HROOT FM_FLEET_BACKEND=herdr FM_FLEET_HERDR_CLOSE_HOOK=$HERDR_CLOSE \
+  FM_FLEET_HERDR_LAUNCH_HOOK=$HERDR_LAUNCH "$FLEET" stop --all >/dev/null || fail "interactive Herdr stop"
+
+# Version-1 migration relabels homes, lifts confirmed bindings, and retains ambiguity.
+MROOT="$TMP_ROOT/migrate"
+mkdir -p "$MROOT/old-a/data" "$MROOT/old-c/data" "$MROOT/sm-a" "$MROOT/sm-c"
+printf '%s\n' '# SecondMates' '- sm-a - A (home: '"$MROOT"'/sm-a; scope: a; projects: p-a; added 2026-09-13)' > "$MROOT/old-a/data/secondmates.md"
+printf '%s\n' '# SecondMates' '- sm-c - C (home: '"$MROOT"'/sm-c; scope: c; projects: p-c; added 2026-09-13)' > "$MROOT/old-c/data/secondmates.md"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$MROOT/old-a" > "$MROOT/sm-a/.fm-secondmate-parent"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$MROOT/old-c" > "$MROOT/sm-c/.fm-secondmate-parent"
+cat > "$MROOT/fleet.json" <<EOF
+{"version":1,"managers":[
+ {"id":"old-a","home":"$MROOT/old-a","scope":"a","secondmates":["sm-a"],"projects":["p-a"],"domains":["d-a"]},
+ {"id":"old-b","home":"$MROOT/old-b","scope":"b","secondmates":["sm-b1","sm-b2"],"projects":["p-b"],"domains":["d-b"]},
+ {"id":"old-c","home":"$MROOT/old-c","scope":"c","secondmates":["sm-c"],"projects":["p-c"],"domains":["d-c"]}],
+ "dependencies":[
+ {"owner":"old-a","from_task":"A1","needs_manager":"old-c","needs_task":"C1","status":"open"},
+ {"owner":"old-b","from_task":"B1","needs_manager":"old-a","needs_task":"A1","status":"open"}]}
+EOF
+FM_FLEET_ROOT=$MROOT "$FLEET" migrate >/dev/null || fail "version-1 migration"
+FM_FLEET_ROOT=$MROOT "$FLEET" migrate >/dev/null || fail "version-2 migration is not idempotent"
+python3 - "$MROOT/fleet.json" <<'PY' || fail "migration result"
+import json,sys
+with open(sys.argv[1]) as handle: reg=json.load(handle)
+assert reg["version"]==2
+assert [m["id"] for m in reg["managers"]]==["manager-1","manager-2","manager-3"]
+assert {o["secondmate"] for o in reg["owners"]}=={"sm-a","sm-c"}
+assert len(reg["assignments"])==2
+assert any(r.get("project")=="p-b" for r in reg["unassigned"])
+assert len(reg["dependencies"])==1 and reg["dependencies"][0]["owner_secondmate"]=="sm-a"
+assert len(reg["legacy_dependencies"])==1
+PY
+
+# Transfer uses lifecycle hooks in tests, so it never launches an external harness.
+TROOT="$TMP_ROOT/transfer"
+FM_FLEET_ROOT=$TROOT "$FLEET" init >/dev/null
+for n in 1 2; do FM_FLEET_ROOT=$TROOT "$FLEET" manager register --id manager-$n --home "$TROOT/manager-$n" >/dev/null; done
+SMHOME="$TROOT/harness-home"
+FM_FLEET_ROOT=$TROOT "$FLEET" owner register --secondmate harness --home "$SMHOME" --projects AutoDev,dotcodex --domains harness >/dev/null
+mkdir -p "$TROOT/manager-1/data" "$TROOT/manager-1/state" "$TROOT/manager-2/data" "$TROOT/manager-2/state" "$SMHOME"
+printf '%s\n' '# SecondMates' '- harness - Harness (home: '"$SMHOME"'; scope: harness; projects: AutoDev, dotcodex; added 2026-09-13)' > "$TROOT/manager-1/data/secondmates.md"
+printf '%s\n' '# SecondMates' > "$TROOT/manager-2/data/secondmates.md"
+printf 'kind=secondmate\nhome=%s\nwindow=fake\n' "$SMHOME" > "$TROOT/manager-1/state/harness.meta"
+printf 'working: migration fixture\n' > "$TROOT/manager-1/state/harness.status"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$TROOT/manager-1" > "$SMHOME/.fm-secondmate-parent"
+add_lock "$TROOT/manager-1"; transfer_source_holder=$LAST_HOLDER
+FM_FLEET_ROOT=$TROOT "$FLEET" assign --secondmate harness --reason fixture >/dev/null
+remove_lock "$TROOT/manager-1" "$transfer_source_holder"
+
+HOOK="$TMP_ROOT/hook.sh"
+cat > "$HOOK" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$FM_HOOK_LOG"
+SH
+chmod +x "$HOOK"
+FAIL_HOOK="$TMP_ROOT/fail-hook.sh"
+cat > "$FAIL_HOOK" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAIL_HOOK"
+export FM_HOOK_LOG="$TMP_ROOT/hooks.log"
+export FM_FLEET_TRANSFER_STOP_HOOK=$HOOK
+export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$HOOK
+export FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$HOOK
+export FM_FLEET_TRANSFER_ROLLBACK_START_HOOK=$HOOK
+
+mkdir -p "$TROOT/manager-1/state/pending-replies"
+printf 'phase=escalated\n' > "$TROOT/manager-1/state/pending-replies/open1"
+if FM_FLEET_ROOT=$TROOT "$FLEET" transfer begin --secondmate harness --to manager-2 >/dev/null 2>&1; then fail "transfer ignored an open pending reply"; fi
+[ ! -e "$FM_HOOK_LOG" ] || fail "open pending reply allowed an endpoint lifecycle action"
+rm -f "$TROOT/manager-1/state/pending-replies/open1"
+export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK
+if FM_FLEET_ROOT=$TROOT "$FLEET" transfer begin --secondmate harness --to manager-2 >/dev/null 2>&1; then fail "transfer hid a manager relaunch failure"; fi
+txfile=$(find "$TROOT/transactions" -type f -name '*.json' | head -1); tx=$(basename "$txfile" .json)
+[ -n "$tx" ] || fail "interrupted transfer has no journal"
+grep -q "parent_home=$TROOT/manager-2" "$SMHOME/.fm-secondmate-parent" || fail "parent binding did not move"
+[ -f "$TROOT/manager-2/state/harness.meta" ] && [ ! -f "$TROOT/manager-1/state/harness.meta" ] || fail "parent metadata was not transferred"
+[ "$(FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev | sed -n 's/.*-> \(manager-[0-9]*\).*/\1/p')" = manager-2 ] || fail "transfer assignment was not published"
+export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$HOOK
+FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$tx" >/dev/null || fail "recover interrupted transfer"
+grep -q "$TROOT/manager-2|harness|start-secondmate" "$FM_HOOK_LOG" || fail "SecondMate relaunch did not use destination parent"
+
+FM_FLEET_ROOT=$TROOT "$FLEET" transfer rollback --transaction "$tx" >/dev/null || fail "rollback transfer"
+grep -q "parent_home=$TROOT/manager-1" "$SMHOME/.fm-secondmate-parent" || fail "rollback did not restore parent binding"
+[ -f "$TROOT/manager-1/state/harness.meta" ] && [ ! -f "$TROOT/manager-2/state/harness.meta" ] || fail "rollback did not restore parent records"
+[ "$(FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev | sed -n 's/.*-> \(manager-[0-9]*\).*/\1/p')" = manager-1 ] || fail "rollback did not restore assignment"
+
+add_lock "$TROOT/manager-1"; live_source=$LAST_HOLDER
+if FM_FLEET_ROOT=$TROOT "$FLEET" transfer begin --secondmate harness --to manager-2 >/dev/null 2>&1; then fail "transfer accepted a live source lock"; fi
+remove_lock "$TROOT/manager-1" "$live_source"
+
+pass "fleet schema-v2 assignment and transfer control plane"
