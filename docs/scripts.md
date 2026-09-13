@@ -76,7 +76,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-git-push-guard.sh`  | Refuse a forge=external task's pushes to the shared origin and of task-prefixed branches, and write its per-task guard record ([design](external-review-forge.md)) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab, cmux workspace, and tern session titles |
-| `fm-backend-launch-env-lib.sh` | Shared color-control scrub every backend applies before it births a long-lived server |
+| `fm-backend-launch-env-lib.sh` | Shared color-control scrub the tmux, Herdr, and zellij adapters apply before they birth a long-lived server |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
 | `fm-agent-process-lib.sh` | Backend-neutral harness-process name classifier shared by recovery-grade adapters |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
