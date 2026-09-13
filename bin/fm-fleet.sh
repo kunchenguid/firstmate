@@ -560,9 +560,18 @@ PY
     [ $# -eq 1 ] || { echo "fm-fleet: attach needs exactly one manager id" >&2; exit 2; }
     home=$(python3 -c 'import json,sys; ms=[m["home"] for m in json.load(open(sys.argv[1]))["managers"] if m["id"]==sys.argv[2]]; print(ms[0] if ms else "")' "$REG" "$1")
     [ -n "$home" ] || { echo "fm-fleet: unknown manager $1" >&2; exit 1; }
+    herdr_line=""
+    if [ -f "$home/state/.fleet-herdr-target" ]; then
+      ht=$(cat "$home/state/.fleet-herdr-target" 2>/dev/null || true)
+      if [ -n "$ht" ]; then
+        hs=${ht%%:*}; hp=${ht#*:}
+        herdr_line="herdr tab: $ht (peek: herdr pane read $hp --session $hs --source visible --lines 20 --format text)"
+      fi
+    fi
     cat <<EOF
 manager $1 home: $home
-inspect (read-only, safe while the manager runs):
+${herdr_line:+$herdr_line
+}inspect (read-only, safe while the manager runs):
   FM_HOME=$home $FM_ROOT/bin/fm-fleet-view.sh
   FM_HOME=$home $FM_ROOT/bin/fm-crew-state.sh <task-id>
 take over authority (stops the supervised daemon first):

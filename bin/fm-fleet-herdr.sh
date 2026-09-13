@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 fleet_ws_label() {
-  printf 'fm-fleet-%s' "$1"
+  printf 'firstmate-%s' "$1"
 }
 
 usage() {

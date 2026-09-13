@@ -49,7 +49,7 @@ Registration and every start refuse a SecondMate that already belongs to another
 Starting a second live authority for the same manager ID, `FM_HOME`, or lease fails safely.
 A manager start also refuses when that home's session lock is held by a live FirstMate session.
 The per-home session lock in `bin/fm-lock.sh` still owns one-authority-per-home; the fleet lease in `<home>/state/.fleet-lease` extends the same rule to manager processes.
-Concurrent managers never share one mutable `FM_HOME`.
+Concurrent managers never share one mutable `FM_HOME`. Home paths are stable storage locators and are never renamed; human identity lives in the registry id, so a rename touches the registry and the Herdr labels but never moves a home directory.
 Fleet commands serialize registry writes through a lock directory and validate before mutating.
 
 ## CLI
@@ -106,7 +106,7 @@ A manager home has two live forms, never both at once.
 The placeholder form is the supervised heartbeat daemon (`bin/fm-fleet-manager.sh`): it holds the fleet lease, publishes heartbeats, and exits cleanly on SIGTERM.
 It runs under tmux when tmux is present and under `nohup` otherwise; `FM_FLEET_BACKEND=tmux` or `=nohup` pins the choice.
 The reasoning form is a real FirstMate session (Codex) running in the home with `FM_HOME` set, holding the home session lock.
-`FM_FLEET_BACKEND=herdr` runs each manager in its own workspace per manager home (label `fm-fleet-<id>`) with one tab per manager (label `fleet-<id>`) in the resolved Herdr session, so managers stay visible on the operator's normal Herdr surface with live agent states, matching the workspace-per-home rule SecondMates and Crewmates follow.
+`FM_FLEET_BACKEND=herdr` runs each manager in its own workspace per manager home (label `firstmate-<id>`, so the side panel reads `firstmate-runtime` and friends) with one tab per manager (label `fleet-<id>`) in the resolved Herdr session, so managers stay visible on the operator's normal Herdr surface with live agent states, matching the workspace-per-home rule SecondMates and Crewmates follow.
 The Herdr backend reuses the verified tab-create, submit, and kill primitives from `bin/backends/herdr.sh`; tabs are labeled `fleet-<id>` and never collide with task tabs.
 Explicit selection stays required for Herdr because it is experimental and session-dependent.
 A reasoning session takes a home only after that home's daemon is stopped (`fm-fleet.sh stop <id>`); `fm-fleet.sh start` refuses a home whose session lock is held by a live session, and the daemon refuses to start there too.
