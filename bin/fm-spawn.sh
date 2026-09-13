@@ -201,12 +201,16 @@
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   resolves the current remote default branch, and resets to its tip. When the
+#   repository has no remote at all (`git remote` prints nothing), spawn never
+#   fetches and instead resets to the LOCAL default branch (main, then master),
+#   the base a local-only project's crew branch is later landed onto. When
+#   remotes exist but none is origin, spawn refuses, since it cannot verify
+#   freshness against a remote it never contacts. Relaunch reuses the recorded
+#   worktree without fetching or resetting its base. An unreachable detected
+#   origin, unresolved default branch, or non-clean worktree refuses a fresh
+#   spawn rather than risking a PR based on stale history or discarding local
+#   work, and each refusal names which of those shapes it hit.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2586,8 +2590,21 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
+# Refresh a clean pooled worktree onto the project's current default-branch tip
+# before a fresh crew or scout launch, so no worker starts from a stale base.
+# Three repository shapes are told apart, and every refusal names which one hit:
+#   - origin configured: fetch it and reset to origin/<default>; an unreachable
+#     or unusable origin refuses, never downgrading into "whatever is local".
+#   - no remote at all (`git remote` prints nothing): a local-only project has no
+#     upstream to be stale against, so reset to the LOCAL default branch
+#     (main, then master) instead; a repository with no resolvable default
+#     branch refuses.
+#   - remotes exist but none is origin: refuse, because the origin-based fetch
+#     cannot prove freshness against a remote it never contacts.
+# The dirty-worktree refusal runs first in every shape: uncommitted work is
+# never discarded to refresh a base.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 status remotes
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2600,9 +2617,23 @@ freshen_spawn_worktree_base() {  # <worktree>
     fi
     return 1
   fi
-  if ! spawn_worktree_has_origin_config "$worktree"; then
-    return 0
+  if spawn_worktree_has_origin_config "$worktree"; then
+    freshen_spawn_worktree_base_from_origin "$worktree"
+    return
   fi
+  remotes=$(git -C "$worktree" remote 2>/dev/null) || {
+    echo "error: could not list remotes for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  if [ -n "$remotes" ]; then
+    echo "error: pooled worktree '$worktree' has remotes ($(printf '%s' "$remotes" | tr '\n' ' ' | sed 's/ $//')) but no origin to verify freshness against; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  freshen_spawn_worktree_base_from_local_default "$worktree"
+}
+
+freshen_spawn_worktree_base_from_origin() {  # <worktree>
+  local worktree=$1 default target expected actual
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2631,6 +2662,31 @@ freshen_spawn_worktree_base() {  # <worktree>
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+}
+
+# Local-only shape: no remote is configured, so the project's own default branch
+# is the freshest base that exists. bin/fm-merge-local.sh later lands the crew
+# branch onto that same branch, which is why it is the right starting point.
+freshen_spawn_worktree_base_from_local_default() {  # <worktree>
+  local worktree=$1 default target expected actual
+  default=$(default_branch "$worktree") || {
+    echo "error: pooled worktree '$worktree' has no git remote and no local default branch (main or master); refusing to launch without a base to refresh from" >&2
+    return 1
+  }
+  target="refs/heads/$default"
+  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    echo "error: pooled worktree '$worktree' has no git remote and its local default branch '$default' is not a commit; refusing to launch without a base to refresh from" >&2
+    return 1
+  }
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset remoteless pooled worktree '$worktree' to local '$default'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: remoteless pooled worktree '$worktree' is at '${actual:-unknown}', not local '$default' ('$expected'); refusing to launch" >&2
     return 1
   fi
 }
