@@ -38,6 +38,9 @@
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
+# Readers must retain a final message line even when the record has no
+# terminating newline; otherwise acknowledging the record can silently drop
+# part of the instruction.
 #
 # Sequence numbers are never reused within a task: allocation scans both the
 # inbox root and handled/, so a message is processed at most once per worker
