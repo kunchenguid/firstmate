@@ -232,7 +232,7 @@ test_ship_modes_generate_clean_briefs() {
 # event that happens in it, and no-mistakes must separate the pre-run window it
 # owns from the active run the pipeline owns.
 test_ship_briefs_forbid_agent_coauthor_trailer() {
-  local home id mode brief block checkpoint
+  local home id mode brief block checkpoint disclosure intent_rule
   home="$TMP_ROOT/coauthor-home"
   write_registry "$home"
 
@@ -269,8 +269,11 @@ ROWS
     || fail "no-mistakes: co-author ban did not forbid rewriting while a run owns the branch"
   printf '%s\n' "$block" | grep -Eiq "force-push" \
     || fail "no-mistakes: co-author ban did not name force-push among the forbidden active-run rewrites"
-  printf '%s\n' "$block" | grep -Eiq "note:.*(before|preced).*done:" \
-    || fail "no-mistakes: post-run disclosure did not keep off the terminal done: line"
+  disclosure=$(printf '%s\n' "$block" | grep -i 'note:')
+  printf '%s\n' "$disclosure" | grep -Eiq "note:[^.]*immediately (before|preceding)[^.]*done:" \
+    || fail "no-mistakes: post-run disclosure did not go on its own note: line immediately before the terminal done: line"
+  printf '%s\n' "$disclosure" | grep -Eiq "note:[^.]*(never|not)[^.]*(before|preceding)[^.]*done:" \
+    && fail "no-mistakes: post-run disclosure ordering is stated as a negation, so it does not precede the done: line"
   # The worker cannot amend a pipeline-authored commit while the run owns the
   # branch, so its only lever is the two channels it drives itself: the run's
   # `--intent` and the fix instructions it sends back through a gate response.
@@ -278,10 +281,16 @@ ROWS
     || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via --intent"
   printf '%s\n' "$block" | grep -Eiq "respond|fix instruction|gate" \
     || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via its fix responses"
-  # That lever must not contradict the --intent provenance rules in the same
-  # brief, which otherwise admit only the captain's own words.
-  sed -n '/Do not include/p' "$home/data/brief-coauthor-nm/brief.md" | grep -Eiq "attribution|exception" \
-    || fail "no-mistakes: --intent provenance rules still exclude the attribution ban the block tells the worker to pass"
+  # That lever must not contradict the sentence in the same brief that actually
+  # restricts what goes into `--intent`, which otherwise admits only the
+  # captain's own words; it has to admit the ban affirmatively, not merely
+  # mention it.
+  intent_rule=$(sed -n '/pass .--intent. as only/p' "$home/data/brief-coauthor-nm/brief.md")
+  [ -n "$intent_rule" ] || fail "no-mistakes: brief no longer states which content may go into --intent"
+  printf '%s\n' "$intent_rule" | grep -Eiq "plus[^.]*attribution ban|and[^.]*attribution ban" \
+    || fail "no-mistakes: the sentence restricting --intent content does not admit the attribution ban the block tells the worker to pass"
+  printf '%s\n' "$intent_rule" | grep -Eiq "(never|do not|don't|not)[^.]*attribution ban" \
+    && fail "no-mistakes: the sentence restricting --intent content names the attribution ban only to exclude it"
 
   # The attribution block lands mid-section in the no-mistakes arm, so it must
   # be a subsection: everything after it - the `--intent` provenance rules, the
@@ -289,8 +298,8 @@ ROWS
   # terminal done gate - still belongs to Definition of done, and a level-1
   # heading there would file the pipeline contract under commit attribution.
   brief="$home/data/brief-coauthor-nm/brief.md"
-  sed -n '/^# Definition of done$/,$p' "$brief" | sed '1d' | grep -q '^# ' \
-    && fail "no-mistakes: a level-1 heading inside Definition of done swallows the rest of the contract"
+  sed -n '/^#* *Commit attribution/,/checks green/p' "$brief" | grep -q '^# ' \
+    && fail "no-mistakes: the attribution heading is level-1, so it swallows the rest of the Definition of done"
   sed -n '/^#* *Commit attribution/,$p' "$brief" | grep -Eq '^done: PR|append .done: PR .url. checks green' \
     || fail "no-mistakes: terminal done gate no longer renders after the attribution block"
   sed -n '/default branch; that is the captain/{n;p;}' "$brief" | grep -q '^$' \
@@ -453,6 +462,8 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must require --intent to be the Captain's intent subsection"
   assert_grep "plus any later words the captain actually said" "$brief" \
     "no-mistakes DOD must allow later captain words in --intent"
+  assert_grep "plus the standing commit-attribution ban above" "$brief" \
+    "no-mistakes DOD must admit the commit-attribution ban into --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
     "no-mistakes DOD must keep Firstmate spec out of --intent"
   assert_grep "or your own decisions and tradeoffs" "$brief" \
