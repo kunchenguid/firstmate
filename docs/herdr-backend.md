@@ -111,7 +111,7 @@ Projected children are never collapsed back into that parent; it is the placemen
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
-An ambiguous response grants no mutation or cleanup authority.
+An ambiguous response grants no mutation or cleanup authority, but a structured `pane_not_found` on that pre-close verification is confirmed-gone, not ambiguous, so cleanup finishes without attempting a close.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
