@@ -106,6 +106,10 @@ fm_dispatch_breaker_check() {
     echo "error: dispatch circuit breaker is open for task '$id' after repeated failures (last reason: ${FM_BREAKER_LAST_REASON:-unknown}; worktree: ${FM_BREAKER_WORKTREE:-none}); explicit captain recovery required (run: bin/fm-dispatch-breaker.sh reset $id)" >&2
     return 1
   fi
+  if [ "$FM_BREAKER_STATE" = "half-open" ] && [ "$FM_BREAKER_ATTEMPTS" -gt 0 ]; then
+    echo "error: half-open dispatch probe already consumed for task '$id'; explicit captain recovery required (run: bin/fm-dispatch-breaker.sh reset $id)" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -472,15 +476,6 @@ fm_spawn_verify_worker_started() {
         fi
         ;;
     esac
-
-    # 6. Capture pane output to detect agent activity
-    pane_out=$(fm_backend_capture "$backend" "$target" 20 "fm-$id" 2>/dev/null || true)
-    if [ -n "$pane_out" ]; then
-      if printf '%s\n' "$pane_out" | grep -qiE '(reading brief|thinking|processing|running|executing|\bcontext:\b|\bmodel:\b|welcome to|claude|codex|opencode|pi|omp|gemini|kimi|rovo|muse|cursor)'; then
-        FM_SPAWN_START_FAILURE_REASON=""
-        return 0
-      fi
-    fi
 
     i=$((i + 1))
     [ "$i" -ge "$max_polls" ] || sleep "$poll_interval"

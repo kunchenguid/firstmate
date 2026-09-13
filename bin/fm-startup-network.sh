@@ -302,9 +302,17 @@ terminate_worker_group() {  # <pid> <identity> <pgid>
 # Reap stale, expired, or superseded workers and lingering child process groups.
 reap_stale_workers() {  # [target_pid] [target_identity] [target_pgid]
   local target_pid=${1:-} target_ident=${2:-} target_pgid=${3:-}
-  local cur_state cur_pid cur_ident cur_pgid started age budget need_kill=0
+  local cur_state cur_pid cur_ident cur_pgid started age budget need_kill=0 recorded_gen
 
   if [ -n "$target_pid" ]; then
+    if [ -z "$target_ident" ] && [ -z "$target_pgid" ]; then
+      recorded_gen=$(status_get generation)
+      [ -n "$recorded_gen" ] && [ "$target_pid" = "$recorded_gen" ] || return 1
+      target_pid=$(status_get pid)
+      target_ident=$(status_get identity)
+      target_pgid=$(status_get pgid)
+      [ -n "$target_pid" ] || return 0
+    fi
     terminate_worker_group "$target_pid" "$target_ident" "$target_pgid" || true
     return 0
   fi
@@ -825,7 +833,7 @@ case "$MODE" in
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
   report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
-  reap) reap_stale_workers "${1:-}" ;;
+  reap) reap_stale_workers "${1:-}" || exit $? ;;
   -h|--help) usage ;;
   *)
     printf 'fm-startup-network: unknown mode: %s\n' "${MODE:-<none>}" >&2
