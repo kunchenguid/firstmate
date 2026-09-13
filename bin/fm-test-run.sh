@@ -292,7 +292,7 @@ family_for_basename() {
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-daily.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-search.test.sh|fm-grok-harness.test.sh|\
+    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-search.test.sh|fm-smoke.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-lint-workflows.test.sh|\
     fm-macos-scope.test.sh|\
     fm-model-telemetry.test.sh|fm-model-usage.test.sh|fm-session-digest.test.sh|fm-tachikoma.test.sh|fm-marvin.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
@@ -1786,6 +1786,9 @@ families_for_changed_path() {
       ;;
     bin/fm-marvin.sh|modules/marvin/*)
       printf '%s\n' __script__:fm-marvin.test.sh
+      ;;
+    bin/fm-smoke.sh)
+      printf '%s\n' __script__:fm-smoke.test.sh
       ;;
     bin/fm-moiras.sh|modules/moiras/*)
       printf '%s\n' __script__:fm-moiras.test.sh

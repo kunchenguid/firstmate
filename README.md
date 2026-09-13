@@ -144,6 +144,23 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
+## Lifecycle smoke
+
+### Motive
+A stable home is a scripted smoke on main plus a day without a silent failure.
+
+### Run
+From a Firstmate home: `bin/fm-smoke.sh`.
+It creates a fresh named non-default Herdr lab and isolated home, then exercises session-start, spawn, steer, wake, optional PR registration, and teardown.
+It records each invoked owner's exact exit code and duration, plus six stage outcomes; failed prerequisites skip downstream mutation while cleanup still runs.
+A passing smoke is a composition check, not independent proof of backend selection, watcher continuity, or teardown safety.
+
+### Configure
+`FM_SMOKE_PR_URL` enables the existing PR registration owner with a real URL; it does not publish a passing smoke attestation.
+Without it, the PR stage is explicitly skipped.
+`bin/fm-smoke.sh -h` lists every environment variable, including the canonical positive-millisecond stage budgets.
+The script header is the authoritative contract for output, private evidence, budgets, and remaining limits.
+
 ## How It Works
 
 ```
