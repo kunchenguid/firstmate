@@ -3446,137 +3446,15 @@ real_path_or_raw() {  # <path>
 # process sandbox applied to the final launch command denies absolute-path
 # writes back into the project while preserving the task's scratch and
 # firstmate-owned report/status surfaces. Both gates must pass before launch.
-reader_validate_descendant_symlinks() {  # <canonical-scratch-dir>
-  local scratch=$1 links link raw_target target_real
-  links=$(find "$scratch" -type l -print 2>/dev/null) || {
-    echo "error: reader scratch directory $scratch could not be inspected for descendant symlinks; refusing to launch - a reader must never be able to write a tracked file" >&2
-    return 1
-  }
-  while IFS= read -r link || [ -n "$link" ]; do
-    [ -n "$link" ] || continue
-    raw_target=$(readlink "$link" 2>/dev/null) || {
-      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be read; refusing to launch - a reader must never be able to write a tracked file" >&2
-      return 1
-    }
-    case "$raw_target" in
-      /*)
-        echo "error: reader scratch directory $scratch contains an unsafe symlink at $link that uses an absolute target; refusing to launch - a reader must never be able to write a tracked file" >&2
-        return 1
-        ;;
-    esac
-    target_real=$(realpath "$link" 2>/dev/null) || {
-      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be resolved; refusing to launch - a reader must never be able to write a tracked file" >&2
-      return 1
-    }
-    [ -e "$target_real" ] || {
-      echo "error: reader scratch directory $scratch contains an unsafe symlink at $link whose target cannot be resolved; refusing to launch - a reader must never be able to write a tracked file" >&2
-      return 1
-    }
-    case "$target_real" in
-      "$scratch"|"$scratch"/*) ;;
-      *)
-        echo "error: reader scratch directory $scratch contains an unsafe symlink at $link that resolves outside its canonical root; refusing to launch - a reader must never be able to write a tracked file" >&2
-        return 1
-        ;;
-    esac
-  done <<EOF
-$(printf '%s\n' "$links" | LC_ALL=C sort)
-EOF
-}
-
-validate_reader_scratch() {  # <scratch-dir>
-  local scratch=$1 scratch_real inside_work_tree inside_git_dir descendant_git
-  scratch_real=$(cd "$scratch" 2>/dev/null && pwd -P) || {
-    echo "error: reader scratch directory cannot be resolved: $scratch; refusing to launch" >&2
-    return 1
-  }
-  case "$scratch_real" in
-    "$PROJ_ABS_REAL"|"$PROJ_ABS_REAL"/*)
-      echo "error: reader scratch directory $scratch_real resolves into the primary checkout $PROJ_ABS_REAL; refusing to launch - a reader must never be able to write a tracked file" >&2
-      return 1
-      ;;
-  esac
-  inside_work_tree=$(git -C "$scratch_real" rev-parse --is-inside-work-tree 2>/dev/null) || inside_work_tree=false
-  inside_git_dir=$(git -C "$scratch_real" rev-parse --is-inside-git-dir 2>/dev/null) || inside_git_dir=false
-  if [ "$inside_work_tree" = true ] || [ "$inside_git_dir" = true ]; then
-    echo "error: reader scratch directory $scratch_real is inside a git checkout or git dir; refusing to launch - a reader must never be able to write a tracked file" >&2
-    return 1
-  fi
-  reader_validate_descendant_symlinks "$scratch_real" || return 1
-  descendant_git=$(find "$scratch_real" -name .git -print -quit 2>/dev/null) || {
-    echo "error: reader scratch directory $scratch_real could not be inspected for descendant git metadata; refusing to launch - a reader must never be able to write a tracked file" >&2
-    return 1
-  }
-  if [ -n "$descendant_git" ]; then
-    echo "error: reader scratch directory $scratch_real contains a git checkout at $descendant_git; refusing to launch - a reader must never be able to write a tracked file" >&2
-    return 1
-  fi
-}
-
-reader_sandbox_preflight() {
-  local platform sandbox_bin report_dir state_dir profile
-  platform=$(uname -s)
-  report_dir=$(cd "$DATA/$ID" 2>/dev/null && pwd -P) || return 1
-  state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
-  case "$report_dir" in
-    "$PROJ_ABS_REAL")
-      echo "error: reader report directory cannot be the project root; refusing to launch without process-level write confinement" >&2
-      return 1
-      ;;
-  esac
-  case "$state_dir" in
-    "$PROJ_ABS_REAL")
-      echo "error: reader state directory cannot be the project root; refusing to launch without process-level write confinement" >&2
-      return 1
-      ;;
-  esac
-  case "$platform" in
-    Darwin)
-      sandbox_bin=$(command -v sandbox-exec 2>/dev/null || true)
-      [ -n "$sandbox_bin" ] || {
-        echo "error: sandbox-exec is required for reader process confinement on macOS; refusing to launch" >&2
-        return 1
-      }
-      profile='(version 1)(allow default)(deny file-write* (subpath (param "PROJECT")))(allow file-write* (subpath (param "SCRATCH")))(allow file-write* (subpath (param "REPORT")))(allow file-write* (subpath (param "STATE")))'
-      "$sandbox_bin" -D "PROJECT=$PROJ_ABS_REAL" -D "SCRATCH=$READER_SCRATCH" \
-        -D "REPORT=$report_dir" -D "STATE=$state_dir" -p "$profile" /usr/bin/true >/dev/null 2>&1 || {
-        echo "error: sandbox-exec could not establish reader process confinement; refusing to launch" >&2
-        return 1
-      }
-      READER_SANDBOX_PROFILE=$profile
-      ;;
-    Linux)
-      sandbox_bin=$(command -v bwrap 2>/dev/null || true)
-      [ -n "$sandbox_bin" ] || {
-        echo "error: bwrap is required for reader process confinement on Linux; refusing to launch" >&2
-        return 1
-      }
-      "$sandbox_bin" --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev \
-        --ro-bind "$PROJ_ABS_REAL" "$PROJ_ABS_REAL" -- /bin/true >/dev/null 2>&1 || {
-        echo "error: bwrap could not establish reader process confinement; refusing to launch" >&2
-        return 1
-      }
-      ;;
-    *)
-      echo "error: reader process confinement is unsupported on $platform; refusing to launch" >&2
-      return 1
-      ;;
-  esac
-  READER_SANDBOX_PLATFORM=$platform
-  READER_SANDBOX_BIN=$sandbox_bin
-  READER_REPORT_DIR=$report_dir
-  READER_STATE_DIR=$state_dir
-}
-
 reader_confine_launch() {  # <launch-command>
   local launch=$1 confined allowed
-  case "$READER_SANDBOX_PLATFORM" in
+  case "$FM_READER_SANDBOX_PLATFORM" in
     Darwin)
-      printf '%s' "$(shell_quote "$READER_SANDBOX_BIN") -D $(shell_quote "PROJECT=$PROJ_ABS_REAL") -D $(shell_quote "SCRATCH=$READER_SCRATCH") -D $(shell_quote "REPORT=$READER_REPORT_DIR") -D $(shell_quote "STATE=$READER_STATE_DIR") -p $(shell_quote "$READER_SANDBOX_PROFILE") /bin/bash -c $(shell_quote "$launch")"
+      printf '%s' "$(shell_quote "$FM_READER_SANDBOX_BIN") -D $(shell_quote "PROJECT=$PROJ_ABS_REAL") -D $(shell_quote "SCRATCH=$READER_SCRATCH") -D $(shell_quote "REPORT=$FM_READER_REPORT_DIR") -D $(shell_quote "STATE=$FM_READER_STATE_DIR") -p $(shell_quote "$FM_READER_SANDBOX_PROFILE") /bin/bash -c $(shell_quote "$launch")"
       ;;
     Linux)
-      confined="$(shell_quote "$READER_SANDBOX_BIN") --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev --ro-bind $(shell_quote "$PROJ_ABS_REAL") $(shell_quote "$PROJ_ABS_REAL")"
-      for allowed in "$READER_REPORT_DIR" "$READER_STATE_DIR"; do
+      confined="$(shell_quote "$FM_READER_SANDBOX_BIN") --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev --ro-bind $(shell_quote "$PROJ_ABS_REAL") $(shell_quote "$PROJ_ABS_REAL")"
+      for allowed in "$FM_READER_REPORT_DIR" "$FM_READER_STATE_DIR"; do
         case "$allowed" in
           "$PROJ_ABS_REAL"/*)
             confined="$confined --bind $(shell_quote "$allowed") $(shell_quote "$allowed")"
@@ -3908,6 +3786,14 @@ if [ "$ACCESS" = reader ]; then
     exit 1
   fi
   TASK_TMP=$FM_READER_TASK_TMP
+  if [ "$RELAUNCH" -eq 1 ]; then
+    RELAUNCH_RECORDED_TASK_TMP=$(fm_meta_optional_exact_value "$STATE/$ID.meta" tasktmp) || {
+      echo "error: task $ID records ambiguous reader tasktmp metadata; refusing to relaunch until its record has exactly one non-empty tasktmp= value" >&2
+      exit 1
+    }
+    fm_reader_recorded_scratch_validate \
+      "$ID" "$RELAUNCH_RECORDED_TASK_TMP" "$RELAUNCH_WT" || exit 1
+  fi
 fi
 
 # The access axis of an existing task id is immutable across relaunches: a
@@ -4077,9 +3963,10 @@ if [ "$ACCESS" = reader ]; then
     echo "error: could not create the reader scratch directory at $TASK_TMP/scratch" >&2
     exit 1
   }
-  validate_reader_scratch "$TASK_TMP/scratch" || exit 1
-  READER_SCRATCH=$(cd "$TASK_TMP/scratch" && pwd -P)
-  reader_sandbox_preflight || exit 1
+  fm_reader_scratch_validate "$TASK_TMP/scratch" "$PROJ_ABS_REAL" || exit 1
+  READER_SCRATCH=$FM_READER_VALIDATED_SCRATCH
+  fm_reader_sandbox_preflight \
+    "$PROJ_ABS_REAL" "$READER_SCRATCH" "$DATA/$ID" "$STATE" || exit 1
   reader_ensure_read_handle "$READER_SCRATCH" "$READER_BASE_COMMIT" || exit 1
   SPAWN_TASK_CWD="$READER_SCRATCH"
   WT="$READER_SCRATCH"
@@ -4106,7 +3993,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   if [ "$ACCESS" = reader ]; then
-    validate_reader_scratch "$WT" || exit 1
+    fm_reader_scratch_validate "$WT" "$PROJ_ABS_REAL" || exit 1
   fi
   WT_TARGET=$T
   SES=${T%%:*}
@@ -5590,10 +5477,21 @@ else
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
-  awk -F= '
+  local replace_dispatch=0
+  if [ "$DISPATCH_RESOLVED" -eq 1 ] || [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ] \
+    || [ "$DISPATCH_PROVIDER_SET" -eq 1 ] || [ "$DISPATCH_MODEL_FAMILY_SET" -eq 1 ]; then
+    replace_dispatch=1
+  fi
+  awk -F= -v replace_dispatch="$replace_dispatch" '
     BEGIN {
       split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind code code_parent parent child_seq access mode yolo tasktmp model effort busy_gen spawn_gen telemetry_session_id billing_pool_ref traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
+      if (replace_dispatch == 1) {
+        owned["dispatch"] = 1
+        owned["dispatch_override_reason"] = 1
+        owned["dispatch_provider"] = 1
+        owned["dispatch_model_family"] = 1
+      }
     }
     !($1 in owned)
   ' "$RELAUNCH_META"

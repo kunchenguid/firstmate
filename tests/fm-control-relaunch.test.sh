@@ -17,7 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
-#   7. With crew-dispatch active, relaunch forwards --dispatch-resolved to spawn.
+#   7. With crew-dispatch active, relaunch forwards --dispatch-resolved to spawn
+#      and never reuses an attestation for a changed harness/model/effort tuple.
 #   8. --quota-fallback picks the next same-class profile, writes a progress
 #      note from status plus git, records lifecycle telemetry, and refuses when
 #      no eligible profile remains. An override with no matched_rule recovers
@@ -212,9 +213,13 @@ add_reader_scout_task() {
     echo "kind=scout"
     echo "access=reader"
     echo "tasktmp=$task_tmp"
-    echo "model=default"
-    echo "effort=default"
+    echo "model=claude-sonnet-4-5"
+    echo "effort=xhigh"
     echo "base_commit=$head"
+    echo "dispatch=override"
+    echo "dispatch_override_reason=retained fixture route"
+    echo "dispatch_provider=anthropic"
+    echo "dispatch_model_family=claude"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$scratch" > "$dir/fake/cwd"
@@ -321,11 +326,21 @@ SH
 # Give a case home a real backlog carrying <id>, so the relaunch path's paired
 # backlog transition (bin/fm-backlog-transition-lib.sh) is live rather than
 # skipped for want of a backlog file.
-seed_backlog() {  # <case-dir> <id> <queued|in_flight>
-  local dir=$1 id=$2 want=$3 file="$1/home/data/backlog.md"
+seed_backlog() {  # <case-dir> <id> <queued|in_flight|done>
+  local dir=$1 id=$2 want=$3 file="$1/home/data/backlog.md" kind repo
+  kind=$(meta_field "$dir" "$id" kind)
+  repo=$(basename "$(meta_field "$dir" "$id" project)")
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$file"
-  tasks-axi add "$id" "relaunch fixture task" --kind ship --file "$file" >/dev/null
-  [ "$want" != in_flight ] || tasks-axi start "$id" --file "$file" >/dev/null
+  tasks-axi add "$id" "relaunch fixture task" --kind "$kind" --repo "$repo" --file "$file" >/dev/null
+  case "$want" in
+    queued) ;;
+    in_flight) tasks-axi start "$id" --file "$file" >/dev/null ;;
+    done)
+      tasks-axi start "$id" --file "$file" >/dev/null
+      tasks-axi 'done' "$id" --file "$file" >/dev/null
+      ;;
+    *) fail "unknown backlog fixture state: $want" ;;
+  esac
 }
 
 backlog_state() {  # <case-dir> <id>
@@ -1624,13 +1639,21 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 # worktree. The control path must preserve that scratch and let the launch owner
 # adopt the recorded reader access instead of defaulting to writer.
 test_recorded_reader_scout_relaunch_without_access_keeps_identity() {
-  local dir out rc scratch
+  local dir out rc scratch tasktmp project base_commit endpoint backlog_before journal
   dir=$(new_case reader-relaunch rl-reader)
   add_reader_scout_task "$dir" rl-reader
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-reader in_flight
   scratch=$(meta_field "$dir" rl-reader worktree)
+  tasktmp=$(meta_field "$dir" rl-reader tasktmp)
+  project=$(meta_field "$dir" rl-reader project)
+  base_commit=$(meta_field "$dir" rl-reader base_commit)
+  endpoint=$(meta_field "$dir" rl-reader window)
+  backlog_before=$(backlog_state "$dir" rl-reader)
 
   out=$(run_control "$dir" rl-reader relaunch --note "continue the recorded review"); rc=$?
-  expect_code 0 "$rc" "ordinary reader-scout relaunch without --access should succeed"$'\n'"$out"
+  journal=$(cat "$dir/home/state/rl-reader.control-relaunch" 2>/dev/null || printf 'absent')
+  expect_code 0 "$rc" "ordinary reader-scout relaunch without identity or routing overrides should succeed"$'\n'"$out"$'\n'"journal:"$'\n'"$journal"
   assert_contains "$out" "relaunched rl-reader harness=claude from=claude" \
     "the outcome should name the same-harness replacement"
   assert_contains "$out" "worktree=$scratch" \
@@ -1643,6 +1666,36 @@ test_recorded_reader_scout_relaunch_without_access_keeps_identity() {
     || fail "relaunch must keep exactly one access=reader record"
   [ "$(meta_field "$dir" rl-reader worktree)" = "$scratch" ] \
     || fail "the reader scratch must be reused, not replaced with a pool worktree"
+  [ "$(meta_field "$dir" rl-reader tasktmp)" = "$tasktmp" ] \
+    || fail "the canonical reader temp root must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader project)" = "$project" ] \
+    || fail "the recorded project must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader base_commit)" = "$base_commit" ] \
+    || fail "the immutable reader base commit must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader window)" = "$endpoint" ] \
+    || fail "the recorded endpoint must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader endpoint_task_id)" = rl-reader ] \
+    || fail "the endpoint must remain bound to the recorded task id"
+  [ "$(meta_field "$dir" rl-reader model)" = claude-sonnet-4-5 ] \
+    || fail "the non-default model must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader effort)" = xhigh ] \
+    || fail "the non-default effort must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader dispatch)" = override ] \
+    || fail "the recorded dispatch attestation must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader dispatch_override_reason)" = "retained fixture route" ] \
+    || fail "the recorded dispatch override reason must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader dispatch_provider)" = anthropic ] \
+    || fail "the recorded dispatch provider must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader dispatch_model_family)" = claude ] \
+    || fail "the recorded dispatch model family must survive the relaunch"
+  [ "$(grep -Ec '^dispatch(=|_override_reason=|_provider=|_model_family=)' "$dir/home/state/rl-reader.meta")" = 4 ] \
+    || fail "the four recorded dispatch fields must each remain unique"
+  [ "$(backlog_state "$dir" rl-reader)" = "$backlog_before" ] \
+    || fail "the in-flight backlog item must survive the relaunch"
+  assert_grep 'continue the recorded review' "$dir/home/data/rl-reader/brief.md" \
+    "the required recovery note must reach the replacement's brief"
+  [ "$(grep -c '^# Load-bearing contract$' "$dir/home/data/rl-reader/brief.md")" = 1 ] \
+    || fail "the relaunch must preserve the brief's load-bearing boundary"
   [ "$(journal_field "$dir" rl-reader phase)" = complete ] \
     || fail "the transaction journal should end complete"
   [ "$(journal_field "$dir" rl-reader access)" = reader ] \
@@ -1664,7 +1717,10 @@ test_direct_spawn_relaunch_adopts_recorded_reader_access() {
   scratch=$(meta_field "$dir" rl-reader-spawn worktree)
   printf 'zsh' > "$dir/fake/command"
 
-  out=$(run_spawn "$dir" rl-reader-spawn --relaunch --harness claude); rc=$?
+  enable_dispatch_array "$dir"
+  out=$(run_spawn "$dir" rl-reader-spawn --relaunch --harness claude \
+    --dispatch-override-reason "retained fixture route" \
+    --dispatch-provider anthropic --dispatch-model-family claude); rc=$?
   expect_code 0 "$rc" "direct spawn relaunch should adopt recorded reader access"$'\n'"$out"
   assert_contains "$out" "spawned rl-reader-spawn harness=claude kind=scout access=reader" \
     "the launch handoff should retain reader access"
@@ -1672,9 +1728,169 @@ test_direct_spawn_relaunch_adopts_recorded_reader_access() {
     "the direct relaunch should retain the recorded scratch"
   [ "$(grep -c '^access=' "$dir/home/state/rl-reader-spawn.meta")" = 1 ] \
     || fail "direct relaunch must keep exactly one access=reader record"
+  [ "$(grep -Ec '^dispatch(=|_override_reason=|_provider=|_model_family=)' "$dir/home/state/rl-reader-spawn.meta")" = 4 ] \
+    || fail "direct relaunch must replace, not duplicate, the recorded dispatch tuple"
   [ ! -e /tmp/fm-rl-reader-spawn ] \
     || fail "direct reader relaunch allocated a writer temp root"
   pass "fm-spawn relaunch: a recorded reader access axis is adopted without --access"
+}
+
+test_direct_spawn_relaunch_validates_explicit_access_after_record_adoption() {
+  local dir out rc
+  dir=$(new_case reader-spawn-order rl-reader-order)
+  add_reader_scout_task "$dir" rl-reader-order
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl-reader-order --relaunch --harness claude --access reader \
+    --dispatch-override-reason "retained fixture route" \
+    --dispatch-provider anthropic --dispatch-model-family claude); rc=$?
+  expect_code 0 "$rc" "explicit matching reader access should be checked after recorded kind adoption"$'\n'"$out"
+  assert_contains "$out" "spawned rl-reader-order harness=claude kind=scout access=reader" \
+    "the access-order discriminator should launch with the recorded identity"
+  pass "fm-spawn relaunch: explicit reader access is validated after the recorded kind is adopted"
+}
+
+test_reader_checkpoint_refuses_a_noncanonical_scratch_before_stop() {
+  local dir out rc meta brief backlog_before journal scratch="$TMP_ROOT/noncanonical-reader-scratch"
+  dir=$(new_case reader-noncanonical rl-reader-path)
+  add_reader_scout_task "$dir" rl-reader-path
+  seed_backlog "$dir" rl-reader-path in_flight
+  mkdir -p "$scratch"
+  meta="$dir/home/state/rl-reader-path.meta"
+  brief="$dir/home/data/rl-reader-path/brief.md"
+  sed "s|^worktree=.*|worktree=$scratch|" "$meta" > "$meta.changed"
+  mv "$meta.changed" "$meta"
+  printf '%s' "$scratch" > "$dir/fake/cwd"
+  cp "$meta" "$meta.expected"
+  cp "$brief" "$brief.expected"
+  backlog_before=$(backlog_state "$dir" rl-reader-path)
+
+  out=$(run_control "$dir" rl-reader-path relaunch --note "must not stop on an invalid scratch"); rc=$?
+  journal=$(cat "$dir/home/state/rl-reader-path.control-relaunch" 2>/dev/null || printf 'absent')
+  expect_code 1 "$rc" "a noncanonical recorded reader scratch must refuse before stop"$'\n'"$out"$'\n'"journal:"$'\n'"$journal"
+  assert_contains "$out" "does not match its canonical scratch" \
+    "the refusal should name the reader scratch identity mismatch"
+  cmp -s "$meta" "$meta.expected" || fail "the refused scratch changed task metadata"
+  cmp -s "$brief" "$brief.expected" || fail "the refused scratch changed the brief"
+  [ "$(backlog_state "$dir" rl-reader-path)" = "$backlog_before" ] \
+    || fail "the refused scratch changed the backlog item"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the refused scratch stopped the running agent"
+  assert_no_grep '/exit' "$dir/fake/literal" "the refused scratch sent an exit command"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "the refused scratch launched a replacement"
+  assert_absent "$dir/home/state/rl-reader-path.control-relaunch" \
+    "the pre-stop scratch refusal wrote a relaunch journal"
+  pass "fm-control relaunch: a noncanonical reader scratch refuses before the original process is touched"
+}
+
+make_reader_sandbox_failure_stub() {  # <case-dir>
+  local binary
+  case "$(uname -s)" in
+    Darwin) binary=sandbox-exec ;;
+    Linux) binary=bwrap ;;
+    *) fail "reader confinement test needs a supported platform" ;;
+  esac
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$1/fakebin/$binary"
+  chmod +x "$1/fakebin/$binary"
+}
+
+test_reader_checkpoint_refuses_failed_confinement_before_stop() {
+  local dir out rc meta brief backlog_before journal
+  dir=$(new_case reader-confinement rl-reader-sandbox)
+  add_reader_scout_task "$dir" rl-reader-sandbox
+  seed_backlog "$dir" rl-reader-sandbox in_flight
+  make_reader_sandbox_failure_stub "$dir"
+  meta="$dir/home/state/rl-reader-sandbox.meta"
+  brief="$dir/home/data/rl-reader-sandbox/brief.md"
+  cp "$meta" "$meta.expected"
+  cp "$brief" "$brief.expected"
+  backlog_before=$(backlog_state "$dir" rl-reader-sandbox)
+
+  out=$(run_control "$dir" rl-reader-sandbox relaunch --note "must not stop without confinement"); rc=$?
+  journal=$(cat "$dir/home/state/rl-reader-sandbox.control-relaunch" 2>/dev/null || printf 'absent')
+  expect_code 1 "$rc" "failed reader confinement must refuse before stop"$'\n'"$out"$'\n'"journal:"$'\n'"$journal"
+  assert_contains "$out" "could not establish reader process confinement" \
+    "the refusal should name the failed confinement preflight"
+  cmp -s "$meta" "$meta.expected" || fail "failed confinement changed task metadata"
+  cmp -s "$brief" "$brief.expected" || fail "failed confinement changed the brief"
+  [ "$(backlog_state "$dir" rl-reader-sandbox)" = "$backlog_before" ] \
+    || fail "failed confinement changed the backlog item"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "failed confinement stopped the running agent"
+  assert_no_grep '/exit' "$dir/fake/literal" "failed confinement sent an exit command"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "failed confinement launched a replacement"
+  assert_absent "$dir/home/state/rl-reader-sandbox.control-relaunch" \
+    "the pre-stop confinement refusal wrote a relaunch journal"
+  pass "fm-control relaunch: failed reader confinement refuses before the original process is touched"
+}
+
+test_reader_checkpoint_refuses_an_untransitionable_backlog_before_stop() {
+  local dir out rc meta brief backlog_before
+  dir=$(new_case reader-backlog rl-reader-done)
+  add_reader_scout_task "$dir" rl-reader-done
+  seed_backlog "$dir" rl-reader-done 'done'
+  meta="$dir/home/state/rl-reader-done.meta"
+  brief="$dir/home/data/rl-reader-done/brief.md"
+  cp "$meta" "$meta.expected"
+  cp "$brief" "$brief.expected"
+  backlog_before=$(backlog_state "$dir" rl-reader-done)
+
+  out=$(run_control "$dir" rl-reader-done relaunch --note "must not stop for a finished row"); rc=$?
+  journal=$(cat "$dir/home/state/rl-reader-done.control-relaunch" 2>/dev/null || printf 'absent')
+  expect_code 1 "$rc" "an untransitionable backlog item must refuse before stop"$'\n'"$out"$'\n'"journal:"$'\n'"$journal"
+  assert_contains "$out" "backlog item rl-reader-done is not dispatchable" \
+    "the refusal should name the backlog state gate"
+  cmp -s "$meta" "$meta.expected" || fail "the backlog refusal changed task metadata"
+  cmp -s "$brief" "$brief.expected" || fail "the backlog refusal changed the brief"
+  [ "$(backlog_state "$dir" rl-reader-done)" = "$backlog_before" ] \
+    || fail "the backlog refusal changed the backlog item"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the backlog refusal stopped the running agent"
+  assert_no_grep '/exit' "$dir/fake/literal" "the backlog refusal sent an exit command"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "the backlog refusal launched a replacement"
+  assert_absent "$dir/home/state/rl-reader-done.control-relaunch" \
+    "the pre-stop backlog refusal wrote a relaunch journal"
+  pass "fm-control relaunch: an untransitionable backlog item refuses before the original process is touched"
+}
+
+test_reader_checkpoint_refuses_damaged_identity_before_stop() {
+  local label expect dir id meta brief backlog_before out rc
+  while IFS='|' read -r label expect; do
+    [ -n "$label" ] || continue
+    id="rl-reader-damaged-${label}"
+    dir=$(new_case "reader-damaged-$label" "$id")
+    add_reader_scout_task "$dir" "$id"
+    seed_backlog "$dir" "$id" in_flight
+    meta="$dir/home/state/$id.meta"
+    brief="$dir/home/data/$id/brief.md"
+    case "$label" in
+      duplicate-access) printf '%s\n' 'access=reader' >> "$meta" ;;
+      access-kind-mismatch) sed 's/^kind=scout$/kind=ship/' "$meta" > "$meta.changed" && mv "$meta.changed" "$meta" ;;
+      duplicate-dispatch-provider) printf '%s\n' 'dispatch_provider=other' >> "$meta" ;;
+      invalid-base-commit) sed 's/^base_commit=.*/base_commit=not-a-commit/' "$meta" > "$meta.changed" && mv "$meta.changed" "$meta" ;;
+      missing-scratch) rm -rf "$(meta_field "$dir" "$id" tasktmp)" ;;
+      wrong-endpoint) sed "s/^endpoint_task_id=$id$/endpoint_task_id=other/" "$meta" > "$meta.changed" && mv "$meta.changed" "$meta" ;;
+    esac
+    cp "$meta" "$meta.expected"
+    cp "$brief" "$brief.expected"
+    backlog_before=$(backlog_state "$dir" "$id")
+
+    out=$(run_control "$dir" "$id" relaunch --note "must refuse damaged identity"); rc=$?
+    expect_code 1 "$rc" "$label must refuse before stop"$'\n'"$out"
+    assert_contains "$out" "$expect" "$label should name its identity refusal"
+    cmp -s "$meta" "$meta.expected" || fail "$label changed task metadata"
+    cmp -s "$brief" "$brief.expected" || fail "$label changed the brief"
+    [ "$(backlog_state "$dir" "$id")" = "$backlog_before" ] || fail "$label changed the backlog item"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "$label stopped the running agent"
+    assert_no_grep '/exit' "$dir/fake/literal" "$label sent an exit command"
+    assert_no_grep 'encode launch-brief' "$dir/fake/literal" "$label launched a replacement"
+    assert_absent "$dir/home/state/$id.control-relaunch" "$label wrote a relaunch journal"
+  done <<'ROWS'
+duplicate-access|ambiguous access metadata
+access-kind-mismatch|access=reader but kind=ship
+duplicate-dispatch-provider|ambiguous dispatch provider metadata
+invalid-base-commit|recorded reader base commit is invalid
+missing-scratch|recorded worktree
+wrong-endpoint|belongs to task other
+ROWS
+  pass "fm-control relaunch: damaged reader identity refuses before the original process is touched"
 }
 
 enable_dispatch_array() {
@@ -1696,6 +1912,219 @@ test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active() {
   [ "$(meta_field "$dir" rl-qa dispatch)" = resolved ] \
     || fail "spawn did not record dispatch=resolved (got $(meta_field "$dir" rl-qa dispatch))"
   pass "fm-control relaunch: --dispatch-resolved is accepted and forwarded when crew-dispatch is active"
+}
+
+test_effort_change_requires_fresh_dispatch_attestation_before_mutation() {
+  local label effort dir id out rc meta brief backlog endpoint_file
+  while IFS='|' read -r label effort; do
+    [ -n "$label" ] || continue
+    id="rl-effort-$label"
+    dir=$(new_case "effort-$label" "$id")
+    add_reader_scout_task "$dir" "$id"
+    enable_dispatch_array "$dir"
+    seed_backlog "$dir" "$id" in_flight
+    meta="$dir/home/state/$id.meta"
+    brief="$dir/home/data/$id/brief.md"
+    backlog="$dir/home/data/backlog.md"
+    cp "$meta" "$meta.expected"
+    cp "$brief" "$brief.expected"
+    cp "$backlog" "$backlog.expected"
+    for endpoint_file in command cwd windows literal keys; do
+      cp "$dir/fake/$endpoint_file" "$dir/fake/$endpoint_file.expected"
+    done
+
+    out=$(run_control "$dir" "$id" relaunch --effort "$effort" --note "change effort with a fresh route"); rc=$?
+    expect_code 1 "$rc" "$label must require a fresh dispatch attestation"$'\n'"$out"
+    assert_contains "$out" "changing its recorded dispatch tuple" \
+      "$label should name the stale dispatch attestation"
+    cmp -s "$meta" "$meta.expected" || fail "$label changed task metadata"
+    cmp -s "$brief" "$brief.expected" || fail "$label changed the brief"
+    cmp -s "$backlog" "$backlog.expected" || fail "$label changed the backlog record"
+    for endpoint_file in command cwd windows literal keys; do
+      cmp -s "$dir/fake/$endpoint_file" "$dir/fake/$endpoint_file.expected" \
+        || fail "$label changed endpoint process state in $endpoint_file"
+    done
+    assert_absent "$dir/home/state/$id.control-relaunch" "$label wrote a relaunch journal"
+    assert_absent "$dir/home/state/$id.control-relaunch.note" "$label wrote a relaunch note"
+    assert_absent "$dir/home/state/$id.control-relaunch.meta-prior" "$label wrote a metadata checkpoint"
+    assert_absent "$dir/home/state/$id.control-relaunch.brief-prior" "$label wrote an instruction checkpoint"
+  done <<'ROWS'
+changed-high|high
+cleared-default|default
+ROWS
+  pass "fm-control relaunch: every effort change requires a fresh dispatch attestation before mutation"
+}
+
+test_recorded_harness_alias_change_requires_fresh_dispatch_attestation_before_mutation() {
+  local dir out rc meta brief backlog endpoint_file
+  dir=$(new_case harness-alias-change rl-harness-alias-change)
+  add_ship_task "$dir" rl-harness-alias-change cursor-agent
+  sed 's/^model=default$/model=cursor-unavailable/' \
+    "$dir/home/state/rl-harness-alias-change.meta" > "$dir/home/state/rl-harness-alias-change.meta.changed"
+  mv "$dir/home/state/rl-harness-alias-change.meta.changed" "$dir/home/state/rl-harness-alias-change.meta"
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-harness-alias-change in_flight
+  cat >> "$dir/home/state/rl-harness-alias-change.meta" <<'META'
+dispatch=override
+dispatch_override_reason=retained fixture route
+dispatch_provider=cursor
+dispatch_model_family=composer
+META
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%s\n' 'other-model - Other'
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/cursor-agent"
+  printf 'cursor-agent' > "$dir/fake/command"
+  printf 'cursor-agent' > "$dir/fake/becomes"
+  meta="$dir/home/state/rl-harness-alias-change.meta"
+  brief="$dir/home/data/rl-harness-alias-change/brief.md"
+  backlog="$dir/home/data/backlog.md"
+  cp "$meta" "$meta.expected"
+  cp "$brief" "$brief.expected"
+  cp "$backlog" "$backlog.expected"
+  for endpoint_file in command cwd windows literal keys; do
+    cp "$dir/fake/$endpoint_file" "$dir/fake/$endpoint_file.expected"
+  done
+
+  out=$(run_control "$dir" rl-harness-alias-change relaunch --harness cursor \
+    --note "change the exact adapter"); rc=$?
+  expect_code 1 "$rc" "a normalized-family match must not hide an exact adapter change"$'\n'"$out"
+  assert_contains "$out" "changing its recorded dispatch tuple" \
+    "the exact adapter change should require a fresh dispatch attestation"
+  cmp -s "$meta" "$meta.expected" || fail "the exact adapter refusal changed task metadata"
+  cmp -s "$brief" "$brief.expected" || fail "the exact adapter refusal changed the brief"
+  cmp -s "$backlog" "$backlog.expected" || fail "the exact adapter refusal changed the backlog record"
+  for endpoint_file in command cwd windows literal keys; do
+    cmp -s "$dir/fake/$endpoint_file" "$dir/fake/$endpoint_file.expected" \
+      || fail "the exact adapter refusal changed endpoint process state in $endpoint_file"
+  done
+  assert_absent "$dir/home/state/rl-harness-alias-change.control-relaunch" \
+    "the exact adapter refusal wrote a relaunch journal"
+  assert_absent "$dir/home/state/rl-harness-alias-change.control-relaunch.note" \
+    "the exact adapter refusal wrote a relaunch note"
+  assert_absent "$dir/home/state/rl-harness-alias-change.control-relaunch.meta-prior" \
+    "the exact adapter refusal wrote a metadata checkpoint"
+  assert_absent "$dir/home/state/rl-harness-alias-change.control-relaunch.brief-prior" \
+    "the exact adapter refusal wrote an instruction checkpoint"
+  assert_absent "$dir/home/data/rl-harness-alias-change/launch-brief.md" \
+    "the exact adapter refusal rendered replacement instructions"
+  pass "fm-control relaunch: an exact adapter change cannot reuse a normalized-family attestation"
+}
+
+test_harness_alias_change_with_fresh_dispatch_attestation_succeeds() {
+  local dir out rc
+  dir=$(new_case harness-alias-attested rl-harness-alias-attested)
+  add_ship_task "$dir" rl-harness-alias-attested cursor-agent
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-harness-alias-attested in_flight
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%s\n' 'default - Default'
+fi
+exit 0
+SH
+  cat > "$dir/fakebin/cursor" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'fixture cursor'
+SH
+  chmod +x "$dir/fakebin/cursor-agent" "$dir/fakebin/cursor"
+  printf 'cursor-agent' > "$dir/fake/command"
+  printf 'cursor-agent' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl-harness-alias-attested relaunch --harness cursor \
+    --dispatch-resolved --note "change the exact adapter with a fresh route"); rc=$?
+  expect_code 0 "$rc" "a freshly attested cursor-agent to cursor change should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-harness-alias-attested harness)" = cursor ] \
+    || fail "the freshly attested cursor-agent to cursor change was not recorded"
+  [ "$(meta_field "$dir" rl-harness-alias-attested dispatch)" = resolved ] \
+    || fail "the freshly attested cursor-agent to cursor change did not replace the dispatch attestation"
+  pass "fm-control relaunch: a fresh dispatch attestation permits cursor-agent to cursor"
+}
+
+test_exact_unchanged_harness_reuses_recorded_dispatch_attestation() {
+  local dir out rc
+  dir=$(new_case harness-exact-unchanged rl-harness-exact-unchanged)
+  add_ship_task "$dir" rl-harness-exact-unchanged cursor
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-harness-exact-unchanged in_flight
+  cat >> "$dir/home/state/rl-harness-exact-unchanged.meta" <<'META'
+dispatch=override
+dispatch_override_reason=retained fixture route
+dispatch_provider=cursor
+dispatch_model_family=composer
+META
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%s\n' 'default - Default'
+fi
+exit 0
+SH
+  cat > "$dir/fakebin/cursor" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'fixture cursor'
+SH
+  chmod +x "$dir/fakebin/cursor-agent" "$dir/fakebin/cursor"
+  printf 'cursor-agent' > "$dir/fake/command"
+  printf 'cursor-agent' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl-harness-exact-unchanged relaunch --harness cursor \
+    --note "keep the exact recorded adapter"); rc=$?
+  expect_code 0 "$rc" "an exact unchanged harness should reuse its recorded attestation"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-harness-exact-unchanged harness)" = cursor ] \
+    || fail "the exact unchanged harness identity drifted"
+  [ "$(meta_field "$dir" rl-harness-exact-unchanged dispatch)" = override ] \
+    || fail "the exact unchanged harness replaced the dispatch attestation"
+  [ "$(meta_field "$dir" rl-harness-exact-unchanged dispatch_override_reason)" = "retained fixture route" ] \
+    || fail "the exact unchanged harness lost the dispatch reason"
+  pass "fm-control relaunch: an exact unchanged harness reuses its recorded attestation"
+}
+
+test_effort_change_with_fresh_dispatch_attestation_succeeds() {
+  local dir out rc
+  dir=$(new_case effort-attested rl-effort-attested)
+  add_reader_scout_task "$dir" rl-effort-attested
+  enable_dispatch_array "$dir"
+  seed_backlog "$dir" rl-effort-attested in_flight
+
+  out=$(run_control "$dir" rl-effort-attested relaunch --effort high \
+    --dispatch-resolved --note "change effort with a fresh route"); rc=$?
+  expect_code 0 "$rc" "a freshly attested effort change should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-effort-attested effort)" = high ] \
+    || fail "the freshly attested effort change was not recorded"
+  [ "$(meta_field "$dir" rl-effort-attested dispatch)" = resolved ] \
+    || fail "the freshly attested effort change did not replace the dispatch attestation"
+  pass "fm-control relaunch: a freshly attested effort change succeeds"
+}
+
+test_unchanged_effort_reuses_recorded_dispatch_attestation() {
+  local label dir id out rc
+  for label in implicit explicit; do
+    id="rl-effort-$label"
+    dir=$(new_case "effort-$label" "$id")
+    add_reader_scout_task "$dir" "$id"
+    enable_dispatch_array "$dir"
+    seed_backlog "$dir" "$id" in_flight
+
+    if [ "$label" = explicit ]; then
+      out=$(run_control "$dir" "$id" relaunch --harness claude --effort xhigh \
+        --note "keep the exact recorded tuple"); rc=$?
+    else
+      out=$(run_control "$dir" "$id" relaunch --note "keep the recorded effort"); rc=$?
+    fi
+    expect_code 0 "$rc" "$label unchanged dispatch tuple should reuse the recorded attestation"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" effort)" = xhigh ] || fail "$label unchanged effort drifted"
+    [ "$(meta_field "$dir" "$id" dispatch)" = override ] \
+      || fail "$label unchanged effort replaced the dispatch attestation"
+    [ "$(meta_field "$dir" "$id" dispatch_override_reason)" = "retained fixture route" ] \
+      || fail "$label unchanged effort lost the dispatch reason"
+  done
+  pass "fm-control relaunch: implicit and explicit exact tuples reuse the recorded attestation"
 }
 
 test_quota_fallback_picks_next_profile_and_writes_a_progress_note() {
@@ -1799,6 +2228,30 @@ test_quota_fallback_refuses_when_no_eligible_profile_remains() {
   pass "fm-control relaunch: --quota-fallback refuses loudly when no eligible profile remains"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  case "$FM_TEST_ONLY" in
+    reader-relaunch-composition)
+      test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+      test_direct_spawn_relaunch_adopts_recorded_reader_access
+      test_direct_spawn_relaunch_validates_explicit_access_after_record_adoption
+      test_recorded_reader_scout_relaunch_without_access_keeps_identity
+      test_reader_checkpoint_refuses_a_noncanonical_scratch_before_stop
+      test_reader_checkpoint_refuses_failed_confinement_before_stop
+      test_reader_checkpoint_refuses_an_untransitionable_backlog_before_stop
+      test_reader_checkpoint_refuses_damaged_identity_before_stop
+      test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active
+      test_effort_change_requires_fresh_dispatch_attestation_before_mutation
+      test_recorded_harness_alias_change_requires_fresh_dispatch_attestation_before_mutation
+      test_harness_alias_change_with_fresh_dispatch_attestation_succeeds
+      test_exact_unchanged_harness_reuses_recorded_dispatch_attestation
+      test_effort_change_with_fresh_dispatch_attestation_succeeds
+      test_unchanged_effort_reuses_recorded_dispatch_attestation
+      exit 0
+      ;;
+    *) fail "unknown FM_TEST_ONLY selector: $FM_TEST_ONLY" ;;
+  esac
+fi
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1852,9 +2305,20 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
-test_recorded_reader_scout_relaunch_without_access_keeps_identity
 test_direct_spawn_relaunch_adopts_recorded_reader_access
+test_direct_spawn_relaunch_validates_explicit_access_after_record_adoption
+test_recorded_reader_scout_relaunch_without_access_keeps_identity
+test_reader_checkpoint_refuses_a_noncanonical_scratch_before_stop
+test_reader_checkpoint_refuses_failed_confinement_before_stop
+test_reader_checkpoint_refuses_an_untransitionable_backlog_before_stop
+test_reader_checkpoint_refuses_damaged_identity_before_stop
 test_relaunch_forwards_dispatch_attestation_when_crew_dispatch_is_active
+test_effort_change_requires_fresh_dispatch_attestation_before_mutation
+test_recorded_harness_alias_change_requires_fresh_dispatch_attestation_before_mutation
+test_harness_alias_change_with_fresh_dispatch_attestation_succeeds
+test_exact_unchanged_harness_reuses_recorded_dispatch_attestation
+test_effort_change_with_fresh_dispatch_attestation_succeeds
+test_unchanged_effort_reuses_recorded_dispatch_attestation
 test_quota_fallback_picks_next_profile_and_writes_a_progress_note
 test_quota_fallback_recovers_an_override_profile_array
 test_quota_fallback_lifts_an_operational_hold

@@ -143,6 +143,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -226,6 +228,8 @@ DISPATCH_OVERRIDE_REASON=
 DISPATCH_OVERRIDE_REASON_SET=0
 DISPATCH_PROVIDER=
 DISPATCH_PROVIDER_SET=0
+DISPATCH_MODEL_FAMILY=
+DISPATCH_MODEL_FAMILY_SET=0
 QUOTA_FALLBACK=0
 QUOTA_FALLBACK_FROM=
 QUOTA_FALLBACK_STARTED_MS=0
@@ -882,6 +886,100 @@ resolve_relaunch_profile() {
   fi
 }
 
+relaunch_backlog_preflight() {
+  local gate_status recorded_project recorded_repo
+  if fm_backlog_transition_applies "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$DATA" "$KIND"; then
+    recorded_project=$(fm_meta_optional_exact_value "$META" project) \
+      || die "task $ID records ambiguous project metadata; refusing to relaunch before checking its backlog item"
+    recorded_repo=$(basename "$recorded_project")
+    if ! fm_backlog_row_probe "$DATA" "$ID"; then
+      if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+        die "task $ID has no backlog item in this home; refusing to stop an agent whose replacement cannot retain backlog ownership"
+      fi
+      die "task $ID's backlog item could not be read before relaunch ($FM_BACKLOG_ROW_ERROR)"
+    fi
+    case "$FM_BACKLOG_ROW_REPO" in
+      "$recorded_repo") ;;
+      ''|-)
+        die "task $ID's backlog item records no repo; repair it to $recorded_repo before relaunch so replacement ownership is unchanged"
+        ;;
+      *)
+        die "task $ID's backlog repo is $FM_BACKLOG_ROW_REPO, but its recorded project is $recorded_repo; refusing to stop an agent with inconsistent ownership"
+        ;;
+    esac
+    fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE" \
+      || die "this home's backlog item $ID is not dispatchable in state $FM_BACKLOG_ROW_STATE"
+    return 0
+  else
+    gate_status=$?
+  fi
+  [ "$gate_status" -ne 2 ] \
+    || die "task $ID cannot read its backlog data directory before relaunch: $DATA ($FM_BACKLOG_TRANSITION_ERROR)"
+}
+
+resolve_relaunch_dispatch() {
+  local recorded_dispatch recorded_reason recorded_provider recorded_family dispatch_file
+  [ "$KIND" != secondmate ] || return 0
+  dispatch_file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/crew-dispatch.json"
+  recorded_dispatch=$(fm_meta_optional_exact_value "$META" dispatch) \
+    || die "task $ID records ambiguous dispatch metadata; refusing to relaunch until $META has at most one non-empty dispatch= value"
+  recorded_reason=$(fm_meta_optional_exact_value "$META" dispatch_override_reason) \
+    || die "task $ID records ambiguous dispatch override metadata; refusing to relaunch until $META has at most one non-empty dispatch_override_reason= value"
+  recorded_provider=$(fm_meta_optional_exact_value "$META" dispatch_provider) \
+    || die "task $ID records ambiguous dispatch provider metadata; refusing to relaunch until $META has at most one non-empty dispatch_provider= value"
+  recorded_family=$(fm_meta_optional_exact_value "$META" dispatch_model_family) \
+    || die "task $ID records ambiguous dispatch model-family metadata; refusing to relaunch until $META has at most one non-empty dispatch_model_family= value"
+  case "$recorded_dispatch" in
+    '')
+      [ -z "$recorded_reason$recorded_provider$recorded_family" ] \
+        || die "task $ID records dispatch details without a dispatch attestation; refusing to relaunch inconsistent routing metadata"
+      ;;
+    resolved|tachikoma)
+      [ -z "$recorded_reason" ] \
+        || die "task $ID records dispatch=$recorded_dispatch with an override reason; refusing to relaunch inconsistent routing metadata"
+      ;;
+    override)
+      [ -n "$recorded_reason" ] \
+        || die "task $ID records dispatch=override without its reason; refusing to relaunch inconsistent routing metadata"
+      ;;
+    *) die "task $ID records unknown dispatch attestation '$recorded_dispatch'; refusing to relaunch until the routing metadata is repaired" ;;
+  esac
+  if [ "$DISPATCH_RESOLVED" = 1 ] || [ "$DISPATCH_OVERRIDE_REASON_SET" = 1 ]; then
+    return 0
+  fi
+  if [ "$TARGET_HARNESS" != "$PRIOR_RECORDED_HARNESS" ] || [ "$TARGET_MODEL" != "$PRIOR_MODEL" ] \
+     || [ "$TARGET_EFFORT" != "$PRIOR_EFFORT" ]; then
+    [ ! -f "$dispatch_file" ] \
+      || die "task $ID is changing its recorded dispatch tuple; pass --dispatch-resolved or --dispatch-override-reason instead of reusing the prior attestation"
+    return 0
+  fi
+  case "$recorded_dispatch" in
+    resolved) DISPATCH_RESOLVED=1 ;;
+    override)
+      DISPATCH_OVERRIDE_REASON=$recorded_reason
+      DISPATCH_OVERRIDE_REASON_SET=1
+      ;;
+    '')
+      [ ! -f "$dispatch_file" ] \
+        || die "task $ID has no recorded dispatch attestation to reuse; pass --dispatch-resolved or --dispatch-override-reason before stopping its agent"
+      return 0
+      ;;
+    tachikoma)
+      [ ! -f "$dispatch_file" ] \
+        || die "task $ID's recorded dispatch=tachikoma cannot attest a profile-based relaunch; resolve or override the replacement dispatch before stopping its agent"
+      return 0
+      ;;
+  esac
+  if [ -n "$recorded_provider" ]; then
+    DISPATCH_PROVIDER=$recorded_provider
+    DISPATCH_PROVIDER_SET=1
+  fi
+  if [ -n "$recorded_family" ]; then
+    DISPATCH_MODEL_FAMILY=$recorded_family
+    DISPATCH_MODEL_FAMILY_SET=1
+  fi
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -889,7 +987,7 @@ resolve_relaunch_profile() {
 CHECKPOINT_LINES=()
 safe_checkpoint() {
   local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
-  local recorded_access inside_git_dir
+  local recorded_access recorded_tasktmp recorded_project recorded_base_commit
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -902,12 +1000,23 @@ safe_checkpoint() {
     reader)
       [ "$KIND" = scout ] \
         || die "task $ID records access=reader but kind=$KIND; refusing to relaunch a non-scout as a reader"
-      wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-      inside_git_dir=$(git -C "$WT" rev-parse --is-inside-git-dir 2>/dev/null || true)
-      if [ -n "$wt_top" ] || [ "$inside_git_dir" = true ]; then
-        die "task $ID's recorded reader scratch $WT is inside a git checkout or git dir; refusing to relaunch without a checkout-free scratch"
+      recorded_tasktmp=$(fm_meta_optional_exact_value "$META" tasktmp) \
+        || die "task $ID records ambiguous reader tasktmp metadata; refusing to relaunch until $META has exactly one non-empty tasktmp= value"
+      fm_reader_recorded_scratch_validate "$ID" "$recorded_tasktmp" "$WT" || exit 1
+      recorded_project=$(fm_meta_optional_exact_value "$META" project) \
+        || die "task $ID records ambiguous reader project metadata; refusing to relaunch until $META has exactly one non-empty project= value"
+      recorded_base_commit=$(fm_meta_optional_exact_value "$META" base_commit) \
+        || die "task $ID records ambiguous reader base-commit metadata; refusing to relaunch until $META has exactly one non-empty base_commit= value"
+      [ -n "$recorded_project" ] && [ -d "$recorded_project" ] \
+        || die "task $ID's recorded reader project '${recorded_project:-none}' is missing; refusing to relaunch"
+      if ! [[ "$recorded_base_commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        || ! git -C "$recorded_project" cat-file -e "$recorded_base_commit^{commit}" 2>/dev/null; then
+        die "task $ID's recorded reader base commit is invalid; refusing to replace its immutable launch boundary"
       fi
-      CHECKPOINT_LINES+=("access=reader" "scratch=$wt_real")
+      fm_reader_scratch_validate "$WT" "$recorded_project" || exit 1
+      fm_reader_sandbox_preflight \
+        "$recorded_project" "$FM_READER_VALIDATED_SCRATCH" "$DATA/$ID" "$STATE" || exit 1
+      CHECKPOINT_LINES+=("access=reader" "scratch=$wt_real" "base_commit=$recorded_base_commit")
       return 0
       ;;
     *)
@@ -1049,6 +1158,8 @@ do_relaunch() {
     quota_fallback_prepare
   fi
   resolve_relaunch_profile
+  resolve_relaunch_dispatch
+  relaunch_backlog_preflight
 
   case "$KIND" in
     ship|scout)
@@ -1098,6 +1209,7 @@ do_relaunch() {
     spawn_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
   fi
   [ "$DISPATCH_PROVIDER_SET" = 0 ] || spawn_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
+  [ "$DISPATCH_MODEL_FAMILY_SET" = 0 ] || spawn_args+=(--dispatch-model-family "$DISPATCH_MODEL_FAMILY")
   [ -z "$QUOTA_FALLBACK_RULE" ] || spawn_args+=(--matched-rule "$QUOTA_FALLBACK_RULE")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
