@@ -188,10 +188,10 @@ fm_brief_task_content_valid() {  # <file>
 # change here reaches both callers without a second copy to drift.
 # It also covers a commit a pipeline step made on the worker's behalf. The
 # prohibition is identical in every mode; only the check point and the remedy
-# differ, because branch ownership does - each mode names an event that actually
-# happens in it, and no-mistakes mode escalates rather than rewriting, because
-# the pipeline owns the branch and its pushed PR head from the moment a run
-# starts, so a worker-side rewrite could not change what merges.
+# differ, because branch ownership does. no-mistakes mode is the one that
+# changes hands mid-flight, so its arm is phased: the worker strips the trailer
+# while the branch is still its own, must not touch the branch while a run owns
+# it, and reports rather than rewriting a pushed PR head afterwards.
 # Never touching the default branch is absolute in every mode.
 fm_commit_attribution_block() {  # <task-id> <mode>
   local id=$1 mode=$2
@@ -203,9 +203,9 @@ EOF
   case "$mode" in
     no-mistakes)
       cat <<EOF
-Check every commit on this branch for that trailer before you append your \`done:\` report.
-If any commit carries it - one you wrote or one a pipeline step wrote on your behalf - say so plainly in that \`done:\` report and name the commits, rather than shipping silently; firstmate decides what happens before merge.
-Do not rebase, amend, filter, force-push, or hand-commit on \`fm/$id\` to strip a trailer yourself: the pipeline owns this branch and its pushed PR head from the moment a run starts.
+Before you start a no-mistakes run, while \`fm/$id\` is still yours alone, check every commit on this branch for that trailer; if you find one, rewrite ONLY this task's own unmerged branch to strip it, and say in your report that you did.
+While a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter, force-push, or hand-commit on it, not even to strip a trailer.
+Once the run is terminal, check the branch again and report a surviving trailer instead of rewriting the pushed PR head: append a \`note:\` line naming those commits immediately before your terminal \`done:\` line, leave that \`done:\` line in its exact required shape, and let firstmate decide before merge.
 EOF
       ;;
     direct-PR)

@@ -226,16 +226,17 @@ test_ship_modes_generate_clean_briefs() {
 # must carry a hard, unmissable prohibition (bin/fm-dod-lib.sh's
 # fm_commit_attribution_block, the single owner shared with bin/fm-promote.sh).
 # Assert the shape - a standing rule, that it reaches pipeline-authored
-# commits too, and that a worker already carrying one has a remedy - not the
-# exact sentence, so the wording stays free to improve. The check point and the
-# remedy are mode-specific, so each mode must also name an event that happens in
-# it and a remedy that mode can actually deliver.
+# commits too, and that a worker already carrying one may strip it from its own
+# unmerged branch - not the exact sentence, so the wording stays free to
+# improve. The check point is mode-specific, so each mode must also name an
+# event that happens in it, and no-mistakes must separate the pre-run window it
+# owns from the active run the pipeline owns.
 test_ship_briefs_forbid_agent_coauthor_trailer() {
-  local home id mode brief block checkpoint remedy
+  local home id mode brief block checkpoint
   home="$TMP_ROOT/coauthor-home"
   write_registry "$home"
 
-  while IFS='~' read -r id mode checkpoint remedy; do
+  while IFS='~' read -r id mode checkpoint; do
     [ -n "$id" ] || continue
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
       || fail "$id: --mode $mode scaffold failed"
@@ -247,17 +248,29 @@ test_ship_briefs_forbid_agent_coauthor_trailer() {
     assert_contains "$block" "HARD RULE" "$id: co-author ban was not phrased as a hard, unmissable rule"
     printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
       || fail "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
+    assert_contains "$block" "own unmerged branch" \
+      "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
     printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
       || fail "$id: co-author ban did not forbid touching commits already on the default branch"
     printf '%s\n' "$block" | grep -Eiq "$checkpoint" \
       || fail "$id: co-author ban named no check point belonging to mode $mode"
-    printf '%s\n' "$block" | grep -Eiq "$remedy" \
-      || fail "$id: co-author ban named no remedy mode $mode can deliver"
   done <<'ROWS'
-brief-coauthor-nm~no-mistakes~before you append your .done:. report~say so plainly in that .done:. report|firstmate decides
-brief-coauthor-dp~direct-PR~before you push|open or update its PR~own unmerged branch
-brief-coauthor-lo~local-only~before you report this branch ready~own unmerged branch
+brief-coauthor-nm~no-mistakes~before you start a no-mistakes run
+brief-coauthor-dp~direct-PR~before you push|open or update its PR
+brief-coauthor-lo~local-only~before you report this branch ready
 ROWS
+
+  # no-mistakes is the only mode whose branch changes hands mid-flight, so its
+  # arm must permit the worker's own pre-run rewrite, forbid any rewrite while
+  # the run owns the branch, and route the post-run disclosure off the terminal
+  # `done:` line that firstmate parses.
+  block=$(sed -n '/^# Commit attribution/,/default branch/p' "$home/data/brief-coauthor-nm/brief.md")
+  printf '%s\n' "$block" | grep -Eiq "while a run is active.*(never|not)|(never|not).*while a run is active" \
+    || fail "no-mistakes: co-author ban did not forbid rewriting while a run owns the branch"
+  printf '%s\n' "$block" | grep -Eiq "force-push" \
+    || fail "no-mistakes: co-author ban did not name force-push among the forbidden active-run rewrites"
+  printf '%s\n' "$block" | grep -Eiq "note:.*(before|preced).*done:" \
+    || fail "no-mistakes: post-run disclosure did not keep off the terminal done: line"
   pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
 }
 
