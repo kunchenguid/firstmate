@@ -57,21 +57,35 @@
 # never a wedged, un-endable session - while still nagging again on a later turn
 # if the problem persists.
 #
-# Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
-# marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
-# including turns started by the asyncRewake auto-arm, so the one-shot allow
-# would re-open the exact blind window this guard exists to close
-# (docs/turnend-guard.md records the 2026-07-21 incident). In --claude mode this
-# guard ignores stop_hook_active and instead cooperates with the Stop-owned
-# auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
+# Stop-owned auto-arm cooperation, --claude and --codex modes: both harnesses
+# register a Stop-owned auto-arm beside this guard on the SAME Stop event
+# (bin/fm-claude-stop-autoarm.sh and bin/fm-codex-stop-autoarm.sh), so a turn
+# that ends right after an actionable wake legitimately has no live watcher for
+# the moment the auto-arm needs to bring the next one up. Blocking there is a
+# false alarm on healthy supervision, and it is what made the guard banner recur
+# once per wake on a Codex primary. Each harness keeps its own single-flight
+# ledger and markers under its own FM_AUTOARM_PREFIX, and the mode flag selects
+# which one this guard reads, so the two can never read each other's claims.
+#
+# --claude additionally IGNORES stop_hook_active, because Claude Code marks EVERY
+# stop after ANY stop-hook-driven continuation stop_hook_active=true, including
+# turns started by the asyncRewake auto-arm, so the one-shot allow would re-open
+# the exact blind window this guard exists to close (docs/turnend-guard.md
+# records the 2026-07-21 incident). --codex keeps the shared one-shot loop guard:
+# its auto-arm delivers wakes as ordinary queued user messages rather than
+# stop-hook continuations, so stop_hook_active there still means only "this stop
+# already follows a block of ours", and honoring it is what keeps a Codex session
+# endable without relying on a harness-side consecutive-block override.
+#
+# In either cooperative mode:
 #   1. a live identity-matched watcher with a fresh beacon - or, in away mode, a
 #      live identity-matched daemon with a fresh beacon - allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
-#      for the auto-arm to claim this home (a live OPEN generation claim in the
-#      state/.claude-autoarm-epoch ledger - fm_autoarm_claim_open - or a legacy
+#      for the auto-arm to claim this home (a live OPEN generation claim in this
+#      mode's own epoch ledger - fm_autoarm_claim_open - or a legacy
 #      build's lock-holding claim under the legacy abandonment proof) or to
-#      record a fresh actionable exit-2 outcome
-#      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
+#      record a fresh actionable rewake outcome in that same ledger for this
+#      event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
@@ -95,6 +109,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
+CODEX_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
@@ -106,10 +121,23 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
+    --codex) CODEX_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--codex|--cursor]" >&2; exit 2 ;;
   esac
 done
+
+# Which harness's Stop-owned auto-arm this guard cooperates with, and therefore
+# which single-flight ledger, micro-mutex, and failure markers it reads. The
+# flag is authoritative over detection because the hook that passed it is the
+# registration of exactly one harness (bin/fm-wake-lib.sh honors an explicit
+# FM_AUTOARM_PREFIX for the same reason).
+COOP_MODE=0
+if [ "$CLAUDE_MODE" -eq 1 ] || [ "$CODEX_MODE" -eq 1 ]; then
+  COOP_MODE=1
+fi
+FM_AUTOARM_PREFIX=.claude-autoarm
+[ "$CODEX_MODE" -eq 0 ] || FM_AUTOARM_PREFIX=.codex-autoarm
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -170,12 +198,13 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
-OWNER_LOCK="$STATE/.claude-autoarm.lock"
-FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
-FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+AUTOARM_EPOCH="$STATE/$FM_AUTOARM_PREFIX-epoch"
+OWNER_LOCK="$STATE/$FM_AUTOARM_PREFIX.lock"
+FAILURE_NOTICE="$STATE/$FM_AUTOARM_PREFIX-failure-notified"
+FAILURE_ALARM="$STATE/$FM_AUTOARM_PREFIX-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
-  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  [ "$COOP_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
   fm_lock_release "$BUDGET_LOCK"
@@ -189,7 +218,7 @@ fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  [ "$COOP_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
 }
@@ -237,7 +266,7 @@ block_stop() {
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
-    if [ "$CLAUDE_MODE" -eq 1 ]; then
+    if [ "$COOP_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
     fi
     printf '●  %s\n' "$reason"
@@ -246,11 +275,11 @@ block_stop() {
   exit 2
 }
 
-if [ "$CLAUDE_MODE" -eq 0 ]; then
+if [ "$COOP_MODE" -eq 0 ]; then
   block_stop
 fi
 
-# --- --claude cooperative path -----------------------------------------------
+# --- Stop-owned auto-arm cooperative path ------------------------------------
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
@@ -275,8 +304,8 @@ BUDGET_CHARGED_EPOCH=
 budget_account_current_epoch() {  # [observe|block]
   local mode=${1:-observe} current_epoch outcome old_session old_count old_epoch tmp initialized charged
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
-  current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$AUTOARM_EPOCH" 2>/dev/null || true)
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$AUTOARM_EPOCH" 2>/dev/null || true)
   initialized=0
   charged=0
   COUNT=0
@@ -353,24 +382,24 @@ autoarm_owns_recovery() {
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$AUTOARM_EPOCH" 2>/dev/null || true)
   case "$outcome" in
     rewake)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$AUTOARM_EPOCH")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
         return 0
       fi
       ;;
     failed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$AUTOARM_EPOCH")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
       fi
       ;;
     failed-suppressed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$AUTOARM_EPOCH")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         :
@@ -459,7 +488,7 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$AUTOARM_EPOCH" 2>/dev/null || true)
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;
     *) return 1 ;;

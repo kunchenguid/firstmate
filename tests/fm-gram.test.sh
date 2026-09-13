@@ -92,7 +92,6 @@ test_help_and_usage() {
   out=$("$GRAM" --help 2>&1) || rc=$?
   expect_code 0 "$rc" "--help must exit 0"
   assert_contains "$out" "poll" "--help lists the poll action"
-  assert_contains "$out" "list" "--help lists the list action"
   rc=0
   out=$("$GRAM" bogus 2>&1) || rc=$?
   expect_code 2 "$rc" "unknown action must exit 2"
@@ -230,17 +229,6 @@ test_capture_is_private_and_written_before_publication() {
   pass "fm-gram: each message is captured privately before it is published"
 }
 
-test_list_previews_without_publishing() {
-  local home out
-  home=$(make_home preview)
-  fake_herdr "$(store_json "$(msg gram-p owner_to_agent '"firstmate"' 'preview me' 1000)")"
-  out=$(env HERDR_PANE_ID=w1:p1 FM_HOME="$home" PATH="$FAKEBIN:$PATH" "$GRAM" list 2>&1)
-  assert_contains "$out" "gram-p" "list names the eligible message"
-  assert_contains "$out" "new" "list marks an unpublished message as new"
-  assert_equals 0 "$(notes_of "$home")" "list publishes nothing"
-  pass "fm-gram: list previews eligibility without publishing"
-}
-
 test_help_and_usage
 test_only_addressed_owner_messages_are_taken
 test_message_bodies_never_reach_stdout
@@ -251,4 +239,3 @@ test_failing_herdr_is_one_bounded_line
 test_hanging_herdr_is_bounded_by_the_budget
 test_missing_store_id_refuses_rather_than_deduplicating_blind
 test_capture_is_private_and_written_before_publication
-test_list_previews_without_publishing

@@ -1960,6 +1960,85 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- --codex cooperative mode ------------------------------------------------
+# Codex registers bin/fm-codex-stop-autoarm.sh beside this guard on the same Stop
+# event, so the same cooperation applies - against the Codex ledger, never
+# Claude's. Without it every actionable wake cost one false
+# "TURN WOULD END BLIND" banner on the turn that handled it.
+
+run_hook_codex() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s,"session_id":"sess-codex-mode"}' "$stop_active" \
+    | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1
+}
+
+# A live open generation claim in <ledger>, the positive evidence that an
+# auto-arm generation owns recovery for this event epoch. Sets CLAIM_PID.
+CLAIM_PID=
+seed_open_generation_claim() {  # <dir> <ledger-basename>
+  local dir=$1 ledger=$2 identity
+  sleep 60 &
+  CLAIM_PID=$!
+  identity=$(fm_test_pid_identity "$CLAIM_PID") || fail "could not compute a claim pid-identity"
+  printf 'epoch=12 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$CLAIM_PID" "$identity" \
+    > "$dir/state/$ledger"
+  : > "$dir/state/.last-watcher-beat"
+}
+
+test_hook_codex_mode_allows_on_open_codex_generation_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-open-claim")
+  : > "$dir/state/task1.meta"
+  seed_open_generation_claim "$dir" .codex-autoarm-epoch
+  out=$(run_hook_codex "$dir" false); status=$?
+  kill "$CLAIM_PID" 2>/dev/null || true
+  wait "$CLAIM_PID" 2>/dev/null || true
+  expect_code 0 "$status" "--codex mode must allow when a live Codex auto-arm generation owns recovery"
+  [ -z "$out" ] || fail "--codex claimed allow produced output: $out"
+  pass "fm-turnend-guard --codex: a live Codex auto-arm claim ends the false blind-turn banner"
+}
+
+test_hook_codex_mode_blocks_without_any_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unclaimed")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" false); status=$?
+  expect_code 2 "$status" "--codex mode must still block a genuinely unsupervised stop"
+  assert_contains "$out" "TURN WOULD END BLIND" "--codex block must carry the blind-turn banner"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "--codex block must explain the missing auto-arm claim"
+  pass "fm-turnend-guard --codex: absence of an auto-arm claim is never an allow"
+}
+
+# Only one primary harness owns a home, but the two ledgers live side by side in
+# the same state dir, so a mode that read the wrong one would allow a blind stop
+# on the strength of another harness's claim.
+test_hook_codex_mode_never_reads_claudes_ledger() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-wrong-ledger")
+  : > "$dir/state/task1.meta"
+  seed_open_generation_claim "$dir" .claude-autoarm-epoch
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" false); status=$?
+  kill "$CLAIM_PID" 2>/dev/null || true
+  wait "$CLAIM_PID" 2>/dev/null || true
+  expect_code 2 "$status" "--codex mode must not accept a Claude auto-arm claim as its own recovery"
+  assert_contains "$out" "TURN WOULD END BLIND" "--codex cross-ledger block must carry the blind-turn banner"
+  pass "fm-turnend-guard --codex: a Claude claim never vouches for a Codex home"
+}
+
+# Codex keeps the shared one-shot loop guard, so a stop that already follows one
+# of this guard's own blocks still ends the turn: a Codex session must stay
+# endable without relying on a harness-side consecutive-block override.
+test_hook_codex_mode_keeps_the_one_shot_loop_guard() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-loop-guard")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" true); status=$?
+  expect_code 0 "$status" "--codex mode must allow a stop that already follows one of its own blocks"
+  [ -z "$out" ] || fail "--codex loop-guarded allow produced output: $out"
+  pass "fm-turnend-guard --codex: one forced continuation per turn, never a wedged session"
+}
+
 # --- AWAY MODE: the daemon owns supervision ----------------------------------
 #
 # While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
@@ -2277,6 +2356,10 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_codex_mode_allows_on_open_codex_generation_claim
+test_hook_codex_mode_blocks_without_any_claim
+test_hook_codex_mode_never_reads_claudes_ledger
+test_hook_codex_mode_keeps_the_one_shot_loop_guard
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock
 test_hook_away_mode_blocks_without_any_supervisor

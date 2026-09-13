@@ -194,17 +194,6 @@ test_actionable_close_queues_the_wake_into_this_payloads_thread() {
   pass "fm-codex-stop-autoarm: an actionable close is queued into the Codex thread"
 }
 
-test_the_thread_is_recorded_for_the_home() {
-  local dir
-  dir=$(make_primary_dir "$TMP_ROOT/thread-record")
-  need_supervision "$dir"
-  write_arm_fixture "$dir" actionable
-  run_autoarm "$dir" >/dev/null || true
-  assert_equals "$PAYLOAD_THREAD" "$(cat "$dir/state/.codex-thread" 2>/dev/null)" \
-    "the live Codex thread is recorded for the home"
-  pass "fm-codex-stop-autoarm: the live Codex thread is recorded"
-}
-
 test_it_keeps_its_own_ledger_separate_from_claudes() {
   local dir
   dir=$(make_primary_dir "$TMP_ROOT/ledger")
@@ -217,6 +206,99 @@ test_it_keeps_its_own_ledger_separate_from_claudes() {
   assert_contains "$(cat "$dir/state/.codex-autoarm-epoch")" "outcome=rewake" \
     "a delivered wake is recorded as the generation's outcome"
   pass "fm-codex-stop-autoarm: the single-flight ledger is its own, never Claude's"
+}
+
+# The same hook, fired from a harness process that KEEPS holding the session
+# lock after the hook returns, which is the live shape every mid-turn reader
+# sees: the session that armed the watcher is still the session running the
+# handling turn. Sets HOLD_PID for the caller to reap.
+HOLD_PID=
+run_autoarm_holding_lock() {
+  local dir=$1 i=0
+  printf '%s\n' "{\"session_id\":\"$PAYLOAD_THREAD\"}" \
+    | FM_HOME="$dir" PATH="$FAKEBIN:$PATH" "$FAKE_HARNESS" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-codex-stop-autoarm.sh"
+        : > "$FM_HOME/state/hook-returned"
+        sleep 60
+      ' >/dev/null 2>&1 &
+  HOLD_PID=$!
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/state/hook-returned" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+midturn_healthy() {  # <dir>
+  local dir=$1
+  FM_AUTOARM_PREFIX=.codex-autoarm FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$1"; fm_autoarm_midturn_healthy "$2"' _ "$dir/bin/fm-wake-lib.sh" "$dir/state"
+}
+
+# The pull guard (bin/fm-guard.sh) reads a stale mid-turn beacon as a supervision
+# lapse unless the auto-arm ledger proves a handling turn owns the gap. That
+# proof needs the rewake row bound to the live session lock and the current
+# watcher recovery generation, so an unbound row makes every Codex handling turn
+# that outruns grace print "SUPERVISION IS OFF" while supervision is healthy.
+test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation() {
+  local dir rc=0
+  dir=$(make_primary_dir "$TMP_ROOT/rewake-binding")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" actionable
+  run_autoarm_holding_lock "$dir"
+  assert_contains "$(queued_log "$dir")" "firstmate watcher wake" \
+    "the wake was delivered, so there is a rewake row to bind"
+  midturn_healthy "$dir" || rc=$?
+  kill "$HOLD_PID" 2>/dev/null || true
+  wait "$HOLD_PID" 2>/dev/null || true
+  expect_code 0 "$rc" \
+    "a delivered Codex rewake must satisfy the mid-turn proof its own session can read back"
+  pass "fm-codex-stop-autoarm: a delivered rewake is bound to the session lock and recovery generation"
+}
+
+# A rewake that cannot be bound still has to go out: codex queue is the only wake
+# channel this hook has, so refusing delivery would drop the event entirely.
+test_an_unbindable_rewake_is_still_delivered() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/rewake-unbindable")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" actionable
+  # An arm that reports an actionable close without leaving a downtime marker.
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'signal: t1.status\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  run_autoarm "$dir" >/dev/null || true
+  assert_contains "$(queued_log "$dir")" "firstmate watcher wake" \
+    "an unbindable rewake is still queued into the thread"
+  pass "fm-codex-stop-autoarm: an unbindable rewake is delivered rather than dropped"
+}
+
+# The failure notice is the only operator-visible report that the automatic
+# mechanism is broken, so a push the CLI rejected must not consume the episode.
+test_a_rejected_failure_push_is_retried_on_the_next_stop() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/failure-push-rejected")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" failing
+  export FM_TEST_CODEX_QUEUE_RC=1
+  run_autoarm "$dir" >/dev/null || true
+  unset FM_TEST_CODEX_QUEUE_RC
+  assert_contains "$(queued_log "$dir")" "auto-arm FAILED" \
+    "the notice push is attempted before any episode marker exists"
+  assert_absent "$dir/state/.codex-autoarm-failure-notified" \
+    "a rejected push must not consume the episode's only notice"
+  : > "$dir/state/queued.log"
+  run_autoarm "$dir" >/dev/null || true
+  assert_contains "$(queued_log "$dir")" "auto-arm FAILED" \
+    "the next Stop retries the notice the rejected push never delivered"
+  assert_present "$dir/state/.codex-autoarm-failure-notified" \
+    "an accepted push is what marks the episode as announced"
+  pass "fm-codex-stop-autoarm: a rejected failure push is retried, not silently consumed"
 }
 
 # A freshly exec'd process is reported by ps as "/usr/bin/env bash <script>" for
@@ -353,8 +435,10 @@ test_an_idle_home_stays_inert() {
 
 
 test_actionable_close_queues_the_wake_into_this_payloads_thread
-test_the_thread_is_recorded_for_the_home
 test_it_keeps_its_own_ledger_separate_from_claudes
+test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation
+test_an_unbindable_rewake_is_still_delivered
+test_a_rejected_failure_push_is_retried_on_the_next_stop
 test_a_healthy_watcher_is_not_announced
 test_failure_is_announced_once_per_episode
 test_a_payload_with_no_thread_stands_down

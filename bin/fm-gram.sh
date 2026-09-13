@@ -3,7 +3,6 @@
 #
 # Usage:
 #   fm-gram.sh poll        one bounded poll; capture and publish what is new
-#   fm-gram.sh list        read-only: what a poll would consider, publishing nothing
 #   fm-gram.sh --help
 #
 # Gram is Herdr's owner<->agent message channel (`herdr gram`). Before this, a
@@ -92,7 +91,6 @@ usage() {
   cat <<'EOF'
 Usage:
   fm-gram.sh poll     one bounded poll: capture and publish owner messages addressed to this home
-  fm-gram.sh list     read-only preview of what a poll would consider; publishes nothing
   fm-gram.sh --help   print this help
 
 Environment:
@@ -112,8 +110,8 @@ gram_list() {
   fm_run_timed "$BUDGET" "$HERDR_BIN" gram list 2>/dev/null
 }
 
-# Eligible rows as tab-separated "<id>\t<from>\t<created_unix_ms>", oldest
-# first. Bodies never pass through this function's stdout.
+# Eligible rows as tab-separated "<id>\t<from>", oldest first. Bodies never pass
+# through this function's stdout.
 select_eligible() {  # <json>
   printf '%s' "$1" | jq -r '
     (.result.messages // [])
@@ -125,7 +123,7 @@ select_eligible() {  # <json>
       ))
     | sort_by(.created_unix_ms // 0)
     | .[]
-    | [.id, (.from // "owner"), ((.created_unix_ms // 0) | tostring)]
+    | [.id, (.from // "owner")]
     | @tsv
   ' 2>/dev/null
 }
@@ -174,12 +172,12 @@ publish() {  # <capture-path> <from>
 }
 
 action_poll() {
-  local json rc store rows published=0 failed=0 id from created path
+  local json rc store rows published=0 failed=0 id from path
 
   command -v jq >/dev/null 2>&1 || { say 'jq is missing, so Gram intake cannot run'; return 1; }
   command -v "$HERDR_BIN" >/dev/null 2>&1 || { say "the herdr CLI ($HERDR_BIN) is missing, so Gram intake cannot run"; return 1; }
   if [ -z "${HERDR_PANE_ID:-}" ]; then
-    say 'no HERDR_PANE_ID in this environment, so `herdr gram list` resolves no audience and would report an empty inbox whether or not the owner wrote. Gram intake is not running.'
+    say 'no HERDR_PANE_ID in this environment, so "herdr gram list" resolves no audience and would report an empty inbox whether or not the owner wrote. Gram intake is not running.'
     return 1
   fi
   mkdir -p "$CAPTURE_DIR" 2>/dev/null || { say "cannot create $CAPTURE_DIR"; return 1; }
@@ -209,7 +207,7 @@ action_poll() {
   # Serialize against an overlapping poll so two cycles cannot publish the same
   # message twice. A held lock means another poll is already doing this work.
   fm_lock_try_acquire "$SEEN_LOCK" || return 0
-  while IFS=$'\t' read -r id from created; do
+  while IFS=$'\t' read -r id from; do
     [ -n "$id" ] || continue
     seen_has "$store" "$id" && continue
     if ! path=$(capture "$json" "$store" "$id"); then
@@ -241,31 +239,8 @@ EOF
   return 0
 }
 
-action_list() {
-  local json store rows id from created state
-  command -v jq >/dev/null 2>&1 || { say 'jq is missing'; return 1; }
-  command -v "$HERDR_BIN" >/dev/null 2>&1 || { say "the herdr CLI ($HERDR_BIN) is missing"; return 1; }
-  json=$(gram_list) || { say 'herdr gram list failed'; return 1; }
-  store=$(printf '%s' "$json" | jq -r '.result.store_id // empty' 2>/dev/null)
-  printf 'store: %s\n' "${store:-<none>}"
-  printf 'pane identity: %s\n' "${HERDR_PANE_ID:-<none - list resolves no audience>}"
-  rows=$(select_eligible "$json")
-  if [ -z "$rows" ]; then
-    printf 'eligible: none\n'
-    return 0
-  fi
-  while IFS=$'\t' read -r id from created; do
-    [ -n "$id" ] || continue
-    if seen_has "$store" "$id"; then state=seen; else state=new; fi
-    printf 'eligible: %s from=%s created_unix_ms=%s %s\n' "$id" "$from" "$created" "$state"
-  done <<EOF
-$rows
-EOF
-}
-
 case "${1:-poll}" in
   poll) action_poll ;;
-  list) action_list ;;
   -h|--help) usage ;;
   *)
     printf 'fm-gram: unknown action: %s\n' "$1" >&2

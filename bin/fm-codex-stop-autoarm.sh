@@ -93,7 +93,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_AUTOARM_PREFIX=.codex-autoarm
 OWNER_LOCK="$STATE/$FM_AUTOARM_PREFIX.lock"
 FAILURE_NOTICE="$STATE/$FM_AUTOARM_PREFIX-failure-notified"
-THREAD_RECORD="$STATE/.codex-thread"
 AUTOARM_ATTEMPTS=${FM_CODEX_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -165,21 +164,6 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
 
-# Record the live thread for this home once ownership is established, so an
-# operator (and a later recovery path) can see which Codex thread this home's
-# wakes are being delivered into. It is a record, never the authority: every
-# delivery below uses THIS payload's thread, which is live by definition.
-record_thread() {
-  local tmp
-  tmp=$(umask 077; mktemp "$STATE/.codex-thread.XXXXXX" 2>/dev/null) || return 1
-  if ! printf '%s\n' "$THREAD" >"$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  mv -f -- "$tmp" "$THREAD_RECORD" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-}
-record_thread || true
-
 # --- single-flight generation claim -------------------------------------------
 # Codex does not deduplicate async hook firings, so exactly one generation owner
 # arms and delivers per event epoch: every firing defers to a live open claim,
@@ -202,15 +186,28 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # while this generation still owns the claim and the home is still awake. The
 # ledger write is the commit point: a losing generation neither writes nor
 # queues, so one event epoch yields exactly one wake turn.
-autoarm_deliver() {  # <outcome> <banner> [marker-file]
-  local outcome=$1 banner=$2 marker=${3:-}
+#
+# A rewake row also records the live session-lock pid and the watcher recovery
+# generation it belongs to, exactly as bin/fm-claude-stop-autoarm.sh does, so
+# fm_autoarm_midturn_healthy can recognize this home's handling turn instead of
+# reading its stale beacon as a supervision lapse. The binding is evidence, not
+# a precondition: unlike Claude, whose exit-2 banner IS the wake, Codex has no
+# second delivery channel, so a row that cannot be bound still goes out unbound
+# rather than dropping the only wake this event epoch will ever get.
+autoarm_deliver() {  # <outcome> <banner>
+  local outcome=$1 banner=$2 session_pid='' recovery=''
   fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
   [ -e "$STATE/.afk" ] && return 1
-  if [ -n "$marker" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" || return 1
-  else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" || return 1
+  if [ "$outcome" = rewake ] && fm_session_lock_owned_by_self "$STATE" \
+    && fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*|announced:downtime:*)
+        session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+        [ -z "$session_pid" ] || recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
+        ;;
+    esac
   fi
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "" "$session_pid" "$recovery" || return 1
   codex queue --thread "$THREAD" --message "$banner" >/dev/null 2>&1
 }
 
@@ -298,13 +295,18 @@ fi
 
 # Notify once per continuous failure episode. A broken automatic mechanism has
 # to be visible, but repeating it on every Stop would storm the thread, so the
-# marker write is what makes the notice a once-per-episode event.
+# marker write is what makes the notice a once-per-episode event. The marker is
+# created only AFTER the push was accepted: a rejected push delivered nothing,
+# and a marker written ahead of it would silence the episode's only notice for
+# good.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   DETAIL=
   [ -n "$OUT" ] && DETAIL=$(grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8)
   NOTICE=$(printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n%s\nDo not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' \
     "$attempt" "$DETAIL")
-  autoarm_deliver failed "$NOTICE" "$FAILURE_NOTICE" || true
+  if autoarm_deliver failed "$NOTICE"; then
+    : > "$FAILURE_NOTICE" 2>/dev/null || true
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
