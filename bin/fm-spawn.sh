@@ -93,9 +93,10 @@
 #   the escape hatch for trying an unverified adapter, so it is never renamed
 #   and naming never blocks it; mandatory naming is reserved for ordinary
 #   verified ship/scout dispatch. Secondmate primaries keep their existing
-#   behavior in their own per-home workspace. Rovo is
-#   skipped because Herdr has no rovo integration and live `agent get` returns
-#   agent_not_found for a running rovo pane (docs/verification/rovo.md).
+#   behavior in their own per-home workspace. fm_backend_herdr_harness_registers
+#   owns the only adapter exclusions: rovo always, because Herdr has no rovo
+#   integration (docs/verification/rovo.md), and muse only when the task's
+#   Herdr release is provably below 0.9.0, the first with Muse detection.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -3017,8 +3018,9 @@ EOF
     ;;
 esac
 fi
-if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != rovo ] \
-   && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ] \
+   && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } \
+   && fm_backend_herdr_harness_registers "$HARNESS" "$T"; then
   HERDR_AGENT_NAME=$(fm_backend_herdr_task_agent_name "$ID") || {
     echo "error: could not derive a valid herdr agent name for task $ID" >&2
     exit 1
