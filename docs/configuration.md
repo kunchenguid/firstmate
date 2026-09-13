@@ -324,6 +324,8 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Codex's async Stop hook owns the same re-arm and delivers its wake as a queued message into the Codex thread, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Codex is the one harness whose hooks need a one-time operator approval before any of this runs: Codex trusts a hook by the hash of its command, so `bin/fm-codex-stop-autoarm.sh` is a new entry whose hash has to be approved once in the Codex session, exactly like the guard entry beside it.
+Until that approval a Codex primary has no auto-arm at all, which is loud rather than silent - the beacon goes stale and the turn-end guard blocks - but the banner names missing supervision rather than a missing approval, so check the hook approval first when a Codex primary starts blocking on every turn.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
@@ -617,6 +619,13 @@ New messages always wake; a repeated diagnostic (an unreachable Herdr server, a 
 The publication cursor `state/.gram-seen` is keyed by store id plus message id, so each message is published once across restarts.
 The order is capture, then publish, then record, because losing a message the owner sent is worse than showing it twice, so a crash between publishing and recording can re-publish that one message on the next poll.
 That is the whole guarantee: it is not at-least-once, not no-loss, and not exactly-once delivery.
+
+Deleting a Gram message purges this home's copy of it.
+`herdr gram delete` is the documented way to clean up a short-lived secret, so a capture that outlived the owner's own deletion would quietly break that advice.
+Every poll therefore reconciles: a capture for the current store whose message id no longer appears in the listing is removed, together with the inbox note it produced, whether that note is still pending or already handled.
+Absence is read only within the audience this poll can see, which is the same audience that produced the capture, so nothing is concluded about any other recipient's copy.
+The `state/.gram-seen` entry is kept on purpose, so a purged message is never published a second time.
+`bin/fm-gram-check.sh disarm` removes the standing check, not the captures; deleting the messages is what clears those.
 
 ## Relay (.env)
 
@@ -1071,6 +1080,7 @@ FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryab
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
+FM_CODEX_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Codex auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
 FM_CLAUDE_AUTOARM_EPOCH_FRESH=15   # seconds a recorded auto-arm outcome remains eligible for the current event epoch's recovery or failure decision
 FM_CLAUDE_TURNEND_BLOCK_BUDGET=3   # consecutive --claude guard re-blocks before the verified one-time attended fail-open; safely below Claude Code's 8-block override

@@ -481,12 +481,16 @@ The measurements that decided the design, all in an isolated Herdr lab session w
 | Does an async `Stop` hook's `exit 2` reach the model? | No. The banner was discarded with no continuation. |
 | Does a synchronous `Stop` hook's `exit 2` reach the model? | Yes, rendered as `Blocked by hook`, but the turn is held open for the hook's whole duration. |
 | Does Codex deduplicate concurrent async `Stop` firings? | No. A second Stop started a second concurrent instance, which is why the auto-arm keeps a single-flight generation ledger. |
+| Does an async `Stop` hook wait for a synchronous one registered ahead of it? | No. With one synchronous and one async hook in the same Stop group, the async hook started 0.11s after the synchronous hook began, while that synchronous hook ran for 3.02s. |
 | Can an external process wake an idle session? | Yes. `codex queue --thread <session_id>` reached an idle TUI session in 4s. |
 
 `codex queue` behavior that bounds the delivery claim: a message queued while the agent is working is delivered after that turn rather than interleaved; two queued messages arrive in submission order; a bogus or unknown thread id exits non-zero with a named error; and a message queued for a thread whose session is already gone is **accepted with exit 0**.
 That last row is why delivery is documented as best effort and the durable wake queue remains the reliable record.
 
-End-to-end, against a disposable checkout with its own `FM_HOME`: after one ordinary turn the Stop hook armed a watcher with no model command (ledger `outcome=arming`, live watcher pid, fresh beacon, recorded thread), and appending a `done:` line to a task's status file surfaced the wake in the Codex primary 14 seconds later with no user prompt.
+The concurrency row is what `bin/fm-turnend-guard.sh --codex` rests on: the guard is registered first and synchronous, the auto-arm second and async, and the guard's bounded cooperative wait can only observe an auto-arm generation claim if the auto-arm is already running while the guard waits.
+`tests/fm-codex-continuity-live-e2e.test.sh` asserts that ordering in its interactive tier, so a Codex release that starts serializing Stop hooks fails there rather than silently turning every wake-handling turn back into a blocked stop.
+
+End-to-end, against a disposable checkout with its own `FM_HOME`: after one ordinary turn the Stop hook armed a watcher with no model command (ledger `outcome=arming`, live watcher pid, fresh beacon), and appending a `done:` line to a task's status file surfaced the wake in the Codex primary 14 seconds later with no user prompt.
 
 Pi same-process session-transition ownership was verified on 2026-09-01 against the tracked extension with provider-free public lifecycle events, retained and fresh extension-module rebinds, and real arm children:
 

@@ -74,7 +74,11 @@
 #     fresh watcher predicate and retried a bounded number of times. Only an
 #     exhausted failure with no verified watcher queues one operator notice per
 #     failure episode, deduplicated by state/.codex-autoarm-failure-notified, so
-#     a broken mechanism says so once instead of storming the thread.
+#     a broken mechanism says so once instead of storming the thread. That
+#     marker is created inside the owned ledger write BEFORE the push, so a
+#     marker that cannot be created suppresses the push rather than announcing
+#     without a dedupe key; a push the CLI then rejects removes it again, so the
+#     next Stop retries the notice exactly once more.
 #
 # This hook never writes to stdout and never blocks the Stop decision: Codex
 # ignores both for an async hook. Every uncertainty - unresolvable ancestry,
@@ -188,27 +192,38 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # queues, so one event epoch yields exactly one wake turn.
 #
 # A rewake row also records the live session-lock pid and the watcher recovery
-# generation it belongs to, exactly as bin/fm-claude-stop-autoarm.sh does, so
-# fm_autoarm_midturn_healthy can recognize this home's handling turn instead of
-# reading its stale beacon as a supervision lapse. The binding is evidence, not
-# a precondition: unlike Claude, whose exit-2 banner IS the wake, Codex has no
-# second delivery channel, so a row that cannot be bound still goes out unbound
-# rather than dropping the only wake this event epoch will ever get.
-autoarm_deliver() {  # <outcome> <banner>
-  local outcome=$1 banner=$2 session_pid='' recovery=''
+# generation it belongs to, exactly as bin/fm-claude-stop-autoarm.sh does, and
+# refuses on the same terms: a rewake that cannot be bound is worse than no
+# rewake at all, because fm_autoarm_midturn_healthy rejects a row with no
+# recovery generation, so bin/fm-guard.sh would cry supervision-off on the very
+# handling turn the binding exists to protect. Refusing costs nothing the wake
+# queue does not already hold, and the synchronous guard still owns the next
+# turn end.
+#
+# With a marker argument the marker is created inside the same owned ledger
+# write, so it commits before the push and a marker that cannot be created
+# refuses instead of announcing something nothing can deduplicate. A rejected
+# push then removes it, leaving the next Stop free to retry.
+autoarm_deliver() {  # <outcome> <banner> [marker-file]
+  local outcome=$1 banner=$2 marker=${3:-} session_pid='' recovery=''
   fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
   [ -e "$STATE/.afk" ] && return 1
-  if [ "$outcome" = rewake ] && fm_session_lock_owned_by_self "$STATE" \
-    && fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+  if [ "$outcome" = rewake ]; then
+    fm_session_lock_owned_by_self "$STATE" || return 2
+    fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 2
     case "$FM_RECOVERY_MARKER_TOKEN" in
-      pending:downtime:*|announced:downtime:*)
-        session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
-        [ -z "$session_pid" ] || recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
-        ;;
+      pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+      *) return 2 ;;
     esac
+    session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+    [ -n "$session_pid" ] || return 2
   fi
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "" "$session_pid" "$recovery" || return 1
-  codex queue --thread "$THREAD" --message "$banner" >/dev/null 2>&1
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return 1
+  if ! codex queue --thread "$THREAD" --message "$banner" >/dev/null 2>&1; then
+    [ -z "$marker" ] || rm -f -- "$marker" 2>/dev/null || true
+    return 1
+  fi
+  return 0
 }
 
 # Best-effort ownership-checked record for paths where supersession changes
@@ -295,18 +310,14 @@ fi
 
 # Notify once per continuous failure episode. A broken automatic mechanism has
 # to be visible, but repeating it on every Stop would storm the thread, so the
-# marker write is what makes the notice a once-per-episode event. The marker is
-# created only AFTER the push was accepted: a rejected push delivered nothing,
-# and a marker written ahead of it would silence the episode's only notice for
-# good.
+# marker is what makes the notice a once-per-episode event, and the push is
+# gated on it: no dedupe key, no announcement.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   DETAIL=
   [ -n "$OUT" ] && DETAIL=$(grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8)
   NOTICE=$(printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n%s\nDo not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' \
     "$attempt" "$DETAIL")
-  if autoarm_deliver failed "$NOTICE"; then
-    : > "$FAILURE_NOTICE" 2>/dev/null || true
-  fi
+  autoarm_deliver failed "$NOTICE" "$FAILURE_NOTICE" || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

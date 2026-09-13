@@ -256,9 +256,12 @@ test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation() {
   pass "fm-codex-stop-autoarm: a delivered rewake is bound to the session lock and recovery generation"
 }
 
-# A rewake that cannot be bound still has to go out: codex queue is the only wake
-# channel this hook has, so refusing delivery would drop the event entirely.
-test_an_unbindable_rewake_is_still_delivered() {
+# A rewake row with no recovery generation can never satisfy the mid-turn proof,
+# so delivering one would announce a handling turn that bin/fm-guard.sh then
+# calls unsupervised - worse than not announcing at all. The event is not lost:
+# the durable wake queue still holds it and the synchronous guard owns the next
+# turn end, which is exactly why bin/fm-claude-stop-autoarm.sh refuses too.
+test_an_unbindable_rewake_is_refused() {
   local dir
   dir=$(make_primary_dir "$TMP_ROOT/rewake-unbindable")
   need_supervision "$dir"
@@ -273,9 +276,12 @@ exit 0
 SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
   run_autoarm "$dir" >/dev/null || true
-  assert_contains "$(queued_log "$dir")" "firstmate watcher wake" \
-    "an unbindable rewake is still queued into the thread"
-  pass "fm-codex-stop-autoarm: an unbindable rewake is delivered rather than dropped"
+  assert_present "$dir/state/arm-ran" "the watcher is still armed"
+  assert_absent "$dir/state/queued.log" \
+    "a rewake that cannot be bound to a recovery generation is never queued"
+  assert_not_contains "$(cat "$dir/state/.codex-autoarm-epoch" 2>/dev/null)" "outcome=rewake" \
+    "an unbindable rewake must not be committed to the ledger either"
+  pass "fm-codex-stop-autoarm: an unbindable rewake is refused rather than delivered unbound"
 }
 
 # The failure notice is the only operator-visible report that the automatic
@@ -289,7 +295,7 @@ test_a_rejected_failure_push_is_retried_on_the_next_stop() {
   run_autoarm "$dir" >/dev/null || true
   unset FM_TEST_CODEX_QUEUE_RC
   assert_contains "$(queued_log "$dir")" "auto-arm FAILED" \
-    "the notice push is attempted before any episode marker exists"
+    "the notice push is attempted for an unannounced episode"
   assert_absent "$dir/state/.codex-autoarm-failure-notified" \
     "a rejected push must not consume the episode's only notice"
   : > "$dir/state/queued.log"
@@ -301,13 +307,33 @@ test_a_rejected_failure_push_is_retried_on_the_next_stop() {
   pass "fm-codex-stop-autoarm: a rejected failure push is retried, not silently consumed"
 }
 
+# The notice is deduplicated by one marker, so an announcement made without one
+# would repeat on every Stop for the rest of the episode. The push is gated on
+# the marker for exactly that reason: no dedupe key, no announcement.
+test_a_notice_with_no_writable_marker_is_never_pushed() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/failure-marker-unwritable")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" failing
+  # A dangling symlink into a directory that does not exist: absent to `test -e`,
+  # so the notice gate opens, and impossible to create.
+  ln -s "$dir/state/no-such-dir/notified" "$dir/state/.codex-autoarm-failure-notified"
+  run_autoarm "$dir" >/dev/null || true
+  assert_absent "$dir/state/queued.log" \
+    "a notice with no writable dedupe marker must not be announced"
+  run_autoarm "$dir" >/dev/null || true
+  assert_absent "$dir/state/queued.log" \
+    "and the next Stop must not storm the thread with it either"
+  pass "fm-codex-stop-autoarm: an unwritable episode marker suppresses the notice instead of storming"
+}
+
 # A freshly exec'd process is reported by ps as "/usr/bin/env bash <script>" for
 # a moment and as "bash <script>" once the exec settles, so an identity read too
 # early never matches the one the predicate reads later. Wait for two identical
 # consecutive reads before recording, or the healthy case fails for a reason
 # that has nothing to do with the hook.
 watcher_identity() {
-  local dir=$1 pid=$2 prev= cur= i=0
+  local dir=$1 pid=$2 prev='' cur='' i=0
   while [ "$i" -lt 50 ]; do
     cur=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid")
     [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
@@ -437,8 +463,9 @@ test_an_idle_home_stays_inert() {
 test_actionable_close_queues_the_wake_into_this_payloads_thread
 test_it_keeps_its_own_ledger_separate_from_claudes
 test_a_delivered_rewake_is_bound_to_this_session_and_recovery_generation
-test_an_unbindable_rewake_is_still_delivered
+test_an_unbindable_rewake_is_refused
 test_a_rejected_failure_push_is_retried_on_the_next_stop
+test_a_notice_with_no_writable_marker_is_never_pushed
 test_a_healthy_watcher_is_not_announced
 test_failure_is_announced_once_per_episode
 test_a_payload_with_no_thread_stands_down

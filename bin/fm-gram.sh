@@ -58,12 +58,22 @@
 # the whole guarantee. This is not at-least-once, not no-loss, and not
 # exactly-once delivery, and must never be described as any of them.
 #
-# CONFIDENTIALITY
+# CONFIDENTIALITY, AND WHAT THE OWNER'S DELETION MEANS HERE
 #
 # Message text is written only to the private capture under state/gram-inbox/
 # (mode 0600) and to the inbox note. It is never printed to stdout, never put in
 # a wake payload beyond what fm-inbox.sh's own summary does, and never written to
 # a status log. The poll's own output lines carry counts and ids, never bodies.
+#
+# `herdr gram delete` is documented as the way to clean up a short-lived secret,
+# so a copy of that secret sitting in this home after the owner purged it would
+# quietly break that advice. Every poll therefore reconciles: a capture for THIS
+# store whose message id is gone from the listing is deleted, along with the
+# inbox note it produced (pending or already handled). The deletion is inferred
+# only from absence in the audience this poll can see, which is exactly the
+# audience that produced the capture, so nothing is concluded about any other
+# recipient's copy. The state/.gram-seen entry is deliberately kept, so a purged
+# message is never re-published if the store ever shows it again.
 set -u
 export LC_ALL=C
 
@@ -159,8 +169,11 @@ capture() {  # <json> <store> <id>
 }
 
 # Hand the body to the inbox owner as one argument. Never a shell string.
+# Prints the queued note id so the capture can record which note it produced;
+# the inbox's own output is consumed here and never reaches this poll's stdout,
+# because its summary line carries the message body.
 publish() {  # <capture-path> <from>
-  local path=$1 from=$2 body
+  local path=$1 from=$2 body out
   body=$(jq -r '
     [ (.message.text // ""),
       (if (.message.file.name // "") != "" then "[attached file: " + .message.file.name + "]" else "" end)
@@ -168,11 +181,50 @@ publish() {  # <capture-path> <from>
   ' "$path" 2>/dev/null) || return 1
   [ -n "${body//[[:space:]]/}" ] || body="(the owner sent a Gram message with no text)"
   [ -x "$INBOX_BIN" ] || return 1
-  FM_HOME="$FM_HOME" "$INBOX_BIN" note "Gram message from $from: $body" >/dev/null 2>&1
+  out=$(FM_HOME="$FM_HOME" "$INBOX_BIN" note "Gram message from $from: $body" 2>/dev/null) || return 1
+  printf '%s' "$out" | sed -n 's/^queued //p' | head -n 1 | tr -dc 'A-Za-z0-9._-'
+}
+
+# Record which inbox note this capture produced, so honouring a later deletion
+# can remove both halves of the copy rather than only the capture.
+capture_note() {  # <capture-path> <note-id>
+  local path=$1 note=$2 tmp
+  [ -n "$note" ] || return 0
+  tmp=$(umask 077; mktemp "$CAPTURE_DIR/.capture.XXXXXX" 2>/dev/null) || return 1
+  if ! jq --arg note "$note" '. + {note_id: $note}' "$path" >"$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+}
+
+# Honour `herdr gram delete`: a capture for THIS store whose message id is gone
+# from the listing describes a message the owner purged, so the copy this home
+# made goes too - the capture and the inbox note it produced, pending or handled.
+# A capture for another store is never touched, and state/.gram-seen is left
+# alone so a purged message can never be published a second time.
+purge_deleted() {  # <store> <live-ids>
+  local store=$1 live=$2 f cap_store cap_id note
+  [ -d "$CAPTURE_DIR" ] || return 0
+  for f in "$CAPTURE_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    cap_store=$(jq -r '.store_id // empty' "$f" 2>/dev/null) || continue
+    [ "$cap_store" = "$store" ] || continue
+    cap_id=$(jq -r '.message.id // empty' "$f" 2>/dev/null) || continue
+    [ -n "$cap_id" ] || continue
+    printf '%s\n' "$live" | grep -Fqx -- "$cap_id" && continue
+    note=$(jq -r '.note_id // empty' "$f" 2>/dev/null)
+    rm -f -- "$f"
+    case "$note" in
+      ''|*[!A-Za-z0-9._-]*) ;;
+      *) rm -f -- "$STATE/inbox/$note.note" "$STATE/inbox/handled/$note.note" ;;
+    esac
+  done
 }
 
 action_poll() {
-  local json rc store rows published=0 failed=0 id from path
+  local json rc store rows live published=0 failed=0 id from path note
 
   command -v jq >/dev/null 2>&1 || { say 'jq is missing, so Gram intake cannot run'; return 1; }
   command -v "$HERDR_BIN" >/dev/null 2>&1 || { say "the herdr CLI ($HERDR_BIN) is missing, so Gram intake cannot run"; return 1; }
@@ -201,12 +253,18 @@ action_poll() {
     return 1
   fi
 
+  # Every id the store still shows this audience, eligible or not: absence from
+  # THIS set is what a purge looks like from here.
+  live=$(printf '%s' "$json" | jq -r '
+    (.result.messages // [])[] | select((.id | type) == "string") | .id
+  ' 2>/dev/null)
   rows=$(select_eligible "$json")
-  [ -n "$rows" ] || return 0
 
   # Serialize against an overlapping poll so two cycles cannot publish the same
-  # message twice. A held lock means another poll is already doing this work.
+  # message twice, or one purge a capture the other is still publishing. A held
+  # lock means another poll is already doing this work.
   fm_lock_try_acquire "$SEEN_LOCK" || return 0
+  purge_deleted "$store" "$live"
   while IFS=$'\t' read -r id from; do
     [ -n "$id" ] || continue
     seen_has "$store" "$id" && continue
@@ -214,10 +272,11 @@ action_poll() {
       failed=$((failed + 1))
       continue
     fi
-    if ! publish "$path" "$from"; then
+    if ! note=$(publish "$path" "$from"); then
       failed=$((failed + 1))
       continue
     fi
+    capture_note "$path" "$note" || true
     if ! seen_record "$store" "$id"; then
       # Published but unrecorded: say so, because this exact message is the one
       # that can appear twice after a crash here.

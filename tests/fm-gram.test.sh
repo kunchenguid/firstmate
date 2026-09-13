@@ -87,6 +87,22 @@ note_bodies() {  # <home>
   cat "$1"/state/inbox/*.note 2>/dev/null || true
 }
 
+captures_of() {  # <home>
+  local c count=0
+  for c in "$1"/state/gram-inbox/*.json; do
+    [ -e "$c" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
+# Everything this home holds that could still contain the owner's words: the
+# private captures plus every inbox note, pending or already handled.
+retained_text() {  # <home>
+  cat "$1"/state/gram-inbox/*.json "$1"/state/inbox/*.note \
+    "$1"/state/inbox/handled/*.note 2>/dev/null || true
+}
+
 test_help_and_usage() {
   local out rc=0
   out=$("$GRAM" --help 2>&1) || rc=$?
@@ -172,6 +188,7 @@ test_missing_pane_identity_is_reported_not_read_as_empty() {
   home=$(make_home no_identity)
   fake_herdr "$(store_json)"
   out="$home/out.txt"
+  # shellcheck disable=SC2016 # $0/$1/$? must expand inside the child sh, not here.
   status=$(env -u HERDR_PANE_ID FM_HOME="$home" PATH="$FAKEBIN:$PATH" \
     sh -c '"$0" poll >"$1" 2>&1; echo $?' "$GRAM" "$out")
   expect_code 1 "$status" "a home with no pane identity must fail loudly"
@@ -229,6 +246,63 @@ test_capture_is_private_and_written_before_publication() {
   pass "fm-gram: each message is captured privately before it is published"
 }
 
+# `herdr gram delete` is documented as the way to purge a short-lived secret, so
+# a capture or note that outlived the owner's deletion would quietly break that
+# advice. The next poll is what honours it.
+test_deleting_a_message_purges_the_local_copy() {
+  local home out
+  home=$(make_home purge)
+  fake_herdr "$(store_json "$(msg gram-secret owner_to_agent '"firstmate"' 'the passphrase is hunter2' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 1 "$(captures_of "$home")" "the message is captured first"
+  assert_contains "$(retained_text "$home")" "hunter2" "and its body is held locally"
+
+  # The owner deletes it: the store still exists, the message no longer does.
+  fake_herdr "$(store_json)"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 0 "$(captures_of "$home")" "the capture is removed once the message is gone"
+  assert_equals 0 "$(notes_of "$home")" "the note it produced is removed too"
+  assert_not_contains "$(retained_text "$home")" "hunter2" \
+    "no copy of a deleted message survives anywhere in the home"
+  pass "fm-gram: deleting a Gram message purges this home's capture and its note"
+}
+
+test_a_purged_message_is_never_republished() {
+  local home out
+  home=$(make_home purge_cursor)
+  fake_herdr "$(store_json "$(msg gram-gone owner_to_agent '"firstmate"' 'delete me later' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  fake_herdr "$(store_json)"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 0 "$(notes_of "$home")" "the purge cleared the note"
+  # The store shows it again (a restored backup, a renumbered store): the cursor
+  # must still suppress it, because the owner already saw it once.
+  fake_herdr "$(store_json "$(msg gram-gone owner_to_agent '"firstmate"' 'delete me later' 1000)")"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 0 "$(notes_of "$home")" "a purged message is never published a second time"
+  pass "fm-gram: the seen cursor outlives the purge, so nothing is re-published"
+}
+
+# The purge reads absence from one audience's listing, so it must never reach
+# past the store that listing describes.
+test_a_purge_never_touches_another_stores_capture() {
+  local home out
+  home=$(make_home purge_scope)
+  fake_herdr "$(store_json "$(msg gram-a owner_to_agent '"firstmate"' 'store A body' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 1 "$(captures_of "$home")" "store A message captured"
+  fake_herdr_raw 'cat <<'"'"'JSON'"'"'
+{"id":"cli:gram:list","result":{"digest":"d","store_id":"machine_other","messages":[{"id":"gram-b","direction":"owner_to_agent","from":"owner","to":"firstmate","text":"store B body","created_unix_ms":1000}],"type":"gram_list"}}
+JSON'
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_equals 2 "$(captures_of "$home")" "a poll of store B leaves store A's capture alone"
+  assert_contains "$(retained_text "$home")" "store A body" "store A's body is untouched"
+  pass "fm-gram: a purge is scoped to the store the listing describes"
+}
+
 test_help_and_usage
 test_only_addressed_owner_messages_are_taken
 test_message_bodies_never_reach_stdout
@@ -239,3 +313,6 @@ test_failing_herdr_is_one_bounded_line
 test_hanging_herdr_is_bounded_by_the_budget
 test_missing_store_id_refuses_rather_than_deduplicating_blind
 test_capture_is_private_and_written_before_publication
+test_deleting_a_message_purges_the_local_copy
+test_a_purged_message_is_never_republished
+test_a_purge_never_touches_another_stores_capture

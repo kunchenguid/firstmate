@@ -14,10 +14,17 @@
 #      DISCARDED. The second half is why the auto-arm queues a message instead of
 #      copying Claude's exit-2 rewake; if Codex ever started honoring exit 2 here,
 #      that would be worth knowing rather than silently unused.
+#   4. An async Stop hook does NOT wait for a synchronous one registered ahead of
+#      it in the same group. The tracked .codex/hooks.json registers the turn-end
+#      guard first (synchronous) and the auto-arm second (async), and the guard's
+#      bounded cooperative wait can only ever see an auto-arm generation claim if
+#      the auto-arm is already running while the guard waits. A Codex release that
+#      serialized the group would turn every wake-handling turn back into a
+#      blocked stop, so it has to fail here rather than silently.
 #
 # Tier 1 (token-free, runs wherever codex is installed) proves fact 1.
 # Tier 2 (opt-in, spends tokens) drives a real interactive Codex under tmux and
-# proves facts 2 and 3 end to end.
+# proves facts 2, 3, and 4 end to end.
 #
 # Both tiers fail naming the codex version rather than degrading quietly.
 set -u
@@ -84,12 +91,33 @@ test_async_stop_hook_contract() {
   printf '[features]\nhooks = true\n\n[projects."%s"]\ntrust_level = "trusted"\n' \
     "$project" > "$codex_home/config.toml"
 
-  # The hook records its payload, keeps running well past the turn end, and then
-  # exits 2 with a banner on stderr. If Codex ever delivered that banner, the
-  # transcript would show it.
+  # Two hooks in ONE Stop group, in the tracked registration's order: a
+  # SYNCHRONOUS stand-in for the turn-end guard first, then the async hook. The
+  # sync hook runs for 3s and leaves sync-finished behind only when it is done,
+  # so the async hook can record, from its own first line, whether it started
+  # while the sync hook was still running. No sub-second clock is needed, and the
+  # answer is the exact property the --codex cooperative wait depends on.
+  cat > "$lab/sync-hook.sh" <<HOOK
+#!/usr/bin/env bash
+LAB=$(printf '%q' "$lab")
+cat >/dev/null 2>&1 || true
+sleep 3
+date +%s > "\$LAB/sync-finished"
+exit 0
+HOOK
+  chmod +x "$lab/sync-hook.sh"
+
+  # The async hook records its payload and its start ordering, keeps running well
+  # past the turn end, and then exits 2 with a banner on stderr. If Codex ever
+  # delivered that banner, the transcript would show it.
   cat > "$lab/stop-hook.sh" <<HOOK
 #!/usr/bin/env bash
 LAB=$(printf '%q' "$lab")
+if [ -e "\$LAB/sync-finished" ]; then
+  printf 'serialized\n' > "\$LAB/async-order"
+else
+  printf 'concurrent\n' > "\$LAB/async-order"
+fi
 cat > "\$LAB/payload.json" 2>/dev/null || true
 date +%s > "\$LAB/hook-started"
 sleep 6
@@ -98,8 +126,8 @@ printf 'FM-LIVE-GUARD-EXIT2-BANNER\n' >&2
 exit 2
 HOOK
   chmod +x "$lab/stop-hook.sh"
-  printf '{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": %s, "timeout": 120, "async": true } ] } ] } }\n' \
-    "\"$lab/stop-hook.sh\"" > "$project/.codex/hooks.json"
+  printf '{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": %s, "timeout": 60 }, { "type": "command", "command": %s, "timeout": 120, "async": true } ] } ] } }\n' \
+    "\"$lab/sync-hook.sh\"" "\"$lab/stop-hook.sh\"" > "$project/.codex/hooks.json"
 
   session="fm-codex-live-$$"
   tmux kill-session -t "$session" 2>/dev/null || true
@@ -125,6 +153,18 @@ HOOK
     sleep 1
   done
   [ -e "$lab/hook-started" ] || die "the Stop hook never fired in an interactive session"
+
+  # Fact 4: the async hook did not wait for the synchronous one ahead of it.
+  # Without this, bin/fm-turnend-guard.sh --codex would wait out its whole
+  # cooperative window before the auto-arm had even started, and every
+  # wake-handling turn would end on a false blind-turn block.
+  case "$(cat "$lab/async-order" 2>/dev/null || printf 'missing')" in
+    concurrent) ;;
+    serialized)
+      die "the async Stop hook started only after the synchronous hook finished; bin/fm-turnend-guard.sh --codex can no longer observe an auto-arm claim within its cooperative window"
+      ;;
+    *) die "the async Stop hook did not record its start ordering against the synchronous hook" ;;
+  esac
 
   # Fact 2: the payload carries the thread id delivery needs.
   command -v jq >/dev/null 2>&1 || die "jq is required to read the Stop payload"
@@ -159,7 +199,7 @@ HOOK
   if tmux capture-pane -p -S -200 -t "$session" 2>/dev/null | grep -q 'FM-LIVE-GUARD-EXIT2-BANNER'; then
     die "an async Stop hook's exit-2 banner was delivered; bin/fm-codex-stop-autoarm.sh assumes it is discarded and could use it instead"
   fi
-  printf 'ok - codex %s: async Stop hook fires with a session_id, does not hold the turn, and its exit-2 stderr stays discarded\n' "$CODEX_VERSION"
+  printf 'ok - codex %s: async Stop hook fires with a session_id, starts beside a synchronous hook rather than after it, does not hold the turn, and its exit-2 stderr stays discarded\n' "$CODEX_VERSION"
 }
 
 test_queue_surface_exists

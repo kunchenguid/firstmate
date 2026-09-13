@@ -4079,14 +4079,21 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
-  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): the Claude
-  # and Codex Stop auto-arms and Cursor's stop-hook park all run the watcher only
-  # BETWEEN turns, so a fresh beacon with no live watcher is their healthy
-  # mid-turn state. Pi and pi-signed secondmates previously received persistent
-  # here and now receive extension to match fm_supervision_model's own table, so
-  # their pull guard tolerates the extension hand-off exactly as a Pi primary does.
+  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
+  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
+  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Pi and pi-signed secondmates previously received persistent here and now
+  # receive extension to match fm_supervision_model's own table, so their pull
+  # guard tolerates the extension hand-off exactly as a Pi primary does.
+  # Codex is deliberately NOT autoarm here even though fm_supervision_model maps a
+  # codex PRIMARY that way: the primary's claim rests on its own checkout's
+  # tracked .codex/hooks.json, while a Codex hook only runs after the operator has
+  # approved its hash, and docs/verification/supervision.md records Firstmate
+  # project hooks under a spawned worktree firing for neither a trusted
+  # interactive pane nor codex exec. Until a spawned home is proven to fire them,
+  # persistent keeps a dead watcher loud there instead of silently tolerated.
   case "$HARNESS" in
-    claude|codex|cursor) supervision_model=autoarm ;;
+    claude|cursor) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;
     *) supervision_model=persistent ;;
   esac
