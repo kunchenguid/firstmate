@@ -8,6 +8,10 @@
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
 #           This is the only subcommand that touches firstmate's wake queue.
+#           `--source` records which channel the note came in through (default
+#           `text`) and `--meta` records one extra `key=value` line for that
+#           channel's own bookkeeping; both are optional and repeatable in the
+#           case of `--meta`.
 #   say     Same as `note`, but the body comes from spoken audio on stdin.
 #           Speech is an INPUT METHOD here, not an architecture: it transcribes
 #           and then takes exactly the `note` path.
@@ -19,7 +23,8 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh note [--source <name>] [--meta <key=value>]... <text>...
+#   fm-inbox.sh note [--source <name>] [--meta <key=value>]... -   (body from stdin)
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
@@ -178,7 +183,14 @@ queue_note() {
     printf 'source=%s\n' "$source"
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf -- '--\n'
-    printf '%s\n' "$body"
+    # The body verbatim. The record is line-oriented, so it gets a terminating
+    # newline only when the body does not already end in one: appending
+    # unconditionally would invent a blank line the caller never sent, and the
+    # trailing blank lines a caller DID send are content, not padding.
+    case "$body" in
+      *$'\n') printf '%s' "$body" ;;
+      *) printf '%s\n' "$body" ;;
+    esac
   } >"$tmp"
 
   # Publish the completed note atomically.
@@ -195,16 +207,55 @@ queue_note() {
   fi
 }
 
+# `--source` and `--meta` exist so another channel in front of firstmate can
+# record WHERE a note came from without carrying a queue of its own. Both are
+# validated rather than trusted: the values land in the record header above the
+# `--` separator, so an unchecked newline could forge a field, and an unchecked
+# key could overwrite one. A caller that passes neither gets exactly the record
+# it got before.
+valid_meta() {  # <key=value>
+  case "$1" in
+    *$'\n'*) return 1 ;;
+    [a-z_]*=*) ;;
+    *) return 1 ;;
+  esac
+  local key=${1%%=*}
+  case "$key" in
+    *[!a-z0-9_]*) return 1 ;;
+    id|at|source) return 1 ;;
+  esac
+}
+
 cmd_note() {
-  local body
+  local body source=text meta=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source)
+        [ "$#" -ge 2 ] || die "--source needs a value"
+        case "$2" in
+          ''|*[!a-z0-9-]*) die "invalid --source: $2" ;;
+        esac
+        source=$2; shift 2 ;;
+      --meta)
+        [ "$#" -ge 2 ] || die "--meta needs a key=value"
+        valid_meta "$2" || die "invalid --meta: $2"
+        meta=${meta:+$meta$'\n'}$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note <text>...   (or: note - to read stdin)"
+    die "usage: fm-inbox.sh note [--source <name>] [--meta <key=value>]... <text>...   (or: note - to read stdin)"
   elif [ "$1" = "-" ]; then
-    body=$(cat)
+    # A bare $(cat) strips EVERY trailing newline, which silently truncates a
+    # body that deliberately ends in blank lines. The sentinel makes the read
+    # byte-exact; the empty-body refusal in queue_note still rejects a body that
+    # is nothing but whitespace.
+    body=$(cat; printf x)
+    body=${body%x}
   else
     body="$*"
   fi
-  queue_note text "$body"
+  queue_note "$source" "$body" "$meta"
 }
 
 # ---------------------------------------------------------------- say
