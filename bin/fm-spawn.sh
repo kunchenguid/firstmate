@@ -2442,8 +2442,15 @@ if [ "$KIND" = ship ]; then
       exit 1
     }
   elif [ "$BRANCH" != "fm/$ID" ]; then
-    echo "error: $BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
-    exit 1
+    # A relaunch's branch comes from the meta record (--branch-prefix is refused
+    # there), so a promoted scout whose brief never carried a Ship branch line
+    # must relaunch on that recorded branch rather than be refused.
+    if [ "$RELAUNCH" -eq 1 ]; then
+      echo "warning: $BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
+    else
+      echo "error: $BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
+      exit 1
+    fi
   else
     echo "warning: $BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
   fi
