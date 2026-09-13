@@ -150,7 +150,10 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--expected-spawn-gen <generation>]
+#   --expected-spawn-gen requires the current record's published spawn_gen to
+#   match under the task's meta lock before cleanup; missing or mismatched
+#   identity refuses even with --force, protecting a replacement incarnation.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -293,11 +296,19 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+EXPECTED_SPAWN_GEN=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --expected-spawn-gen)
+      case "${2:-}" in
+        ''|.*|*[!A-Za-z0-9._-]*) echo "error: invalid expected spawn generation" >&2; exit 2 ;;
+      esac
+      EXPECTED_SPAWN_GEN=$2
+      shift
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -420,6 +431,13 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+if [ -n "$EXPECTED_SPAWN_GEN" ]; then
+  if ! fm_backlog_meta_spawn_gen "$META" "$STATE" \
+    || [ "$FM_BACKLOG_META_SPAWN_GEN" != "$EXPECTED_SPAWN_GEN" ]; then
+    echo "REFUSED: task $ID no longer identifies expected spawn generation $EXPECTED_SPAWN_GEN; nothing was changed" >&2
+    exit 1
+  fi
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)

@@ -29,7 +29,7 @@
 # The cadence-gated scan below then evaluates at most once per
 # FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
 # that --startup performs the same scan immediately in the locked session
-# start's deferred worker. Each scan uses an aggregate
+# start's deferred worker. Each classification scan uses an aggregate
 # FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
 # The scan enforces that budget itself through a whole-second deadline, and the
@@ -59,6 +59,19 @@
 # path share the same receipt store.
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
 # only after its corresponding inactive-outcome wake is handled.
+# After creating that receipt and successfully publishing (or finding) its
+# queued presentation, the main-home scan invokes standard non-force teardown.
+# Already presented or reported receipts also permit a cleanup retry.
+# Cleanup runs after releasing the reconciliation meta lock and outside the
+# classification scan's process-group timeout, then passes the receipt's
+# incarnation through fm-teardown.sh's --expected-spawn-gen guard.
+# A publication failure leaves the task and pending receipt for retry; a
+# teardown safety refusal retains the task and receipt without bypassing it.
+# Successful cleanup leaves the receipt available for later acknowledgement,
+# and repeated scans reuse receipts and suppress duplicate queued presentations.
+# Secondmate-home delivery does not trigger automatic cleanup.
+# tests/fm-inactive-reconcile.test.sh covers cleanup ordering, publication
+# failure, safety refusal, incarnation replacement, and repeated reconciliation.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
@@ -75,8 +88,9 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# Terminal classification reads only durable local state and fm-crew-state.sh;
+# it never invokes a PR poll or a state *.check.sh. Subsequent standard teardown
+# may consult the forge and refresh the clone under its own safety contract.
 set -u
 export LC_ALL=C
 
@@ -87,6 +101,7 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+RECONCILE_AUTO_TEARDOWN_RECORD=
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -191,11 +206,18 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
+  RECORD_CLEANUP_RECORD=
+  if [ -f "$RECORD_PRESENTED" ] && [ ! -L "$RECORD_PRESENTED" ]; then
+    RECORD_CLEANUP_RECORD=$RECORD_PRESENTED
+  elif [ -f "$RECORD_REPORTED" ] && [ ! -L "$RECORD_REPORTED" ]; then
+    RECORD_CLEANUP_RECORD=$RECORD_REPORTED
+  fi
   if [ -f "$RECORD_PRESENTED" ] || [ -f "$RECORD_REPORTED" ]; then
     RECORD_PENDING=
     return 0
   fi
   if [ -f "$RECORD_PENDING" ] && [ ! -L "$RECORD_PENDING" ]; then
+    RECORD_CLEANUP_RECORD=$RECORD_PENDING
     return 0
   fi
   mkdir -p "$OUTCOME_DIR" || return 1
@@ -224,6 +246,15 @@ mark_reported() { # <record>
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   reported=${record%.pending}.reported
   mv -f "$record" "$reported"
+}
+automatic_teardown() { # <id> <receipt> <incarnation>
+  local id=$1 receipt=$2 incarnation=$3
+  "$SCRIPT_DIR/fm-teardown.sh" "$id" --expected-spawn-gen "$incarnation" || {
+    printf 'automatic teardown refused: task=%s receipt=%s; task retained for retry\n' \
+      "$id" "$(basename "$receipt")" >&2
+    return 0
+  }
+  printf 'automatic teardown: task=%s complete\n' "$id"
 }
 
 queue_key_exists() { # <key>
@@ -474,7 +505,7 @@ report_child() { # <id>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 presentation_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -509,29 +540,44 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     outcome_key="inactive-outcome-main-$id-$state"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
-  [ -n "$RECORD_PENDING" ] || return 0
+  [ -n "$RECORD_PENDING" ] || {
+    if [ -z "$self" ]; then
+      RECONCILE_AUTO_TEARDOWN_RECORD=${RECORD_CLEANUP_RECORD:-}
+    fi
+    return 0
+  }
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
     else
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "inactive terminal outcome needs parent report: child=$id state=$state"
+      RECONCILE_AUTO_TEARDOWN_RECORD=
     fi
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
-  queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
+  queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || presentation_rc=$?
+  [ "$presentation_rc" -le 1 ] || return 1
+  RECONCILE_AUTO_TEARDOWN_RECORD=$RECORD_PENDING
 }
 
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0 receipt=
+  RECONCILE_AUTO_TEARDOWN_RECORD=
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock" || return 1
   reconcile_direct_child_locked "$id" "$meta" "$self" "$timeout" || rc=$?
+  receipt=${RECONCILE_AUTO_TEARDOWN_RECORD:-}
+  if [ "$rc" -eq 0 ] && [ -n "$receipt" ]; then
+    printf '%s\t%s\t%s\n' "$id" "$(record_value "$receipt" incarnation)" "$receipt" >&3 || rc=$?
+  fi
   fm_lock_release "$lock"
+  RECONCILE_AUTO_TEARDOWN_RECORD=
   return "$rc"
+
 }
 
 # SCAN_FIRST_VISIT_PENDING is armed by scan() before its passes. The deadline
@@ -640,11 +686,17 @@ case "$mode" in
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
-      :
-    elif [ "$?" -ne 124 ]; then
-      exit 1
-    fi
+    mkdir -p "$STATE" || exit 1
+    cleanup_requests=$(mktemp "$STATE/.inactive-cleanup.XXXXXX") || exit 1
+    trap 'rm -f "$cleanup_requests"' EXIT
+    scan_rc=0
+    fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup" \
+      3> "$cleanup_requests" || scan_rc=$?
+    while IFS=$'\t' read -r id incarnation receipt; do
+      valid_id "$id" && valid_id "$incarnation" && [ -n "$receipt" ] || continue
+      automatic_teardown "$id" "$receipt" "$incarnation"
+    done < "$cleanup_requests"
+    [ "$scan_rc" -eq 0 ] || [ "$scan_rc" -eq 124 ] || exit 1
     ;;
   _scan-locked)
     [ "$#" -eq 2 ] || exit 2

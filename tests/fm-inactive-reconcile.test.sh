@@ -39,7 +39,19 @@ SH
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
   capture-pane) printf 'idle\n> \n' ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$FM_HOME/endpoint-cleanup.log"
+    for receipt in "$FM_HOME/state/terminal-outcomes/"*.pending; do
+      [ -f "$receipt" ] || continue
+      printf 'receipt-present\n' >> "$FM_HOME/endpoint-cleanup.log"
+    done
+    ;;
 esac
+SH
+  cat > "$fake/ps" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -u ] || exit 0
+exec /bin/ps "$@"
 SH
   local tool
   for tool in gh gh-axi curl; do
@@ -817,6 +829,138 @@ test_reconciliation_never_calls_forge() {
   [ ! -s "$WORLD/forge.log" ] || fail "reconciliation invoked a forge command: $(cat "$WORLD/forge.log")"
   pass "reconciliation makes zero forge or PR API calls"
 }
+
+test_automatic_teardown_invokes_standard_cleanup() {
+  make_world automatic-teardown
+  write_child "$MAIN" child 'done: green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
+  [ ! -e "$MAIN/state/child.meta" ] || fail "standard teardown retained eligible task metadata: $(cat "$WORLD/reconcile.out")"
+  [ ! -e "$MAIN/state/child.status" ] || fail "standard teardown retained volatile status"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "standard teardown removed terminal receipt"
+  grep -Fxq 'receipt-present' "$MAIN/endpoint-cleanup.log" || fail "endpoint cleanup preceded durable receipt"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup >/dev/null
+  [ "$(grep -c '^kill-window' "$MAIN/endpoint-cleanup.log")" = 1 ] || fail "repeated reconciliation duplicated endpoint cleanup"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "repeated reconciliation duplicated presentation"
+  pass "terminal reconciliation executes standard teardown after recording the receipt"
+}
+
+test_slow_teardown_outlives_classification_budget() {
+  local outcome started elapsed
+  for outcome in complete refused; do
+    make_world "slow-teardown-$outcome"
+    write_child "$MAIN" child 'done: green'
+    if [ "$outcome" = refused ]; then
+      awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+      mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+      age "$MAIN/state/child.meta"
+    fi
+    mkdir -p "$WORLD/root/bin"
+    cat > "$WORLD/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+printf 'guard-finished\n' > "$FM_HOME/slow-guard.log"
+SH
+    chmod +x "$WORLD/root/bin/fm-guard.sh"
+    started=$(date +%s)
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' \
+      run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
+    elapsed=$(( $(date +%s) - started ))
+    [ "$elapsed" -ge 3 ] && [ -f "$MAIN/slow-guard.log" ] || fail "classification timeout interrupted standard teardown: $(cat "$WORLD/reconcile.out")"
+    [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "slow teardown lost terminal receipt"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "slow teardown lost presentation wake"
+    if [ "$outcome" = complete ]; then
+      [ ! -e "$MAIN/state/child.meta" ] || fail "slow standard teardown did not finish cleanup"
+      grep -Fxq 'receipt-present' "$MAIN/endpoint-cleanup.log" || fail "slow cleanup preceded durable receipt"
+    else
+      grep -Fq 'scout task child has no report' "$WORLD/reconcile.out" || fail "slow teardown did not reach its safety refusal"
+      [ -f "$MAIN/state/child.meta" ] && [ -f "$MAIN/state/child.status" ] || fail "slow safety refusal removed durable task state"
+      [ ! -e "$MAIN/endpoint-cleanup.log" ] || fail "slow safety refusal killed the endpoint"
+    fi
+  done
+  pass "standard teardown can finish or refuse beyond the classification timeout"
+}
+
+test_automatic_teardown_refusal_preserves_task() {
+  local attempt
+  make_world automatic-teardown-refused
+  write_child "$MAIN" child 'done: green'
+  awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  for attempt in 1 2; do
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
+    grep -Fq 'scout task child has no report' "$WORLD/reconcile.out" || fail "standard scout safety check did not refuse cleanup"
+    [ -f "$MAIN/state/child.meta" ] && [ -f "$MAIN/state/child.status" ] || fail "teardown refusal removed task state"
+    [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "teardown refusal lost or duplicated terminal receipt"
+    [ ! -e "$MAIN/endpoint-cleanup.log" ] || fail "teardown refusal killed the endpoint"
+  done
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "retry duplicated queued presentation"
+  pass "standard teardown safety refusal preserves task and receipt across retries"
+}
+
+test_failed_presentation_preserves_task_until_retry() {
+  local attempt
+  make_world presentation-failure
+  write_child "$MAIN" child 'done: green'
+  mkdir "$MAIN/state/.wake-queue"
+  for attempt in 1 2; do
+    if FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1; then
+      fail "failed presentation append was reported as successful"
+    fi
+    [ -f "$MAIN/state/child.meta" ] && [ -f "$MAIN/state/child.status" ] || fail "failed presentation removed task state"
+    [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "failed presentation lost or duplicated its receipt"
+    [ ! -e "$MAIN/endpoint-cleanup.log" ] || fail "failed presentation killed the endpoint"
+  done
+  rmdir "$MAIN/state/.wake-queue"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
+  [ ! -e "$MAIN/state/child.meta" ] || fail "successful publication retry did not clean up task"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "publication retry did not queue exactly one wake"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "publication retry lost terminal receipt"
+  pass "failed wake publication preserves the task until a durable retry"
+}
+
+test_teardown_checks_expected_generation_under_lock() {
+  local holder teardown_pid i
+  make_world teardown-generation-race
+  write_child "$MAIN" child 'done: green' spawn-old
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    meta="$FM_STATE_OVERRIDE/child.meta"
+    lock=$(fm_meta_lock_path "$meta")
+    fm_lock_acquire_wait "$lock"
+    : > "$2/meta-held"
+    while [ ! -e "$2/replace-meta" ]; do sleep 0.05; done
+    awk '\''{ sub(/^spawn_gen=.*/, "spawn_gen=spawn-new"); print }'\'' "$meta" > "$meta.tmp"
+    mv "$meta.tmp" "$meta"
+    printf "working: replacement active\n" > "$FM_STATE_OVERRIDE/child.status"
+    fm_lock_release "$lock"
+  ' _ "$ROOT" "$WORLD" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$WORLD/meta-held" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$WORLD/meta-held" ] || { reap "$holder"; fail "metadata holder did not start"; }
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$MAIN" \
+    FM_STATE_OVERRIDE="$MAIN/state" FM_DATA_OVERRIDE="$MAIN/data" FM_CONFIG_OVERRIDE="$MAIN/config" \
+    "$ROOT/bin/fm-teardown.sh" child --expected-spawn-gen spawn-old > "$WORLD/teardown.out" 2>&1 &
+  teardown_pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$MAIN/state/.control-child.lock" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$MAIN/state/.control-child.lock" ] || { reap "$holder"; reap "$teardown_pid"; fail "teardown did not reach lifecycle lock"; }
+  : > "$WORLD/replace-meta"
+  wait "$holder" || fail "metadata replacement failed"
+  if wait "$teardown_pid"; then fail "teardown accepted a replaced incarnation"; fi
+  grep -Fq 'expected spawn generation spawn-old' "$WORLD/teardown.out" || fail "teardown did not refuse the incarnation mismatch: $(cat "$WORLD/teardown.out")"
+  grep -Fxq 'spawn_gen=spawn-new' "$MAIN/state/child.meta" || fail "teardown removed the replacement record"
+  grep -Fxq 'working: replacement active' "$MAIN/state/child.status" || fail "teardown removed replacement status"
+  [ ! -e "$MAIN/endpoint-cleanup.log" ] || fail "teardown killed replacement endpoint"
+  pass "teardown compares the expected incarnation after acquiring its metadata lock"
+}
+
+test_automatic_teardown_invokes_standard_cleanup
+test_slow_teardown_outlives_classification_budget
+test_automatic_teardown_refusal_preserves_task
+test_failed_presentation_preserves_task_until_retry
+test_teardown_checks_expected_generation_under_lock
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
