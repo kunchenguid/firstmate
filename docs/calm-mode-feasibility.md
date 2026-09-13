@@ -84,7 +84,7 @@ The adapter probes for that exact method and, per the [compatibility contract](c
 While Calm is active, the adapter passes a shallow thinking-free presentation copy into Pi's ordinary layout calculation, independent of Pi's own hide-thinking setting, then retains the original message on the component for invalidation.
 The persisted assistant message, provider context, tool execution, export data, and Pi's own hide-thinking preference remain unchanged.
 Thinking-only assistant messages render zero rows under Calm, and thinking before visible assistant text adds no spacing beyond the text-only baseline.
-Turning Calm off restores whatever Pi hide-thinking setting the captain already had; `/export` and `/share` keep full thinking because stock export rendering disables the hide path.
+Turning Calm off restores whatever Pi hide-thinking setting the captain already had; `/export` and `/share` keep full thinking because they render from session data, which the display-only copy never touches.
 
 The disconfirming checks deliberately retain supported boundaries.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.

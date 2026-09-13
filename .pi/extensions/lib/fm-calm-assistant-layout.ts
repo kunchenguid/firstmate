@@ -68,6 +68,7 @@ export function installCalmAssistantLayout(): void {
 
   AssistantMessageComponent.prototype.updateContent = function (
     message: AssistantMessage,
+    isStreaming?: boolean,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
     const hideThinking =
@@ -86,7 +87,7 @@ export function installCalmAssistantLayout(): void {
           }
         : message;
 
-    originalUpdateContent.call(this, presentationMessage);
+    originalUpdateContent.call(this, presentationMessage, isStreaming);
     if (presentationMessage !== message) state.lastMessage = message;
   };
 

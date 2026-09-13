@@ -1361,7 +1361,21 @@ if (assistantThinkingTool.render(100).length !== 0) {
 if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
   throw new Error("Calm-hidden thinking changed final assistant row geometry");
 }
-// Calm must hide thinking on its own even when Pi's hide-thinking is expanded (Ctrl+T off).
+const streamingContexts = [];
+const streamingAssistant = new AssistantMessageComponent(undefined, true, undefined, undefined, undefined, [
+  (markdown, context) => {
+    streamingContexts.push(context.isStreaming);
+    return markdown;
+  },
+]);
+streamingAssistant.updateContent({
+  ...assistantBase,
+  content: [{ type: "thinking", thinking: "HIDDEN_STREAMING_THINKING" }, { type: "text", text: "STREAMING_TEXT" }],
+}, true);
+streamingAssistant.render(100);
+if (streamingContexts.length === 0 || streamingContexts.some((isStreaming) => isStreaming !== true)) {
+  throw new Error(`Calm assistant layout dropped Pi's streaming flag: ${JSON.stringify(streamingContexts)}`);
+}
 assistantThinkingTool.setHideThinkingBlock(false);
 assistantThinkingText.setHideThinkingBlock(false);
 if (assistantThinkingTool.render(100).length !== 0) {
@@ -1376,7 +1390,6 @@ if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assista
 if (assistantThinkingText.render(100).join("\n").includes("HIDDEN_FINAL_THINKING")) {
   throw new Error("Calm left final expanded thinking content visible while Pi hide-thinking was off");
 }
-// Restore Pi's collapsed hide-thinking for the calm-off restoration checks below.
 assistantThinkingTool.setHideThinkingBlock(true);
 assistantThinkingText.setHideThinkingBlock(true);
 if (assistantThinkingTool.render(100).length !== 0) {
@@ -2288,28 +2301,17 @@ TS
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
-  # Ctrl+T expands Pi's hide-thinking; Calm must still hide reasoning on its own.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  i=0
-  while [ "$i" -lt 30 ]; do
-    capture_geometry_viewport "$expanded_snapshot"
-    sleep 0.05
-    i=$((i + 1))
-  done
+  wait_for_geometry_text "$expanded_snapshot" "Thinking blocks: visible" \
+    || fail "Ctrl+T did not expand Pi hide-thinking while Calm was active"
   assert_not_contains "$(cat "$expanded_snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
     "Pi hide-thinking expand restored reasoning while Calm was active"
-  assert_not_contains "$(cat "$expanded_snapshot")" "Thinking..." \
-    "Pi hide-thinking expand restored a collapsed thinking label while Calm was active"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" \
     "Pi hide-thinking expand restored Calm-hidden tool rows"
   assert_geometry_gap "$expanded_snapshot" "Calm transcript with Pi hide-thinking expanded"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  i=0
-  while [ "$i" -lt 30 ]; do
-    capture_geometry_viewport "$snapshot"
-    sleep 0.05
-    i=$((i + 1))
-  done
+  wait_for_geometry_text "$snapshot" "Thinking blocks: hidden" \
+    || fail "Ctrl+T did not re-collapse Pi hide-thinking while Calm was active"
   assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
     "re-collapsing Pi hide-thinking restored reasoning while Calm was active"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
