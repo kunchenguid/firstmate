@@ -554,7 +554,7 @@ This file is not inherited by secondmate homes, so each home watches the tools i
 
 `FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
 A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
-The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
+The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because the watcher reports a timed-out run as a `check:` wake and would otherwise repeat that timeout on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
