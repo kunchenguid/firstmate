@@ -461,6 +461,7 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
         fresh = (time.time() - os.path.getmtime(os.path.join(state_dir, ".fleet-heartbeat.json"))) <= 15
     except OSError:
         hb, fresh = {}, False
+    lease = os.path.exists(os.path.join(state_dir, ".fleet-lease"))
     wait = bool(hb.get("provider_wait")) or os.path.exists(os.path.join(state_dir, ".fleet-wait"))
     blocked = bool(hb.get("blocked")) or os.path.exists(os.path.join(state_dir, ".fleet-blocked"))
     reason = hb.get("blocked_reason") or ""
@@ -488,6 +489,8 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
                 state = "running"
             else:
                 state = "idle"
+    elif not alive and pid is None and not hb and not lease:
+        state = "ready"
     elif not alive and (hb.get("state_hint") == "stopped") and pid is None:
         state = "stopped"
     else:

@@ -72,7 +72,8 @@ The manager daemon is the single writer of its heartbeat file.
 ## Status
 
 `fm-fleet.sh status` answers which managers are alive, what each owns, which shard is blocked, who waits on a model, and who stopped progressing.
-States are `running`, `model-wait`, `idle`, `blocked`, `stalled`, `stopped`, and `dead`.
+States are `running`, `model-wait`, `idle`, `blocked`, `stalled`, `ready`, `stopped`, and `dead`.
+`ready` means registered but never started; a manager may wait in `ready` rather than having ownership fabricated for it.
 Waiting on a provider is healthy and never counts as stalled.
 `stalled` means no meaningful progress inside `FM_FLEET_STALL_SECS` without a wait or block.
 `stopped` means a clean stop with the shard still registered; `dead` means the process is gone without one.
