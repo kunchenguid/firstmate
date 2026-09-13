@@ -31,6 +31,13 @@ Use `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` agai
 
 Verify setup by spawning a small task and confirming metadata contains `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 
+## Session launch environment
+
+Creating the shared background session births the zellij server, which hands its startup environment to every pane created afterwards.
+Firstmate drops the launcher's color control (`NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`) before that launch, so a Firstmate started by an agent under `NO_COLOR=1` cannot leave every crew pane monochrome.
+The list is shared with the tmux and Herdr adapters through `bin/fm-backend-launch-env-lib.sh`.
+An existing session is reused with no environment change, and every unrelated launch variable is left intact.
+
 ## Task shape and home isolation
 
 Every task receives one tab in the shared Zellij session.
