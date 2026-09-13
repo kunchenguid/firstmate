@@ -661,7 +661,7 @@ Observed output:
 
 ```text
 ok - real Herdr: a supported-harness spawn receives its deterministic name on the exact new pane
-ok - real Herdr: an unresolvable name collision stops visibly and preserves the exact pane and task copy
+ok - real Herdr: an unresolvable name collision stops visibly, closes the exact pane, and keeps the task copy
 ok - real Herdr: mutable names never select the rename target or disturb a sibling pane
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
