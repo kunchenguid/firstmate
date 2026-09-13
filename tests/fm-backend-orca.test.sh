@@ -174,11 +174,9 @@ test_send_text_submit_verifies_empty_composer_after_enter() {
   pass "fm_backend_orca_send_text_submit: verifies empty composer after Enter with one bounded read"
 }
 
-test_send_text_submit_borderless_claude_confirms() {
-  # The #2029 analogue this adapter never received: a borderless claude
-  # composer (bare `❯` row between horizontal rules) must confirm a submit.
-  # Before consolidation orca knew only the bordered shape, so every steer to
-  # a borderless harness exited unconfirmed and --resolve-key never closed.
+test_send_text_submit_borderless_lone_glyph_overlap_defers() {
+  # A lone `❯` row between horizontal rules is byte-identical to Pi's overlap
+  # shape; without an identity probe Orca defers rather than falsely confirming.
   local out
   orca_case send-submit-borderless
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
@@ -186,8 +184,8 @@ test_send_text_submit_borderless_claude_confirms() {
   printf '{"ok":true,"result":{"terminal":{"tail":["────────────────","❯","────────────────"]}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "a borderless claude composer should confirm the submit, got '$out'"
-  pass "fm_backend_orca_send_text_submit: a borderless claude composer confirms delivery (the missing #2029 shape)"
+  [ "$out" = unknown ] || fail "a lone '❯' overlap must defer submit confirmation without identity, got '$out'"
+  pass "fm_backend_orca_send_text_submit: a lone '❯' overlap defers without identity"
 }
 
 test_composer_state_stale_banner_never_wins() {
@@ -1329,7 +1327,7 @@ test_capture_fails_on_orca_error_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
-test_send_text_submit_borderless_claude_confirms
+test_send_text_submit_borderless_lone_glyph_overlap_defers
 test_composer_state_stale_banner_never_wins
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
