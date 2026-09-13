@@ -13,11 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
-
-## Routing table
-
-`data/secondmates.md` has one parser-compatible line per persistent second mate.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default. ## Routing table `data/secondmates.md` has one parser-compatible line per persistent second mate.
 A local route uses:
 
 ```markdown
