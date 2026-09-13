@@ -1240,6 +1240,11 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+<<<<<<< HEAD
+=======
+`tasks-axi` and `quota-axi` are required bootstrap tools in every profile.
+An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
+>>>>>>> 86e0244 (no-mistakes(document): Align forge toolchain documentation)
 For a registered GitHub project, an absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
 An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with its required floor, install command, and explicit text fallback.
