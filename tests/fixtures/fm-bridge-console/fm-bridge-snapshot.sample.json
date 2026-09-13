@@ -1,0 +1,151 @@
+{
+  "schema": "fm-bridge-snapshot.v1",
+  "generated": "2026-09-13T22:00:00Z",
+  "host": "landons-mac-mini",
+  "fm_home": "/Users/landonprojects/firstmate",
+  "quota": {
+    "ok": true,
+    "error": null,
+    "observed_at": "2026-09-13T22:00:00Z",
+    "providers": [
+      {
+        "provider": "claude",
+        "scope": "all_models",
+        "percent_remaining": 5,
+        "spend_priority": 2.88,
+        "runway": "through_reset",
+        "limited_by": "seven_day",
+        "resets_at": "2026-09-14T00:00:00Z",
+        "projected_exhausted_at": null
+      },
+      {
+        "provider": "codex",
+        "scope": "all_models",
+        "percent_remaining": 62,
+        "spend_priority": 0.9,
+        "runway": "through_reset",
+        "limited_by": "five_hour",
+        "resets_at": "2026-09-14T02:30:00Z",
+        "projected_exhausted_at": null
+      }
+    ],
+    "attention": [
+      {"provider": "kimi", "kind": "auth_required", "detail": "credential expired"}
+    ]
+  },
+  "agents": [
+    {
+      "id": "cim-signal",
+      "kind": "ship",
+      "parent": null,
+      "project": "cimulate",
+      "harness": "codex",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "backend": "herdr",
+      "endpoint_alive": true,
+      "current_state": "running",
+      "last_status": {"state": "working", "note": "implementing fix for signal drop", "at": "2026-09-13T21:55:00Z"},
+      "started_at": "2026-09-13T21:15:00Z",
+      "elapsed_seconds": 2520,
+      "pr": null,
+      "worktree": "/Users/landonprojects/.treehouse/cimulate-abc/1/cimulate",
+      "context": {
+        "current_tokens": 49678,
+        "peak_tokens": 49678,
+        "window_tokens": 258400,
+        "percent": 19.2,
+        "session_log": "/Users/landonprojects/.codex/sessions/cim-signal.jsonl",
+        "measured_at": "2026-09-13T21:59:00Z"
+      },
+      "tokens": {"total": 968992, "output": 12345},
+      "validation": {
+        "run_id": "run-1",
+        "branch": "fm/cim-signal",
+        "status": "running",
+        "current_step": "review",
+        "steps": [{"step": "review", "status": "completed", "duration_ms": 149776, "findings": 0}]
+      },
+      "sources": {"context": "codex session log model_context_window", "validation": "no-mistakes axi status"}
+    },
+    {
+      "id": "fm-bridge-console",
+      "kind": "ship",
+      "parent": null,
+      "project": "firstmate",
+      "harness": "claude",
+      "model": "claude-sonnet-5",
+      "effort": "high",
+      "backend": "herdr",
+      "endpoint_alive": true,
+      "current_state": "running",
+      "last_status": {"state": "working", "note": "building terminal console", "at": "2026-09-13T21:58:00Z"},
+      "started_at": "2026-09-13T20:30:00Z",
+      "elapsed_seconds": 6600,
+      "pr": null,
+      "worktree": "/Users/landonprojects/.treehouse/firstmate-11c53f/3/firstmate",
+      "context": {
+        "current_tokens": 189000,
+        "peak_tokens": 191000,
+        "window_tokens": 258400,
+        "percent": 73.1,
+        "session_log": "/Users/landonprojects/.claude/sessions/fm-bridge-console.jsonl",
+        "measured_at": "2026-09-13T21:59:30Z"
+      },
+      "tokens": {"total": 2200000, "output": 45000},
+      "validation": null,
+      "sources": {"context": "claude session log token table", "validation": "direct-PR mode, no no-mistakes run"}
+    },
+    {
+      "id": "orca-scout-7",
+      "kind": "scout",
+      "parent": null,
+      "project": "baseball",
+      "harness": "codex",
+      "model": null,
+      "effort": null,
+      "backend": "orca",
+      "endpoint_alive": false,
+      "current_state": null,
+      "last_status": {"state": "done", "note": "report.md written", "at": "2026-09-13T18:00:00Z"},
+      "started_at": "2026-09-13T17:00:00Z",
+      "elapsed_seconds": 3600,
+      "pr": null,
+      "worktree": null,
+      "context": null,
+      "tokens": null,
+      "validation": null,
+      "sources": {"context": "endpoint dead, no session log found", "validation": "scout task, no validation run"}
+    },
+    {
+      "id": "fleet-secondmate",
+      "kind": "secondmate",
+      "parent": null,
+      "project": null,
+      "harness": "pi",
+      "model": null,
+      "effort": null,
+      "backend": "tmux",
+      "endpoint_alive": true,
+      "current_state": "idle",
+      "last_status": {"state": "done", "note": "idle, queue empty", "at": "2026-09-13T20:00:00Z"},
+      "started_at": null,
+      "elapsed_seconds": null,
+      "pr": null,
+      "worktree": null,
+      "context": null,
+      "tokens": null,
+      "validation": null,
+      "sources": {"context": "secondmate primary, not sampled", "validation": "n/a"}
+    }
+  ],
+  "unrecorded_agents": [
+    {"pid": 91318, "command": "codex --resume abc123 --model gpt-5.5", "elapsed_seconds": 1292954}
+  ],
+  "backlog": {"in_flight": 4, "held": 2, "ready": 39, "blocked": 0},
+  "upstream": {"status": "behind", "new_commits": 3, "line": "upstream: 3 new commits not in origin/main", "checked_at": "2026-09-13T21:00:00Z"},
+  "sources": [
+    {"name": "quota-axi", "ok": true, "elapsed_ms": 812, "error": null},
+    {"name": "fm-crew-state", "ok": true, "elapsed_ms": 340, "error": null}
+  ]
+}

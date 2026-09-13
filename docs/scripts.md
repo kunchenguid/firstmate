@@ -22,6 +22,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-mate-view.sh`        | Inspect registered second mates across local and remote hosts in parallel            |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
+| `fm-bridge-console.py`  | Textual terminal console over the fm-bridge-snapshot.v1 collector: quota, fleet, backlog, upstream, and unrecorded-process observability; read-only keys run directly, everything else queues a note for firstmate |
+| `fm-bridge.sh`           | Launch `fm-bridge-console.py` through `uv run`, resolving its PEP 723 inline dependencies without a global install |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes, classifying every live mate left on the target commit for restart or fallback nudge |
 | `fm-upstream-sync.sh`    | Merge upstream commits into an isolated worktree branch and open a PR against origin/main, merging rather than rebasing fork-carried changes |
@@ -160,3 +162,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
 | `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
 | `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+
+## Opening the bridge console in a herdr pane
+
+Run `bin/fm-bridge.sh` in any herdr pane (a bare terminal window works too) and it fills the pane like any other full-screen terminal app, exiting on `ctrl+q`.
+This does not drive herdr lifecycle itself, so open or close the pane the same way you would for any other command.
