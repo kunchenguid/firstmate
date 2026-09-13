@@ -1517,7 +1517,7 @@ test_no_run_herdr_done_agent_status_is_not_crew_done() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
-  FM_FAKE_HERDR_AGENT_STATUS=done
+  FM_FAKE_HERDR_AGENT_STATUS="done"
   FM_FAKE_HERDR_PROCESS=agent
   local out; out=$(run_crew_state "$d" feat-herdr-codex-done)
   assert_contains "$out" "state: unknown" "a completed Herdr turn without a task outcome stays unknown"
