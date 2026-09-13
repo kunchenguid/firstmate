@@ -149,20 +149,11 @@ MUSE_BIN=$(PATH="$ORIGINAL_PATH" command -v muse 2>/dev/null || true)
 if [ -z "$MUSE_BIN" ]; then
   printf '# muse is not installed; Muse-on-Herdr submit confirmation was not verified here\n'
 else
-  # muse has no probe-friendly version flag: docs/verification/muse.md records
-  # the launcher execing a version-suffixed muse-bin-<version> beside itself as
-  # the authoritative version surface, and the newest installed one is what the
-  # launcher will exec. Reading it off disk keeps this guard from invoking an
-  # unproven flag that could drop into an interactive TUI instead of printing.
+  # muse has no probe-friendly version flag, and the build this record must name
+  # is the one actually running in the pane, so the version is read below from
+  # the pane's own process info once the readiness gate has seen it. Until then
+  # the messages carry the honest placeholder.
   MUSE_VERSION=version-unknown
-  muse_newest=
-  for muse_candidate in "${MUSE_BIN%/*}"/muse-bin-*; do
-    [ -x "$muse_candidate" ] || continue
-    if [ -z "$muse_newest" ] || [ "$muse_candidate" -nt "$muse_newest" ]; then
-      muse_newest=$muse_candidate
-    fi
-  done
-  [ -z "$muse_newest" ] || MUSE_VERSION=${muse_newest##*/muse-bin-}
   MUSE_CONFIG_HOME="$TMP_ROOT/muse-config"
   MUSE_DATA_HOME="$TMP_ROOT/muse-data"
   MUSE_WORKSPACE="$TMP_ROOT/muse-workspace"
@@ -210,41 +201,60 @@ else
   [ "$muse_idle" = 1 ] \
     || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live agent process with a shared empty composer in the lab pane (last process state '$muse_process', last composer state '$muse_state')"
 
+  # The build that ran is the build this record may name, and the pane's own
+  # process info carries it: muse's launcher execs a version-suffixed
+  # muse-bin-<version>, which docs/verification/muse.md treats as muse's
+  # authoritative version surface.
+  muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
+  muse_exec_name=$(printf '%s' "$muse_proc_json" | jq -r '
+    [.result.process_info.foreground_processes[]?
+     | (.name // empty), ((.argv // [])[0] // empty), (.argv0 // empty)]
+    | map(split("/") | last)
+    | map(select(startswith("muse-bin-")))
+    | first // empty' 2>/dev/null || true)
+  [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
+
   # Best-effort route preference, not proof: a readable native status here means
   # fm_backend_herdr_send_text_submit would take its native branch instead of
-  # the composer one this leg is about, so the leg refuses rather than reporting
-  # a verdict whose origin it cannot name. It proves nothing on its own, because
+  # the composer one this leg is about, so a verdict from this run could not be
+  # attributed to either. It proves nothing on its own, because
   # fm_backend_herdr_agent_status_raw returns the same empty string for a pane
   # with no registered agent and for an agent get that simply failed.
+  # A Herdr that starts registering an agent for Muse panes is an upstream
+  # improvement rather than a firstmate defect, so this reports unverified and
+  # skips the leg exactly as an absent Muse does, leaving CHECKED untouched
+  # instead of turning an unchanged repository red.
   muse_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
-  [ -z "$muse_raw" ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: this leg is about the composer fallback, but the native agent probe now reads '$muse_raw', so the submit verdict would take the native branch instead"
+  if [ -n "$muse_raw" ]; then
+    printf '# herdr now registers a native agent for the Muse pane (agent_status %s), so a steer would take the native branch rather than the composer fallback this leg covers; Muse-on-Herdr submit confirmation was not verified here\n' \
+      "$muse_raw"
+  else
+    MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
+    muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
+      || fail "send_text_submit failed to run against Muse Code ($MUSE_VERSION) on $HERDR_VER"
+    CHECKED=$((CHECKED + 1))
+    [ "$muse_verdict" = empty ] \
+      || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: a landed steer must confirm empty, got '$muse_verdict'"
 
-  MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
-  muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
-    || fail "send_text_submit failed to run against Muse Code ($MUSE_VERSION) on $HERDR_VER"
-  CHECKED=$((CHECKED + 1))
-  [ "$muse_verdict" = empty ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: a landed steer must confirm empty, got '$muse_verdict'"
-
-  # Same two-occurrence rule as the Claude leg: the token must appear in the
-  # submitted prompt and again in the echo provider's reply, so a merely
-  # cleared composer cannot pass for a delivered instruction.
-  muse_landed=0
-  i=0
-  while [ "$i" -lt 90 ]; do
-    muse_screen=$(lab pane read "$MUSE_PANE" --source recent --lines 200 2>/dev/null || true)
-    muse_occurrences=$(printf '%s\n' "$muse_screen" | grep -F -c "$MUSE_TOKEN" || true)
-    if [ "$muse_occurrences" -ge 2 ]; then
-      muse_landed=1
-      break
-    fi
-    i=$((i + 1))
-    sleep 1
-  done
-  [ "$muse_landed" = 1 ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
-  pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle bare U+27E9 row as empty, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
+    # Same two-occurrence rule as the Claude leg: the token must appear in the
+    # submitted prompt and again in the echo provider's reply, so a merely
+    # cleared composer cannot pass for a delivered instruction.
+    muse_landed=0
+    i=0
+    while [ "$i" -lt 90 ]; do
+      muse_screen=$(lab pane read "$MUSE_PANE" --source recent --lines 200 2>/dev/null || true)
+      muse_occurrences=$(printf '%s\n' "$muse_screen" | grep -F -c "$MUSE_TOKEN" || true)
+      if [ "$muse_occurrences" -ge 2 ]; then
+        muse_landed=1
+        break
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    [ "$muse_landed" = 1 ] \
+      || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
+    pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle bare U+27E9 row as empty, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
+  fi
 fi
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"
