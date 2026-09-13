@@ -243,7 +243,7 @@ test_ship_briefs_forbid_agent_coauthor_trailer() {
     brief="$home/data/$id/brief.md"
     # Scope every assertion to the rendered attribution block, so unrelated
     # brief prose cannot stand in for a clause that went missing.
-    block=$(sed -n '/^# Commit attribution/,/default branch/p' "$brief")
+    block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
     assert_contains "$block" "co-author" "$id: brief did not mention the co-author trailer ban at all"
     assert_contains "$block" "HARD RULE" "$id: co-author ban was not phrased as a hard, unmissable rule"
     printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
@@ -264,14 +264,51 @@ ROWS
   # arm must permit the worker's own pre-run rewrite, forbid any rewrite while
   # the run owns the branch, and route the post-run disclosure off the terminal
   # `done:` line that firstmate parses.
-  block=$(sed -n '/^# Commit attribution/,/default branch/p' "$home/data/brief-coauthor-nm/brief.md")
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$home/data/brief-coauthor-nm/brief.md")
   printf '%s\n' "$block" | grep -Eiq "while a run is active.*(never|not)|(never|not).*while a run is active" \
     || fail "no-mistakes: co-author ban did not forbid rewriting while a run owns the branch"
   printf '%s\n' "$block" | grep -Eiq "force-push" \
     || fail "no-mistakes: co-author ban did not name force-push among the forbidden active-run rewrites"
   printf '%s\n' "$block" | grep -Eiq "note:.*(before|preced).*done:" \
     || fail "no-mistakes: post-run disclosure did not keep off the terminal done: line"
+
+  # The attribution block lands mid-section in the no-mistakes arm, so it must
+  # be a subsection: everything after it - the `--intent` provenance rules, the
+  # ask-user escalation, the `--yes` ban, the do-not-hand-edit rule and the
+  # terminal done gate - still belongs to Definition of done, and a level-1
+  # heading there would file the pipeline contract under commit attribution.
+  brief="$home/data/brief-coauthor-nm/brief.md"
+  sed -n '/^# Definition of done$/,$p' "$brief" | sed '1d' | grep -q '^# ' \
+    && fail "no-mistakes: a level-1 heading inside Definition of done swallows the rest of the contract"
+  sed -n '/^#* *Commit attribution/,$p' "$brief" | grep -Eq '^done: PR|append .done: PR .url. checks green' \
+    || fail "no-mistakes: terminal done gate no longer renders after the attribution block"
+  sed -n '/default branch; that is the captain/{n;p;}' "$brief" | grep -q '^$' \
+    || fail "no-mistakes: attribution block does not end with a blank line before the rest of the contract"
   pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
+}
+
+# The ban is on the trailer, not on shipping, so it must reach EVERY generated
+# brief - a scout's scratch commits can be promoted in place. A scout has no
+# delivery mode and no branch to ship, so its brief carries the prohibition and
+# the default-branch absolute and must not borrow a ship mode's check point.
+test_scout_brief_forbids_agent_coauthor_trailer() {
+  local home brief block
+  home="$TMP_ROOT/coauthor-scout-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-coauthor-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold failed"
+  brief="$home/data/brief-coauthor-scout/brief.md"
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
+  assert_contains "$block" "co-author" "scout brief did not mention the co-author trailer ban at all"
+  assert_contains "$block" "HARD RULE" "scout brief did not phrase the ban as a hard, unmissable rule"
+  printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
+    || fail "scout brief's ban did not cover pipeline-authored commits on the worker's behalf"
+  printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
+    || fail "scout brief's ban did not forbid touching commits already on the default branch"
+  printf '%s\n' "$block" | grep -Eiq "before you push|open or update its PR|report this branch ready|no-mistakes run" \
+    && fail "scout brief borrowed a ship mode's check point despite having no delivery mode"
+  assert_no_grep "EOF" "$brief" "scout brief leaked a heredoc EOF marker"
+  pass "fm-brief.sh: a scout brief forbids an agent co-author commit trailer too"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -960,6 +997,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_briefs_forbid_agent_coauthor_trailer
+test_scout_brief_forbids_agent_coauthor_trailer
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

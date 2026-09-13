@@ -193,10 +193,12 @@ fm_brief_task_content_valid() {  # <file>
 # while the branch is still its own, must not touch the branch while a run owns
 # it, and reports rather than rewriting a pushed PR head afterwards.
 # Never touching the default branch is absolute in every mode.
+# A scout has no delivery mode and no branch to ship, so its arm carries the
+# prohibition and the default-branch absolute with no check point or remedy.
 fm_commit_attribution_block() {  # <task-id> <mode>
   local id=$1 mode=$2 checkpoint=''
   cat <<EOF
-# Commit attribution - HARD RULE, no exceptions
+## Commit attribution - HARD RULE, no exceptions
 NEVER put an agent name as a commit co-author trailer (for example \`Co-Authored-By: Claude ... <noreply@anthropic.com>\`) on any commit on this branch.
 This holds whether you write the commit yourself or a pipeline step writes it on your behalf while applying a fix.
 EOF
@@ -208,6 +210,8 @@ While a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter,
 Once the run is terminal, check the branch again and report a surviving trailer instead of rewriting the pushed PR head: append a \`note:\` line naming those commits immediately before your terminal \`done:\` line, leave that \`done:\` line in its exact required shape, and let firstmate decide before merge.
 EOF
       ;;
+    scout)
+      : ;;
     direct-PR)
       checkpoint='Before you push this branch and before you open or update its PR' ;;
     local-only)
@@ -268,6 +272,7 @@ Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 
 $(fm_commit_attribution_block "$id" "$mode")
+
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
