@@ -51,8 +51,9 @@ Então defina localmente `mode:"live"`, `enabled:true` e `outbound_authorized:tr
 Habilitar `enabled` permite polling; `outbound_authorized` é uma autorização local separada para respostas ao criador.
 O token nunca muda o destinatário permitido e a ponte não amplia as permissões do Firstmate.
 
-`poll_timeout` 0-25, `poll_limit` 1-100, texto até 4096 caracteres e as cotas máximas do exemplo vêm do manual.
-`send_timeout` de 90 segundos, backoff com jitter, limite local de 200000 caracteres por resposta, política `new-only`, bloqueio após 409 e retenção local sem limpeza automática são decisões de implementação.
+`poll_timeout` 0-25, máximo de 100 entradas por poll, texto até 4096 caracteres e as cotas máximas do exemplo vêm do manual.
+Exigir `poll_limit` entre 1 e 100 localmente, sem aceitar os valores que a API normaliza, é uma decisão de implementação.
+`send_timeout` de 90 segundos por padrão (configurável entre 30 e 300), backoff com jitter, limite local de 200000 caracteres por resposta, política `new-only`, bloqueio após 409 e retenção local sem limpeza automática também são decisões de implementação.
 As cotas configuradas podem ser reduzidas, nunca aumentadas além do manual, e cada bucket usa uma janela móvel persistida de 60 segundos.
 Os campos opcionais de mídia/digitação/modelos devem permanecer falsos; habilitá-los falha explicitamente.
 
@@ -61,6 +62,7 @@ Os campos opcionais de mídia/digitação/modelos devem permanecer falsos; habil
 O comando `service-render` detecta Darwin e os caminhos reais do Python, código e configuração, grava uma plist desabilitada e imprime os comandos exatos de instalação, início, parada, reinício e logs.
 Ele não chama `launchctl`, instala serviço, altera sessões nem ativa tráfego.
 Escolha um checkout estável após a integração local aprovada; não instale um serviço apontando para um worktree descartável.
+Para renderizar com o modo `simulated` do exemplo, acrescente à configuração `simulator_file` com o caminho absoluto de uma fixture JSON no formato indicado em [Simulação sem credenciais](#simulação-sem-credenciais); sem esse campo, `service-render` recusa a geração.
 
 ```sh
 python3 bin/fm-whatsapp.py --config "$FM_HOME/config/whatsapp.json" service-render --output ./whatsapp.plist

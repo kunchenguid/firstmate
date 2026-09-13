@@ -4,8 +4,8 @@
 An exclusive agent lock covers run/recovery, including outstanding subprocesses.
 fm-inbox's keyed capture closes the note-write/return gap. Main-side 'claim'
 and typed response commands own task execution acknowledgement, never transport.
-The only automatic status answers are snapshots of this bridge's typed events;
-all other natural-language messages go to the owning main with bounded history.
+Local status/help and decision-answer handling precede main intake; other
+natural-language messages go to the owning main with bounded history.
 """
 
 from contextlib import contextmanager

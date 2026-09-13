@@ -4,9 +4,10 @@
 Only the live lock-owning main can invoke dispatch. Operations accept JSON data:
   pending: list request ids and transport state, including already-claimed work.
   claim: request + note_id; returns fresh_claim plus bounded conversation context.
-  emit: event, request, kind, body; optional task={home,id,revision}; completed
-    requires nonempty evidence array. decision additionally requires task,
-    action, expires (epoch, within 24h). Allowed kinds are enumerated below.
+  emit: event, request, kind, body; task={home,id,revision} is required for
+    started, progress and decision, optional for other kinds. completed requires
+    a nonempty evidence array. decision also requires action and expires (epoch,
+    within 24h). Allowed kinds are enumerated below.
   consume-decision: id, request, home, task, revision, action (exact tuple).
     Returns new_consumption=true ONCE; repeat is a receipt, not a new grant.
 All events and outbox chunks commit together. No terminal scraping, task
