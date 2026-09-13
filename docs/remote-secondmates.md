@@ -252,6 +252,12 @@ SSH exit 255 preserves both the route and local records because completion is un
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 No generic remote delete or write surface exists: remote writes are confined to inherited allowlist files and backlog handoff scratch files, and remote home removal is reachable only through guarded secondmate retirement.
 
+## Observability and inspection
+
+Inspect registered second mates across local and remote hosts with `bin/fm-mate-view.sh [<secondmate-id>...]`.
+For remote second mates, it runs `bin/fm-host-report.sh` over SSH and attaches recent terminal scrollback when available.
+For single-line host status in Bearings, `bin/fm-bearings-snapshot.sh` collects compact host lines into the snapshot.
+
 ## Verification
 
 The portable tests use the real entrypoint protocol, real git repositories, a deterministic SSH boundary, a stateful host-local Herdr CLI fixture, and a controlled account fixture for the readiness gate.

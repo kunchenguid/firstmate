@@ -114,9 +114,16 @@ FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
+FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
+case "$FM_SNAPSHOT_BUDGET" in ''|*[!0-9]*|0) FM_SNAPSHOT_BUDGET=5 ;; esac
+FM_BEARINGS_HOST_TIMEOUT=${FM_BEARINGS_HOST_TIMEOUT:-5}
+case "$FM_BEARINGS_HOST_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_HOST_TIMEOUT=5 ;; esac
+FM_BEARINGS_HOST_PROBES=${FM_BEARINGS_HOST_PROBES:-1}
+FM_ON_BIN="${FM_ON_OVERRIDE:-$SCRIPT_DIR/fm-on.sh}"
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
 }
+validate_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_bound FM_BEARINGS_LANDED "$FM_BEARINGS_LANDED"
 validate_bound FM_BEARINGS_LANDED_PER_HOME "$FM_BEARINGS_LANDED_PER_HOME"
 validate_bound FM_BEARINGS_IN_FLIGHT "$FM_BEARINGS_IN_FLIGHT"
@@ -146,6 +153,7 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
+  secondmate_hosts{id,host,status},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -229,6 +237,7 @@ if [ "$GUARD_RC" -eq 4 ]; then
 fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+SNAP_COLLECT_START=$(date +%s)
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
     SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
@@ -238,6 +247,9 @@ if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
 else
   SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
 fi
+SNAP_COLLECT_END=$(date +%s)
+SNAP_COLLECT_ELAPSED=$(( SNAP_COLLECT_END - SNAP_COLLECT_START ))
+SNAP_COLLECT_REMAINING=$(( FM_SNAPSHOT_BUDGET - SNAP_COLLECT_ELAPSED ))
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
@@ -332,6 +344,101 @@ EOF
   fi
 fi
 
+# --- secondmate host status -------------------------------------------------
+SECONDMATE_HOSTS='[]'
+if [ "$FM_BEARINGS_HOST_PROBES" = 1 ]; then
+  local_mates=$(printf '%s' "$SNAP" | jq -c '.secondmate_current.records // [] | .[] | select(.registered != false) | {id, host, home, remote, freshness: (.freshness.status // "unknown")}')
+  if [ -n "$local_mates" ]; then
+    host_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-hosts.XXXXXX")
+    pids=()
+    ids=()
+    hosts=()
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      m_id=$(printf '%s' "$m" | jq -r '.id')
+      m_host=$(printf '%s' "$m" | jq -r '.host // empty')
+      m_home=$(printf '%s' "$m" | jq -r '.home // empty')
+      m_remote=$(printf '%s' "$m" | jq -r '.remote // false')
+      m_freshness=$(printf '%s' "$m" | jq -r '.freshness // "unknown"')
+      ids+=("$m_id")
+      hosts+=("${m_host:-local}")
+
+      if [ "$SNAP_COLLECT_REMAINING" -le 0 ]; then
+        printf 'host view pending\n' > "$host_tmp/$m_id.res"
+        continue
+      fi
+
+      if [ "$m_remote" = "true" ] && [ "$m_freshness" != "fresh" ]; then
+        printf 'host view pending\n' > "$host_tmp/$m_id.res"
+        continue
+      fi
+
+      effective_timeout=$FM_BEARINGS_HOST_TIMEOUT
+      if [ "$effective_timeout" -gt "$SNAP_COLLECT_REMAINING" ]; then
+        effective_timeout=$SNAP_COLLECT_REMAINING
+      fi
+      if [ "$effective_timeout" -le 0 ]; then
+        effective_timeout=1
+      fi
+
+      (
+        out_f="$host_tmp/$m_id.out"
+        err_f="$host_tmp/$m_id.err"
+        if [ "$m_remote" = "true" ]; then
+          if fm_run_timed "$effective_timeout" "$FM_ON_BIN" "$m_id" fm-host-report.sh --line > "$out_f" 2> "$err_f"; then
+            head -n 1 "$out_f" > "$host_tmp/$m_id.res"
+          else
+            rc=$?
+            err_text=$(cat "$err_f" 2>/dev/null || true)
+            if [ "$rc" -eq 124 ]; then
+              printf '%s: unreachable (timed out after %ss)\n' "$m_host" "$effective_timeout" > "$host_tmp/$m_id.res"
+            elif printf '%s\n' "$err_text" | grep -qE "not a genuine executable in the configured remote root: fm-host-report\.sh|not tracked by the configured remote root: fm-host-report\.sh|command not found: fm-host-report\.sh|fm-host-report\.sh: No such file"; then
+              printf 'remote copy lacks fm-host-report.sh; update that host\n' > "$host_tmp/$m_id.res"
+            elif [ "$rc" -eq 255 ]; then
+              printf '%s: unreachable (ssh exit 255)\n' "$m_host" > "$host_tmp/$m_id.res"
+            else
+              printf '%s: unreachable (ssh exit %s)\n' "$m_host" "$rc" > "$host_tmp/$m_id.res"
+            fi
+          fi
+        else
+          if fm_run_timed "$effective_timeout" env FM_HOME="$m_home" "$SCRIPT_DIR/fm-host-report.sh" --line > "$out_f" 2> "$err_f"; then
+            head -n 1 "$out_f" > "$host_tmp/$m_id.res"
+          else
+            rc=$?
+            printf 'local home unavailable (exit %s)\n' "$rc" > "$host_tmp/$m_id.res"
+          fi
+        fi
+      ) &
+      pids+=($!)
+    done <<EOF
+$local_mates
+EOF
+    if [ "${#pids[@]}" -gt 0 ]; then
+      for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+      done
+    fi
+    SECONDMATE_HOSTS="["
+    first=1
+    for i in "${!ids[@]}"; do
+      id="${ids[$i]}"
+      h="${hosts[$i]}"
+      res="unavailable"
+      [ -f "$host_tmp/$id.res" ] && res=$(cat "$host_tmp/$id.res")
+      [ -n "$res" ] || res="unavailable"
+      entry=$(jq -n --arg id "$id" --arg host "$h" --arg status "$res" '{id:$id, host:$host, status:$status}')
+      if [ "$first" -eq 1 ]; then
+        SECONDMATE_HOSTS="$SECONDMATE_HOSTS$entry"
+        first=0
+      else
+        SECONDMATE_HOSTS="$SECONDMATE_HOSTS,$entry"
+      fi
+    done
+    SECONDMATE_HOSTS="$SECONDMATE_HOSTS]"
+    rm -rf -- "$host_tmp"
+  fi
+fi
+
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 BEARINGS_TODAY=${NOW%%T*}
 case "$BEARINGS_TODAY" in
@@ -367,7 +474,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
-  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
+  --argjson candidate_prs "$CANDIDATE_PRS" \
+  --argjson secondmate_hosts "$SECONDMATE_HOSTS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
@@ -599,6 +707,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
         | select(.reconcile_inventory != null)
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
+      secondmate_hosts: $secondmate_hosts,
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),

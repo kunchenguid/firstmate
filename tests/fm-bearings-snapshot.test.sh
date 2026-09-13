@@ -321,6 +321,7 @@ run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
     FM_TEST_LEDGER_ACTIVE_DIR="$parent/ledger-active" \
     FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
     FM_SNAPSHOT_BUDGET=15 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+    FM_BEARINGS_HOST_PROBES=0 \
     FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
 }
 
