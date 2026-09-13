@@ -4079,14 +4079,14 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
-  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
-  # Pi and pi-signed secondmates previously received persistent here and now
-  # receive extension to match fm_supervision_model's own table, so their pull
-  # guard tolerates the extension hand-off exactly as a Pi primary does.
+  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): the Claude
+  # and Codex Stop auto-arms and Cursor's stop-hook park all run the watcher only
+  # BETWEEN turns, so a fresh beacon with no live watcher is their healthy
+  # mid-turn state. Pi and pi-signed secondmates previously received persistent
+  # here and now receive extension to match fm_supervision_model's own table, so
+  # their pull guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
+    claude|codex|cursor) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;
     *) supervision_model=persistent ;;
   esac

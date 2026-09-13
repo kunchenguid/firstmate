@@ -185,20 +185,20 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
-#               watcher is armed at each turn end and exits on its wake, so it
-#               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
-#               watcher process is healthy, and a stale beacon is still healthy
-#               while a Claude auto-arm generation explains the gap
+#   autoarm     Claude's and Codex's Stop-hook auto-arms and Cursor's stop-hook
+#               park: the watcher is armed at each turn end and exits on its
+#               wake, so it runs only BETWEEN turns. Mid-turn a fresh beacon with
+#               no live watcher process is healthy, and a stale beacon is still
+#               healthy while an auto-arm generation explains the gap
 #               (fm_autoarm_midturn_healthy).
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
-#               background arm, tmux, unknown): the watcher runs as a tracked live
-#               process, so a live identity-matched pid is the real liveness signal.
+#   persistent  every other harness (opencode/grok background arm, tmux,
+#               unknown): the watcher runs as a tracked live process, so a live
+#               identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
 # stays consistent with the harness-specific repair line the guards already emit.
@@ -209,9 +209,24 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
+    claude|codex|cursor) printf 'autoarm\n' ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
+  esac
+}
+
+# Which Stop auto-arm ledger this home's PRIMARY harness writes. Each Stop-owned
+# auto-arm keeps its own generation ledger under its own FM_AUTOARM_PREFIX
+# (bin/fm-claude-stop-autoarm.sh and bin/fm-codex-stop-autoarm.sh), so a READER
+# that did not set the prefix itself has to ask which one the running primary
+# actually writes before it reads a generation claim. An explicit
+# FM_AUTOARM_PREFIX always wins, so a hook and its tests stay authoritative over
+# detection.
+fm_autoarm_prefix_for_primary() {
+  [ -z "${FM_AUTOARM_PREFIX:-}" ] || { printf '%s\n' "$FM_AUTOARM_PREFIX"; return 0; }
+  case "$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)" in
+    codex) printf '.codex-autoarm\n' ;;
+    *) printf '.claude-autoarm\n' ;;
   esac
 }
 
@@ -394,9 +409,20 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
-    if [ "$fresh" = true ] || fm_autoarm_midturn_healthy "$state" "$grace"; then
+    if [ "$fresh" = true ]; then
+      FM_WATCHER_VERDICT_OK=true
+      return 0
+    fi
+    # A stale beacon is still healthy while an auto-arm generation explains the
+    # gap, but only in the ledger the running primary's own hook writes. The
+    # caller's own prefix is restored either way, so this selection never leaks.
+    local prefix saved_prefix=${FM_AUTOARM_PREFIX:-}
+    prefix=$(fm_autoarm_prefix_for_primary)
+    FM_AUTOARM_PREFIX=$prefix
+    if fm_autoarm_midturn_healthy "$state" "$grace"; then
       FM_WATCHER_VERDICT_OK=true
     fi
+    FM_AUTOARM_PREFIX=$saved_prefix
     return 0
   fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
@@ -1364,8 +1390,8 @@ fm_failure_episode_reset() {
   esac
   for path in \
     "$state/.turnend-claude-blocks" \
-    "$state/.claude-autoarm-failure-notified" \
-    "$state/.claude-autoarm-failure-alarmed"
+    "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-notified" \
+    "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-alarmed"
   do
     if [ -d "$path" ] && [ ! -L "$path" ]; then
       [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
@@ -1374,8 +1400,8 @@ fm_failure_episode_reset() {
   done
   if ! rm -f \
     "$state/.turnend-claude-blocks" \
-    "$state/.claude-autoarm-failure-notified" \
-    "$state/.claude-autoarm-failure-alarmed" \
+    "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-notified" \
+    "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-alarmed" \
     2>/dev/null; then
     [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
     return 1
@@ -1384,11 +1410,21 @@ fm_failure_episode_reset() {
   return 0
 }
 
-# --- Claude Stop auto-arm generation claims -----------------------------------
+# --- Stop auto-arm generation claims ------------------------------------------
 # Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
 # bin/fm-turnend-guard.sh --claude) coordinate through the epoch ledger
 # state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
-# generation. This is an optimistic, generation-based single-flight design:
+# generation.
+#
+# The ledger, its micro-mutex, and the two failure markers are all named from
+# one prefix, FM_AUTOARM_PREFIX, so a second Stop-owned auto-arm for a different
+# primary harness keeps its own single-flight state in the same home instead of
+# racing Claude's. The default is Claude's original ".claude-autoarm", so every
+# existing caller, record, and on-disk file is unchanged; bin/fm-codex-stop-autoarm.sh
+# sets ".codex-autoarm". Only one primary harness owns a home at a time, so the
+# prefixes never need to agree - they only need to not collide.
+#
+# This is an optimistic, generation-based single-flight design:
 #
 #   - The CURRENT claim is the ledger's latest entry: line 1 begins with the
 #     "epoch=N owner_pid=P outcome=O updated_at=T" record. A "rewake" outcome
@@ -1481,7 +1517,7 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
 fm_autoarm_ledger_read() {  # <state-dir>
   local state=$1 epoch
-  epoch="$state/.claude-autoarm-epoch"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   FM_AUTOARM_GEN=
   FM_AUTOARM_OWNER=
   FM_AUTOARM_OUTCOME=
@@ -1511,7 +1547,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # the legacy shim, and anything else must not defer.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
-  epoch="$state/.claude-autoarm-epoch"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
   esac
@@ -1548,8 +1584,8 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 # exists to stop.
 fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   local state=$1 lock_pid recovery epoch_mtime beacon_mtime
-  [ -e "$state/.claude-autoarm-failure-notified" ] && return 1
-  [ -e "$state/.claude-autoarm-failure-alarmed" ] && return 1
+  [ -e "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-notified" ] && return 1
+  [ -e "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-failure-alarmed" ] && return 1
   fm_autoarm_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
@@ -1558,7 +1594,7 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   fm_recovery_marker_read "$state/.watcher-down" || return 1
   recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
   [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1
-  epoch_mtime=$(fm_path_mtime "$state/.claude-autoarm-epoch") || return 1
+  epoch_mtime=$(fm_path_mtime "$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch") || return 1
   beacon_mtime=$(fm_path_mtime "$state/.last-watcher-beat") || return 1
   [ "$epoch_mtime" -ge "$beacon_mtime" ]
 }
@@ -1570,8 +1606,8 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
 # computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity tmp
-  lock="$state/.claude-autoarm.lock"
-  epoch="$state/.claude-autoarm-epoch"
+  lock="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}.lock"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   FM_AUTOARM_MY_GEN=
   # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
   # command substitution would resolve it in that subshell, recording the
@@ -1613,8 +1649,8 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
 # unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation]
   local state=$1 gen=$2 outcome=$3 marker=${4:-} session=${5:-} recovery=${6:-} lock epoch pid identity tmp i
-  lock="$state/.claude-autoarm.lock"
-  epoch="$state/.claude-autoarm-epoch"
+  lock="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}.lock"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   pid=${BASHPID:-$$}
   i=0
   while ! fm_lock_try_acquire "$lock"; do
@@ -1661,7 +1697,7 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
 
 fm_autoarm_reset_owned() {  # <state-dir> <gen>
   local state=$1 gen=$2 lock pid
-  lock="$state/.claude-autoarm.lock"
+  lock="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}.lock"
   pid=${BASHPID:-$$}
   fm_lock_try_acquire "$lock" || return 2
   if ! fm_autoarm_ledger_read "$state" \
@@ -1693,8 +1729,8 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen>
 #      proof as fm_autoarm_claim_open).
 fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
-  lock="$state/.claude-autoarm.lock"
-  epoch="$state/.claude-autoarm-epoch"
+  lock="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}.lock"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
   esac
@@ -1744,9 +1780,9 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
-  lock="$state/.claude-autoarm.lock"
+  lock="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}.lock"
   steal="$lock.steal"
-  epoch="$state/.claude-autoarm-epoch"
+  epoch="$state/${FM_AUTOARM_PREFIX:-.claude-autoarm}-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
   fm_lock_try_acquire "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then

@@ -461,13 +461,32 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `tests/fm-codex-continuity-live-e2e.test.sh` (token-free tier), plus `FM_CODEX_LIVE_STOP_E2E=1` for the interactive tier | codex-cli 0.154.0, 2026-09-13: `codex queue --thread/--message` is present and refuses an impossible thread id; a real interactive Stop hook fired with a `session_id` in its payload, `"async": true` was honored so the turn ended while the hook still ran, `codex queue` into that recorded thread was accepted while the session was live, and the async hook's exit-2 stderr was never delivered to the model. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | omp | `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` | One initial `fm_watch_arm_omp` invocation (the openai-codex model reaches extension tools through omp's `xd://` virtual-file bridge, a `write` to `xd://fm_watch_arm_omp`, counted as the same invocation) started a live watcher; an actionable close spawned a ledger-linked successor and woke main exactly once; the lab is reaped by path, and omp 18.1.11 did not exit within 30s of its rpc stdin closing, recorded as a note. omp 18.1.11, 2026-09-05. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
+
+### Codex Stop-hook-owned supervision, 2026-09-13
+
+codex-cli 0.154.0 replaced Codex's model-driven foreground checkpoint with the same Stop-owned ownership model Claude uses.
+The measurements that decided the design, all in an isolated Herdr lab session with its own `CODEX_HOME`:
+
+| Question | Result |
+| --- | --- |
+| Does a `Stop` hook fire under `codex exec`? | No. `SessionStart` fired in the same run, so hooks were loaded; `Stop` is interactive-only. |
+| Is `"async": true` honored on `Stop`? | Yes. The turn completed 3.3s before the hook finished, and a hook kept running across a later turn with its own child alive throughout. |
+| Does an async `Stop` hook's `exit 2` reach the model? | No. The banner was discarded with no continuation. |
+| Does a synchronous `Stop` hook's `exit 2` reach the model? | Yes, rendered as `Blocked by hook`, but the turn is held open for the hook's whole duration. |
+| Does Codex deduplicate concurrent async `Stop` firings? | No. A second Stop started a second concurrent instance, which is why the auto-arm keeps a single-flight generation ledger. |
+| Can an external process wake an idle session? | Yes. `codex queue --thread <session_id>` reached an idle TUI session in 4s. |
+
+`codex queue` behavior that bounds the delivery claim: a message queued while the agent is working is delivered after that turn rather than interleaved; two queued messages arrive in submission order; a bogus or unknown thread id exits non-zero with a named error; and a message queued for a thread whose session is already gone is **accepted with exit 0**.
+That last row is why delivery is documented as best effort and the durable wake queue remains the reliable record.
+
+End-to-end, against a disposable checkout with its own `FM_HOME`: after one ordinary turn the Stop hook armed a watcher with no model command (ledger `outcome=arming`, live watcher pid, fresh beacon, recorded thread), and appending a `done:` line to a task's status file surfaced the wake in the Codex primary 14 seconds later with no user prompt.
 
 Pi same-process session-transition ownership was verified on 2026-09-01 against the tracked extension with provider-free public lifecycle events, retained and fresh extension-module rebinds, and real arm children:
 

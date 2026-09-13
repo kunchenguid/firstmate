@@ -912,9 +912,14 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
 }
 
+# The point of this case is that the secondmate's supervision model follows ITS
+# OWN harness, so it needs at least one harness from each class. Codex used to be
+# the persistent example; it now owns a Stop auto-arm of its own
+# (bin/fm-codex-stop-autoarm.sh) and is classified autoarm alongside Claude, so
+# opencode carries the persistent half and codex is asserted in its new class.
 test_spawned_secondmate_uses_its_harness_supervision_model() {
   local harness expected w sm launchlog launch fakebin out
-  for harness in codex claude; do
+  for harness in opencode claude codex; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
     launchlog="$w/launch.log"
@@ -937,14 +942,14 @@ SH
     launch=$(cat "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
-      codex)
+      opencode)
         expected='WATCHER DOWN - SUPERVISION IS OFF'
         assert_contains "$out" "$expected" \
-          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+          "OpenCode secondmate inherited an auto-arm model despite its persistent watcher model"
         ;;
-      claude)
+      claude|codex)
         [ -z "$out" ] \
-          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+          || fail "$harness secondmate with a fresh beacon should use auto-arm supervision, got: $out"
         ;;
     esac
   done
