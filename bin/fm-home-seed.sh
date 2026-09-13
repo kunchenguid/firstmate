@@ -8,7 +8,9 @@
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
-#       from the active home into the secondmate home's projects/ directory.
+#       from the active home into the secondmate home's projects/ directory, and
+#       each clone is pointed at a treehouse pool private to this home (see
+#       bin/fm-treehouse-pool-lib.sh) so the two homes never share a pool.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
