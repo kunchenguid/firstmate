@@ -1987,6 +1987,44 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 
+# The generated briefs now declare `note:` and the no-mistakes commit-attribution
+# block tells a worker to append one before its terminal `done:` line, so a note
+# whose prose contains a free-text captain token ("merged", "PR ready") must
+# still be nonterminal and must still keep possible-wedge aging - otherwise a
+# worker disclosing a fact would silently clear its own wedge marker.
+test_note_line_is_nonterminal_and_keeps_wedge_aging() {
+  local dir state key out win pane disclosure fakebin
+  dir=$(make_supercase note-verb-wedge)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-noteline-w1"
+  pane="$dir/pane.txt"
+  disclosure='note: commits a1b2c3, d4e5f6 carry an agent co-author trailer; rebased onto merged #76'
+  printf '%s\n' "$disclosure" > "$state/noteline-w1.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "noteline-w1" | tr ':/.' '___')
+  status_is_terminal_verb "$disclosure" && fail "a note: line read as a terminal verb"
+  status_is_captain_relevant "$disclosure" \
+    && fail "a note: line read as captain-relevant through its free text"
+  seen_through "$state" "noteline-w1"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in
+    self\|*transient*) ;;
+    *) fail "note: line did not take the transient stale path: $out" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a note: line cleared the possible-wedge stale marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "note: stale incorrectly escalated immediately"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  grep -q 'possible wedge' "$state/.subsuper-escalations" \
+    || fail "housekeeping did not re-escalate the aged wedge behind a note: line"
+  pass "a note: line stays nonterminal and keeps possible-wedge aging"
+}
+
 test_afk_genuine_done_still_terminal_stale() {
   local dir state out
   dir=$(make_supercase afk-genuine-done-stale)
@@ -2860,6 +2898,7 @@ test_permission_recovery_reclassifies_catchall_status
 test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
+test_note_line_is_nonterminal_and_keeps_wedge_aging
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
