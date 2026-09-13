@@ -425,6 +425,8 @@ For a remote route, the configured code root updates from its own origin on that
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
+When running Firstmate from a fork, upstream enters the fork by merge rather than rebase.
+`bin/fm-upstream-sync.sh` merges `upstream/main` into an isolated worktree branch, verifies tests, and opens a PR against the fork's `main` so fork-carried changes are merged, not rebased.
 
 ## Restart-proof
 
