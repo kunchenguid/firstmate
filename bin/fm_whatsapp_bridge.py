@@ -279,8 +279,9 @@ class Bridge:
             return
         if self.s.reserve("updates"):
             return
+        timeout = 0 if self.ready_send() else self.c.timeout
         reply = self.transport.call("updates", {"offset": int(self.s.get("cursor")),
-                                                "limit": self.c.limit, "timeout": self.c.timeout})
+                                                "limit": self.c.limit, "timeout": timeout})
         policy = classify("updates", reply)
         if policy != "accepted":
             error = reply.body.get("error", {}) if isinstance(reply.body, dict) else {}
@@ -301,16 +302,22 @@ class Bridge:
             # 409 is a persistent diagnostic halt, even across launchd restarts.
             self.s.put("halt", policy)
 
-    def send_one(self):
+    def ready_send(self):
         if self.stopping or self.s.get("halt") or not self.c.outbound:
-            return False
+            return None
         # Global sequence blocks behind unknown/permanent sends until an operator
         # resolves the exact row; later parts never overtake the uncertain part.
         rows = self.s.rows("SELECT * FROM outbox WHERE state NOT IN ('accepted','delivered','read','abandoned') ORDER BY seq LIMIT 1")
         if not rows:
-            return False
+            return None
         row = rows[0]
-        if row["state"] != "pending" or row["due"] > self.s.clock() or self.s.reserve("messages"):
+        if row["state"] != "pending" or row["due"] > self.s.clock() or self.s.rate_wait("messages", self.s.now()):
+            return None
+        return row
+
+    def send_one(self):
+        row = self.ready_send()
+        if row is None or self.s.reserve("messages"):
             return False
         payload = {"messaging_product": "whatsapp", "to": self.c.creator, "type": "text",
                    "text": {"body": row["body"], "preview_url": False}}

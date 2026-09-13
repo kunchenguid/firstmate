@@ -4,12 +4,14 @@
 
 Em 2026-09-13, a suíte offline foi executada em Darwin/arm64 com Python 3.14.7 e SQLite da biblioteca padrão.
 Comando de reprodução: `bash tests/fm-whatsapp.test.sh`.
-Resultado observado: `Ran 34 tests in 23.005s` e `OK`.
+Resultado observado: `Ran 36 tests in 27.124s` e `OK`.
 Os testes executam interfaces públicas Python e CLI, o `fm-inbox.sh` real, SQLite real, processos locais de fixture e, no Darwin, `plutil -lint` da plist gerada.
 Nenhum teste usa conta WhatsApp, credencial real, modelo, instalação de serviço ou ciclo de vida Herdr.
 O processo com identidade de harness é uma fixture estrutural para a biblioteca de sessão existente; não é uma execução de Codex ou prova de comportamento de UI do fornecedor.
 O teste de parada/reinício encerra somente o processo que ele próprio criou e verifica que seu principal de fixture continua vivo.
 Regressões determinísticas exercitam o handler de SIGTERM registrado pela entrada CLI durante polling e envio simulados, além da parada após uma nota persistida pelo `fm-inbox.sh` real, impedindo operações posteriores.
+Um transporte com relógio simulado avança pelo timeout solicitado de cada poll: com configuração de 25 segundos e resultado de 49 partes, verifica progresso sem long polling enquanto há saída pronta, status/recibos intercalados, cotas móveis preservadas e retorno ao timeout configurado quando ocioso.
+Casos separados verificam a escolha do timeout com saída ausente, não autorizada, bloqueada, em backoff ou sem cota, além de halt e parada.
 
 O código foi inspecionado no checkout de base `b182d0f908b78d08c7ccb8dce3775bdca8c5d657`, incluindo `fm-inbox.sh`, `fm_voice_records.py`, voz, configuração, arquitetura, protocolo Herdr e os proprietários de lock, eventos, decisões e respostas públicas.
 Esta integração não amplia o escopo da voz nem reutiliza o transporte X/Discord como se fosse WhatsApp.

@@ -228,14 +228,18 @@ class Store:
         self.put("last_clock", now)
         return now
 
+    def rate_wait(self, endpoint, now):
+        rows = self.rows("SELECT at FROM rates WHERE endpoint=? AND at>? ORDER BY at",
+                         (endpoint, now - 60))
+        limit = self.config.rates[endpoint]
+        return max(0.01, rows[-limit]["at"] + 60 - now) if len(rows) >= limit else 0
+
     def reserve(self, endpoint):
         with self.tx():
             now = self.now()
-            rows = self.rows("SELECT at FROM rates WHERE endpoint=? AND at>? ORDER BY at",
-                             (endpoint, now - 60))
-            limit = self.config.rates[endpoint]
-            if len(rows) >= limit:
-                return max(0.01, rows[-limit]["at"] + 60 - now)
+            wait = self.rate_wait(endpoint, now)
+            if wait:
+                return wait
             self.db.execute("DELETE FROM rates WHERE at<=?", (now - 60,))
             self.db.execute("INSERT INTO rates VALUES(?,?)", (endpoint, now))
         return 0

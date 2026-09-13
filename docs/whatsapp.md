@@ -74,6 +74,8 @@ A máquina precisa permanecer ligada, acordada e com a sessão de usuário dispo
 O serviço usa polling de saída e não abre porta, webhook ou socket público.
 O Firstmate principal continua precisando alcançar checkpoints para executar novos pedidos e publicar resultados.
 Cada ciclo tenta no máximo um envio, voltando ao polling de entradas e recibos antes da próxima parte, sujeito às cotas e ao backoff persistidos.
+Quando a primeira parte na ordem da fila está pendente, vencida, autorizada e com cota de envio disponível, o poll usa `timeout=0` para não atrasar sua saída; essa consulta não reserva cota de mensagens e continua respeitando a cota de updates.
+Sem saída pronta, o poll mantém o timeout configurado; uma parte posterior pronta não ultrapassa uma parte bloqueada ou ainda em backoff.
 A ordem da fila permanece sequencial; a resposta a uma consulta pode continuar aguardando as partes anteriores, mesmo quando a consulta já foi registrada e tratada.
 `SIGTERM` permite terminar e persistir a operação em andamento e sair, verificando a parada antes das próximas operações e entre encaminhamentos de notas; uma interrupção forçada preserva a janela incerta de envio para reconciliação.
 

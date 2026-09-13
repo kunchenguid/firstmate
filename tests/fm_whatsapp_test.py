@@ -670,6 +670,100 @@ for line in sys.stdin:
         self.assertEqual([p["state"] for p in parts[:2]], ["read", "accepted"])
         self.assertTrue(all(p["state"] == "pending" for p in parts[2:]))
 
+    def test_ready_multipart_output_avoids_long_poll_and_keeps_idle_timeout(self):
+        row, _ = self.claim()
+        self.assertTrue(self.bridge.send_one())
+        event = self.emit(row, "completed", "x" * 200000, evidence=["fixture"])["event"]
+        self.config.timeout = 25
+        query = self.message("/status")
+        calls = []
+        original = self.bridge.transport.call
+        started = self.now
+
+        def timed_transport(endpoint, payload):
+            calls.append((endpoint, self.now, dict(payload)))
+            if endpoint == "messages":
+                self.now += 0.01
+                return original(endpoint, payload)
+            if sum(c[0] == "updates" for c in calls) == 2:
+                mid = self.store.rows("SELECT wamid FROM outbox WHERE event=? AND part=0", (event,))[0]["wamid"]
+                return poll([query], statuses=[{"id": mid, "status": "read", "timestamp": str(int(self.now)),
+                                               "recipient_id": "user:owner"}], offset=50)
+            self.now += payload["timeout"]
+            return Reply(204)
+
+        with patch.object(self.bridge.transport, "call", side_effect=timed_transport):
+            for cycle in range(100):
+                before = sum(c[0] == "messages" for c in calls)
+                self.bridge.tick()
+                self.assertLessEqual(sum(c[0] == "messages" for c in calls) - before, 1)
+                if cycle == 1:
+                    self.assertEqual(self.store.get("cursor"), "50")
+                    self.assertEqual(self.store.rows("SELECT state FROM inbound WHERE wamid=?", (query["id"],)),
+                                     [{"state": "answered"}])
+                    parts = self.store.rows("SELECT state FROM outbox WHERE event=? ORDER BY part", (event,))
+                    self.assertEqual(parts[0]["state"], "read")
+                    self.assertTrue(any(p["state"] == "pending" for p in parts))
+                self.now += 1
+                if all(p["state"] in ("accepted", "delivered", "read") for p in self.store.snapshot()["outbox"]):
+                    break
+            else:
+                self.fail("multipart output did not finish within bounded cycles")
+            self.assertLess(self.now - started, 360)
+            sends = [c for c in calls if c[0] == "messages"]
+            polls = [c for c in calls if c[0] == "updates"]
+            self.assertLess(sends[10][1] - started, 12)
+            self.assertTrue(all(c[2]["timeout"] == 0 for c in polls[:11]))
+            for endpoint, limit in (("updates", 15), ("messages", 12)):
+                times = [c[1] for c in calls if c[0] == endpoint]
+                for at in times:
+                    self.assertLessEqual(sum(at - 60 < stamp <= at for stamp in times), limit)
+            self.now += 61
+            self.bridge.tick()
+            self.assertEqual(calls[-1][0], "updates")
+            self.assertEqual(calls[-1][2]["timeout"], 25)
+            self.assertEqual(sum(c[0] == "messages" for c in calls), len(sends))
+        self.assertEqual("".join(json.loads(r["payload"])["text"]["body"] for r in self.store.rows(
+            "SELECT payload FROM sim_sends ORDER BY seq")[1:-1]), "x" * 200000)
+
+    def test_poll_uses_idle_timeout_unless_ordered_head_is_sendable(self):
+        for case in ("empty", "denied", "blocked", "future", "quota", "halted", "stopped"):
+            with self.subTest(case=case):
+                path = self.dir / f"readiness-{case}.json"
+                values = dict(self.values, state_dir=str(self.dir / f"readiness-state-{case}"),
+                              poll_timeout=25, outbound_authorized=case != "denied")
+                path.write_text(json.dumps(values))
+                store = Store(Config(path), clock=lambda: self.now)
+                try:
+                    if case != "empty":
+                        with store.tx():
+                            store.emit("fixture-response", "fixture-request", "notice", "x" * 8000, "bridge")
+                            if case == "blocked":
+                                store.db.execute("UPDATE outbox SET state='delivery_unknown' WHERE part=0")
+                            if case == "future":
+                                store.db.execute("UPDATE outbox SET due=? WHERE part=0", (self.now + 1000,))
+                    if case == "quota":
+                        for _ in range(12):
+                            self.assertEqual(store.reserve("messages"), 0)
+                    if case == "halted":
+                        store.put("halt", "poll_conflict")
+                    transport = Sequence([Reply(204), Reply(204)])
+                    bridge = Bridge(store, transport)
+                    bridge.stopping = case == "stopped"
+                    before = store.rows("SELECT * FROM rates WHERE endpoint='messages'")
+                    bridge.poll()
+                    self.assertEqual(store.rows("SELECT * FROM rates WHERE endpoint='messages'"), before)
+                    if case in ("halted", "stopped"):
+                        self.assertEqual(transport.calls, [])
+                    else:
+                        self.assertEqual(transport.calls[0][1]["timeout"], 25)
+                    if case == "quota":
+                        self.now -= 10
+                        bridge.poll()
+                        self.assertEqual(transport.calls[-1][1]["timeout"], 25)
+                finally:
+                    store.db.close()
+
     def test_stop_during_forward_finishes_current_note_only(self):
         first, second = self.receive(), self.receive()
         original = subprocess.run
