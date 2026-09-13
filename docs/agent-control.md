@@ -20,8 +20,10 @@ When `FM_CONTROL_EXPECTED_SPAWN_GEN` is non-empty, control rereads the current t
 Relaunch uses the old generation as its precondition and publishes a fresh generation through `bin/fm-spawn.sh` after replacement.
 Control remains generation-only in v1; its existing exact task-id, metadata, backend, endpoint, and lifecycle postcondition checks remain authoritative for endpoint safety.
 
-`fm-send.sh` advertises `spawn-generation`, `endpoint`, and `remote-host` for every owned task-selector path, including typed local sends.
-When the corresponding `FM_SEND_EXPECTED_SPAWN_GEN`, `FM_SEND_EXPECTED_ENDPOINT`, or `FM_SEND_EXPECTED_REMOTE_HOST` value is non-empty, the command rereads the canonical task binding under the per-task metadata lock and refuses before pending-reply records, inbox enqueue, remote transport, doorbells, or typed backend submission when the value is missing or different.
+`fm-send.sh` advertises `spawn-generation`, `endpoint`, and `remote-host` for every owned local task-selector path, including typed local sends.
+When the corresponding `FM_SEND_EXPECTED_SPAWN_GEN` or `FM_SEND_EXPECTED_ENDPOINT` value is non-empty, the command rereads the canonical local task binding under the per-task metadata lock and refuses before pending-reply records, inbox enqueue, doorbells, or typed backend submission when the value is missing or different.
+Remote task selectors are outside the advertised v1 coverage for `spawn-generation` and `endpoint`; their remote transport and parent-generation publication are deferred to a focused follow-up, while the existing `FM_SEND_EXPECTED_REMOTE_HOST` check remains unchanged.
+When `FM_SEND_EXPECTED_REMOTE_HOST` is non-empty, the command still rereads the canonical remote host and refuses before remote transport when it is missing or different.
 Unset or empty values preserve ordinary behavior.
 An explicit backend target is an endpoint outside this home's task ledger, so it is excluded from the proof's authority claim and does not acquire task-selector guard semantics.
 

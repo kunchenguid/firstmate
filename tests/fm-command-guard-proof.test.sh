@@ -82,6 +82,7 @@ run_send() {
 test_probe_protocol() {
   local dir out rc before after
   dir=$(new_home probe)
+  write_send_meta "$dir"
   before=$(find "$dir/home/state" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
   out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json); rc=$?
   expect_code 0 "$rc" "send capability probe should succeed"
@@ -93,6 +94,15 @@ test_probe_protocol() {
     || fail "control proof has the wrong exact shape: $out"
   after=$(find "$dir/home/state" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
   [ "$before" = "$after" ] || fail "the probe created state: before=<$before> after=<$after>"
+
+  dir=$(new_home probe-empty)
+  out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json 2>/dev/null); rc=$?
+  [ "$rc" -ne 0 ] || fail "an empty state produced positive send proof"
+  [ -z "$out" ] || fail "an empty state emitted send proof: $out"
+  out=$(FM_HOME="$dir/home" "$CONTROL" --guard-capabilities --json 2>/dev/null); rc=$?
+  [ "$rc" -ne 0 ] || fail "an empty state produced positive control proof"
+  [ -z "$out" ] || fail "an empty state emitted control proof: $out"
+
   out=$(FM_HOME="$dir/home" "$SEND" --guard-capabilities --json extra 2>/dev/null); rc=$?
   [ "$rc" -ne 0 ] || fail "an inexact send probe was accepted"
   [ -z "$out" ] || fail "an inexact send probe emitted positive proof: $out"
