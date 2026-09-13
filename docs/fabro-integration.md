@@ -5,10 +5,10 @@ This document outlines the architecture, configuration, stage mapping, setup, mo
 ## Overview
 
 Fabro enables DAG-based execution and visualization of autonomous coding workflows.
-When a Firstmate coding task (`ship` or `scout`) is spawned, Firstmate triggers the registration of a Fabro DAG workflow (`FirstmateCoding`) representing the lifecycle stages.
+When a Firstmate coding task (`ship` or `scout`) is spawned, Firstmate makes a best-effort Fabro dry-run registration of a DAG workflow (`FirstmateCoding`) representing the lifecycle stages.
 
 Firstmate and Herdr continue supervising the interactive agent terminal and lifecycle events.
-Fabro provides structural visibility across the defined lifecycle phases.
+Fabro provides an optional validated, dry-run view of the defined lifecycle phases.
 
 ## Workflow DAG Definition
 
@@ -46,7 +46,7 @@ When `fm-spawn.sh` launches a worker:
 1. `bin/fm-fabro-trigger.sh` is invoked with `<task-id> <worktree> <harness> <kind>`.
 2. The trigger checks whether `fabro` is installed on PATH. If missing, it outputs an informative diagnostic and exits cleanly with return code 0.
 3. The workflow file is validated. If validation fails or the definition is absent, a diagnostic is logged and spawn continues.
-4. The run registration is attempted using `fabro create` with attached metadata labels (`firstmate_task_id`, `harness`, `worktree`, `kind`).
+4. A dry-run registration is attempted using `fabro create --dry-run` with attached metadata labels (`firstmate_task_id`, `harness`, `worktree`, `kind`); this optional hook does not gate the Firstmate launch.
 5. If the Fabro server or environment is unreachable, the trigger logs the reason and exits cleanly without failing the Firstmate task.
 
 ## Cleanup & Herdr Lifecycle
