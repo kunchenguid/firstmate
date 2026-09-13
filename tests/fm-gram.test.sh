@@ -96,11 +96,17 @@ captures_of() {  # <home>
   printf '%s\n' "$count"
 }
 
-# Everything this home holds that could still contain the owner's words: the
-# private captures plus every inbox note, pending or already handled.
+# Everything this home holds that could still contain the owner's words. Scanning
+# the WHOLE home is the point: an earlier version of this helper listed only
+# gram-inbox/ and inbox/, so its "no copy survives anywhere" assertion could not
+# see the body the wake-queue row carries and could not fail. Any new sink a
+# future change adds is caught here without anyone remembering to extend a list.
 retained_text() {  # <home>
-  cat "$1"/state/gram-inbox/*.json "$1"/state/inbox/*.note \
-    "$1"/state/inbox/handled/*.note 2>/dev/null || true
+  find "$1" -type f -exec cat {} + 2>/dev/null || true
+}
+
+wake_rows() {  # <home>
+  cat "$1/state/.wake-queue" 2>/dev/null || true
 }
 
 test_help_and_usage() {
@@ -258,14 +264,69 @@ test_deleting_a_message_purges_the_local_copy() {
   assert_equals 1 "$(captures_of "$home")" "the message is captured first"
   assert_contains "$(retained_text "$home")" "hunter2" "and its body is held locally"
 
+  # The wake row fm-inbox.sh queued carries the first hundred characters of the
+  # body, so it is a third durable copy the purge has to reach.
+  assert_contains "$(wake_rows "$home")" "hunter2" "the queued wake row carries the body too"
+
   # The owner deletes it: the store still exists, the message no longer does.
   fake_herdr "$(store_json)"
   run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
   assert_equals 0 "$(captures_of "$home")" "the capture is removed once the message is gone"
   assert_equals 0 "$(notes_of "$home")" "the note it produced is removed too"
+  assert_not_contains "$(wake_rows "$home")" "hunter2" "the queued wake row is dropped too"
   assert_not_contains "$(retained_text "$home")" "hunter2" \
     "no copy of a deleted message survives anywhere in the home"
-  pass "fm-gram: deleting a Gram message purges this home's capture and its note"
+  pass "fm-gram: deleting a Gram message purges this home's capture, note, and wake row"
+}
+
+# The wake queue is durable supervision state: dropping the wrong row loses a
+# wake permanently, so the purge must take out its own row and leave every other
+# row untouched, sequence number included.
+test_a_purge_drops_only_its_own_wake_row() {
+  local home out before after
+  home=$(make_home purge_row_scope)
+  # An unrelated wake queued through the real library, exactly as the watcher
+  # would queue it, before any Gram message exists.
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_wake_append signal "t1.status" "signal: t1.status changed"
+  ' _ "$home/bin/fm-wake-lib.sh" >/dev/null 2>&1 \
+    || fail "could not queue the unrelated wake"
+  before=$(wake_rows "$home")
+  assert_contains "$before" "t1.status" "the unrelated wake is queued"
+
+  fake_herdr "$(store_json "$(msg gram-row owner_to_agent '"firstmate"' 'purge my row' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  assert_contains "$(wake_rows "$home")" "purge my row" "the Gram wake row is queued"
+
+  fake_herdr "$(store_json)"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  after=$(wake_rows "$home")
+  assert_not_contains "$after" "purge my row" "the purged message's row is gone"
+  assert_equals "$before" "$after" \
+    "every other queued row survives the purge byte-identically, sequence included"
+  pass "fm-gram: a purge drops only its own wake row and leaves the queue otherwise intact"
+}
+
+# A drain can present a Gram wake and then race the purge that removes its note.
+# Acknowledging a note that is already gone must read as already handled rather
+# than failing, or the handling turn cannot complete its own acknowledgement.
+test_acking_a_purged_note_degrades_cleanly() {
+  local home out note rc=0 ack
+  home=$(make_home purge_ack_race)
+  fake_herdr "$(store_json "$(msg gram-race owner_to_agent '"firstmate"' 'race me' 1000)")"
+  out="$home/out.txt"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  note=$(basename "$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit)" .note)
+  [ -n "$note" ] || fail "the poll must have produced a note to ack"
+
+  fake_herdr "$(store_json)"
+  run_poll "$home" "$out" HERDR_PANE_ID=w1:p1 >/dev/null
+  ack=$(FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" drain --ack "$note" 2>&1) || rc=$?
+  expect_code 0 "$rc" "acking a purged note must not fail the handling turn"
+  assert_contains "$ack" "already-acked $note" "a purged note reads as already handled"
+  pass "fm-gram: acknowledging a note the purge already removed degrades cleanly"
 }
 
 test_a_purged_message_is_never_republished() {
@@ -314,5 +375,7 @@ test_hanging_herdr_is_bounded_by_the_budget
 test_missing_store_id_refuses_rather_than_deduplicating_blind
 test_capture_is_private_and_written_before_publication
 test_deleting_a_message_purges_the_local_copy
+test_a_purge_drops_only_its_own_wake_row
+test_acking_a_purged_note_degrades_cleanly
 test_a_purged_message_is_never_republished
 test_a_purge_never_touches_another_stores_capture

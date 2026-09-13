@@ -68,12 +68,27 @@
 # `herdr gram delete` is documented as the way to clean up a short-lived secret,
 # so a copy of that secret sitting in this home after the owner purged it would
 # quietly break that advice. Every poll therefore reconciles: a capture for THIS
-# store whose message id is gone from the listing is deleted, along with the
-# inbox note it produced (pending or already handled). The deletion is inferred
-# only from absence in the audience this poll can see, which is exactly the
-# audience that produced the capture, so nothing is concluded about any other
-# recipient's copy. The state/.gram-seen entry is deliberately kept, so a purged
-# message is never re-published if the store ever shows it again.
+# store whose message id is gone from the listing is deleted, and so is every
+# other local copy it produced.
+#
+# There are exactly THREE durable local sinks for a message body, and the purge
+# covers all three:
+#   1. the private capture under state/gram-inbox/;
+#   2. the derived note under state/inbox/, or state/inbox/handled/ once acked;
+#   3. the state/.wake-queue row fm-inbox.sh appended, whose payload carries the
+#      note's first hundred characters of body.
+# Anything else that ever sees a body is transient: this poll's own printed
+# lines and the standing check's output carry counts and ids only.
+#
+# What the purge CANNOT do is retract text already delivered into a conversation
+# transcript. Once a drained wake or a read note has reached the model's context
+# or a rendered pane, it is out of this home's reach, and no claim here covers it.
+#
+# The deletion is inferred only from absence in the audience this poll can see,
+# which is exactly the audience that produced the capture, so nothing is
+# concluded about any other recipient's copy. The state/.gram-seen entry is
+# deliberately kept, so a purged message is never re-published if the store ever
+# shows it again.
 set -u
 export LC_ALL=C
 
@@ -199,13 +214,49 @@ capture_note() {  # <capture-path> <note-id>
   mv -f -- "$tmp" "$path" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
 }
 
+# Drop the pending wake row a purged note produced, and nothing else. The wake
+# queue is durable supervision state, so dropping the wrong row loses a wake for
+# good: this matches the exact `inbox:<note-id>` key in the row's own key field
+# rather than any substring of its payload, takes the queue's own lock so a
+# concurrent drain never reads a half-written file, and renames a sibling
+# temporary into place. A lock it cannot take inside its bound, or a rewrite it
+# cannot finish, is reported rather than attempted optimistically - a surviving
+# row is recoverable on the next poll, a corrupted queue is not.
+purge_wake_row() {  # <note-id>
+  local note=$1 tmp rc=0
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" 5 || return 1
+  if tmp=$(mktemp "$FM_WAKE_QUEUE.purge.XXXXXX" 2>/dev/null); then
+    if awk -F '\t' -v key="inbox:$note" 'NF < 5 || $4 != key' "$FM_WAKE_QUEUE" >"$tmp" 2>/dev/null \
+      && mv -f -- "$tmp" "$FM_WAKE_QUEUE" 2>/dev/null
+    then
+      rc=0
+    else
+      rm -f -- "$tmp"
+      rc=1
+    fi
+  else
+    rc=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$rc"
+}
+
 # Honour `herdr gram delete`: a capture for THIS store whose message id is gone
-# from the listing describes a message the owner purged, so the copy this home
-# made goes too - the capture and the inbox note it produced, pending or handled.
+# from the listing describes a message the owner purged, so every local copy this
+# home made goes too - the wake row carrying the note's summary, the inbox note
+# itself whether pending or already handled, and the capture.
+#
+# The wake row goes FIRST, because the capture is what records the note id: a
+# capture removed ahead of a row that could not be dropped would strand that row
+# with nothing left to identify it. So a row this poll cannot drop leaves the
+# whole capture in place, counts a failure, and the next poll retries the lot.
 # A capture for another store is never touched, and state/.gram-seen is left
 # alone so a purged message can never be published a second time.
+PURGE_FAILED=0
 purge_deleted() {  # <store> <live-ids>
   local store=$1 live=$2 f cap_store cap_id note
+  PURGE_FAILED=0
   [ -d "$CAPTURE_DIR" ] || return 0
   for f in "$CAPTURE_DIR"/*.json; do
     [ -f "$f" ] || continue
@@ -215,11 +266,17 @@ purge_deleted() {  # <store> <live-ids>
     [ -n "$cap_id" ] || continue
     printf '%s\n' "$live" | grep -Fqx -- "$cap_id" && continue
     note=$(jq -r '.note_id // empty' "$f" 2>/dev/null)
-    rm -f -- "$f"
     case "$note" in
-      ''|*[!A-Za-z0-9._-]*) ;;
-      *) rm -f -- "$STATE/inbox/$note.note" "$STATE/inbox/handled/$note.note" ;;
+      ''|*[!A-Za-z0-9._-]*) note='' ;;
     esac
+    if [ -n "$note" ]; then
+      if ! purge_wake_row "$note"; then
+        PURGE_FAILED=$((PURGE_FAILED + 1))
+        continue
+      fi
+      rm -f -- "$STATE/inbox/$note.note" "$STATE/inbox/handled/$note.note"
+    fi
+    rm -f -- "$f"
   done
 }
 
@@ -294,6 +351,10 @@ EOF
   fi
   if [ "$published" -gt 0 ]; then
     say "$published new Gram message(s) from the owner are waiting in the captain inbox"
+  fi
+  if [ "$PURGE_FAILED" -gt 0 ]; then
+    say "could not clear this home's copy of $PURGE_FAILED deleted Gram message(s); their wake rows are still queued and the next poll retries"
+    return 1
   fi
   return 0
 }

@@ -324,8 +324,10 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Codex's async Stop hook owns the same re-arm and delivers its wake as a queued message into the Codex thread, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
-Codex is the one harness whose hooks need a one-time operator approval before any of this runs: Codex trusts a hook by the hash of its command, so `bin/fm-codex-stop-autoarm.sh` is a new entry whose hash has to be approved once in the Codex session, exactly like the guard entry beside it.
-Until that approval a Codex primary has no auto-arm at all, which is loud rather than silent - the beacon goes stale and the turn-end guard blocks - but the banner names missing supervision rather than a missing approval, so check the hook approval first when a Codex primary starts blocking on every turn.
+Codex is the one harness whose hooks need a one-time operator approval before any of this runs, and upgrading to the Codex auto-arm needs TWO approvals rather than one.
+Codex persists hook trust per entry, keyed by the hash of that entry's command, so both `Stop` entries in `.codex/hooks.json` are untrusted on the first session after this upgrade: `bin/fm-codex-stop-autoarm.sh` is a brand-new entry, and the turn-end guard entry beside it had `--codex` appended to its command, which invalidates whatever hash was already approved for it.
+Until both are approved once, a Codex primary is silently unsupervised rather than loudly unsupervised: there is no auto-arm to re-arm the watcher and no turn-end guard to block the blind turn, so nothing says the supervision is off.
+Approve both entries in the first Codex session after pulling this change, and treat that as the step that turns supervision back on rather than an optional prompt to dismiss.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
@@ -620,9 +622,18 @@ The publication cursor `state/.gram-seen` is keyed by store id plus message id, 
 The order is capture, then publish, then record, because losing a message the owner sent is worse than showing it twice, so a crash between publishing and recording can re-publish that one message on the next poll.
 That is the whole guarantee: it is not at-least-once, not no-loss, and not exactly-once delivery.
 
-Deleting a Gram message purges this home's copy of it.
-`herdr gram delete` is the documented way to clean up a short-lived secret, so a capture that outlived the owner's own deletion would quietly break that advice.
-Every poll therefore reconciles: a capture for the current store whose message id no longer appears in the listing is removed, together with the inbox note it produced, whether that note is still pending or already handled.
+Deleting a Gram message purges this home's durable copies of it.
+`herdr gram delete` is the documented way to clean up a short-lived secret, so a copy that outlived the owner's own deletion would quietly break that advice.
+Every poll therefore reconciles: a capture for the current store whose message id no longer appears in the listing is removed, and so is every local copy it produced.
+
+A message body reaches exactly three durable local sinks, and the purge covers all three: the private capture under `state/gram-inbox/`, the derived note under `state/inbox/` or `state/inbox/handled/` once acknowledged, and the `state/.wake-queue` row whose payload carries the note's first hundred characters of body.
+The poll's own printed lines and the standing check's output never carry a body at all, so there is no fourth sink to clear.
+What the purge cannot do is retract text already delivered into a conversation transcript: once a drained wake or a read note has reached the model's context, it is beyond this home's reach and nothing here claims otherwise.
+
+The wake row is dropped under the wake queue's own lock, matching that row's exact `inbox:<note-id>` key so every other queued row survives byte-identically, sequence number included.
+A poll that cannot take that lock or cannot complete the rewrite reports the failure and leaves the whole capture in place, because the capture is what records the note id; the next poll retries the purge rather than stranding a row nothing can identify.
+A drain that races the purge is safe in the other direction too: `bin/fm-inbox.sh drain --ack <id>` reports a note that is already gone as `already-acked` instead of failing.
+
 Absence is read only within the audience this poll can see, which is the same audience that produced the capture, so nothing is concluded about any other recipient's copy.
 The `state/.gram-seen` entry is kept on purpose, so a purged message is never published a second time.
 `bin/fm-gram-check.sh disarm` removes the standing check, not the captures; deleting the messages is what clears those.
