@@ -458,6 +458,55 @@ test_name_agent_refuses_unverified_rename_and_invalid_name() {
   pass 'agent naming fails closed on unverified writes and invalid names'
 }
 
+harness_registers() {  # <dir> <harness> <status-json|fail>
+  local dir=$1 resp="$1/responses" fb i
+  rm -rf "$resp"; mkdir -p "$resp"; : > "$dir/log"
+  for i in 1 2 3; do
+    if [ "$3" = fail ]; then
+      printf '1\n' > "$resp/$i.exit"
+    else
+      printf '%s\n' "$3" > "$resp/$i.out"
+    fi
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_harness_registers "$1" fmtest:w1:p2' "$ROOT" "$2"
+}
+
+test_harness_registration_excludes_rovo_and_muse_below_herdr_0_9_0() {
+  local dir
+  dir="$TMP_ROOT/harness-registers"; mkdir -p "$dir"
+
+  harness_registers "$dir" muse '{"client":{"version":"0.9.0"},"server":{"running":true,"version":"0.8.2"}}'
+  expect_code 1 $? 'muse on a running Herdr 0.8.2 server must skip mandatory naming'
+  assert_contains "$(cat "$dir/log")" $'status\x1f--json\x1f--session\x1ffmtest' \
+    'muse registration did not read the release of the exact target session'
+
+  harness_registers "$dir" muse '{"client":{"version":"0.8.2"},"server":{"running":true,"version":"0.9.0"}}'
+  expect_code 0 $? 'muse on a running Herdr 0.9.0 server must require naming'
+
+  harness_registers "$dir" muse '{"client":{"version":"0.9.1-preview"},"server":{"running":true,"version":"0.10.0"}}'
+  expect_code 0 $? 'muse on a Herdr release newer than 0.9.0 must require naming'
+
+  harness_registers "$dir" muse '{"client":{"version":"0.7.4"},"server":{"running":false}}'
+  expect_code 1 $? 'muse with no running server and a pre-0.9.0 client must skip mandatory naming'
+
+  harness_registers "$dir" muse fail
+  expect_code 0 $? 'an unreadable Herdr release is not proof that muse cannot register'
+
+  harness_registers "$dir" muse '{"client":{"version":"0.7.4"},"server":{"running":true,"version":"garbled"}}'
+  expect_code 0 $? 'an unparseable server release is not proof that muse cannot register'
+
+  harness_registers "$dir" rovo '{"client":{"version":"0.9.0"},"server":{"running":true,"version":"0.9.0"}}'
+  expect_code 1 $? 'rovo must skip mandatory naming on every Herdr release'
+  [ ! -s "$dir/log" ] || fail 'the rovo exclusion must not depend on a Herdr call'
+
+  harness_registers "$dir" claude '{"client":{"version":"0.7.1"},"server":{"running":true,"version":"0.7.1"}}'
+  expect_code 0 $? 'a registered adapter must require naming on every supported Herdr release'
+  [ ! -s "$dir/log" ] || fail 'a registered adapter must not depend on a Herdr release read'
+  pass 'harness registration excludes rovo always and muse only below Herdr 0.9.0'
+}
+
 # --- client selection: a stale client shadowing a compatible one -------------
 #
 # Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
@@ -5303,6 +5352,7 @@ test_name_agent_renames_and_verifies_the_exact_pane
 test_name_agent_accepts_verified_readback_after_lost_rename_response
 test_name_agent_refuses_mismatched_pane_without_renaming
 test_name_agent_refuses_unverified_rename_and_invalid_name
+test_harness_registration_excludes_rovo_and_muse_below_herdr_0_9_0
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free

@@ -97,7 +97,11 @@ Fresh provisional metadata and backlog state are not committed on that failure.
 Mandatory task-based naming is reserved for ordinary ship and scout dispatch through a verified harness adapter.
 A raw launch command is the verification-only exception: it is the escape hatch for trying an unverified adapter, so Firstmate never renames it and naming never blocks or fails that spawn, and its agent keeps Herdr's default presentation.
 Secondmate-primary launches also keep their existing behavior, in their own per-home workspace.
-Rovo is the one supported adapter excluded: Herdr ships no rovo integration, and a live rovo pane answered `agent get` with `agent_not_found` ([`verification/rovo.md`](verification/rovo.md)), so a rovo task keeps Herdr's default presentation.
+Supported adapters are excluded only where Herdr provably cannot register them, and an excluded task keeps Herdr's default presentation.
+Rovo is always excluded: Herdr ships no rovo integration, and a live rovo pane answered `agent get` with `agent_not_found` ([`verification/rovo.md`](verification/rovo.md)).
+Muse is excluded only when the task's Herdr release is below 0.9.0, the first release with Muse agent detection.
+On 0.9.0 and newer, Muse naming is mandatory like every other verified adapter.
+The running server's release decides, or the client's when no server is running, and an unreadable release is not proof, so naming stays required.
 
 The alias is presentation state, not endpoint authority.
 Normal task operations continue to use the recorded session, workspace, tab, and pane ids.

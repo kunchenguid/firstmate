@@ -130,6 +130,9 @@ FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
 # both fixes reaches 19, and the pre-fix builds top out at 17.
 FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL=19
 FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
+# Herdr 0.9.0 is the first release with Muse agent detection (upstream #2489);
+# older releases never register a live Muse pane.
+FM_BACKEND_HERDR_MIN_MUSE_AGENT_VERSION=0.9.0
 # One-warning-per-release dedupe marker prefix, under the state dir. The
 # projection decision is remade on every spawn, so an undeduplicated
 # below-floor warning would repeat on every crewmate; the key is the detected
@@ -2930,6 +2933,31 @@ fm_backend_herdr_parse_target() {  # <target>
   FM_BACKEND_HERDR_SESSION=${target%%:*}
   FM_BACKEND_HERDR_PANE=${target#*:}
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
+}
+
+# fm_backend_herdr_harness_registers: whether Herdr can register this adapter's
+# live agent in the exact target's session. Returns 1 only on proof that it
+# cannot: rovo has no Herdr integration (docs/verification/rovo.md), and Muse
+# is undetected below FM_BACKEND_HERDR_MIN_MUSE_AGENT_VERSION. For Muse the
+# running server's release decides, or the client's when status positively
+# reports no running server. An unreadable release is not proof.
+fm_backend_herdr_harness_registers() {  # <harness> <target>
+  local harness=${1:-} status version verdict=0
+  case "$harness" in
+    rovo) return 1 ;;
+    muse) ;;
+    *) return 0 ;;
+  esac
+  fm_backend_herdr_parse_target "${2:-}" || return 0
+  status=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null) || return 0
+  version=$(printf '%s' "$status" | jq -r '
+    if .server.running == true then .server.version // empty
+    elif .server.running == false then .client.version // empty
+    else empty
+    end
+  ' 2>/dev/null) || return 0
+  fm_backend_herdr_version_at_least "$version" "$FM_BACKEND_HERDR_MIN_MUSE_AGENT_VERSION" || verdict=$?
+  [ "$verdict" -ne 1 ]
 }
 
 # fm_backend_herdr_task_agent_name: derive the Herdr live-agent name for one
