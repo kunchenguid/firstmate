@@ -58,8 +58,11 @@
 #                              background job and record that no terminal exists.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
-#                              wait for it, close the recorded terminal by exact
-#                              id, clear state/.afk, then archive the record last.
+#                              wait for it, force-terminate the whole recorded
+#                              process tree when the grace window expires, verify
+#                              every process exited, close the recorded terminal
+#                              by exact id, clear state/.afk, then archive the
+#                              record last.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -706,8 +709,83 @@ fm_afk_launch_start_native() {
   return "$result"
 }
 
+# Record the daemon's whole /proc descendant tree as "pid<TAB>identity" lines
+# BEFORE any signal, so the stop can later verify exactly these processes died
+# instead of fire-and-forgetting the daemon pid alone. MSYS /proc covers the
+# bash-wrapped daemon tree (its fork children's Win32 parent links go stale and
+# are invisible to taskkill //T, verified 2026-09-14: the watcher under a
+# pane-launched daemon has no live Win32 parent chain); hosts without /proc
+# record nothing and keep the single-pid behavior. Identity matching is what
+# lets the later sweep kill a survivor without pid-reuse risk.
+fm_afk_launch_descendant_records() {  # <root-pid>
+  local root=$1 d rest ppid identity
+  local -a frontier=("$root") next=()
+  [ -n "$root" ] || return 0
+  while [ "${#frontier[@]}" -gt 0 ]; do
+    next=()
+    for d in /proc/[0-9]*; do
+      d=${d#/proc/}
+      [ "$d" != "$root" ] || continue
+      rest=$(cat "/proc/$d/stat" 2>/dev/null) || continue
+      rest=${rest#*(}
+      rest=${rest#*) }
+      rest=${rest#* }
+      ppid=${rest%% *}
+      case " ${frontier[*]} " in
+        *" $ppid "*)
+          next+=("$d")
+          identity=$(fm_pid_identity "$d" 2>/dev/null) || identity=""
+          printf '%s\t%s\n' "$d" "$identity"
+          ;;
+      esac
+    done
+    frontier=("${next[@]+"${next[@]}"}")
+  done
+}
+
+# Force-terminate one pid and, on Windows, the native process tree under its
+# winpid. Each mechanism covers exactly the other's blind spot: taskkill //T
+# walks the Win32 parent chain that MSYS /proc cannot see, while the explicit
+# KILL reaches MSYS fork children whose Win32 parent link went stale with their
+# fork-helper intermediate. (Git Bash needs the doubled slashes //PID //T //F:
+# a single slash would be path-converted.)
+fm_afk_launch_force_kill_pid() {  # <pid>
+  local pid=$1 winpid
+  if fm_host_is_windows; then
+    winpid=$(cat "/proc/$pid/winpid" 2>/dev/null) || winpid=""
+    if [ -n "$winpid" ]; then
+      taskkill //PID "$winpid" //T //F >/dev/null 2>&1
+    fi
+  fi
+  kill -KILL "$pid" 2>/dev/null
+  return 0
+}
+
+# Verify every recorded tree process exited; force-kill an identity-matched
+# survivor and surface a failure when one survives even that. Identity matching
+# keeps pid reuse from turning the sweep onto an unrelated process, and a
+# record whose identity cannot be re-read is skipped as not ours.
+fm_afk_launch_sweep_tree() {  # <daemon-tree>
+  local result=0 tree_pid tree_identity
+  while IFS="$(printf '\t')" read -r tree_pid tree_identity; do
+    [ -n "$tree_pid" ] && [ -n "$tree_identity" ] || continue
+    fm_pid_alive "$tree_pid" || continue
+    [ "$(fm_pid_identity "$tree_pid" 2>/dev/null)" = "$tree_identity" ] || continue
+    fm_afk_launch_log "daemon descendant pid=$tree_pid outlived the daemon; forcing termination"
+    fm_afk_launch_force_kill_pid "$tree_pid"
+    if fm_pid_alive "$tree_pid" \
+      && [ "$(fm_pid_identity "$tree_pid" 2>/dev/null)" = "$tree_identity" ]; then
+      fm_afk_launch_log "daemon descendant pid=$tree_pid survived forced termination"
+      result=1
+    fi
+  done <<EOF
+$1
+EOF
+  return "$result"
+}
+
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived
+  local pid pid_identity current_identity result=0 read_result archived daemon_tree
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -716,12 +794,16 @@ fm_afk_launch_stop() {
   fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
-  # first would make that flush a no-op via inject_msg's presence gate).
+  # first would make that flush a no-op via inject_msg's presence gate). The
+  # tree is recorded BEFORE the signal so the exit verification below covers
+  # the whole bash-wrapped process tree, not just the daemon pid.
   pid=""
   pid_identity=""
+  daemon_tree=""
   if daemon_lock_held_by_live_daemon; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    daemon_tree=$(fm_afk_launch_descendant_records "$pid")
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
@@ -732,6 +814,19 @@ fm_afk_launch_stop() {
       fm_pid_alive "$pid" || break
       sleep 0.25
     done
+    # MSYS bash defers a trapped TERM until the foreground native child exits
+    # (verified 2026-09-14: a TERM sent while bash waited on an 8s powershell
+    # child ran the trap only when that child exited), so a daemon mid
+    # herdr/powershell call can outlive the grace window entirely. Forced
+    # whole-tree termination closes that gap.
+    if fm_pid_alive "$pid"; then
+      fm_afk_launch_log "daemon survived the SIGTERM grace window; forcing whole-tree termination"
+      fm_afk_launch_force_kill_pid "$pid"
+      for _ in $(seq 1 16); do
+        fm_pid_alive "$pid" || break
+        sleep 0.25
+      done
+    fi
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
@@ -739,10 +834,12 @@ fm_afk_launch_stop() {
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM and forced termination; preserving lifecycle state"
       return 1
     fi
   fi
+  # (1b) Verify the whole tree exited, not just the daemon pid.
+  fm_afk_launch_sweep_tree "$daemon_tree" || result=1
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1

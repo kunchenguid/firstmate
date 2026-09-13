@@ -20,9 +20,12 @@
 # hosts. This file is sourced by scripts and has no side effects on source.
 
 # True when the host shell is an MSYS-style Windows environment, where the Unix
-# ps walks cannot cross into the native Windows processes above the shell.
+# ps walks cannot cross into the native Windows processes above the shell. The
+# uname read goes through FM_UNAME_S_CACHE so a test can pin the host class
+# after sourcing (an empty memo falls back to a live read).
+FM_UNAME_S_CACHE=""
 fm_host_is_windows() {
-  case "$(uname -s 2>/dev/null)" in
+  case "${FM_UNAME_S_CACHE:-$(uname -s 2>/dev/null)}" in
     MINGW*|MSYS*|CYGWIN*) return 0 ;;
     *) return 1 ;;
   esac

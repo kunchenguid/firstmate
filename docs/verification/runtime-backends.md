@@ -1052,6 +1052,12 @@ A POSIX `exec env ...` line sent into a created Herdr pane reached its PowerShel
 With the wrapper, the same pane shell executed `& 'C:\Program Files\Git\bin\bash.exe' -lc '<command>'`, the real `bin/fm-afk-start.sh` daemon started in that pane's foreground, the watcher beat `state/.last-watcher-beat` within one poll, the daemon logged its startup line, and `stop` terminated the daemon, closed the workspace by exact id, and archived the record.
 The portable command contract is pinned by the `tests/fm-afk-launch.test.sh` pane-command units on both host classes, and its herdr e2e asserts the daemon entry actually executes by watching a marker file the entry writes, which topology checks alone cannot see when a pane shell rejects the command.
 
+The Windows whole-tree stop was verified live on 2026-09-14 on the same host class with herdr 0.9.0-preview.2026-09-08, the real `bin/fm-afk-start.sh` daemon in an isolated `fm-lab-*` session, and a sandbox home.
+Bash runs a trapped TERM only after the foreground child it is waiting on completes, and the daemon loop waits on multi-second children, so the daemon deterministically outlived the stop's SIGTERM grace window in two live cycles and the forced escalation completed every teardown (`stop` rc=0, workspace closed by exact id, `.afk` and terminal record cleared, posture record archived).
+The tree shape was confirmed on the same host: the pane's PowerShell wrapper exits after launching the daemon and the watcher child carries a stale Win32 parent, so the sweep records the `/proc` descendant tree before signaling and verifies each identity-matched member is gone after, with `taskkill //PID <winpid> //T //F` covering the native tree and explicit kills covering the MSYS fork children `taskkill /T` cannot see.
+A following start after both forced stops relaunched supervision cleanly, proving no stale lock, record, or terminal survives a forced stop, and the graceful path was exercised on the same daemon in the same session.
+The escalation and sweep semantics are pinned by five `tests/fm-afk-launch.test.sh` units, including that a reused pid with a mismatched identity is never killed and a survivor that outlives the force fails the stop while teardown still completes.
+
 ## zai primary session identity on Windows
 
 zai is a herdr fork whose engine is the zai-cli node bundle; it publishes no harness-identity marker of its own and consumes the herdr pane environment, so its identity comes from process ancestry alone.

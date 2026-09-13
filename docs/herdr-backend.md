@@ -309,6 +309,7 @@ Harnesses with native tracked background execution can run the daemon in their t
 Pi and pi-signed no longer launch the away daemon; their ordinary supervision session continues under the posture record.
 For another harness without native tracked background execution, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 On a Windows host the created pane's shell is PowerShell, so the launcher wraps the daemon command in the Git Bash login invocation PowerShell executes, while POSIX hosts send the bare command.
+Because bash defers a trapped TERM until the foreground child it waits on completes, the Windows stop records the daemon's `/proc` descendant tree before signaling, escalates to `taskkill //PID <winpid> //T //F` plus explicit kills when the grace window expires, and verifies every recorded process exited before touching lifecycle state.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 

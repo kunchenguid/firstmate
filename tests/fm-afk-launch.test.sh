@@ -939,6 +939,7 @@ unit_stop_confirms_daemon_exit() {
         rm -rf "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
       fi
     }
+    fm_afk_launch_force_kill_pid() { return 1; }
     ! fm_afk_launch_stop
   ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
     && [ ! -e "$st/state/.supervise-daemon.lock" ] \
@@ -949,6 +950,144 @@ unit_stop_confirms_daemon_exit() {
   fi
   kill -KILL "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_forces_a_term_ignoring_daemon() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-force.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  # The no-op sleep spins the real grace window down to the force path without
+  # waiting it out; the forced kill itself must be the real mechanism.
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    sleep() { :; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" >/dev/null 2>&1 \
+    && ! kill -0 "$daemon_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop escalation: a daemon that ignores TERM through the grace window is force-terminated and teardown completes"
+  else
+    fail "stop escalation: TERM-ignoring daemon survived or teardown did not complete"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_sweeps_a_surviving_descendant() {
+  local st daemon_pid child_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-sweep.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  # The daemon exits on TERM but leaks a descendant that ignores TERM - the
+  # watcher-shaped orphan the tree sweep exists for.
+  bash -c '
+    trap "exit 0" TERM
+    bash -c "trap \"\" TERM; while :; do sleep 1; done" &
+    printf "%s" "$!" > "$1"
+    while :; do sleep 1; done
+  ' _ "$st/child-pid" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  child_pid=$(cat "$st/child-pid")
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    sleep() { :; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" >/dev/null 2>&1 \
+    && ! kill -0 "$daemon_pid" 2>/dev/null \
+    && ! kill -0 "$child_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.afk" ]; then
+    pass "stop tree sweep: a descendant that outlives the daemon is force-terminated"
+  else
+    fail "stop tree sweep: descendant survivor was not reaped (daemon $(kill -0 "$daemon_pid" 2>/dev/null && echo alive || echo dead), child $(kill -0 "$child_pid" 2>/dev/null && echo alive || echo dead))"
+  fi
+  kill -KILL "$daemon_pid" "$child_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_surfaces_an_unkillable_survivor() {
+  local st daemon_pid child_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-unkillable.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  # Busy loops (no foreground child) so the daemon's own TERM trap runs the
+  # instant the signal lands; the child ignores TERM and cannot be force-killed.
+  bash -c '
+    trap "exit 0" TERM
+    bash -c "trap \"\" TERM; while :; do :; done" &
+    printf "%s" "$!" > "$1"
+    while :; do :; done
+  ' _ "$st/child-pid" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  child_pid=$(cat "$st/child-pid")
+  if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_force_kill_pid() { return 1; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" >/dev/null 2>&1 \
+    && kill -0 "$child_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop survivor: an unkillable descendant surfaces failure while teardown completes"
+  else
+    fail "stop survivor: unkillable descendant was swallowed or teardown was blocked"
+  fi
+  kill -KILL "$daemon_pid" "$child_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_tree_sweep_identity_guards() {
+  local st survivor unrelated survivor_identity
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-sweep-guard.XXXXXX")
+  sleep 600 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  survivor=$!
+  sleep 600 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  unrelated=$!
+  survivor_identity=$(FM_HOME="$st" bash -c '. "$1" && fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$survivor")
+  # A recorded identity that re-reads differently is stale pid reuse: the
+  # sweep must leave that live process alone.
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_sweep_tree "$(printf "%s\t%s\n" "$2" "proc-starttime=999 cmdline-hex=ff")"
+  ' _ "$LAUNCH" "$unrelated" >/dev/null 2>&1 \
+    && kill -0 "$unrelated" 2>/dev/null; then
+    pass "tree sweep: a reused pid with mismatched identity is never killed"
+  else
+    fail "tree sweep: killed an unrelated process on a stale pid match"
+  fi
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_sweep_tree "$(printf "%s\t%s\n" "$2" "$3")"
+  ' _ "$LAUNCH" "$survivor" "$survivor_identity" >/dev/null 2>&1 \
+    && ! kill -0 "$survivor" 2>/dev/null; then
+    pass "tree sweep: an identity-matched survivor is force-terminated"
+  else
+    fail "tree sweep: identity-matched survivor survived"
+  fi
+  kill -KILL "$survivor" "$unrelated" 2>/dev/null || true
+  wait "$survivor" "$unrelated" 2>/dev/null || true
   rm -rf "$st"
 }
 
@@ -1198,6 +1337,10 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_stop_forces_a_term_ignoring_daemon
+unit_stop_sweeps_a_surviving_descendant
+unit_stop_surfaces_an_unkillable_survivor
+unit_tree_sweep_identity_guards
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
