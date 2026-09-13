@@ -175,6 +175,30 @@ test_write_is_durable_and_exact() {
 # The doorbell may land in a pane whose agent has exited, where it is a shell
 # command line. Execute the real line in real shells and assert it is inert:
 # exit 0, no output, and nothing in the inbox touched.
+test_legacy_unterminated_record_is_read() {
+  local state rec expected actual
+  state="$TMP_ROOT/legacy-unterminated/state"
+  mkdir -p "$state/t1.inbox/handled"
+  rec="$state/t1.inbox/001.msg"
+  # A pre-fix record can end without a newline after its final instruction
+  # line. Read it through the production inbox-body interface, not by parsing
+  # it in this test, so the final instruction line cannot be silently dropped.
+  printf 'schema=fm-task-inbox.v1\nat=2025-01-01T00:00:00Z\n--\n%s' \
+    'final instruction without newline' > "$rec"
+  expected="$state/expected"
+  actual="$state/actual"
+  printf '%s' 'final instruction without newline' > "$expected"
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" \
+    || fail "an unterminated legacy record could not be read"
+  cmp -s "$expected" "$actual" \
+    || fail "the final unterminated instruction line was dropped"
+  mv "$rec" "$state/t1.inbox/handled/" \
+    || fail "a successfully read legacy record could not be acknowledged"
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || fail "acknowledgement did not move the legacy record to handled"
+  pass "inbox: legacy records without a final newline preserve the final instruction line"
+}
+
 test_doorbell_is_a_shell_noop() {
   local state rec doorbell sh out before after marker
   state="$TMP_ROOT/noop/x; touch marker; #'s space/state"
@@ -693,6 +717,7 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 }
 
 test_write_is_durable_and_exact
+test_legacy_unterminated_record_is_read
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent

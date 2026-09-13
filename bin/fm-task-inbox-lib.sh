@@ -241,7 +241,7 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
 fm_task_inbox_body() {  # <record-path>
   local line
   [ -f "$1" ] || return 1
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     if [ "$line" = -- ]; then
       cat
       return 0
