@@ -976,13 +976,14 @@ test_forge_host_resolver_expands_safe_includes() {
   fakebin="$case_dir/fakebin"
   marker="$case_dir/match-exec-ran"
   mkdir -p "$config_dir" "$fakebin"
+  real_ssh=$(command -v ssh)
   cat > "$config_dir/config" <<EOF
 Include included.conf
 Match host github-work
   HostName github.com
-Match exec "touch $marker"
+Match host github-work,exec "touch $marker"
   HostName should-not-be-used.example
-Match EXEC "touch $marker"
+Match host github-work,EXEC "touch $marker"
   HostName should-not-be-used-case-variant.example
 EOF
   cat > "$config_dir/included.conf" <<'EOF'
@@ -991,19 +992,15 @@ EOF
 EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
-config=$(cat)
-if grep -F -q 'HostName should-not-be-used.example' <<<"$config" \
-  || grep -F -q 'HostName should-not-be-used-case-variant.example' <<<"$config"; then
-  printf '%s\n' 'hostname should-not-be-used.example'
-elif grep -F -q 'Match host github-work' <<<"$config" \
-  && grep -F -q 'HostName github.com' <<<"$config"; then
-  printf '%s\n' 'hostname github.com'
-else
-  printf '%s\n' 'hostname missing.example'
-fi
+config=$(mktemp)
+trap 'rm -f "$config"' EXIT
+cat > "$config"
+target=${!#}
+exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
 SH
   chmod +x "$fakebin/ssh"
   result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+    FM_REAL_SSH_BIN="$real_ssh" \
     bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
