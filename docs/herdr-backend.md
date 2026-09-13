@@ -79,7 +79,7 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Agent names
 
-Every Herdr ship or scout launched through a supported Firstmate harness adapter receives a deterministic name after the harness registers in the exact new pane.
+Every Herdr ship or scout launched through a supported Firstmate harness adapter, apart from the exclusions below, receives a deterministic name after the harness registers in the exact new pane.
 The format is `fm-<task-prefix>-<scope-digest>`.
 The task prefix is the first 17 normalized characters of the task id, and the 10-character digest binds the full task id to the existing home tag.
 That home tag includes the primary or secondmate identity and a hash of the resolved Firstmate installation root, so matching task ids from homes sharing one Herdr session still get different names.

@@ -80,23 +80,13 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
-#   Every Herdr ship or scout launched through a supported harness adapter gets
-#   one deterministic session-global agent name after the harness registers in
-#   its exact response-derived pane. The name keeps a readable task prefix and
-#   hashes the full task id with the existing installation/home identity, so
-#   same-id tasks from homes sharing one Herdr session remain distinguishable.
-#   Rename success is read back from that exact pane. A bounded retry handles a
-#   lost rename response; absent registration, a collision, or failed readback
-#   stops the spawn, closes that exact pane so the launched agent cannot keep
-#   working outside task control, and leaves the task copy and failure event for
-#   inspection. A raw launch command is the verification-only exception: it is
-#   the escape hatch for trying an unverified adapter, so it is never renamed
-#   and naming never blocks it; mandatory naming is reserved for ordinary
-#   verified ship/scout dispatch. Secondmate primaries keep their existing
-#   behavior in their own per-home workspace. fm_backend_herdr_harness_registers
-#   owns the only adapter exclusions: rovo always, because Herdr has no rovo
-#   integration (docs/verification/rovo.md), and muse only when the task's
-#   Herdr release is provably below 0.9.0, the first with Muse detection.
+#   A Herdr ship or scout launched through a verified harness adapter also gets
+#   a deterministic task-based agent name, read back from its exact pane; a
+#   naming failure stops the spawn and closes that exact pane so the launched
+#   agent cannot keep working outside task control. Raw launch commands are
+#   never renamed, and fm_backend_herdr_harness_registers owns the adapter
+#   exclusions. docs/herdr-backend.md "Agent names" owns the name format,
+#   verification, failure handling, and exclusions.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
