@@ -205,10 +205,14 @@ else
   # process info carries it: muse's launcher execs a version-suffixed
   # muse-bin-<version>, which docs/verification/muse.md treats as muse's
   # authoritative version surface.
+  # The argv exec path is preferred over the kernel process name, the same
+  # ordering bin/backends/herdr.sh already applies, because that name is
+  # truncated (15 bytes on Linux, 16 on macOS) and a real muse identity
+  # truncates mid-version to a build that never existed.
   muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
   muse_exec_name=$(printf '%s' "$muse_proc_json" | jq -r '
     [.result.process_info.foreground_processes[]?
-     | (.name // empty), ((.argv // [])[0] // empty), (.argv0 // empty)]
+     | ((.argv // [])[0] // empty), (.argv0 // empty), (.name // empty)]
     | map(split("/") | last)
     | map(select(startswith("muse-bin-")))
     | first // empty' 2>/dev/null || true)
