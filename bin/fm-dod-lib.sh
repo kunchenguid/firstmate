@@ -190,7 +190,7 @@ fm_brief_task_content_valid() {  # <file>
 # The prohibition is identical in every mode; only the check point, the remedy
 # and the pipeline clause differ, because branch ownership does. Only
 # no-mistakes runs a pipeline that commits on the worker's behalf, so only its
-# arm says the ban covers such a commit. no-mistakes mode is the one that
+# arm carries the ban to that pipeline. no-mistakes mode is the one that
 # changes hands mid-flight, so its arm is phased: the worker strips the trailer
 # while the branch is still its own, must not touch the branch while a run owns
 # it, and reports rather than rewriting a pushed PR head afterwards.
@@ -219,7 +219,6 @@ EOF
     case "$mode" in
       no-mistakes)
         cat <<EOF
-This holds whether you write the commit yourself or a pipeline step writes it on your behalf while applying a fix.
 The pipeline commits on your behalf, so carry this ban to it through the two channels you already drive: state it in the \`--intent\` you pass \`no-mistakes axi run\`, and restate it in every fix instruction you send with \`no-mistakes axi respond\`.
 Before you start a no-mistakes run, while \`fm/$id\` is still yours alone, check every commit on this branch for that trailer; if you find one, rewrite ONLY this task's own unmerged branch to strip it, and say in your report that you did.
 While a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter, force-push, or hand-commit on it, not even to strip a trailer.
