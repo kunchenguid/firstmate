@@ -4,13 +4,14 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, and an
-# arbitrarily nested project name on Gerrit, where "number" is the change
+# "path" is the full project path, which is owner/repository on GitHub and
+# Forgejo, an arbitrarily nested group/subgroup/project namespace on GitLab, and
+# an arbitrarily nested project name on Gerrit, where "number" is the change
 # number. A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# instead. GitLab, Gerrit, and Forgejo all run on self-hosted instances, and
+# Gerrit runs nowhere else, so the host is part of that identity rather than a
+# constant. Every consumer re-derives the identity
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
@@ -115,7 +116,7 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
+# GitLab, Gerrit, and Forgejo all serve self-hosted instances, so the host is part of the
 # identity rather than a constant. It is accepted only as a lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
 # change. github.com is refused here even though its shape is otherwise valid:
@@ -188,14 +189,26 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
+# exactly owner/repository, so each segment is validated the same way GitHub's
+# owner and repo are, minus GitHub's specific hyphen-run and length rules.
+fm_pr_forgejo_segment_valid() {
+  local segment=${1-}
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || return 1
+  case "$segment" in
+    .|..|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab and Gerrit each get
-# their own namespace rules rather than a loosened GitHub rule.
+# username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
+# each get their own namespace rules rather than a loosened GitHub rule.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
-# URL leaves them empty, and those paths address the project by FM_PR_HOST and
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
+# because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab or
+# gerrit URL leaves them empty, and those paths address the project by FM_PR_HOST and
 # FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
 # host.
 fm_pr_url_parse() {
@@ -247,16 +260,37 @@ fm_pr_url_parse() {
   # nested path for the same reason GitLab's does, so it is never flattened into
   # an owner/repository pair that cannot address it.
   pattern='^https://([a-z0-9.-]{1,253})/c/([A-Za-z0-9._/-]+)/\+/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_gerrit_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gerrit
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
+  # route separator and no "/+/" change separator, so this shape never collides
+  # with the GitLab or Gerrit patterns above.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
   fm_pr_forge_host_valid "$host" || return 1
-  fm_pr_gerrit_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gerrit
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+  FM_PR_PROVIDER=forgejo
   FM_PR_URL=$raw
   FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
+  # shellcheck disable=SC2034
+  FM_PR_OWNER=${BASH_REMATCH[2]}
+  # shellcheck disable=SC2034
+  FM_PR_REPO=${BASH_REMATCH[3]}
+  FM_PR_NUMBER=${BASH_REMATCH[4]}
 }
 
 fm_pr_head_valid() {
