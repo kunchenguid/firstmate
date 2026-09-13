@@ -1717,15 +1717,7 @@ treehouse_registered_path_for_return() {
       return 0
     fi
   done < <(
-    printf '%s\n' "$status" | jq -r '
-      if type == "array" then
-        .[]?.path // empty
-      elif type == "object" then
-        .worktrees[]?.path // empty
-      else
-        empty
-      end
-    ' 2>/dev/null
+    printf '%s\n' "$status" | jq -r '.[]?.path // empty' 2>/dev/null
   )
   return 1
 }
