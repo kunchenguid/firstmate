@@ -169,4 +169,29 @@ for mid in fm-a fm-b fm-c; do
 done
 "$FLEET" validate || fail "registry invalid after stop"
 
+# A live reasoning session holding the home lock (no daemon) is real authority.
+"$FLEET" register --id fm-s --home "$FROOT/homes/fm-s" --scope sessions >/dev/null || fail "register fm-s"
+mkdir -p "$FROOT/homes/fm-s/state"
+bash -c 'exec -a /opt/homebrew/bin/codex sleep 300' & SHOLDER=$!
+printf '%s\n' "$SHOLDER" > "$FROOT/homes/fm-s/state/.lock"
+sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sstate" = "idle" ] || fail "session-held home not idle: $sstate"
+sdetail=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["detail"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sdetail" = "agent" ] || fail "session authority not labeled agent: $sdetail"
+"$FLEET" progress fm-s --active 2 --note "session work" >/dev/null || fail "session progress"
+sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sstate" = "running" ] || fail "session progress not running: $sstate"
+"$FLEET" set-wait fm-s --on >/dev/null || fail "session set-wait"
+sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sstate" = "model-wait" ] || fail "session wait not model-wait: $sstate"
+"$FLEET" set-wait fm-s --off >/dev/null || fail "session clear-wait"
+if "$FLEET" start --managers fm-s >/dev/null 2>&1; then
+  fail "fleet started a daemon over a session-held home"
+fi
+sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["detail"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sstate" = "agent" ] || fail "session authority lost after refused start: $sstate"
+kill "$SHOLDER" 2>/dev/null || true
+sstate=$("$FLEET" status --json | python3 -c 'import json,sys; print([r["state"] for r in json.load(sys.stdin)["managers"] if r["manager"]=="fm-s"][0])')
+[ "$sstate" = "ready" ] || [ "$sstate" = "dead" ] || [ "$sstate" = "stopped" ] || fail "released home not quiescent: $sstate"
+
 pass "fleet control plane"

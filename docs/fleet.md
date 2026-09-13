@@ -102,12 +102,15 @@ If fleet control itself is unavailable, running managers keep supervising from t
 
 ## Backends
 
-Managers run under tmux when it is present and under `nohup` otherwise.
-`FM_FLEET_BACKEND=tmux` or `=nohup` pins the choice.
-Both backends run real processes; tmux additionally survives the launching shell.
-`FM_FLEET_BACKEND=herdr` runs each manager in its own workspace per manager home (label `fm-fleet-<id>`) with one tab per manager (label `fleet-<id>`) in the resolved Herdr session, so managers stay visible on the operator's normal Herdr surface, matching the workspace-per-home rule SecondMates and Crewmates follow.
+A manager home has two live forms, never both at once.
+The placeholder form is the supervised heartbeat daemon (`bin/fm-fleet-manager.sh`): it holds the fleet lease, publishes heartbeats, and exits cleanly on SIGTERM.
+It runs under tmux when tmux is present and under `nohup` otherwise; `FM_FLEET_BACKEND=tmux` or `=nohup` pins the choice.
+The reasoning form is a real FirstMate session (Codex) running in the home with `FM_HOME` set, holding the home session lock.
+`FM_FLEET_BACKEND=herdr` runs each manager in its own workspace per manager home (label `fm-fleet-<id>`) with one tab per manager (label `fleet-<id>`) in the resolved Herdr session, so managers stay visible on the operator's normal Herdr surface with live agent states, matching the workspace-per-home rule SecondMates and Crewmates follow.
 The Herdr backend reuses the verified tab-create, submit, and kill primitives from `bin/backends/herdr.sh`; tabs are labeled `fleet-<id>` and never collide with task tabs.
 Explicit selection stays required for Herdr because it is experimental and session-dependent.
+A reasoning session takes a home only after that home's daemon is stopped (`fm-fleet.sh stop <id>`); `fm-fleet.sh start` refuses a home whose session lock is held by a live session, and the daemon refuses to start there too.
+`fm-fleet.sh status` shows `agent` in DETAIL while a reasoning session holds the home and the daemon form otherwise, so the operator can always tell which form is live.
 
 ## Migration
 

@@ -419,9 +419,10 @@ PY
     json=0
     [ "${1:-}" = "--json" ] && json=1
     STALL_SECS="${FM_FLEET_STALL_SECS:-300}"
-    python3 - "$REG" "$json" "$STALL_SECS" <<'PY'
-import json, os, sys, time
+    python3 - "$REG" "$json" "$STALL_SECS" "$SCRIPT_DIR" <<'PY'
+import json, os, subprocess, sys, time
 path, as_json, stall = sys.argv[1], sys.argv[2] == "1", int(sys.argv[3])
+FM_LOCK = os.path.join(sys.argv[4], "fm-lock.sh")
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)
@@ -461,6 +462,28 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
         fresh = (time.time() - os.path.getmtime(os.path.join(state_dir, ".fleet-heartbeat.json"))) <= 15
     except OSError:
         hb, fresh = {}, False
+    try:
+        with open(os.path.join(state_dir, ".fleet-progress.json")) as fh:
+            marked = json.load(fh)
+    except (OSError, ValueError):
+        marked = {}
+    session_pid, session_alive = None, False
+    if not (alive and fresh):
+        try:
+            env = dict(os.environ, FM_HOME=home)
+            out = subprocess.run(["bash", FM_LOCK, "status"], env=env,
+                                 capture_output=True, text=True, timeout=15).stdout.strip()
+        except Exception:
+            out = ""
+        if out.startswith("lock: held by live"):
+            session_alive = True
+            session_pid = out.split()[-1] or None
+    eff_active = marked.get("active_tasks", hb.get("active_tasks", 0))
+    try:
+        eff_active = int(eff_active)
+    except (TypeError, ValueError):
+        eff_active = 0
+    eff_progress = marked.get("last_progress") or hb.get("last_progress")
     lease = os.path.exists(os.path.join(state_dir, ".fleet-lease"))
     wait = bool(hb.get("provider_wait")) or os.path.exists(os.path.join(state_dir, ".fleet-wait"))
     blocked = bool(hb.get("blocked")) or os.path.exists(os.path.join(state_dir, ".fleet-blocked"))
@@ -472,7 +495,24 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
         except OSError:
             reason = ""
     dep_wait = [d for d in open_deps if d.get("owner") == mid]
-    if alive and fresh:
+    session_authority = (not alive) and session_alive
+    if session_authority:
+        if wait:
+            state = "model-wait"
+        elif blocked or dep_wait:
+            state = "blocked"
+        elif eff_active > 0:
+            if marked.get("last_progress"):
+                try:
+                    idle_for = time.time() - time.mktime(time.strptime(eff_progress, "%Y-%m-%dT%H:%M:%SZ"))
+                except Exception:
+                    idle_for = 10 ** 9
+                state = "stalled" if idle_for > stall else "running"
+            else:
+                state = "running"
+        else:
+            state = "idle"
+    elif alive and fresh:
         if wait:
             state = "model-wait"
         elif blocked or dep_wait:
@@ -485,7 +525,7 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
                 idle_for = 10 ** 9
             if idle_for > stall:
                 state = "stalled"
-            elif int(hb.get("active_tasks") or 0) > 0:
+            elif eff_active > 0:
                 state = "running"
             else:
                 state = "idle"
@@ -496,12 +536,14 @@ for m in sorted(reg.get("managers", []), key=lambda x: x.get("id")):
     else:
         state = "dead"
     detail = reason or ("; ".join("needs %s:%s" % (d.get("needs_manager"), d.get("needs_task")) for d in dep_wait) if dep_wait else "")
+    if session_authority and not detail:
+        detail = "agent"
     rows.append({"manager": mid, "scope": scope, "state": state,
-                 "sms": len(m.get("secondmates", [])), "active": int(hb.get("active_tasks") or 0),
+                 "sms": len(m.get("secondmates", [])), "active": eff_active,
                  "blocked": 1 if (blocked or dep_wait) else 0,
-                 "last_progress": age(hb.get("last_progress")) if hb.get("last_progress") else "-",
+                 "last_progress": age(eff_progress) if eff_progress else "-",
                  "secondmates": m.get("secondmates", []), "home": home,
-                 "pid": pid if alive else None, "detail": detail})
+                 "pid": (pid if alive else None) or (session_pid if session_authority else None), "detail": detail})
 if as_json:
     print(json.dumps({"managers": rows}, indent=2, sort_keys=True))
 else:

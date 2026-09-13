@@ -39,6 +39,9 @@ PY
 ) || { echo "fm-fleet-manager: cannot read registry $FLEET_ROOT/fleet.json" >&2; exit 1; }
 [ -n "$HOME_DIR" ] || { echo "fm-fleet-manager: unknown manager $MANAGER_ID" >&2; exit 1; }
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_ROOT/bin/fm-session-lock-lib.sh"
+
 STATE="$HOME_DIR/state"
 mkdir -p "$STATE" "$HOME_DIR/data" "$HOME_DIR/config" 2>/dev/null || {
   echo "fm-fleet-manager: cannot create home directories under $HOME_DIR" >&2
@@ -157,6 +160,16 @@ write_heartbeat "running"
 while [ "$STOPPING" -eq 0 ]; do
   sleep "$POLL" 2>/dev/null || true
   [ "$STOPPING" -eq 0 ] || break
+  lp=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lp" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$lp" != "$ME" ] && fm_harness_pid_alive "$lp" 2>/dev/null; then
+        echo "fm-fleet-manager: live session $lp holds $HOME_DIR; yielding" >> "$LOG" 2>/dev/null || true
+        break
+      fi
+      ;;
+  esac
   write_heartbeat "running" || echo "fm-fleet-manager: heartbeat write failed for $MANAGER_ID" >> "$LOG" 2>/dev/null || true
 done
 
