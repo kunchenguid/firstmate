@@ -28,4 +28,21 @@ case "$BLOCK" in
   *) echo "FAIL - the declared-wait line was lost"; FAIL=1 ;;
 esac
 
+REGISTER_LINE=$(printf '%s\n' "$BLOCK" | grep 'register-clone')
+# shellcheck disable=SC2016  # single quotes are deliberate: this is a literal sed pattern, not meant to expand
+REGISTER_CMD=$(printf '%s\n' "$REGISTER_LINE" | sed -n 's/.*`\([^`]*register-clone[^`]*\)`.*/\1/p')
+if [ -z "$REGISTER_CMD" ]; then
+  echo "FAIL - the block does not tell an out-of-worktree lane to register its clone"; FAIL=1
+else
+  REGISTER_SCRIPT=$(printf '%s\n' "$REGISTER_CMD" | awk '{print $1}')
+  REGISTER_TASK_ID=$(printf '%s\n' "$REGISTER_CMD" | awk '{print $3}')
+  REGISTER_OUT=$("$REGISTER_SCRIPT" register-clone "$REGISTER_TASK_ID" /nonexistent-fm-dod-wait-clone 2>&1) || true
+  case "$REGISTER_OUT" in
+    *"no task record for $REGISTER_TASK_ID"*)
+      echo "ok - the register-clone command in the block resolves to the real watch script wired to this task id" ;;
+    *)
+      echo "FAIL - the register-clone command in the block does not resolve to working behavior: $REGISTER_OUT"; FAIL=1 ;;
+  esac
+fi
+
 exit "$FAIL"

@@ -821,6 +821,69 @@ test_stale_paused_classifies_pause() {
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
+make_crew_state_stub() {  # <fakebin>: fm-crew-state.sh printing <fakebin>/crew-state.out
+  cat > "$1/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+cat "$(dirname "$0")/crew-state.out"
+SH
+  chmod +x "$1/fm-crew-state.sh"
+}
+
+# A paused: line claiming a no-mistakes run is a legitimate wait only while crew
+# state confirms a working run. Otherwise (no run found, failed, parked at a gate)
+# the away-mode classifier escalates instead of granting the long pause cadence.
+test_stale_nm_claim_pause_defers_to_crew_state() {
+  local dir state fakebin out verdict
+  dir=$(make_supercase stale-nm-claim); state="$dir/state"; fakebin="$dir/fakebin"
+  make_crew_state_stub "$fakebin"
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$state/claim-n1.status"
+  printf 'state: working · source: run-step · validating (running)\n' > "$fakebin/crew-state.out"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" classify_stale "sess:fm-claim-n1" "$state")
+  case "$out" in pause\|*) ;; *) fail "a claimed run crew state confirms working lost its pause: $out" ;; esac
+  for verdict in 'state: unknown · source: status-log · no no-mistakes run found' \
+    'state: failed · source: run-step · run failed' \
+    'state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: authority decision)'; do
+    printf '%s\n' "$verdict" > "$fakebin/crew-state.out"
+    out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" classify_stale "sess:fm-claim-n1" "$state")
+    case "$out" in escalate\|*"$verdict"*) ;; *) fail "a claimed run contradicted by '$verdict' did not escalate it: $out" ;; esac
+  done
+  # Counterfactual: a pause that claims no run keeps its cadence under the same verdict.
+  printf 'paused: holding for the upstream release\n' > "$state/claim-n1.status"
+  printf 'state: unknown · source: none · x\n' > "$fakebin/crew-state.out"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" classify_stale "sess:fm-claim-n1" "$state")
+  case "$out" in pause\|*) ;; *) fail "a pause claiming no run stopped classifying as pause: $out" ;; esac
+  pass "a paused: line claiming a no-mistakes run keeps its pause only while crew state confirms the run"
+}
+
+# Once recorded, a claimed-run pause is rechecked on the stale cadence, not the
+# hour-long pause cadence, so a run that fails or parks after the first sight is
+# escalated within minutes.
+test_housekeeping_rechecks_nm_claim_on_stale_cadence() {
+  local dir state fakebin task win pane key marker
+  dir=$(make_supercase housekeeping-nm-claim); state="$dir/state"; fakebin="$dir/fakebin"
+  make_crew_state_stub "$fakebin"
+  task=claim-h1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___'); marker="$state/.subsuper-paused-$key"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 300 )) > "$marker"
+  printf 'state: working · source: run-step · validating (running)\n' > "$fakebin/crew-state.out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a confirmed working run escalated: $(cat "$state/.subsuper-escalations")"
+  [ "$(cat "$marker")" -ge $(( $(date +%s) - 60 )) ] || fail "a confirmed working run did not restart its recheck window"
+  echo $(( $(date +%s) - 300 )) > "$marker"
+  printf 'state: failed · source: run-step · run failed\n' > "$fakebin/crew-state.out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+  grep -F "run failed" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a claimed run that failed was not escalated past the stale cadence: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a claimed-run pause is rechecked against crew state on the stale cadence"
+}
+
 # A verified captain-held transfer is the other declaration that leaves an idle pane
 # EXPECTED, so it earns the same pause action as paused: rather than being aged as a
 # wedge. The wait itself is already durable in the captain-held backlog task.
@@ -2794,6 +2857,8 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
+test_stale_nm_claim_pause_defers_to_crew_state
+test_housekeeping_rechecks_nm_claim_on_stale_cadence
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker

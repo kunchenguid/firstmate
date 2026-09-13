@@ -1705,6 +1705,54 @@ test_no_run_idle_pane_paused() {
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
+# A paused: line that claims a no-mistakes run must not outrank reality: with no
+# run found for the worktree or a registered clone, the crew reads unknown so the
+# ordinary stale cadence applies instead of the long declared-pause cadence.
+test_no_run_nm_claim_pause_reports_unknown() {
+  reset_fakes
+  local d; d=$(new_case nm-claim-no-run)
+  make_repo_on_branch "$d/wt" fm/feat-claim
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-claim.meta" "window=fm:fm-feat-claim" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$d/state/feat-claim.status"
+  arm_idle_record "$d/state" feat-claim
+  local out; out=$(run_crew_state "$d" feat-claim)
+  assert_contains "$out" "state: unknown" "a claimed run that cannot be found reads unknown"
+  assert_not_contains "$out" "state: paused" "a claimed run that cannot be found never reads paused"
+  assert_contains "$out" "no no-mistakes run found" "the detail names the missing run"
+  pass "a paused: line claiming a no-mistakes run with no run found reports unknown"
+}
+
+# A lane whose run executes in a throwaway clone (an upstream attestation
+# workflow needs origin to be upstream) is invisible from its task worktree. A
+# registered clone (nm_clone=, written by bin/fm-nm-watch.sh) makes that run
+# authoritative, so a failed or gate-parked run outranks the worker's paused: line.
+test_registered_clone_run_is_authoritative() {
+  reset_fakes
+  local d out; d=$(new_case registered-clone)
+  make_repo_on_branch "$d/wt" fm/feat-clone
+  git clone -q "$d/wt" "$d/clone"
+  git -C "$d/clone" commit -q --allow-empty -m "rebased onto upstream"
+  FM_FAKE_RUN_HEAD=$(git -C "$d/clone" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+  make_fakebin "$d" >/dev/null
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$d/state/feat-clone.status"
+  arm_idle_record "$d/state" feat-clone
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-clone)"
+  fm_write_meta "$d/state/feat-clone.meta" "window=fm:fm-feat-clone" "worktree=$d/wt" "kind=ship" "harness=claude"
+  out=$(run_crew_state "$d" feat-clone)
+  assert_not_contains "$out" "source: run-step" "an unregistered clone's run does not bind to the task worktree"
+  fm_write_meta "$d/state/feat-clone.meta" "window=fm:fm-feat-clone" "worktree=$d/wt" "kind=ship" "harness=claude" "nm_clone=$d/clone"
+  out=$(run_crew_state "$d" feat-clone)
+  assert_contains "$out" "state: failed" "a registered clone's failed run outranks the paused: line"
+  assert_contains "$out" "source: run-step" "a registered clone's run is the run-step source"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-clone)"
+  out=$(run_crew_state "$d" feat-clone)
+  assert_contains "$out" "state: parked" "a registered clone's gate-parked run outranks the paused: line"
+  assert_contains "$out" "ask-user" "the parked clone run surfaces its ask-user finding"
+  pass "a registered clone's run is authoritative over the worker's paused: line"
+}
+
 test_no_run_idle_pane_custom_paused_verb() {
   reset_fakes
   local d; d=$(new_case custom-paused)
@@ -2569,5 +2617,7 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_no_run_nm_claim_pause_reports_unknown
+test_registered_clone_run_is_authoritative
 
 echo "all fm-crew-state tests passed"

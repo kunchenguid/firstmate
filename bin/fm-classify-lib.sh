@@ -1834,6 +1834,30 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 if a paused: line claims a no-mistakes run is in progress (bin/fm-dod-lib.sh
+# owns the phrase a worker appends). That declaration is a wait only while the
+# run really exists and works, so every supervisor confirms it against crew state
+# instead of granting it the long pause cadence: fm-crew-state.sh reads it unknown
+# when no run is found, fm-watch.sh's pause_state_class answers contradicted, and
+# the away-mode daemon uses crew_pause_claim_contradiction below.
+status_pause_claims_nm_run() {  # <status-line>
+  status_is_paused "$1" || return 1
+  case "$(status_line_note "$1")" in *"no-mistakes run"*) return 0 ;; esac
+  return 1
+}
+
+# When <line> claims a no-mistakes run (above) that crew <id>'s authoritative
+# state does not confirm as working, print that state line and return 0; return
+# 1 when there is no claim or the run is confirmed. One fm-crew-state.sh read.
+crew_pause_claim_contradiction() {  # <id> <status-line>
+  local line state
+  status_pause_claims_nm_run "$2" || return 1
+  line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  state=${line#state: }; state=${state%% *}
+  [ "$state" != working ] || return 1
+  printf '%s' "${line:-crew state unreadable}"
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

@@ -956,7 +956,10 @@ The first poll after arming writes the snapshot and returns false, so arming nev
 A probe that errors exits 2 and is counted against the source's error budget; it is never read as a true.
 A worktree with no no-mistakes run yet (no `init`, or no run submitted there) is not an error: the probe reads it as a clean false on every poll instead of spending the error budget, and still fires the moment a real run appears.
 
-`bin/fm-spawn.sh` arms it and `bin/fm-teardown.sh` retires it. Arming is best-effort: a failure warns and the spawn continues, and the worker then falls back to one status check per resume.
+`bin/fm-nm-watch.sh` owns arming: `bin/fm-spawn.sh` calls it on every spawn and relaunch, it retires any existing watch first so a relaunch converges, and `bin/fm-teardown.sh` retires it.
+A failed arm never fails the spawn, but it queues a durable `check` wake naming the task, because a worker without its watch is never rung.
+A worker whose pipeline runs outside its worktree registers that clone with `fm-nm-watch.sh register-clone`, which records `nm_clone=` in the task record; the watch and `bin/fm-crew-state.sh` then look for the run there.
+A `paused:` line claiming a no-mistakes run is honored only while crew state confirms a working run; otherwise the watcher and the away-mode daemon treat it as a stalled worker on the stale cadence (`status_pause_claims_nm_run` in `bin/fm-classify-lib.sh`).
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 

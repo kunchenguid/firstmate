@@ -1046,6 +1046,24 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
+# Surface a paused: line claiming a no-mistakes run that crew state does not
+# confirm (pause_state_class answered contradicted), once per distinct stale
+# hash and outside the declared-pause throttle, so a failed, gate-parked, or
+# missing run is noticed on the stale cadence rather than a pause window later.
+surface_nm_claim_contradiction() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key marker prev
+  key=$(window_key "$win")
+  marker="$STATE/.paused-nmclaim-$key"
+  prev=$(cat "$marker" 2>/dev/null || true)
+  clear_pause_state "$key"
+  printf '%s' "$h" > "$marker"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  [ "$prev" != "$h" ] || return 0
+  fm_wake_append stale "$win" "stale: $win (paused line claims a no-mistakes run that crew state does not confirm; read bin/fm-crew-state.sh $task)" || exit 1
+  wake "stale: $win"
+  triage_log "surfaced stale (claimed no-mistakes run not confirmed): $win"
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -1163,6 +1181,13 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  # A pause claiming a no-mistakes run that crew state does not confirm (no run,
+  # failed, or parked at a gate) is not a wait: surface_nm_claim_contradiction.
+  if [ "$class" != paused ] && status_pause_claims_nm_run "$last"; then
+    rm -f "$recheck_file"
+    printf 'contradicted'
     return
   fi
   if [ "$kind" != secondmate ]; then
@@ -2397,6 +2422,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              contradicted)
+                surface_nm_claim_contradiction "$w" "$task" "$h"
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -2410,6 +2438,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                contradicted) surface_nm_claim_contradiction "$w" "$task" "$h" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
