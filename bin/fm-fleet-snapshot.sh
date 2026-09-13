@@ -756,7 +756,7 @@ task_json_lines() {
   local pr pr_source status_event_file status_present endpoint_exists agent_alive meta_json report_json worktree_json home_json
   local current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json open_decisions_file
-  local -a open_decisions_arg
+  local -a open_decisions_arg current_state_arg status_log_arg
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -800,29 +800,33 @@ task_json_lines() {
     # surface. It must never abort the loop or tear the shared observation
     # directory down: this body is the left side of a pipeline, so it runs in a
     # subshell whose exit status the pipeline discards, and dropping a row here
-    # would silently delete a live task from the snapshot.
+    # would silently delete a live task from the snapshot. Each degraded default
+    # is a bounded literal the composing jq below builds from argv, so no
+    # degradation depends on a fallback file whose own write can fail: a missing
+    # --slurpfile source is fatal to that jq, which would drop the row it is
+    # degrading. Only an observation this loop has already read back rides a file.
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
-    if ! jq -e 'type == "object"' "$current_file" >/dev/null 2>&1; then
+    current_state_arg=(--slurpfile current_state_file "$current_file")
+    if jq -e 'type == "object"' "$current_file" >/dev/null 2>&1; then
+      read -r current_state current_source < <(
+        jq -r '[.state // "", .source // ""] | @tsv' "$current_file" 2>/dev/null || printf '\t\n'
+      )
+    else
       printf 'fm-fleet-snapshot: %s: current-state observation unreadable; reporting state unknown\n' \
         "$id" >&2
-      current_file="$SNAPSHOT_TASK_DIR/$id.unknown-current.json"
-      printf '%s\n' '{"state":"unknown","source":"none","detail":"current-state observation unreadable during snapshot","raw":""}' \
-        > "$current_file" || true
+      current_state_arg=(--argjson current_state_file '[]')
+      current_state=unknown
+      current_source=none
     fi
+    [ -f "$status_log" ] && status_present=1 || status_present=0
     status_event_file="$SNAPSHOT_TASK_DIR/$id.status-event.json"
+    status_log_arg=(--slurpfile status_log_file "$status_event_file")
     if ! status_event_json "$status_log" "$STATE/$id.status" "$SNAPSHOT_TASK_DIR/$id" \
       > "$status_event_file"; then
       printf 'fm-fleet-snapshot: %s: status-event transport failed; reporting no last event\n' \
         "$id" >&2
-      [ -f "$status_log" ] && status_present=1 || status_present=0
-      jq -n --arg path "$STATE/$id.status" \
-        --argjson present "$(bool_json "$status_present")" \
-        '{path:$path,present:$present,kind:"event_history",last_event:{state:"",note:"",raw:""}}' \
-        > "$status_event_file" || true
+      status_log_arg=(--argjson status_log_file '[]')
     fi
-    read -r current_state current_source < <(
-      jq -r '[.state // "", .source // ""] | @tsv' "$current_file" 2>/dev/null || printf '\t\n'
-    )
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -923,9 +927,11 @@ task_json_lines() {
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
-      --slurpfile current_state_file "$current_file" \
+      "${current_state_arg[@]}" \
       --argjson meta_path "$meta_json" \
-      --slurpfile status_log_file "$status_event_file" \
+      --arg status_log_path "$STATE/$id.status" \
+      --argjson status_log_present "$(bool_json "$status_present")" \
+      "${status_log_arg[@]}" \
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
@@ -935,7 +941,7 @@ task_json_lines() {
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
       '($current_state_file[0] // {state:"unknown",source:"none",detail:"current-state observation unreadable during snapshot",raw:""}) as $current_state
-      | ($status_log_file[0] // {path:null,present:false,kind:"event_history",last_event:{state:"",note:"",raw:""}}) as $status_log
+      | ($status_log_file[0] // {path:$status_log_path,present:$status_log_present,kind:"event_history",last_event:{state:"",note:"",raw:""}}) as $status_log
       | ($open_decisions_file[0]) as $open_decisions
       | {
         id:$id,
@@ -1702,9 +1708,11 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
     '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:true,observed_at:$observed,freshness:"fresh",reason:null,lines:$lines,bytes:$bytes,event_note_seen:$seen,contradiction:$contradiction}'
 }
 
-parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json> <decisions-json-file>
-  jq -n --slurpfile summary "$1" --argjson activities "$2" --slurpfile decisions "$3" '
+parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json-file> <decisions-json-file>
+  jq -n --slurpfile summary "$1" --slurpfile activities "$2" --slurpfile decisions "$3" '
     ($summary[0]) as $summary
+    |
+    ($activities[0] // []) as $activities
     |
     ($decisions[0] // []) as $decisions
     |
@@ -1769,7 +1777,7 @@ parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json>
 secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local tasks_file=$1 output_file=$2 registry_file union_file records_file rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
-  local activity_scan activities provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
+  local activity_scan_file activities_file provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
   local event_raw_file event_note_file decisions_file reconciliation_file
   local seen_homes=''
@@ -1777,10 +1785,15 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   union_file="$JSON_TRANSPORT_DIR/secondmate-union.json"
   records_file="$JSON_TRANSPORT_DIR/secondmate-records.jsonl"
   # One mirrored or directly appended status line has no size bound, so the raw
-  # line, its note, and the keyed decision fold derived from the whole stream all
-  # ride files instead of argv, exactly as the per-task composition does.
+  # line, its note, the bounded activity scan derived from the window, and the
+  # keyed decision fold derived from the whole stream all ride files instead of
+  # argv, exactly as the per-task composition does. The activity window's byte
+  # bound is operator-settable, so it cannot be assumed to fit one exec argument
+  # either.
   event_raw_file="$JSON_TRANSPORT_DIR/secondmate-event-raw"
   event_note_file="$JSON_TRANSPORT_DIR/secondmate-event-note"
+  activity_scan_file="$JSON_TRANSPORT_DIR/secondmate-activity-scan.json"
+  activities_file="$JSON_TRANSPORT_DIR/secondmate-activities.json"
   decisions_file="$JSON_TRANSPORT_DIR/secondmate-decisions.json"
   reconciliation_file="$JSON_TRANSPORT_DIR/secondmate-reconciliation.json"
   registry_secondmates_json > "$registry_file" || return 1
@@ -1830,8 +1843,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
     printf '%s' "$event_raw" > "$event_raw_file" || return 1
     printf '%s' "$event_note" > "$event_note_file" || return 1
-    activity_scan=$(bounded_parent_activities_json "$status_observation_file")
-    activities=$(printf '%s' "$activity_scan" | jq -c '.records')
+    bounded_parent_activities_json "$status_observation_file" > "$activity_scan_file" || return 1
+    jq -c '.records' "$activity_scan_file" > "$activities_file" || return 1
     printf '%s' "$task" | jq -c '.hints.open_decisions // []' > "$decisions_file" || return 1
     event_epoch=$(file_mtime_epoch "$status_observation_file")
     event_age=null
@@ -1918,7 +1931,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
 
     if [ -z "$reason" ]; then
       state=$(jq -r '.state' "$summary_file")
-      parent_evidence_reconciliation_json "$summary_file" "$activities" "$decisions_file" \
+      parent_evidence_reconciliation_json "$summary_file" "$activities_file" "$decisions_file" \
         > "$reconciliation_file" || return 1
       contradiction=$(jq -r '.contradiction' "$reconciliation_file")
       terminal_contradiction=$(jq -r --rawfile note "$event_note_file" '
@@ -1935,12 +1948,16 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --arg summary_source "$summary_source" --arg summary_freshness "$summary_freshness" --argjson summary_age "$summary_age" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --slurpfile decisions "$decisions_file" \
-        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
+        --slurpfile activities "$activities_file" --slurpfile activity_scan "$activity_scan_file" \
         --slurpfile reconciliation "$reconciliation_file" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --rawfile event_raw "$event_raw_file" --rawfile event_note "$event_note_file" --argjson event_age "$event_age" '
         ($summary[0]) as $summary
         |
         ($decisions[0] // []) as $decisions
+        |
+        ($activities[0] // []) as $activities
+        |
+        ($activity_scan[0]) as $activity_scan
         |
         ($reconciliation[0]) as $reconciliation
         |
@@ -1974,11 +1991,15 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --rawfile event_raw "$event_raw_file" --rawfile event_note "$event_note_file" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
+        --argjson registered "$registered" --argjson event_age "$event_age" --slurpfile activities "$activities_file" --slurpfile activity_scan "$activity_scan_file" \
         --slurpfile decisions "$decisions_file" --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
         ($summary[0]) as $summary
         |
         ($decisions[0] // []) as $decisions
+        |
+        ($activities[0] // []) as $activities
+        |
+        ($activity_scan[0]) as $activity_scan
         |
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
