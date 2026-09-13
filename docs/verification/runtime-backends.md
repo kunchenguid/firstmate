@@ -767,7 +767,7 @@ ok - real Herdr: mutable names never select the rename target or disturb a sibli
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
-The live guard uses a token-free registered Claude stand-in, drives the real `fm-spawn.sh` path, routes every Herdr operation through `fm-herdr-lab.sh`, and relies on the helper's unchanged-default-session tripwire.
+The live guard uses a token-free registered Claude stand-in, starts lab panes in a profile-free shell so a login profile cannot put a real `claude` ahead of it on PATH, proves the named pane is still running the stand-in, drives the real `fm-spawn.sh` path, routes every Herdr operation through `fm-herdr-lab.sh`, and relies on the helper's unchanged-default-session tripwire.
 The portable companion cases in `tests/fm-backend-herdr.test.sh` cover format bounds, cross-home and full-task identity, exact-pane mismatch, lost rename responses, invalid names, failed readback, and the adapter exclusions: rovo always, and Muse only on a readable Herdr release below 0.9.0.
 
 ### fm-remote server birth and login-keychain access
