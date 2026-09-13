@@ -4,7 +4,7 @@
 
 Em 2026-09-13, a suíte offline foi executada em Darwin/arm64 com Python 3.14.7 e SQLite da biblioteca padrão.
 Comando de reprodução: `bash tests/fm-whatsapp.test.sh`.
-Resultado observado: `Ran 21 tests` e `OK`.
+Resultado observado: `Ran 29 tests in 23.043s` e `OK`.
 Os testes executam interfaces públicas Python e CLI, o `fm-inbox.sh` real, SQLite real, processos locais de fixture e, no Darwin, `plutil -lint` da plist gerada.
 Nenhum teste usa conta WhatsApp, credencial real, modelo, instalação de serviço ou ciclo de vida Herdr.
 O processo com identidade de harness é uma fixture estrutural para a biblioteca de sessão existente; não é uma execução de Codex ou prova de comportamento de UI do fornecedor.
@@ -22,14 +22,14 @@ O teste real da API e da sessão principal instalada continua pendente de ativa�
 | --- | --- |
 | 1. Texto ao principal correto e resposta no WhatsApp | Implementado; entrada real, claim autenticado e retorno simulados de ponta a ponta; WhatsApp real pendente. |
 | 2. Tarefa pequena com resultado associado | Testado com contagem real de linhas em arquivo de fixture, evento `completed` com evidência e texto na saída simulada; não é raciocínio de um modelo. |
-| 3. Andamento durante tarefa longa | Testado com dois pedidos em estado iniciado, resposta de último evento e pergunta de desambiguação; a execução longa é simulada. |
+| 3. Andamento durante tarefa longa | Regressões cobrem tarefa ativa anterior a onze conclusões, reply encerrado, pedidos recebidos/enfileirados/reivindicados e desambiguação; a execução longa é simulada. |
 | 4. Duplicação e reinício entre persistir/encaminhar/confirmar | Testados rollback antes do cursor, chave repetida, recibo anterior à publicação, retorno perdido, nota já movida para handled e claim repetido. |
-| 5. 204, recibos, inteiro de 64 bits e opcionais | Testados sem parsing do corpo 204, cursor acima de 2^53 devolvido exato, contatos sem profile e read que não regride a delivered. |
-| 6. Backlog antigo e cursor durável | Testados `new-only`, reinício e rejeição de troca de identidade do banco; replay é opção explícita de banco novo. |
+| 5. 204, recibos, inteiro de 64 bits e opcionais | Testados sem parsing do corpo 204, cursor acima de 2^53 devolvido exato e contatos sem profile; regressão adicional cobre read anterior ao resolve-send e delivered posterior sem regressão. |
+| 6. Backlog antigo e cursor durável | Regressões cobrem doctor/status antes da ativação, run desabilitado recusado, instante persistido antes do primeiro poll habilitado, backlog preservado sem execução, cursor no reinício e rejeição explícita de replay. |
 | 7. Instâncias concorrentes e 409 | Testados flock exclusivo e halt persistente após 409; concorrência em máquinas distintas requer resolução operacional. |
 | 8. Rajadas, divisão e digitação | Testadas cotas móveis independentes, persistência, ordem e preservação Unicode; digitação não habilitada, pendente etapa 2. |
-| 9. Políticas de envio | Testados 2xx, 429/Retry-After, 503/131016, 500, reset, timeout, queda após preparar envio e bloqueio de partes posteriores em estado incerto. |
-| 10. Desconhecidos, citações, reações e anexos | Testadas quarentena de remetente desconhecido e ausência de execução/autorização por reação, attachment ou context.from; correlação por wamid conhecido é somente contexto. |
+| 9. Políticas de envio | Testados 2xx, 429/Retry-After, 503/131016, 500, reset, timeout e queda após preparar envio; regressões HTTP com opener mockado cobrem corpos não JSON e backoff preservado, sem rede, e a CLI de reentrega cobre autorização deduplicada, texto integral e estado terminal preservado. |
+| 10. Desconhecidos, citações, reações e anexos | Testadas quarentena e ausência de autorização por reação, attachment ou context.from; regressão de consulta citada encaminha ao principal a correlação da tarefa A mesmo com B ativa, incluindo citação desconhecida sem associação inventada. |
 | 11. Shell e credenciais | Testado texto literal com substituições de shell, autenticação local recusada fora do principal, token sintético privado, rejeição de symlink e ausência do sentinela na saída; nenhum token real lido. |
 | 12. Principal indisponível | Testado principal de fixture encerrado, pedido preservado e confirmação sem início falso; disponibilidade anunciada apenas como checkpoint. |
 | 13. Decisões | Testados dois pedidos, "sim" ambíguo, remetente errado, revisão errada, alteração de tarefa, expiração e consumo único; a execução da ação permanece com os proprietários do Firstmate. |

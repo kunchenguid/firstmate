@@ -7,6 +7,7 @@ main CLI, executes no LLM, and is killed only by its owning test. No live home,
 network client, token, service registration or Herdr lifecycle is used.
 """
 
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +60,7 @@ class WhatsAppTests(unittest.TestCase):
         self.config = Config(self.path)
         self.now = time.time()
         self.store = Store(self.config, clock=lambda: self.now)
+        self.store.activate()
         self.fixture = self.dir / "sim.json"
         self.fixture.write_text("[]")
         self.bridge = Bridge(self.store, Simulator(self.store, self.fixture))
@@ -98,6 +101,13 @@ for line in sys.stdin:
         self.assertEqual(result["code"], 0 if ok else 1, result)
         self.now = max(self.now, time.time() + 1)
         return json.loads(result["stdout"] if ok else result["stderr"])
+
+    def cli(self, *args, ok=True):
+        result = subprocess.run([sys.executable, str(ROOT / "bin/fm-whatsapp.py"),
+                                 "--config", str(self.path), *args],
+                                capture_output=True, text=True, env=self.config.environment())
+        self.assertEqual(result.returncode, 0 if ok else 1, result)
+        return json.loads(result.stdout if ok else result.stderr)
 
     def message(self, body="Analise o arquivo local", **extra):
         self.counter += 1
@@ -151,6 +161,54 @@ for line in sys.stdin:
         self.emit(second, "started", "Analisando login", task=self.task("login"))
         self.receive(self.message("e aquela tarefa?"))
         self.assertIn("Qual deles?", self.store.snapshot()["responses"][-1]["body"])
+
+    def test_status_selects_active_state_before_history_limit(self):
+        active, _ = self.claim()
+        self.emit(active, "started", "Análise longa original", task=self.task())
+        for i in range(11):
+            finished, _ = self.claim(self.receive(self.message(f"Pedido breve {i}")))
+            self.emit(finished, "completed", f"Concluído breve {i}", evidence=["fixture"])
+        answered, _ = self.claim()
+        self.emit(answered, "reply", "Resposta conversacional encerrada")
+        self.receive(self.message("/status"))
+        body = self.store.snapshot()["responses"][-1]["body"]
+        self.assertIn("Análise longa original", body)
+        self.assertNotIn("Qual deles?", body)
+        queued = self.receive(self.message("Outro pedido aguardando"))
+        self.bridge.forward()
+        self.assertEqual(self.store.request(queued["request"])["state"], "queued")
+        self.receive(self.message("/status"))
+        body = self.store.snapshot()["responses"][-1]["body"]
+        self.assertIn("Qual deles?", body)
+        self.assertIn("Enfileirado", body)
+        self.assertIn("Análise longa original", body)
+
+    def test_status_includes_received_queued_and_claimed_requests(self):
+        row = self.receive()
+        for expected in ("Recebido e preservado", "Enfileirado", "Reivindicado, início não confirmado"):
+            self.receive(self.message("/status"))
+            body = self.store.snapshot()["responses"][-1]["body"]
+            self.assertEqual(body, expected)
+            if expected == "Recebido e preservado":
+                self.bridge.forward()
+            elif expected == "Enfileirado":
+                self.claim(row)
+
+    def test_quoted_status_reaches_main_with_exact_correlation(self):
+        first, _ = self.claim()
+        self.emit(first, "reply", "Resposta da tarefa A")
+        while self.bridge.send_one():
+            pass
+        mid = self.store.rows("SELECT wamid FROM outbox WHERE request=? ORDER BY seq DESC", (first["request"],))[0]["wamid"]
+        second, _ = self.claim()
+        self.emit(second, "started", "Tarefa B em andamento", task=self.task())
+        for quoted, related in ((mid, first["request"]), ("wamid.unknown", None)):
+            row = self.receive(self.message("e aquela tarefa?", context={"id": quoted, "from": "agent:123"}))
+            self.assertEqual(row["state"], "received")
+            _, result = self.claim(row)
+            self.assertEqual(result["related_request"], related)
+            self.assertEqual(result["text"], "e aquela tarefa?")
+            self.assertFalse(self.store.rows("SELECT * FROM responses WHERE event=?", (row["request"] + ".status",)))
 
     def test_note_gap_recovery_dedup_and_ack(self):
         message = self.message("texto literal $(touch NEVER) `whoami` ; fim")
@@ -214,6 +272,56 @@ for line in sys.stdin:
         self.path.write_text(json.dumps(changed))
         with self.assertRaises(BridgeError):
             Store(Config(self.path))
+
+    def test_diagnostics_do_not_activate_and_first_poll_preserves_boundary(self):
+        self.values.update(state_dir=str(self.dir / "delayed-state"), enabled=False)
+        self.path.write_text(json.dumps(self.values))
+        self.cli("doctor")
+        self.cli("status")
+        self.cli("run", "--once", "--fixture", str(self.fixture), ok=False)
+        self.values["enabled"] = True
+        self.path.write_text(json.dumps(self.values))
+        self.cli("doctor")
+        self.cli("status")
+        config = Config(self.path)
+        activated = self.now + 4 * 86400
+        store = Store(config, clock=lambda: activated)
+        self.addCleanup(store.db.close)
+        self.assertIsNone(store.get("activated"))
+        old = self.message(timestamp=str(int(self.now) + 86400))
+        recent = self.message(timestamp=str(int(activated) + 2))
+        transport = Sequence([poll([old, recent], offset=7)])
+        bridge = Bridge(store, transport)
+        original = transport.call
+        with patch.object(transport, "call", wraps=transport.call) as call:
+            def activated_call(endpoint, payload):
+                self.assertEqual(float(store.get("activated")), activated)
+                return original(endpoint, payload)
+
+            call.side_effect = activated_call
+            bridge.poll()
+        self.assertEqual(transport.calls[0][1]["offset"], 0)
+        self.assertEqual([r["state"] for r in store.rows("SELECT state FROM inbound ORDER BY rowid")],
+                         ["historical", "received"])
+        bridge.forward()
+        self.assertEqual(len(list((self.home / "state/inbox").glob("*.note"))), 1)
+        reopened = Store(config, clock=lambda: activated + 86400)
+        self.addCleanup(reopened.db.close)
+        next_transport = Sequence([Reply(204)])
+        Bridge(reopened, next_transport).poll()
+        self.assertEqual(float(reopened.get("activated")), activated)
+        self.assertEqual(next_transport.calls[0][1]["offset"], 7)
+        self.assertEqual(len(reopened.rows("SELECT * FROM inbound")), 2)
+
+    def test_replay_configuration_is_rejected_without_executing_history(self):
+        self.receive(self.message(timestamp=str(int(self.now) - 86400)))
+        self.values["startup_policy"] = "replay"
+        self.path.write_text(json.dumps(self.values))
+        self.assertIn("unsupported", self.cli("run", "--once", "--fixture", str(self.fixture), ok=False)["error"])
+        self.assertEqual(self.store.get("cursor"), "1")
+        self.assertEqual(self.store.rows("SELECT state FROM inbound"), [{"state": "historical"}])
+        self.assertEqual(self.store.rows("SELECT * FROM outbox"), [])
+        self.assertFalse(list((self.home / "state/inbox").glob("*.note")))
 
     def test_singleton_and_persistent_conflict_halt(self):
         with singleton(self.config):
@@ -300,6 +408,58 @@ for line in sys.stdin:
         self.bridge.recover()
         self.assertFalse(self.bridge.send_one())
         self.assertEqual(self.store.snapshot()["outbox"][0]["state"], "delivery_unknown")
+
+    def test_terminal_redelivery_requires_resolution_and_deduplicates_authorization(self):
+        row, _ = self.claim()
+        self.assertTrue(self.bridge.send_one())
+        body = "Resultado persistido. " * 300
+        result = self.emit(row, "completed", body, evidence=["fixture"], event="terminal-result")
+        event = result["event"]
+        uncertain = Bridge(self.store, Sequence([Reply(500)]))
+        self.assertFalse(uncertain.send_one())
+        self.cli("redeliver", "--event", event, "--key", "authorized-1", ok=False)
+        blocked = self.store.rows("SELECT seq FROM outbox WHERE event=? ORDER BY seq", (event,))[0]["seq"]
+        self.cli("resolve-send", "--seq", str(blocked), "--disposition", "abandoned")
+        self.cli("redeliver", "--event", event, "--key", "authorized-1", ok=False)
+        while self.bridge.send_one():
+            pass
+        self.assertFalse(self.emit(row, "completed", body, evidence=["fixture"], event=event)["new_event"])
+        responses = self.store.snapshot()["responses"]
+        notes = list((self.home / "state/inbox").glob("*.note"))
+        delivery = self.cli("redeliver", "--event", event, "--key", "authorized-1")
+        self.assertTrue(delivery["new_delivery"])
+        repeat = self.cli("redeliver", "--event", event, "--key", "authorized-1")
+        self.assertFalse(repeat["new_delivery"])
+        self.assertEqual(repeat["event"], delivery["event"])
+        self.cli("redeliver", "--event", "other", "--key", "authorized-1", ok=False)
+        self.cli("redeliver", "--event", event, "--key", "authorized-2", ok=False)
+        chunks = self.store.rows("SELECT body FROM outbox WHERE event=? ORDER BY part", (delivery["event"],))
+        self.assertEqual("".join(c["body"] for c in chunks), body)
+        while self.bridge.send_one():
+            pass
+        self.cli("redeliver", "--event", event, "--key", "authorized-2", ok=False)
+        self.assertFalse(self.cli("redeliver", "--event", event, "--key", "authorized-1")["new_delivery"])
+        self.assertEqual(self.store.request(row["request"])["state"], "completed")
+        self.assertEqual(self.store.snapshot()["responses"], responses)
+        self.assertEqual(list((self.home / "state/inbox").glob("*.note")), notes)
+        _, claim = self.claim(row)
+        self.assertFalse(claim["fresh_claim"])
+
+    def test_manual_acceptance_applies_receipts_that_arrived_before_resolution(self):
+        self.receive()
+        bridge = Bridge(self.store, Sequence([Reply(500)]))
+        self.assertFalse(bridge.send_one())
+        seq = self.store.snapshot()["outbox"][0]["seq"]
+        for status in ("read", "delivered"):
+            self.bridge.ingest(poll(offset=2, statuses=[{"id": "wamid.recovered", "status": status,
+                                                       "timestamp": "1", "recipient_id": "user:owner"}]))
+        self.cli("resolve-send", "--seq", str(seq), "--disposition", "abandoned", "--wamid", "wamid.recovered", ok=False)
+        result = self.cli("resolve-send", "--seq", str(seq), "--disposition", "accepted", "--wamid", "wamid.recovered")
+        self.assertEqual(result["state"], "read")
+        self.assertEqual(self.store.snapshot()["outbox"][0]["state"], "read")
+        self.bridge.ingest(poll(offset=3, statuses=[{"id": "wamid.recovered", "status": "delivered",
+                                                   "timestamp": "2", "recipient_id": "user:owner"}]))
+        self.assertEqual(self.store.snapshot()["outbox"][0]["state"], "read")
 
     def test_unknown_quote_reaction_attachment_never_authorize(self):
         unknown = self.message(**{"from": "user:stranger", "context": {"from": "user:owner", "id": "wamid.trusted"}})
@@ -446,6 +606,56 @@ for line in sys.stdin:
             self.assertTrue(json.loads(stdout)["stopped"])
             self.assertIsNone(self.harness.poll())
         self.assertEqual(self.store.get("cursor"), "0")
+
+    def test_http_non_json_responses_preserve_status_policy_and_retry_after(self):
+        config = Config(self.path)
+        config.mode = "live"
+        http = HTTP(config)
+        cases = [(429, b"rate limited", "pending"), (400, b"bad request", "permanent"),
+                 (403, b"forbidden", "permanent"), (401, b"unauthorized", "auth_failed"),
+                 (500, b"server error", "delivery_unknown"), (503, b"unavailable", "delivery_unknown"),
+                 (200, b"malformed success", "delivery_unknown"),
+                 (200, b'{}', "delivery_unknown"),
+                 (503, b'{"error":{"code":131016}}', "pending")]
+        for index, (status, raw, expected) in enumerate(cases):
+            with self.subTest(status=status, raw=raw):
+                values = dict(self.values, state_dir=str(self.dir / f"http-state-{index}"))
+                path = self.dir / f"http-{index}.json"
+                path.write_text(json.dumps(values))
+                store = Store(Config(path), clock=lambda: self.now)
+                try:
+                    with store.tx():
+                        store.emit("fixture-response", "fixture-request", "notice", "Mensagem de fixture", "bridge")
+                    error = urllib.error.HTTPError("https://api.whatsapp.com/agent/v1/messages", status,
+                                                   "fixture", {"Retry-After": "75"}, io.BytesIO(raw))
+                    with patch("fm_whatsapp_transport.read_secret", return_value="SYNTHETIC_TEST_CREDENTIAL"), \
+                            patch.object(http.opener, "open", side_effect=error if status >= 400 else None,
+                                         return_value=error) as opened:
+                        bridge = Bridge(store, http)
+                        self.assertFalse(bridge.send_one())
+                        row = store.rows("SELECT * FROM outbox")[0]
+                        self.assertEqual(row["state"], expected)
+                        bridge.recover()
+                        self.assertFalse(bridge.send_one())
+                        self.assertEqual(opened.call_count, 1)
+                    if expected == "pending":
+                        self.assertGreaterEqual(row["due"], self.now + 75)
+                    self.assertEqual(store.rows("SELECT http FROM attempts"), [{"http": status}])
+                finally:
+                    store.db.close()
+        for status, expected in ((429, None), (403, "permanent"), (401, "auth_failed")):
+            with self.subTest(endpoint="updates", status=status):
+                self.store.put("halt", "")
+                self.store.put("poll_due", 0)
+                error = urllib.error.HTTPError("https://api.whatsapp.com/agent/v1/updates", status,
+                                               "fixture", {"Retry-After": "75"}, io.BytesIO(b"not json"))
+                with patch("fm_whatsapp_transport.read_secret", return_value="SYNTHETIC_TEST_CREDENTIAL"), \
+                        patch.object(http.opener, "open", side_effect=error):
+                    Bridge(self.store, http).poll()
+                self.assertEqual(self.store.get("halt") or None, expected)
+                self.assertEqual(self.store.get("cursor"), "0")
+                if status == 429:
+                    self.assertGreaterEqual(float(self.store.get("poll_due")), self.now + 75)
 
     def test_scripted_poll_cli_disabled_service_and_backup(self):
         script = [{"endpoint": "updates", "http": 200, "body": poll([self.message()]).body}]

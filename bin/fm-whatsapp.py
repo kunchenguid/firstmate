@@ -84,6 +84,9 @@ def main():
     resolve.add_argument("--seq", type=int, required=True)
     resolve.add_argument("--disposition", choices=("accepted", "abandoned"), required=True)
     resolve.add_argument("--wamid")
+    redeliver = commands.add_parser("redeliver", help="explicitly authorize resending a persisted terminal response after abandonment; may duplicate accepted parts")
+    redeliver.add_argument("--event", required=True, help="original terminal response event")
+    redeliver.add_argument("--key", required=True, help="stable operator authorization key; repeat the same key for deduplication")
     args = parser.parse_args()
     config = Config(args.config)
     if args.command == "configure-token":
@@ -121,6 +124,8 @@ def main():
                 target.close()
             return {"backup": str(args.output), "also_preserve": "FM_HOME/state/inbox keyed receipts and pending/handled notes"}
         with singleton(config):
+            if args.command == "redeliver":
+                return store.redeliver(args.event, args.key)
             if args.command == "resume":
                 store.put("halt", "")
                 return {"resumed": True, "outbox": "uncertain sends still require explicit reconciliation"}
@@ -131,11 +136,16 @@ def main():
                         raise BridgeError("only a blocked send can be reconciled")
                     if args.disposition == "accepted" and (not args.wamid or not args.wamid.startswith("wamid.")):
                         raise BridgeError("confirmed acceptance requires the verified wamid")
-                    store.db.execute("UPDATE outbox SET state=?,wamid=? WHERE seq=?",
-                                     (args.disposition, args.wamid, args.seq))
+                    if args.disposition == "accepted":
+                        state = store.accept_send(args.seq, args.wamid)
+                    else:
+                        if args.wamid:
+                            raise BridgeError("abandonment cannot associate a wamid")
+                        state = "abandoned"
+                        store.db.execute("UPDATE outbox SET state='abandoned' WHERE seq=?", (args.seq,))
                     store.put("last_manual_resolution", encode({"seq": args.seq, "state": args.disposition,
                                                                 "at": store.clock()}))
-                return {"resolved": args.seq, "state": args.disposition}
+                return {"resolved": args.seq, "state": state}
             if not config.enabled:
                 raise BridgeError("bridge is disabled in local configuration")
             if config.mode == "simulated":

@@ -15,7 +15,9 @@ Esta versão integra o principal no seu próximo checkpoint, usando a prova de s
 Uma sessão viva não prova que existe supervisão contínua, e nenhum comando da ponte inicia uma sessão ausente.
 O diagnóstico informa `checkpoint` ou `unavailable`, e sempre `unattended_wake_verified:false`.
 Pedidos ficam preservados enquanto o principal está ausente; confirmações de execução só vêm de eventos explícitos do principal.
-Consultar `/status`, `/tarefas` e algumas perguntas naturais lê os últimos eventos tipados mesmo durante tarefas longas.
+Consultar `/status`, `/tarefas` e algumas perguntas naturais seleciona pedidos pelos estados persistidos antes de limitar a apresentação, incluindo recebidos, enfileirados e reivindicados sem início confirmado.
+Respostas conversacionais encerradas não contam como trabalho ativo; havendo mais de um pedido ativo, a ponte pede desambiguação.
+Uma consulta citada segue ao principal com correlação por `context.id`, sem substituir a tarefa citada pelo andamento global.
 Outras perguntas naturais chegam ao principal com histórico e correlação; ambiguidade entre tarefas exige uma pergunta.
 
 ## Configuração local
@@ -84,19 +86,25 @@ O serviço não despeja corpos de mensagens continuamente em logs; o banco cont�
 
 Reinícios retomam o cursor exato e deduplicam pelo agente/wamid antes dos efeitos externos.
 Na primeira ativação `offset=0` preserva o backlog, mas `new-only` não executa entradas anteriores ao instante persistido de ativação.
+Esse instante é gravado pelo primeiro `run` habilitado, antes do primeiro poll, e preservado nos reinícios; `doctor`, `status` e abertura do banco não ativam a ponte.
 A resolução do timestamp de entrada é de segundos; a fração do segundo inicial é conservadoramente excluída.
 Não derive cursor do relógio e não repita chamadas sem offset após 204.
-`replay` só é permitido como escolha explícita ao criar um novo estado, nunca como troca silenciosa do banco existente.
+Somente `startup_policy:"new-only"` é suportado; `replay` e outras políticas são rejeitados explicitamente, e os registros históricos são preservados sem execução.
 O encaminhamento usa as notas idempotentes de [fm_inbox_key.py](../bin/fm_inbox_key.py); preserve seus recibos e notas em `handled`.
 
 Uma trava exclusiva impede consumidores locais concorrentes do mesmo agente/usuário de sistema.
 Em outra máquina ou conta de sistema, 409/1752041 interrompe o polling de forma persistente; identifique e pare a outra ponte antes de `resume`.
-429 e 503/131016 usam backoff; erros permanentes interrompem a repetição do envio.
+429 e 503/131016 usam backoff; erros permanentes interrompem a repetição do envio, mesmo quando uma resposta 4xx não contém JSON.
+`Retry-After` recebido continua valendo em respostas não JSON; sucesso malformado sem wamid e 5xx sem o código recuperável de 503 permanecem incertos.
 500, reset, timeout e queda após iniciar envio ficam `delivery_unknown` e bloqueiam partes posteriores para preservar a ordem.
 Não há promessa de entrega exatamente uma vez.
-Depois de verificar o aplicativo e os registros, `resolve-send --seq N --disposition accepted --wamid ID` associa uma aceitação comprovada; `--disposition abandoned` abandona conscientemente aquela parte e libera a fila.
+Depois de verificar o aplicativo e os registros, `resolve-send --seq N --disposition accepted --wamid ID` associa uma aceitação comprovada e aplica recibos já persistidos, preservando `read` sobre `delivered`; `--disposition abandoned` abandona conscientemente aquela parte e libera a fila.
 Não há reenvio automático de um resultado incerto nem inferência de um wamid perdido.
-Depois de abandonar uma parte, um novo envio do seu conteúdo exige decisão explícita e um novo evento do principal.
+Para um resultado `completed` ou `failed`, resolva todas as partes pendentes ou incertas antes de autorizar localmente `redeliver --event EVENTO_ORIGINAL --key CHAVE_DA_AUTORIZACAO`.
+O comando exige ao menos uma parte explicitamente abandonada na entrega anterior e enfileira o texto integral da resposta persistida, em ordem, podendo duplicar partes já aceitas.
+Repita a mesma chave para consultar a mesma autorização sem duplicar envios, inclusive após reinício; uma chave não pode ser reutilizada para outro resultado.
+A reentrega não emite um novo resultado, não altera o estado terminal, não concede decisões e não executa a tarefa novamente.
+Falha incerta dessa nova entrega volta a exigir reconciliação explícita; o comando não transmite pela rede e a saída continua dependente do `run` com `outbound_authorized`.
 
 `backup --output CAMINHO` faz um backup consistente de SQLite sem imprimir os textos.
 Pare apenas a ponte para um backup/restauro conjunto do banco, notas e recibos idempotentes de `FM_HOME/state/inbox` que lhe pertencem.

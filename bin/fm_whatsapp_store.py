@@ -62,8 +62,8 @@ class Config:
         self.send_timeout = integer(r.get("send_timeout", 90), 30, 300, "send_timeout")
         self.limit = integer(r.get("poll_limit", 50), 1, 100, "poll_limit")
         self.startup = r.get("startup_policy", "new-only")
-        if self.startup not in ("new-only", "replay"):
-            raise BridgeError("startup_policy must be new-only or replay")
+        if self.startup != "new-only":
+            raise BridgeError("startup_policy must be new-only; historical replay is unsupported")
         self.rates = {"updates": 15, "messages": 12, "statuses": 12,
                       "media-upload": 12, "media-metadata": 12, "media-delete": 12}
         for endpoint, limit in r.get("rate_limits", {}).items():
@@ -136,6 +136,9 @@ class Store:
         CREATE TABLE IF NOT EXISTS attempts(
           id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, at REAL NOT NULL,
           outcome TEXT, http INTEGER, code INTEGER, trace TEXT);
+        CREATE TABLE IF NOT EXISTS redeliveries(
+          key TEXT PRIMARY KEY, source TEXT NOT NULL, event TEXT UNIQUE NOT NULL,
+          at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS receipts(
           wamid TEXT NOT NULL, status TEXT NOT NULL, stamp TEXT NOT NULL,
           PRIMARY KEY(wamid,status,stamp));
@@ -152,7 +155,6 @@ class Store:
                 self.put("binding", binding)
                 if self.get("cursor") is None:
                     self.put("cursor", "0")
-                    self.put("activated", str(self.clock()))
                     self.put("startup", config.startup)
                 elif self.get("startup") != config.startup:
                     raise BridgeError("startup policy is immutable for an existing database")
@@ -173,6 +175,46 @@ class Store:
     def get(self, key):
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
+
+    def activate(self):
+        if not self.config.enabled:
+            raise BridgeError("bridge is disabled in local configuration")
+        with self.tx():
+            if self.get("activated") is None:
+                self.put("activated", self.clock())
+
+    def accept_send(self, seq, wamid):
+        receipts = self.rows("SELECT status FROM receipts WHERE wamid=?", (wamid,))
+        state = ("read" if any(r["status"] == "read" for r in receipts) else
+                 "delivered" if receipts else "accepted")
+        self.db.execute("UPDATE outbox SET state=?,wamid=? WHERE seq=?", (state, wamid, seq))
+        return state
+
+    def redeliver(self, event, key):
+        token(key, "redelivery key")
+        with self.tx():
+            previous = self.db.execute("SELECT source,event FROM redeliveries WHERE key=?", (key,)).fetchone()
+            if previous:
+                if previous["source"] != event:
+                    raise BridgeError("redelivery key reused for another response")
+                return {"event": previous["event"], "new_delivery": False}
+            response = self.db.execute("SELECT * FROM responses WHERE event=?", (event,)).fetchone()
+            if response is None or response["kind"] not in ("completed", "failed") or response["actor"] == "bridge":
+                raise BridgeError("redelivery requires a persisted terminal response")
+            if self.request(response["request"])["state"] != response["kind"]:
+                raise BridgeError("terminal request state mismatch")
+            latest = self.db.execute("SELECT event FROM redeliveries WHERE source=? ORDER BY rowid DESC LIMIT 1",
+                                     (event,)).fetchone()
+            parts = self.rows("SELECT state FROM outbox WHERE event=?", (latest["event"] if latest else event,))
+            if not parts or any(p["state"] not in ("accepted", "delivered", "read", "abandoned") for p in parts):
+                raise BridgeError("resolve all outstanding response parts before authorizing redelivery")
+            if not any(p["state"] == "abandoned" for p in parts):
+                raise BridgeError("redelivery requires an explicitly abandoned response part")
+            delivery = "redelivery-" + digest(key)
+            now = self.now()
+            self.db.execute("INSERT INTO redeliveries VALUES(?,?,?,?)", (key, event, delivery, now))
+            self.enqueue(delivery, response["request"], response["body"], now)
+            return {"event": delivery, "new_delivery": True}
 
     def put(self, key, value):
         self.db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, str(value)))
@@ -223,6 +265,9 @@ class Store:
         now = self.now()
         self.db.execute("INSERT INTO responses VALUES(?,?,?,?,?,?,?)",
                         (event, request, kind, body, payload, actor, now))
+        self.enqueue(event, request, body, now)
+
+    def enqueue(self, event, request, body, now):
         # Python slices preserve Unicode code points and do not lose any suffix.
         for part, start in enumerate(range(0, len(body), 4096)):
             self.db.execute("INSERT INTO outbox(event,request,part,body,state,due) VALUES(?,?,?,?,?,?)",

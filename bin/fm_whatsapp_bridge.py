@@ -75,6 +75,8 @@ class Bridge:
         return result
 
     def ingest(self, reply):
+        if self.s.get("activated") is None:
+            raise BridgeError("activate the enabled bridge before ingesting updates")
         if reply.http == 204:
             return
         payload = reply.body
@@ -134,7 +136,7 @@ class Bridge:
             state = "quarantined"
         elif stamp is None or mid.startswith("invalid-"):
             state = "invalid"
-        elif self.s.get("startup") == "new-only" and stamp < float(self.s.get("activated")):
+        elif stamp < float(self.s.get("activated")):
             state = "historical"
         elif not valid:
             state = "unsupported"
@@ -151,7 +153,8 @@ class Bridge:
             return
         status_words = ("/status", "/tarefas", "como está o andamento?", "qual o andamento?",
                         "e aquela tarefa?", "e aquela tarefa", "como estão as tarefas?")
-        if body.strip().lower() in status_words:
+        quote = message.get("context")
+        if body.strip().lower() in status_words and not (isinstance(quote, dict) and isinstance(quote.get("id"), str)):
             self.status_answer(request)
             return
         if body.strip().lower() in ("/ajuda", "ajuda"):
@@ -167,21 +170,30 @@ class Bridge:
         self.s.emit(request + ".received", request, "received", message, "bridge")
 
     def status_answer(self, request):
-        latest = self.s.rows("""SELECT r.request,r.kind,r.body FROM responses r
-          WHERE r.actor!='bridge' AND r.rowid=(SELECT MAX(x.rowid) FROM responses x
-          WHERE x.request=r.request AND x.actor!='bridge') ORDER BY r.rowid DESC LIMIT 10""")
-        active = [r for r in latest if r["kind"] not in TERMINAL]
+        query = """SELECT i.request,i.state,r.kind,r.body FROM inbound i
+          LEFT JOIN responses r ON r.rowid=(SELECT MAX(x.rowid) FROM responses x
+          WHERE x.request=i.request AND x.actor!='bridge')
+          WHERE i.sender=? AND i.request!=? AND """
+        active = self.s.rows(query + """i.state IN ('received','queued','claimed','started','decision','blocked')
+          ORDER BY i.received DESC,i.rowid DESC LIMIT 11""", (self.c.creator, request))
+        names = {"received": "Recebido e preservado", "queued": "Enfileirado", "claimed": "Reivindicado, início não confirmado",
+                 "started": "Iniciado", "decision": "Aguardando decisão", "completed": "Concluído",
+                 "failed": "Falhou", "answered": "Resposta", "blocked": "Bloqueado"}
+
+        def describe(row):
+            return f"{names[row['state']]}: {row['body']}" if row["body"] else names[row["state"]]
+
         if len(active) > 1:
             body = "Há mais de um pedido em andamento. Qual deles?\n" + "\n".join(
-                f"{i+1}. {r['body'][:180]}" for i, r in enumerate(active))
-        elif latest:
-            row = active[0] if active else latest[0]
-            names = {"started": "Iniciado", "progress": "Em andamento", "decision": "Aguardando decisão",
-                     "completed": "Concluído", "failed": "Falhou", "reply": "Resposta", "blocked": "Bloqueado"}
-            body = f"Último registro do Firstmate ({names.get(row['kind'], row['kind'])}): {row['body']}"
+                f"{i+1}. {describe(r)[:180]}" for i, r in enumerate(active[:10]))
+            if len(active) > 10:
+                body += "\nHá outros pedidos em andamento além destes."
+        elif active:
+            body = describe(active[0])
         else:
-            pending = self.s.db.execute("SELECT COUNT(*) FROM inbound WHERE state IN ('received','queued','claimed')").fetchone()[0]
-            body = f"Há {max(0, pending - 1)} pedido(s) preservado(s). Nenhum início ou resultado foi confirmado pelo Firstmate."
+            latest = self.s.rows(query + """i.state IN ('answered','completed','failed') AND r.rowid IS NOT NULL
+              ORDER BY r.rowid DESC LIMIT 1""", (self.c.creator, request))
+            body = describe(latest[0]) if latest else "Nenhum pedido em andamento ou resultado confirmado pelo Firstmate."
         self.s.emit(request + ".status", request, "notice", body, "bridge")
         self.s.db.execute("UPDATE inbound SET state='answered' WHERE request=?", (request,))
 
@@ -256,6 +268,7 @@ class Bridge:
                 self.s.put("forward_error", "")
 
     def poll(self):
+        self.s.activate()
         if self.s.get("halt") or float(self.s.get("poll_due") or 0) > self.s.clock():
             return
         if self.s.reserve("updates"):
@@ -330,10 +343,7 @@ class Bridge:
             self.s.db.execute("UPDATE attempts SET outcome=?,http=?,code=?,trace=? WHERE id=?",
                               (policy, reply.http, code, trace, attempt))
             if mid:
-                receipts = self.s.rows("SELECT status FROM receipts WHERE wamid=?", (mid,))
-                if receipts:
-                    state = "read" if any(r["status"] == "read" for r in receipts) else "delivered"
-                    self.s.db.execute("UPDATE outbox SET state=? WHERE seq=?", (state, row["seq"]))
+                state = self.s.accept_send(row["seq"], mid)
         return state in ("accepted", "read", "delivered")
 
     def tick(self):

@@ -16,10 +16,13 @@ holder=$(cat "$state/.lock" 2>/dev/null || true)
 case "$holder" in ''|*[!0-9]*) holder='' ;; esac
 case "${2:-}" in
   owned)
-    [ -n "$holder" ] && [ ! -L "$state/.lock" ] \
-      && fm_harness_pid_alive "$holder" && fm_session_lock_owned_by_self "$state" \
-      || { echo 'WhatsApp response requires the owning main session' >&2; exit 1; }
-    printf '%s\n' "$holder"
+    if [ -n "$holder" ] && [ ! -L "$state/.lock" ] \
+      && fm_harness_pid_alive "$holder" && fm_session_lock_owned_by_self "$state"; then
+      printf '%s\n' "$holder"
+    else
+      echo 'WhatsApp response requires the owning main session' >&2
+      exit 1
+    fi
     ;;
   probe)
     if [ -n "$holder" ] && [ ! -L "$state/.lock" ] && fm_harness_pid_alive "$holder"; then

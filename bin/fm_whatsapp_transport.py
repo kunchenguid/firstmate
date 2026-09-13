@@ -28,10 +28,6 @@ class Reply:
 
 
 def classify(endpoint, reply):
-    if reply.fault:
-        return "delivery_unknown" if endpoint == "messages" else "retry"
-    if 200 <= reply.http < 300:
-        return "accepted"
     error = reply.body.get("error", {}) if isinstance(reply.body, dict) else {}
     error = error if isinstance(error, dict) else {}
     code = error.get("code")
@@ -39,10 +35,14 @@ def classify(endpoint, reply):
         return "poll_conflict"
     if reply.http == 429 or (reply.http == 503 and code == 131016):
         return "retry"
-    if reply.http >= 500:
-        return "delivery_unknown" if endpoint == "messages" else "retry"
     if reply.http == 401 or (reply.http == 400 and code == 100 and endpoint == "updates"):
         return "auth_failed"
+    if 400 <= reply.http < 500:
+        return "permanent"
+    if reply.fault or reply.http >= 500:
+        return "delivery_unknown" if endpoint == "messages" else "retry"
+    if 200 <= reply.http < 300:
+        return "accepted"
     return "permanent"
 
 
@@ -128,11 +128,11 @@ class HTTP:
                     return Reply(status, headers=headers)
                 raw = response.read(2 * 1024 * 1024 + 1)
                 if len(raw) > 2 * 1024 * 1024:
-                    return Reply(status, fault="oversized_response")
+                    return Reply(status, headers=headers, fault="oversized_response")
                 try:
                     body = json.loads(raw)
                 except (ValueError, UnicodeError):
-                    return Reply(status, fault="invalid_json")
+                    return Reply(status, headers=headers, fault="invalid_json")
                 return Reply(status, body, headers)
         except (OSError, urllib.error.URLError, TimeoutError):
             return Reply(fault="connection_or_timeout")
