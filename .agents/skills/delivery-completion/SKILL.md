@@ -1,6 +1,6 @@
 ---
 name: delivery-completion
-description: Load before handling a ready PR, landing or cleaning up a task, completing a scout, or promoting scout work.
+description: Load before handling a ready PR or pr-fix wake, landing or cleaning up a task, or completing or promoting an investigation.
 user-invocable: false
 metadata:
   internal: true
@@ -13,7 +13,11 @@ metadata:
 Use the mode-specific ready signal rendered by `bin/fm-dod-lib.sh`.
 Run `bin/fm-pr-check.sh <id> <PR url>`; it records `pr=` and the forge's `pr_head=` when available and arms merge monitoring.
 The context monitor's installation and durable acknowledgement contract is owned by `bin/fm-pr-context-watch.sh`; a context left only in the disposable copy is not a surviving handoff.
-A `pr-fix` wake with reason `merged` or `closed` reports a terminal outcome, not a repair request; handle that outcome and use the monitor's guarded retirement command, retaining the context evidence.
+`bin/fm-pr-fix-seat.sh` owns bounded repair intake, completion, pending-feedback retirement, and recoverable context/snapshot archival; its help owns the commands and receipt formats.
+For a nonterminal `pr-fix` wake, locate the owning context and select an ordinary dispatch through `harness-adapters` before invoking that repair owner; never allocate a second worker by hand.
+A `deferred` or `cancelled` result requires owner review of the recorded reason and retained feedback, not another automatic round.
+An `unavailable` observation requires recovery of readable monitor evidence before repair intake.
+A `merged` or `closed` wake reports a terminal outcome, not a repair request; handle it and let automatic reconciliation archive the acknowledged context and snapshot, including an already-retired monitor.
 Tell the captain the full `https://...` PR URL, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For a custom `state/<id>.check.sh`, use an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, and register its current bytes with `bin/fm-check-register.sh <id>` before execution.

@@ -311,7 +311,7 @@ family_for_basename() {
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-heavy-suite.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-drain-unread-status.test.sh|fm-pr-context-watch.test.sh|\
+    fm-wake-drain-unread-status.test.sh|fm-pr-context-watch.test.sh|fm-pr-fix-seat.test.sh|\
     fm-review-watches.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-auto-quota-drain.test.sh|fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
@@ -784,6 +784,7 @@ tests/fm-pr-comment-watch-mechanism.test.sh 205
 tests/fm-pr-comment-watch.test.sh 890
 tests/fm-pr-context.test.sh 2322
 tests/fm-pr-context-watch.test.sh 26639
+tests/fm-pr-fix-seat.test.sh 75000
 tests/fm-pr-lib.test.sh 35
 tests/fm-pr-merge.test.sh 2675
 tests/fm-primary-scope-lib.test.sh 65

@@ -180,7 +180,7 @@ Once validation starts, prefer routing new requirements to follow-up work rather
 
 ### Completion
 
-Load `delivery-completion` before handling a ready PR, landing or cleaning up a task, completing a scout, or promoting scout work.
+Load `delivery-completion` before handling a ready PR or `pr-fix` wake, landing or cleaning up a task, or completing or promoting an investigation.
 
 ## 8. Supervision protocol
 

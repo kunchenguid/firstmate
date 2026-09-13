@@ -3573,6 +3573,15 @@ if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+if [ -e "$STATE/$ID.pr-repair.json" ] || [ -L "$STATE/$ID.pr-repair.json" ]; then
+  repair_retirement_args=("$ID")
+  [ "$FORCE" != --force ] || repair_retirement_args+=(--cancel)
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-pr-fix-seat.sh" retirement-stage "${repair_retirement_args[@]}"; then
+    echo "error: PR repair retirement could not be staged for $ID; retaining durable task records" >&2
+    exit 1
+  fi
+fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
@@ -3678,6 +3687,12 @@ if [ -d "$STATE" ]; then
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+if [ -e "$STATE/$ID.pr-repair.json" ] || [ -L "$STATE/$ID.pr-repair.json" ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-pr-fix-seat.sh" retired "$ID"; then
+    echo "warning: PR repair retirement for $ID needs reconciliation; its journal remains available" >&2
+  fi
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

@@ -20,14 +20,14 @@ cat > "$TMP_ROOT/context.json" <<JSON
  "oracle":{"name":"acceptance","command":"bin/check"},"tests":[{"command":"bin/check","exit_code":0}],
  "open_review_threads":[],"deferred_items":[],"pre_push_command":"bin/check","merge_authority":"human-merge"}
 JSON
-"$ROOT/bin/fm-pr-context.sh" write change < "$TMP_ROOT/context.json" >/dev/null
 cat > "$FM_TEST_PR_PAYLOAD" <<JSON
 {"data":{"repository":{"pullRequest":{
  "url":"$URL","state":"OPEN","headRefOid":"$HEAD_A","headRefName":"fm/change",
  "headRepository":{"nameWithOwner":"example/project"},
- "comments":{"pageInfo":{"hasNextPage":false},"nodes":[]},
- "reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
- "reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+ "comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"old-comment","updatedAt":"2026-09-12T01:10:00Z"}]},
+ "reviews":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"old-review","state":"CHANGES_REQUESTED","submittedAt":"2026-09-12T01:10:00Z"}]},
+ "reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"old-thread","isResolved":false,
+   "comments":{"nodes":[{"id":"before-delivery","updatedAt":"2026-09-12T11:58:59Z"}]}}]},
  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}
 }}}}
 JSON
@@ -51,6 +51,8 @@ jq -e "$filter" "$FM_TEST_PR_PAYLOAD" | jq -r 'to_entries[] | .key + ": " + (.va
 if [ -f "$FM_TEST_PR_PAYLOAD.extra" ]; then printf 'unexpected output\n'; fi
 SH
 chmod +x "$FM_PR_CONTEXT_GH_CMD"
+"$ROOT/bin/fm-pr-context.sh" write change < "$TMP_ROOT/context.json" >/dev/null
+TZ=UTC touch -t 202609121159.00 "$FM_HOME/data/change/pr-context.md"
 
 out=$("$TOOL" install "$FM_HOME" change 2>&1) || fail "context monitor install failed: $out"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -60,7 +62,11 @@ out=$("$TOOL" install "$FM_HOME" change 2>&1) || fail "context monitor install f
 fm_custom_check_snapshot_prepare "$FM_HOME/state" pr-fix-change || fail "monitor was not bound through the real installer"
 out=$(cd "$TMP_ROOT" && bash "$FM_CUSTOM_CHECK_SNAPSHOT") || fail "installed monitor failed"
 fm_custom_check_snapshot_cleanup
-[ -z "$out" ] || fail "empty initial snapshot was not silent: $out"
+[ -z "$out" ] || fail "first poll replayed feedback strictly before delivery: $out"
+jq -e '.baseline.context_hash==.context_hash and
+  .baseline.delivered_at==("2026-09-12T11:59:00Z"|fromdateiso8601)' \
+  "$FM_HOME/state/pr-fix-change.snapshot.json" >/dev/null || fail "delivery baseline was not recorded"
+pass "first observation baselines comments, reviews and thread activity strictly before delivery"
 jq '.data.repository.pullRequest.comments.nodes=[{id:"C1",updatedAt:"2026-09-12T12:00:00Z"}]' \
   "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
 mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
@@ -107,6 +113,34 @@ export FM_PR_CONTEXT_NOW=3600
 [ -z "$("$TOOL" poll change)" ] || fail "runner queued the event but did not acknowledge its exact generation"
 pass "the real check runner consumes the outbox only after durable wake publication"
 
+# Rewriting evidence on the same head also advances the delivery baseline.
+export FM_PR_CONTEXT_NOW=3700
+jq '.data.repository.pullRequest.comments.nodes += [{id:"before-rewrite",updatedAt:"2026-09-12T12:03:00Z"}]' \
+  "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
+mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
+event=$("$TOOL" poll change)
+assert_contains "$event" " comment $URL event=" "pre-rewrite feedback was not observed"
+# Leave that outbox unacknowledged: replacement evidence covers this old activity.
+jq '.tests += [{command:"bin/check",exit_code:0}]' "$TMP_ROOT/context.json" > "$TMP_ROOT/rewrite.json"
+"$ROOT/bin/fm-pr-context.sh" write change < "$TMP_ROOT/rewrite.json" >/dev/null
+TZ=UTC touch -t 202609121204.00 "$FM_HOME/data/change/pr-context.md"
+jq '.data.repository.pullRequest.reviews.nodes += [{id:"late-old-review",state:"CHANGES_REQUESTED",submittedAt:"2026-09-12T12:03:59Z"}]' \
+  "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
+mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
+export FM_PR_CONTEXT_NOW=3800
+[ -z "$("$TOOL" poll change)" ] || fail "context rewrite replayed old feedback"
+jq -e '.baseline.context_hash==.context_hash and
+  .baseline.delivered_at==("2026-09-12T12:04:00Z"|fromdateiso8601) and (.pending|length)==0' \
+  "$FM_HOME/state/pr-fix-change.snapshot.json" >/dev/null || fail "rewrite retained the old baseline or outbox"
+jq '.data.repository.pullRequest.comments.nodes += [{id:"after-rewrite",updatedAt:"2026-09-12T12:05:00Z"}]' \
+  "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
+mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
+export FM_PR_CONTEXT_NOW=4300
+event=$("$TOOL" poll change)
+assert_contains "$event" " comment $URL event=" "rewrite swallowed newer feedback"
+"$TOOL" ack change "$event"
+pass "changed context hashes absorb old pending/history but retain post-delivery activity on the same head"
+
 # A remote-open task may release compute only after the context monitor is ready.
 copy="$TMP_ROOT/project copy"
 fm_git_init_commit "$copy"
@@ -120,7 +154,7 @@ jq --arg head "$copy_head" '.data.repository.pullRequest.headRefOid=$head' \
   "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
 mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
 if "$TOOL" ready change "$URL" "$copy_head" "$copy" >/dev/null 2>&1; then fail "stale context snapshot authorized retirement"; fi
-export FM_PR_CONTEXT_NOW=4000
+export FM_PR_CONTEXT_NOW=4500
 [ -z "$("$TOOL" poll change)" ] || fail "head recorded by the writer was misclassified as external"
 "$TOOL" ready change "$URL" "$copy_head" "$copy" || fail "fresh monitored context did not authorize ordinary retirement"
 cat > "$FM_HOME/state/change.meta" <<META
@@ -186,6 +220,8 @@ pass "duplicate context ownership is refused before installing another check"
 for filter in \
   '.data.repository.pullRequest.comments.pageInfo.hasNextPage=true' \
   '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup={}' \
+  '.data.repository.pullRequest.comments.nodes=[{id:"C",updatedAt:"not-a-date"}]' \
+  '.data.repository.pullRequest.reviews.nodes=[{id:"R",state:"COMMENTED",submittedAt:"not-a-date"}]' \
   '.data.repository.pullRequest.comments.nodes=[{id:null,updatedAt:"now"}]' \
   '.data.repository.pullRequest.comments.nodes=[{id:"same",updatedAt:"now"},{id:"same",updatedAt:"now"}]' \
   '.data.repository.pullRequest.reviews.nodes=[{id:"R",state:"invalid",submittedAt:null}]' \
@@ -300,3 +336,65 @@ if "$TOOL" retire "$FM_HOME" closed >/dev/null 2>&1; then fail "unqueued termina
 "$TOOL" ack closed "$event"
 "$TOOL" retire "$FM_HOME" closed >/dev/null || fail "acknowledged closed PR stayed registered"
 pass "closed PRs retain their terminal outbox until durable delivery acknowledgement"
+
+fresh_url=https://github.com/example/project/pull/14
+jq --arg url "$fresh_url" '.pr_url=$url' "$TMP_ROOT/current-context.json" > "$TMP_ROOT/fresh-context.json"
+"$ROOT/bin/fm-pr-context.sh" write fresh < "$TMP_ROOT/fresh-context.json" >/dev/null
+TZ=UTC touch -t 202609121204.00 "$FM_HOME/data/fresh/pr-context.md"
+jq --arg url "$fresh_url" '.data.repository.pullRequest.url=$url |
+  .data.repository.pullRequest.comments.nodes=[
+    {id:"old",updatedAt:"2026-09-12T01:10:00Z"},{id:"new",updatedAt:"2026-09-12T12:05:00Z"}] |
+  .data.repository.pullRequest.reviews.nodes=[{id:"old-review",state:"COMMENTED",submittedAt:"2026-09-12T12:03:59Z"}]' \
+  "$TMP_ROOT/good-pr.json" > "$FM_TEST_PR_PAYLOAD"
+"$TOOL" install "$FM_HOME" fresh >/dev/null
+event=$("$TOOL" poll fresh)
+[ "$event" = "pr-fix: 14 $copy_head comment $fresh_url event=1" ] || fail "initial baseline swallowed new feedback: $event"
+jq -e '(.observed.comments|length)==2' "$FM_HOME/state/pr-fix-fresh.snapshot.json" >/dev/null \
+  || fail "baselining discarded observed history"
+pass "first observation retains history while excluding strictly older activity"
+"$TOOL" ack fresh "$event"
+export FM_PR_CONTEXT_NOW=$((FM_PR_CONTEXT_NOW + 600))
+jq '.data.repository.pullRequest.reviewThreads.nodes[0].isResolved=true |
+  .data.repository.pullRequest.reviews.nodes[0].state="DISMISSED"' \
+  "$FM_TEST_PR_PAYLOAD" > "$TMP_ROOT/next.json"
+mv "$TMP_ROOT/next.json" "$FM_TEST_PR_PAYLOAD"
+event=$("$TOOL" poll fresh)
+assert_contains "$event" " comment,review $fresh_url event=" "baseline hid subsequently observed state changes"
+pass "newly observed thread/review state changes remain actionable even on old feedback"
+"$TOOL" ack fresh "$event"
+[ -z "$("$TOOL" poll fresh)" ] || fail "unchanged state transition replayed its wake"
+"$TOOL" inspect fresh | jq -e '
+  any(.feedback.threads[]; .id=="old-thread") and any(.feedback.reviews[]; .id=="old-review")' >/dev/null \
+  || fail "unchanged polling erased actionable state-change identities before repair intake"
+pass "actionable state-change identities survive acknowledgement and unchanged polls"
+
+# Feedback arrives after delivery but shares its forge timestamp's whole second.
+same_url=https://github.com/example/project/pull/15
+jq --arg url "$same_url" '.pr_url=$url' "$TMP_ROOT/current-context.json" > "$TMP_ROOT/same-context.json"
+"$ROOT/bin/fm-pr-context.sh" write same-second < "$TMP_ROOT/same-context.json" >/dev/null
+TZ=UTC touch -t 202609121205.00 "$FM_HOME/data/same-second/pr-context.md"
+jq --arg url "$same_url" '.data.repository.pullRequest.url=$url |
+  .data.repository.pullRequest.comments.nodes=[
+    {id:"historical-comment",updatedAt:"2026-09-12T12:04:59Z"},
+    {id:"same-comment",updatedAt:"2026-09-12T12:05:00Z"}] |
+  .data.repository.pullRequest.reviews.nodes=[
+    {id:"same-review",state:"CHANGES_REQUESTED",submittedAt:"2026-09-12T12:05:00Z"}] |
+  .data.repository.pullRequest.reviewThreads.nodes=[{id:"same-thread",isResolved:false,
+    comments:{nodes:[{id:"same-thread-comment",updatedAt:"2026-09-12T12:05:00Z"}]}}]' \
+  "$TMP_ROOT/good-pr.json" > "$FM_TEST_PR_PAYLOAD"
+"$TOOL" install "$FM_HOME" same-second >/dev/null
+event=$("$TOOL" poll same-second)
+assert_contains "$event" " comment,review $same_url event=" "same-second post-delivery feedback was swallowed"
+[ -z "$("$TOOL" poll same-second)" ] || fail "same-second feedback bypassed debounce"
+export FM_PR_CONTEXT_NOW=$((FM_PR_CONTEXT_NOW + 600))
+event=$("$TOOL" poll same-second)
+assert_contains "$event" " comment,review $same_url event=" "unchanged polling lost unacknowledged same-second feedback"
+"$TOOL" ack same-second "$event"
+export FM_PR_CONTEXT_NOW=$((FM_PR_CONTEXT_NOW + 600))
+[ -z "$("$TOOL" poll same-second)" ] || fail "acknowledged same-second feedback replayed"
+"$TOOL" inspect same-second | jq -e '
+  [.feedback.comments[].id]==["same-comment"] and
+  [.feedback.reviews[].id]==["same-review"] and
+  [.feedback.threads[].id]==["same-thread"]' >/dev/null \
+  || fail "same-second feedback was erased or historical feedback became actionable"
+pass "same-second post-delivery feedback survives first observation and unchanged polls without replaying earlier history"

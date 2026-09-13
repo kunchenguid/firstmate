@@ -852,7 +852,20 @@ test_context_monitor_has_exclusive_polling_ownership() {
   export ARTEMIS_OPEN_PRS='[]' FIRSTMATE_OPEN_PRS="$firstmate_open_pr"
   export FIRSTMATE_THREADS="$threads_open_unreplied"
   PATH="$bindir:$PATH" FM_HOME="$home" FM_PCW_GH_CMD=gh "$TOOL" poll >/dev/null
-  FM_HOME="$home" "$ROOT/bin/fm-pr-context.sh" write change >/dev/null <<'JSON'
+  cat > "$bindir/context-forge" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$1 $2 $3" = 'api POST graphql' ] || exit 1
+filter=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --jq ]; then filter=$2; shift 2; else shift; fi
+done
+printf '%s\n' '{"data":{"repository":{"pullRequest":{"headRefName":"fm/change"}}}}' |
+  jq -e "$filter" | jq -r 'to_entries[] | .key + ": " + (.value | tojson)'
+SH
+  chmod +x "$bindir/context-forge"
+  FM_HOME="$home" FM_PR_CONTEXT_GH_CMD="$bindir/context-forge" \
+    "$ROOT/bin/fm-pr-context.sh" write change >/dev/null <<'JSON' || fail "cannot write context fixture"
 {"pr_url":"https://github.com/pedromuller-del/firstmate/pull/88",
  "repo":"pedromuller-del/firstmate","branch":"fm/change","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
  "oracle":{"name":"acceptance","command":"bin/check"},"tests":[{"command":"bin/check","exit_code":0}],

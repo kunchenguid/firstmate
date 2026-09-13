@@ -10,6 +10,26 @@ unset FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_ROOT_OVERRIDE
 mkdir -p "$FM_HOME/data"
 INPUT="$TMP_ROOT/context.json"
 CONTEXT="$FM_HOME/data/change/pr-context.md"
+export FM_PR_CONTEXT_GH_CMD="$TMP_ROOT/gh-axi"
+cat > "$FM_PR_CONTEXT_GH_CMD" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$1 $2 $3" = 'api POST graphql' ] || exit 91
+[ "${GH_HOST:-}" = github.com ] || exit 92
+[ "${FM_TEST_CONTEXT_UNAVAILABLE:-0}" = 0 ] || exit 7
+shift 3
+filter=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jq) filter=$2; shift 2 ;;
+    --field) shift 2 ;;
+    *) exit 93 ;;
+  esac
+done
+jq -n '{data:{repository:{pullRequest:{headRefName:"fm/change"}}}}' |
+  jq -e "$filter" | jq -r 'to_entries[] | .key + ": " + (.value | tojson)'
+SH
+chmod +x "$FM_PR_CONTEXT_GH_CMD"
 
 fixture() {
   cat > "$INPUT" <<'JSON'
@@ -45,6 +65,39 @@ cp "$CONTEXT" "$TMP_ROOT/original.md"
 write_context >/dev/null
 cmp -s "$CONTEXT" "$TMP_ROOT/original.md" || fail "identical input changed canonical bytes"
 pass "complete context round-trips through a deterministic private Markdown snapshot"
+
+jq '.branch="fm/local-only"' "$INPUT" > "$TMP_ROOT/wrong-branch.json"
+if GH_HOST=unrelated.example "$TOOL" write change < "$TMP_ROOT/wrong-branch.json" > "$TMP_ROOT/out" 2>&1; then
+  fail "writer accepted a local branch differing from the readable PR head branch"
+fi
+assert_grep 'fm/local-only' "$TMP_ROOT/out" "branch refusal omitted the recorded branch"
+assert_grep 'fm/change' "$TMP_ROOT/out" "branch refusal omitted the PR head branch"
+cmp -s "$CONTEXT" "$TMP_ROOT/original.md" || fail "branch refusal replaced existing context"
+pass "a readable head-branch mismatch names both branches and preserves prior evidence"
+
+FM_TEST_CONTEXT_UNAVAILABLE=1 write_context > "$TMP_ROOT/out" 2> "$TMP_ROOT/warning" \
+  || fail "unavailable forge prevented preserving completeness-only evidence"
+assert_grep 'PR head branch unavailable' "$TMP_ROOT/warning" "unverified write did not disclose the failed read"
+cmp -s "$CONTEXT" "$TMP_ROOT/original.md" || fail "unavailable read changed canonical evidence"
+out=$(FM_TEST_CONTEXT_UNAVAILABLE=1 "$TOOL" validate change 2>&1)
+[ "$out" = "valid: $CONTEXT" ] || fail "offline validation unexpectedly accessed the forge: $out"
+pass "unavailable branch reads warn while preserving evidence and keeping validation offline"
+
+# A repair may replace only the exact context it validated before publication.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
+expected_hash=$(fm_pr_sha256 "$CONTEXT")
+"$TOOL" write change --expect-hash "$expected_hash" < "$INPUT" > "$TMP_ROOT/out" 2>&1 \
+  || fail "matching expected context could not be replaced: $(cat "$TMP_ROOT/out")"
+jq '.oracle.name="newer owner evidence"' "$INPUT" > "$TMP_ROOT/newer.json"
+"$TOOL" write change < "$TMP_ROOT/newer.json" >/dev/null
+cp "$CONTEXT" "$TMP_ROOT/newer.md"
+if "$TOOL" write change --expect-hash "$expected_hash" < "$INPUT" > "$TMP_ROOT/out" 2>&1; then
+  fail "stale publication overwrote a concurrent context replacement"
+fi
+cmp -s "$CONTEXT" "$TMP_ROOT/newer.md" || fail "stale write changed the newer evidence"
+write_context >/dev/null
+pass "conditional context replacement preserves a concurrently rewritten handoff"
 
 for filter in 'del(.head)' '.head="short"' 'del(.oracle)' '.oracle.name=""' \
   '.oracle.command="TBD"' '.tests=[]' '.tests[1].exit_code=1' \

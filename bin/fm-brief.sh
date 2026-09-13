@@ -13,8 +13,12 @@
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--visual] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--access <reader|writer>] [--evidence-archive] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> <repo-name> --mode direct-PR --pr-repair <context-task> [--herdr-lab]
 #        fm-brief.sh <task-id> --fill <intent-file> [spec-file]
 #        fm-brief.sh --validate-bookends <brief-file>
+#   --pr-repair selects the existing-PR lifecycle contract owned by
+#   bin/fm-pr-fix-seat.sh instead of the ordinary new-PR setup and completion.
+#   It is valid only for a direct-PR writer and retains the standard safeguards.
 #   --fill atomically replaces both standalone {TASK} slots with <intent-file>
 #   and both standalone {FIRSTMATE_SPEC} slots with [spec-file]. When the
 #   optional spec file is absent it writes an explicit no-additional-spec line.
@@ -206,6 +210,7 @@ VISUAL=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+PR_REPAIR=
 FILL=0
 VALIDATE_BOOKENDS=0
 ACCESS=writer
@@ -219,6 +224,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      pr-repair) PR_REPAIR=$a ;;
       access) ACCESS=$a; ACCESS_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -234,6 +240,7 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --pr-repair) want_value=pr-repair ;;
     # --fill <task-id> <intent-file> [spec-file]: atomically replace both
     # structured Task copies from one authoritative input per subsection.
     --fill) FILL=1 ;;
@@ -419,6 +426,13 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+if [ -n "$PR_REPAIR" ]; then
+  [ "$KIND:$MODE" = ship:direct-PR ] || { echo 'error: --pr-repair requires a direct-PR writer' >&2; exit 1; }
+  case "$PR_REPAIR" in
+    .|..|*[!A-Za-z0-9._-]*) echo 'error: unsafe repair context task' >&2; exit 1 ;;
+  esac
 fi
 
 # The reader/writer access axis is a scout intake decision (like the ship
@@ -1049,7 +1063,15 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2"
+if [ -n "$PR_REPAIR" ]; then
+  REPAIR_COMMAND=$(fm_dod_pr_repair_command) || exit 1
+  SETUP1="1. Prepare only this repair's isolated branch: \`$REPAIR_COMMAND prepare $PR_REPAIR $ID\`."
+  RULE1='1. Never push to the default branch or another PR. Only the repair helper may publish this round. Never merge a PR.'
+  DOD=$(fm_dod_pr_repair_block "$PR_REPAIR" "$ID") || exit 1
+else
+  DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+fi
 
 VISUAL_EVIDENCE_SECTION=''
 if [ "$VISUAL" -eq 1 ]; then
@@ -1097,7 +1119,7 @@ EOF
       PR_PUBLICATION_ADDENDUM=${PR_PUBLICATION_ADDENDUM%$'\n'}
       PR_BODY_SECTION_BODY="$PR_BODY_SECTION_BODY"$'\n'"$PR_PUBLICATION_ADDENDUM"
     fi
-    if [ "$HAS_PR_TEMPLATE" -eq 1 ]; then
+    if [ "$HAS_PR_TEMPLATE" -eq 1 ] && [ -z "$PR_REPAIR" ]; then
       PR_TEMPLATE_HELPER=$(shell_quote "$FM_ROOT/bin/fm-pr-body.sh")
       if [ -f "$DATA/pr-templates/$REPO.md" ]; then
         PR_TEMPLATE_SOURCE_LINE="This project has a private PR body template at \`data/pr-templates/$REPO.md\`; it is this task's PR-submission rule and takes priority over any repository-owned template."
@@ -1137,7 +1159,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$SETUP1
 
 # Rules
 $UNTRUSTED_CONTENT_RULE

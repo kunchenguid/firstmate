@@ -4307,6 +4307,57 @@ EOF
   pass "reader scratch teardown skips treehouse return and removes its task temp root"
 }
 
+test_teardown_finalizes_pr_repair() {
+  local case_dir id=pr-repair-7-1 head url=https://github.com/example/repo/pull/7 ctx rc=0 mode=${1:-completed} force=
+  case_dir=$(make_case "repair-retirement-$mode")
+  wt_commit "$case_dir"
+  add_fork_with_pushed_branch "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  chmod 700 "$case_dir/state"
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" \
+    'kind=ship' 'mode=direct-PR' "spawn_gen=teardown-test-$id"
+  if [ "$mode" = completed ]; then
+    printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/$id.meta"
+    printf 'done: PR %s checks green\n' "$url" > "$case_dir/state/$id.status"
+  else
+    force=--force
+    printf 'working: repair round\n' > "$case_dir/state/$id.status"
+  fi
+  jq -n --arg url "$url" --arg head "$head" '{pr_url:$url,head:$head,repo:"example/repo",branch:"fm/task-x1",
+    oracle:{name:"fixture",command:"true"},tests:[{command:"true",exit_code:0}],
+    open_review_threads:[],deferred_items:[],pre_push_command:"true",merge_authority:"human-merge"}' |
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_PR_CONTEXT_GH_CMD="$case_dir/fakebin/gh-axi" \
+      "$ROOT/bin/fm-pr-context.sh" write change >/dev/null 2>&1 || fail "repair teardown context setup failed"
+  ctx=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-pr-context.sh" validate change --json)
+  jq -n --arg id "$id" --arg url "$url" '{schema:1,id:$id,task:"change",url:$url}' > "$case_dir/state/$id.pr-repair.json"
+  jq -n --arg id "$id" --arg url "$url" --arg head "$head" --arg mode "$mode" --argjson ctx "$ctx" '
+    {schema:1,task:"change",url:$url,round:1,last_generation:0,pending:[],
+      active:{id:$id,phase:$mode,context:$ctx,replies:{},
+        delivery:(if $mode=="completed" then {input:$ctx,context:$ctx} else null end),
+        snapshot:{generation:1,observed:{head:$head,comments:[],reviews:[],threads:[]}}}}' \
+    > "$case_dir/state/pr-fix-seat-7.json"
+  chmod 600 "$case_dir/state/$id.meta" "$case_dir/state/$id.status" \
+    "$case_dir/state/$id.pr-repair.json" "$case_dir/state/pr-fix-seat-7.json"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" ${force:+"$force"} > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "repair teardown ($mode) failed: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/$id.meta" ] || fail "repair metadata survived ordinary teardown"
+  jq -e --arg id "$id" '.active==null and .last_outcome.id==$id' \
+    "$case_dir/state/pr-fix-seat-7.json" >/dev/null || fail "ordinary teardown left the repair reservation active"
+  [ ! -e "$case_dir/state/$id.pr-repair.json" ] || fail "ordinary teardown retained a finished repair index"
+  [ -s "$case_dir/data/change/pr-context.md" ] || fail "ordinary teardown removed the independent context"
+  if [ "$mode" = active ]; then
+    jq -e '.last_outcome.outcome=="cancelled" and .escalation!=null' \
+      "$case_dir/state/pr-fix-seat-7.json" >/dev/null || fail "explicit cancellation silently restarted an incomplete round"
+  fi
+  pass "ordinary teardown finalizes a $mode repair while preserving its independent context"
+}
+
+test_teardown_finalizes_pr_repair
+test_teardown_finalizes_pr_repair active
 test_teardown_seals_observations_without_equating_cleanup_with_success
 test_merged_direct_pr_teardown_seals_pull_request_url
 test_local_only_fork_remote_allows

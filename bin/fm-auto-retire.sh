@@ -12,6 +12,8 @@
 #     empty debrief is refused as debrief-missing and left for a later cycle
 #   - a done task with an OPEN PR passing fm-pr-context-watch.sh ready and
 #     the same debrief guard; its independent context check survives cleanup
+#   - a completed/deferred PR repair with a validated lifecycle receipt; staged
+#     cleanup retries use its hash-bound preserved debrief, not the returned copy
 #   - a scout whose last status verb is done and whose report.md is present
 # The done check snapshots the status file's byte length and mtime; if either
 # changed before retirement, the record is refused as status-moved and left
@@ -143,7 +145,7 @@ forge_state() {  # <pr-url>
   printf '%s\n' "$state"
 }
 
-classify() {  # <id> <meta> -> merged|context|scout|skip|unclassified|status-moved
+classify() {  # <id> <meta> -> merged|context|repair[-retiring]|scout|skip|unclassified|status-moved
   local id=$1 meta=$2 kind pr last verb report state status fp head copy
   kind=$(meta_field "$meta" kind)
   [ -n "$kind" ] || kind=ship
@@ -172,6 +174,23 @@ classify() {  # <id> <meta> -> merged|context|scout|skip|unclassified|status-mov
   fi
   if ! fm_pr_url_parse "$pr" 2>/dev/null; then
     printf 'unclassified\n'
+    return 0
+  fi
+  if [ -e "$STATE/$id.pr-repair.json" ] || [ -L "$STATE/$id.pr-repair.json" ]; then
+    head=$(meta_field "$meta" pr_head)
+    copy=$(meta_field "$meta" worktree)
+    if [ -n "$head" ] && [ -n "$copy" ] &&
+      state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        "$SCRIPT_DIR/fm-pr-fix-seat.sh" ready "$id" "$pr" "$head" "$copy" 2>/dev/null); then
+      status_unchanged "$fp" "$status" || { printf 'status-moved\n'; return 0; }
+      case "$state" in
+        completed|deferred) printf 'repair\n' ;;
+        retiring) printf 'repair-retiring\n' ;;
+        *) printf 'skip\n' ;;
+      esac
+    else
+      printf 'skip\n'
+    fi
     return 0
   fi
   state=$(forge_state "$pr") || { printf 'unclassified\n'; return 0; }
@@ -228,6 +247,15 @@ retire_one() {  # <id> <reason>
   return 0
 }
 
+reconcile_repairs() {
+  [ -x "$SCRIPT_DIR/fm-pr-fix-seat.sh" ] || return 0
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-pr-fix-seat.sh" reconcile; then
+    printf 'warning: PR repair retirement needs reconciliation\n' >&2
+  fi
+}
+reconcile_repairs
+
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] && [ ! -L "$meta" ] || continue
   id=${meta##*/}
@@ -239,10 +267,11 @@ for meta in "$STATE"/*.meta; do
   already_marked "$id" && continue
   class=$(classify "$id" "$meta") || class=unclassified
   case "$class" in
-    merged|context)
-      if preserve_ship_debrief "$id" "$meta"; then
+    merged|context|repair|repair-retiring)
+      if [ "$class" = repair-retiring ] || preserve_ship_debrief "$id" "$meta"; then
         reason="merged PR"
         [ "$class" != context ] || reason="PR context monitor ready"
+        case "$class" in repair*) reason="PR repair round complete" ;; esac
         retire_one "$id" "$reason"
       else
         retry_or_park "$id" debrief-missing \
@@ -262,5 +291,6 @@ for meta in "$STATE"/*.meta; do
       ;;
   esac
 done
+reconcile_repairs
 
 exit 0
