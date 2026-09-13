@@ -77,6 +77,27 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Agent names
+
+Every Herdr ship or scout launched through a supported Firstmate harness adapter receives a deterministic name after the harness registers in the exact new pane.
+The format is `fm-<task-prefix>-<scope-digest>`.
+The task prefix is the first 17 normalized characters of the task id, and the 10-character digest binds the full task id to the existing home tag.
+That home tag includes the primary or secondmate identity and a hash of the resolved Firstmate installation root, so matching task ids from homes sharing one Herdr session still get different names.
+The complete name is at most 31 characters and uses Herdr's lowercase name alphabet.
+
+Firstmate never selects the target by its mutable name.
+It waits for a complete agent registration on the exact response-derived pane id, renames that pane, and reads the same pane back before the spawn can succeed.
+A failed rename response is followed by the same exact-pane read, because the server may have applied the write before the client lost the response.
+Further attempts remain bounded and repeat only this pane-id operation.
+
+An absent registration, name collision, or mismatched readback stops the spawn instead of leaving a misleading generic name as a reported success.
+The failure event records the expected name and exact pane, while the terminal pane and Treehouse copy remain available for inspection.
+Fresh provisional metadata and backlog state are not committed on that failure.
+Raw launch commands and secondmate-primary launches keep their existing behavior because this contract covers only ship and scout launches using supported harness adapters.
+
+The alias is presentation state, not endpoint authority.
+Normal task operations continue to use the recorded session, workspace, tab, and pane ids.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
@@ -356,6 +377,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-herdr-agent-name-live-e2e.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh

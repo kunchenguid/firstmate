@@ -80,6 +80,16 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
+#   Every Herdr ship or scout launched through a supported harness adapter gets
+#   one deterministic session-global agent name after the harness registers in
+#   its exact response-derived pane. The name keeps a readable task prefix and
+#   hashes the full task id with the existing installation/home identity, so
+#   same-id tasks from homes sharing one Herdr session remain distinguishable.
+#   Rename success is read back from that exact pane. A bounded retry handles a
+#   lost rename response; absent registration, a collision, or failed readback
+#   stops the spawn and leaves the exact pane, task copy, and failure event for
+#   inspection. Raw launch commands and secondmate primaries keep their existing
+#   behavior because neither is a ship/scout supported-adapter launch.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -915,6 +925,7 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_AGENT_NAME=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -3000,6 +3011,13 @@ EOF
     ;;
 esac
 fi
+if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" -eq 0 ] \
+   && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  HERDR_AGENT_NAME=$(fm_backend_herdr_task_agent_name "$ID") || {
+    echo "error: could not derive a valid herdr agent name for task $ID" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -4186,6 +4204,14 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$BACKEND" = herdr ] && [ -n "${HERDR_AGENT_NAME:-}" ]; then
+  if ! fm_backend_herdr_name_agent "$T" "$HERDR_AGENT_NAME"; then
+    printf 'failed: herdr agent naming did not verify for %s in exact pane %s\n' \
+      "$HERDR_AGENT_NAME" "$T" >> "$STATE/$ID.status"
+    echo "error: spawn stopped because herdr agent naming did not verify; inspect window $T and local copy $WT" >&2
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
