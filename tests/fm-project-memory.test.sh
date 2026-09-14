@@ -388,10 +388,15 @@ test_the_listing_names_the_knowledge_surface_before_anything_else() {
   pass "fm-project-memory.sh: the listing names the knowledge surface before anything else"
 }
 
-# Rule two on its own, and the case the ranking cannot resolve: all three paths
+# How many names one directory is allowed to contribute, asserted here as the
+# contract it is rather than re-derived from the fixtures below.
+names_from() {  # <output> <directory prefix>
+  printf '%s\n' "$1" | grep -c "^    $2" || true
+}
+
+# Rule two on its own, and the case the ordering cannot resolve: all three paths
 # are knowledge of the same rank, the session logs sort first AND outnumber the
-# cap. Nothing but a per-directory ceiling keeps the two documents visible, so
-# handing the slots out by position alone fails here and only here.
+# cap. Only the fixed per-directory ceiling keeps the two documents visible.
 test_no_single_directory_takes_every_listing_slot() {
   local world out i
   world=$(make_world onedirhog)
@@ -406,14 +411,84 @@ test_no_single_directory_takes_every_listing_slot() {
   record_source "$world"
   out=$(run_scan "$world")
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 62" "the count stopped being complete"
+  assert_equals "5" "$(names_from "$out" '\.claude/history/session-')" \
+    "the crowded directory contributed more names than the ceiling allows"
   assert_contains "$out" "
     AGENTS.md" "a crowded directory of the same rank buried the project's agent memory"
   assert_contains "$out" "docs/audit.md" "a crowded directory of the same rank buried the production audit"
-  assert_contains "$out" ".claude/history/ (23 more files)" \
+  assert_contains "$out" ".claude/history/ (55 more files)" \
     "the crowded directory did not give up its excess to one counted line"
-  assert_contains "$out" "... and 23 more (23 of them knowledge)" \
+  assert_contains "$out" "... and 55 more (55 of them knowledge)" \
     "the omission line did not say how much of what it hides is knowledge"
   pass "fm-project-memory.sh: no single directory takes every listing slot"
+}
+
+# The same rule where there are more directories than slots, which is the shape
+# that used to have no ceiling at all: the listing runs out of room part way
+# through, and the agent memory still has to be named rather than lost behind
+# forty session logs.
+test_more_directories_than_slots_still_names_the_agent_memory() {
+  local world out i
+  world=$(make_world manydirs)
+  mkdir -p "$world/source/.claude/history"
+  i=1
+  while [ "$i" -le 60 ]; do
+    printf '{"turn":%s}\n' "$i" >"$world/source/.claude/history/session-$i.jsonl"
+    i=$((i + 1))
+  done
+  printf 'agent memory an earlier worker wrote\n' >"$world/source/AGENTS.md"
+  i=1
+  while [ "$i" -le 41 ]; do
+    mkdir -p "$world/source/docs/area-$i"
+    printf 'the findings for area %s\n' "$i" >"$world/source/docs/area-$i/nota.md"
+    i=$((i + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 102" "the count stopped being complete"
+  assert_equals "5" "$(names_from "$out" '\.claude/history/session-')" \
+    "the crowded directory took the listing while other directories waited"
+  assert_contains "$out" "
+    AGENTS.md" "the project's agent memory was lost behind a crowded directory"
+  assert_contains "$out" "docs/area-1/nota.md" "no room was left for the documents behind the crowded directory"
+  pass "fm-project-memory.sh: more directories than slots still names the agent memory"
+}
+
+# The shape the ceiling exists for in a Spanish-named project: the root holds
+# the agent memory AND thirty reports, so a rule that reads a directory's best
+# rank would let the root spend the listing and leave `informes/` with nothing
+# but a count, though its documents are worth exactly as much.
+test_a_directory_holding_agent_memory_does_not_take_another_directorys_names() {
+  local world out i
+  world=$(make_world mixedrank)
+  mkdir -p "$world/source/docs" "$world/source/informes"
+  printf 'agent memory an earlier worker wrote\n' >"$world/source/AGENTS.md"
+  i=1
+  while [ "$i" -le 30 ]; do
+    printf 'report %s\n' "$i" >"$world/source/informe-$i.md"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 19 ]; do
+    printf 'audit %s\n' "$i" >"$world/source/docs/audit-$i.md"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 25 ]; do
+    printf 'analysis %s\n' "$i" >"$world/source/informes/analisis-$i.md"
+    i=$((i + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 75" "the count stopped being complete"
+  assert_equals "5" "$(names_from "$out" 'informes/analisis-')" \
+    "the directory holding the agent memory took the names owed to informes/"
+  assert_equals "5" "$(names_from "$out" 'docs/audit-')" \
+    "docs/ contributed a number of names the ceiling does not allow"
+  assert_contains "$out" "
+    AGENTS.md" "the project's agent memory was not named"
+  assert_contains "$out" "informes/ (20 more files)" "informes/ did not give up its excess to one counted line"
+  pass "fm-project-memory.sh: a directory holding agent memory does not take another directory's names"
 }
 
 # Rule three on its own: the hidden count and the knowledge count have to be
@@ -431,8 +506,8 @@ test_the_omission_line_counts_only_the_knowledge_it_hides() {
   record_source "$world"
   out=$(run_scan "$world")
   assert_contains "$out" "UNCOMMITTED_OTHER: 50" "the count stopped being complete"
-  assert_contains "$out" "parts/ (11 more files)" "the overflow did not collapse into one counted line"
-  assert_contains "$out" "... and 11 more (0 of them knowledge)" \
+  assert_contains "$out" "parts/ (45 more files)" "the overflow did not collapse into one counted line"
+  assert_contains "$out" "... and 45 more (0 of them knowledge)" \
     "the omission line counted working material as knowledge"
   assert_contains "$out" "VERDICT: parity" "working material alone turned the verdict into a leak"
   pass "fm-project-memory.sh: the omission line counts only the knowledge it hides"
@@ -455,38 +530,8 @@ test_a_crowded_directory_never_buries_the_captains_own_document() {
   out=$(run_scan "$world")
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 46" "the count stopped being complete"
   assert_contains "$out" "docs/audit.md" "a crowded directory buried the captain's own document"
-  assert_contains "$out" "assets/ (7 more files)" "the overflow did not collapse into one counted line"
+  assert_contains "$out" "assets/ (40 more files)" "the overflow did not collapse into one counted line"
   pass "fm-project-memory.sh: a crowded directory never buries the captain's own document"
-}
-
-# The mirror of the case above, and the one that catches folding by size: here
-# the fullest directory is also the most valuable. Its documents are what the
-# slots are for, so the pictures beside them are what gets counted instead of
-# named - never the other way round.
-test_the_fullest_directory_is_not_folded_when_it_is_the_valuable_one() {
-  local world out i
-  world=$(make_world valuablecrowd)
-  mkdir -p "$world/source/docs" "$world/source/assets"
-  i=1
-  while [ "$i" -le 45 ]; do
-    printf 'finding %s\n' "$i" >"$world/source/docs/note-$i.md"
-    i=$((i + 1))
-  done
-  i=1
-  while [ "$i" -le 20 ]; do
-    printf 'caption\n' >"$world/source/assets/shot-$i.txt"
-    i=$((i + 1))
-  done
-  record_source "$world"
-  out=$(run_scan "$world")
-  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 65" "the count stopped being complete"
-  assert_contains "$out" "docs/note-1.md" "the captain's documents were folded away instead of named"
-  assert_contains "$out" "docs/note-19.md" "the listing stopped short of spending its slots on documents"
-  assert_contains "$out" "assets/ (20 more files)" "the captions were named instead of counted"
-  assert_not_contains "$out" "assets/shot-1.txt" "a slot went to a caption while documents were folded"
-  assert_contains "$out" "... and 27 more (27 of them knowledge)" \
-    "the omission line did not say how much of what it hides is knowledge"
-  pass "fm-project-memory.sh: the fullest directory is not folded when it is the valuable one"
 }
 
 test_scratch_is_counted_but_never_listed() {
@@ -614,10 +659,9 @@ test_scan_is_bounded_by_limit() {
   out=$(run_scan "$world" --limit 3)
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 12" "the complete count was not reported"
   assert_contains "$out" "docs/note-0.md" "a bounded listing returned no document name at all"
-  assert_contains "$out" "docs/ (10 more files)" "what the limit left over was not collapsed into a counted line"
-  assert_contains "$out" "... and 10 more (10 of them knowledge)" \
+  assert_equals "3" "$(names_from "$out" 'docs/note-')" "the listing printed past its limit"
+  assert_contains "$out" "... and 9 more (9 of them knowledge)" \
     "the omission line did not say how much of what it hides is knowledge"
-  assert_not_contains "$out" "docs/note-7.md" "the listing printed past its limit"
 
   # When the overflow is spread across directories there is nothing to collapse,
   # so the omission line carries it - and says how much of what it hides is
@@ -650,9 +694,10 @@ test_documentation_inside_a_dependency_tree_is_not_project_knowledge
 test_a_vendored_tree_is_not_project_knowledge
 test_the_listing_names_the_knowledge_surface_before_anything_else
 test_no_single_directory_takes_every_listing_slot
+test_more_directories_than_slots_still_names_the_agent_memory
+test_a_directory_holding_agent_memory_does_not_take_another_directorys_names
 test_the_omission_line_counts_only_the_knowledge_it_hides
 test_a_crowded_directory_never_buries_the_captains_own_document
-test_the_fullest_directory_is_not_folded_when_it_is_the_valuable_one
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak
