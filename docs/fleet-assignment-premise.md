@@ -55,10 +55,10 @@ Supervision transfer is a journaled fail-closed transaction in registry schema v
 It first validates and snapshots the source binding, registry row, task metadata, status channel, and destination state.
 It refuses when the existing pending-reply library finds any record for that SecondMate whose phase is not `resolved`, including escalated or recovery-unknown records.
 Resolved pending-reply records remain untouched in the source home; any journal reference to them is informational and rollback does not move or delete them.
-It then proves the source supervisor and selected destination manager are stopped, stops and relaunches the SecondMate endpoint so no launch-time parent environment survives, records a preparing transaction, removes the source parent route and metadata, rewrites `.fm-secondmate-parent`, installs the destination route and metadata, atomically publishes the new assignment generation, and restarts the destination manager and SecondMate under the new parent home.
-The source and destination sessions remain stopped during the owner-record rewrite, so no supervisor can act on a partial move.
+It then proves the source supervisor is stopped and the selected destination manager is stopped for a planned transfer or live for a failover recovery, stops and relaunches the SecondMate endpoint so no launch-time parent environment survives, records a preparing transaction, removes the source parent route and metadata, rewrites `.fm-secondmate-parent`, installs the destination route and metadata, atomically publishes the new assignment generation, and restarts the SecondMate, plus a stopped destination manager, under the new parent home.
+The source session remains stopped during the owner-record rewrite, and both homes' `state/.secondmate-registry.lock` are held so no in-home writer can race a partial move.
 A crash before assignment publication leaves the transaction recoverable and the SecondMate unassigned rather than jointly supervised.
-Recovery refuses while either relevant `fm-lock.sh status` reports a live holder.
+Transfer recovery refuses while the source `fm-lock.sh status` reports a live holder, or while the destination session state does not match the journaled planned or failover mode.
 The original FirstMate therefore stops supervising `harness` before the fleet publishes a replacement assignment.
 The selected manager becomes the only parent authority for the relaunched Harness SecondMate endpoint.
 
