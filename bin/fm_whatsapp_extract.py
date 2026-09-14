@@ -125,64 +125,76 @@ def office_content(path, mime):
                 raise ValueError("Office entities refused")
             return ET.fromstring(data)
 
-        shared = []
-        if root == "xl" and "xl/sharedStrings.xml" in names:
-            for item in read_xml("xl/sharedStrings.xml"):
-                shared.append("".join(element.text or "" for element in item.iter()
-                                       if element.tag.rsplit("}", 1)[-1] == "t"))
-        ordered_names = sorted(names)
-        if root == "ppt":
-            presentation = read_xml("ppt/presentation.xml")
-            relationships = read_xml("ppt/_rels/presentation.xml.rels")
-            slides = presentation.find("{*}sldIdLst")
-            if slides is None:
-                raise ValueError("presentation slide order missing")
+        def text_runs(element):
+            return "".join((node.text or "") if node.tag.rsplit("}", 1)[-1] == "t"
+                           else {"br": "\n", "cr": "\n", "tab": "\t"}.get(node.tag.rsplit("}", 1)[-1], "")
+                           for node in element.iter())
+
+        def ordered_parts(index, list_tag, member_kind, folder):
+            document = read_xml(f"{root}/{index}.xml")
+            relationships = read_xml(f"{root}/_rels/{index}.xml.rels")
+            members = document.find("{*}" + list_tag)
+            if members is None:
+                raise ValueError("Office member order missing")
             targets = {}
             for relationship in relationships:
                 rid = relationship.get("Id")
                 if not rid or rid in targets:
-                    raise ValueError("invalid presentation relationship")
+                    raise ValueError("invalid Office relationship")
                 targets[rid] = relationship
-            ordered_names = []
-            for slide in slides:
-                rid = next((value for key, value in slide.attrib.items() if key.endswith("}id")), None)
+            parts = []
+            for member in members:
+                rid = next((value for key, value in member.attrib.items() if key.endswith("}id")), None)
                 relationship = targets.get(rid)
                 if (relationship is None or relationship.get("TargetMode", "Internal") != "Internal"
-                        or not relationship.get("Type", "").endswith("/slide")):
-                    raise ValueError("invalid slide relationship")
+                        or not relationship.get("Type", "").endswith("/" + member_kind)):
+                    raise ValueError("invalid Office member relationship")
                 target = relationship.get("Target", "")
-                name = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "ppt/" + target)
-                if not name.startswith("ppt/slides/") or not name.endswith(".xml") or name not in names:
-                    raise ValueError("slide target missing or invalid")
-                ordered_names.append(name)
+                name = posixpath.normpath(target.lstrip("/") if target.startswith("/") else root + "/" + target)
+                if not name.startswith(f"{root}/{folder}/") or not name.endswith(".xml") or name not in names:
+                    raise ValueError("Office member target missing or invalid")
+                parts.append((member, name))
+            return parts
+
+        shared = []
+        if root == "xl" and "xl/sharedStrings.xml" in names:
+            shared = [text_runs(item) for item in read_xml("xl/sharedStrings.xml")]
+        if root == "ppt":
+            parts = [(name, f"slide {position}: {name}") for position, (_, name) in enumerate(
+                ordered_parts("presentation", "sldIdLst", "slide", "slides"), 1)]
+        elif root == "xl":
+            parts = []
+            for position, (sheet, name) in enumerate(ordered_parts("workbook", "sheets", "worksheet", "worksheets"), 1):
+                title = sheet.get("name")
+                if not title:
+                    raise ValueError("worksheet name missing")
+                parts.append((name, f"sheet {position}: {title} ({name})"))
+        else:
+            parts = [(name, name) for name in sorted(names) if name == "word/document.xml"
+                     or re.fullmatch(r"word/(header|footer)\d+.xml", name)]
         texts = []
-        for position, name in enumerate(ordered_names, 1):
-            if not name.endswith(".xml") or not name.startswith(root + "/"):
-                continue
-            if not (root == "ppt" or name == "word/document.xml" or re.fullmatch(r"word/(header|footer)\d+.xml", name)
-                    or name == "xl/sharedStrings.xml"
-                    or re.fullmatch(r"xl/worksheets/sheet\d+.xml", name)):
-                continue
+        for name, label in parts:
             document = read_xml(name)
-            # Retain paragraph/cell boundaries and cached values without executing formulas.
-            values = [element.text for element in document.iter()
-                      if element.tag.rsplit("}", 1)[-1] in ("t", "v") and element.text]
-            if name == "xl/sharedStrings.xml":
-                continue
             if root == "xl":
                 values = []
                 for cell in document.iter():
                     if cell.tag.rsplit("}", 1)[-1] != "c":
                         continue
-                    value = " ".join(element.text or "" for element in cell.iter()
-                                     if element.tag.rsplit("}", 1)[-1] in ("v", "t"))
+                    if cell.get("t") == "inlineStr":
+                        inline = cell.find("{*}is")
+                        value = text_runs(inline) if inline is not None else ""
+                    else:
+                        cached = cell.find("{*}v")
+                        value = (cached.text or "") if cached is not None else ""
                     if cell.get("t") == "s":
                         index = int(value)
                         if not 0 <= index < len(shared):
                             raise ValueError("invalid shared string index")
                         value = shared[index]
                     values.append(f"{cell.get('r', '?')}: {value}")
-            label = f"slide {position}: {name}" if root == "ppt" else name
+            else:
+                values = [text_runs(element) for element in document.iter()
+                          if element.tag.rsplit("}", 1)[-1] == "p"]
             texts.append(f"[{label}]\n" + "\n".join(values))
             if sum(map(len, texts)) > MAX_TEXT:
                 raise ValueError("Office text limit")

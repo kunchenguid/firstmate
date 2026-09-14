@@ -652,7 +652,7 @@ for line in sys.stdin:
         self.main({**data, "body": "different"}, ok=False)
 
     def test_terminal_outcomes_retire_decisions_and_preserve_consumed_receipts(self):
-        for outcome in ("completed", "failed"):
+        for outcome in ("completed", "failed", "reply"):
             for state in ("pending", "answered", "consumed"):
                 with self.subTest(outcome=outcome, state=state):
                     row, _ = self.claim()
@@ -684,23 +684,26 @@ for line in sys.stdin:
                                                      (question["decision"],))[0], after)
 
     def test_terminal_decision_retirement_rolls_back_with_outcome(self):
-        row, _ = self.claim()
-        self.emit(row, "decision", task=self.task(), action="revisar fixture", expires=time.time() + 300)
-        other, _ = self.claim()
-        self.emit(other, "decision", task=self.task("other"), action="outra revisão", expires=time.time() + 300)
-        self.store.db.execute("""CREATE TRIGGER reject_terminal BEFORE UPDATE OF state ON inbound
-            WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
-        data = {"op": "emit", "event": "terminal-rollback", "request": row["request"],
-                "kind": "completed", "body": "Resultado", "evidence": ["fixture result"]}
-        self.main(data, ok=False)
-        self.assertEqual(self.store.request(row["request"])["state"], "decision")
-        self.assertEqual(self.store.rows("SELECT state FROM decisions"), [{"state": "pending"}] * 2)
-        self.assertEqual(self.store.rows("SELECT * FROM responses WHERE event=?", (data["event"],)), [])
-        self.store.db.execute("DROP TRIGGER reject_terminal")
-        self.assertTrue(self.main(data)["new_event"])
-        self.assertFalse(self.main(data)["new_event"])
-        self.assertEqual(self.store.rows("SELECT state FROM decisions WHERE request=?", (other["request"],)),
-                         [{"state": "pending"}])
+        for outcome in ("completed", "reply"):
+            with self.subTest(outcome=outcome):
+                row, _ = self.claim()
+                self.emit(row, "decision", task=self.task(), action="revisar fixture", expires=time.time() + 300)
+                other, _ = self.claim()
+                self.emit(other, "decision", task=self.task("other"), action="outra revisão", expires=time.time() + 300)
+                before = self.store.rows("SELECT * FROM decisions ORDER BY id")
+                self.store.db.execute("""CREATE TRIGGER reject_terminal BEFORE UPDATE OF state ON inbound
+                    WHEN NEW.state IN ('completed','answered') BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+                data = {"op": "emit", "event": "terminal-rollback-" + outcome, "request": row["request"],
+                        "kind": outcome, "body": "Resultado", "evidence": ["fixture result"]}
+                self.main(data, ok=False)
+                self.assertEqual(self.store.request(row["request"])["state"], "decision")
+                self.assertEqual(self.store.rows("SELECT * FROM decisions ORDER BY id"), before)
+                self.assertEqual(self.store.rows("SELECT * FROM responses WHERE event=?", (data["event"],)), [])
+                self.store.db.execute("DROP TRIGGER reject_terminal")
+                self.assertTrue(self.main(data)["new_event"])
+                self.assertFalse(self.main(data)["new_event"])
+                self.assertEqual(self.store.rows("SELECT state FROM decisions WHERE request=?", (other["request"],)),
+                                 [{"state": "pending"}])
 
     def test_expired_and_changed_decisions_fail_closed(self):
         row, _ = self.claim()
@@ -1543,11 +1546,26 @@ for line in sys.stdin:
                         for number in sorted(order)) + '</Relationships>',
             **{f"ppt/slides/slide{number}.xml": f"<slide><p><t>Slide {number}</t></p></slide>" for number in order}}
 
+    def workbook_files(self, sheets):
+        s = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        rels = "http://schemas.openxmlformats.org/package/2006/relationships"
+        return {
+            "xl/workbook.xml": f'<workbook xmlns="{s}" xmlns:r="{r}"><sheets>' +
+                "".join(f'<sheet name="{title}" sheetId="{number}" r:id="rId{number}"/>' for number, title in sheets) +
+                '</sheets></workbook>',
+            "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{rels}">' +
+                "".join(f'<Relationship Id="rId{number}" Type="{r}/worksheet" Target="worksheets/sheet{number}.xml"/>'
+                        for number, _ in sorted(sheets)) + '</Relationships>',
+            **{f"xl/worksheets/sheet{number}.xml": f'<worksheet xmlns="{s}"><sheetData><row r="1">'
+               f'<c r="A1"><v>{number * 100}</v></c></row></sheetData></worksheet>' for number, _ in sheets}}
+
     def test_office_files_extract_text_cells_and_slides_without_execution(self):
         cases = [
             ("wordprocessingml.document", {"word/document.xml": "<document><p><t>Contract 37</t></p></document>"}, "Contract 37"),
             ("presentationml.presentation", self.presentation_files([37]), "Slide 37"),
-            ("spreadsheetml.sheet", {"xl/sharedStrings.xml": "<sst><si><t>Paint</t></si></sst>",
+            ("spreadsheetml.sheet", {**self.workbook_files([(1, "Paint")]),
+             "xl/sharedStrings.xml": "<sst><si><t>Paint</t></si></sst>",
              "xl/worksheets/sheet1.xml": '<worksheet><row><c r="A1" t="s"><v>0</v></c><c r="B1"><f>19+18</f><v>37</v></c></row></worksheet>'}, "A1: Paint\nB1: 37")]
         for suffix, files, expected in cases:
             mime = "application/vnd.openxmlformats-officedocument." + suffix
@@ -1555,6 +1573,79 @@ for line in sys.stdin:
             _, claimed = self.claim(row)
             self.assertIn(expected, claimed["attachment"]["extracted_text"])
             self.assertIn("no macros", claimed["attachment"]["coverage"])
+
+    def test_office_formatting_runs_preserve_text_and_paragraph_boundaries(self):
+        paragraphs = ('<x:p><x:r><x:t>ABC</x:t></x:r><x:r><x:t>123</x:t></x:r></x:p>'
+                      '<x:p><x:r><x:t>12</x:t></x:r><x:r><x:t>34</x:t><x:tab/>'
+                      '<x:t xml:space="preserve"> total </x:t><x:br/><x:t>next</x:t></x:r></x:p>'
+                      '<x:p/><x:p><x:r><x:t>last</x:t></x:r></x:p>')
+        word = '<document xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + paragraphs + '</document>'
+        slide = '<slide xmlns:x="http://schemas.openxmlformats.org/drawingml/2006/main">' + paragraphs + '</slide>'
+        for suffix, files in (
+                ("wordprocessingml.document", {"word/document.xml": word}),
+                ("presentationml.presentation", {**self.presentation_files([1]), "ppt/slides/slide1.xml": slide})):
+            with self.subTest(suffix=suffix):
+                mime = "application/vnd.openxmlformats-officedocument." + suffix
+                row = self.prepared("document", mime, self.office_bytes(files))
+                _, claimed = self.claim(row)
+                self.assertEqual(claimed["attachment"]["extracted_text"].split("\n", 1)[1],
+                                 "ABC123\n1234\t total \nnext\n\nlast")
+
+    def test_workbook_rich_strings_match_inline_and_preserve_cached_numbers(self):
+        files = self.workbook_files([(1, "Codes")])
+        files["xl/sharedStrings.xml"] = '<sst><si><r><t>ABC</t></r><r><t>123</t></r></si></sst>'
+        files["xl/worksheets/sheet1.xml"] = ('<worksheet><sheetData><row r="1">'
+            '<c r="A1" t="s"><v>0</v></c>'
+            '<c r="B1" t="inlineStr"><is><r><t>ABC</t></r><r><t>123</t></r></is></c>'
+            '<c r="C1" t="inlineStr"><is><r><t>12</t></r><r><t>34</t></r></is></c>'
+            '<c r="D1"><f>600+634</f><v>1234</v></c>'
+            '<c r="E1" t="inlineStr"><is><t xml:space="preserve"> spaced </t></is></c>'
+            '</row></sheetData></worksheet>')
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        row = self.prepared("document", mime, self.office_bytes(files))
+        _, claimed = self.claim(row)
+        self.assertEqual(claimed["attachment"]["extracted_text"],
+                         "[sheet 1: Codes (xl/worksheets/sheet1.xml)]\nA1: ABC123\nB1: ABC123\nC1: 1234\nD1: 1234\nE1:  spaced ")
+
+    def test_workbook_names_and_order_follow_internal_relationships(self):
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        for sheets in ([(1, "Receita"), (2, "Despesa"), (10, "Saldo")],
+                       [(10, "Saldo"), (2, "Despesa"), (1, "Receita")]):
+            with self.subTest(sheets=sheets):
+                files = self.workbook_files(sheets)
+                files["xl/worksheets/sheet99.xml"] = '<worksheet><c r="A1"><v>999</v></c></worksheet>'
+                relationships = "xl/_rels/workbook.xml.rels"
+                files[relationships] = files[relationships].replace('Target="worksheets/sheet2.xml"',
+                                                                     'Target="/xl/worksheets/sheet2.xml"')
+                row = self.prepared("document", mime, self.office_bytes(files))
+                _, claimed = self.claim(row)
+                self.assertEqual(claimed["attachment"]["extracted_text"], "\n\n".join(
+                    f"[sheet {position}: {title} (xl/worksheets/sheet{number}.xml)]\nA1: {number * 100}"
+                    for position, (number, title) in enumerate(sheets, 1)))
+
+    def test_workbook_invalid_relationships_fail_without_forwarding(self):
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        for defect in ("missing-order", "missing-target", "external", "escape", "unknown-id", "wrong-type"):
+            with self.subTest(defect=defect):
+                files = self.workbook_files([(1, "Receita")])
+                rel = "xl/_rels/workbook.xml.rels"
+                if defect == "missing-order":
+                    del files["xl/workbook.xml"]
+                elif defect == "missing-target":
+                    del files["xl/worksheets/sheet1.xml"]
+                elif defect == "unknown-id":
+                    files[rel] = files[rel].replace('Id="rId1"', 'Id="rId2"')
+                elif defect == "wrong-type":
+                    files[rel] = files[rel].replace('/worksheet"', '/styles"')
+                elif defect == "escape":
+                    files["sheet1.xml"] = files["xl/worksheets/sheet1.xml"]
+                    files[rel] = files[rel].replace('Target="worksheets/sheet1.xml"', 'Target="../sheet1.xml"')
+                else:
+                    files[rel] = files[rel].replace('Target="worksheets/sheet1.xml"',
+                                                   'TargetMode="External" Target="https://example.invalid/sheet.xml"')
+                row = self.prepared("document", mime, self.office_bytes(files))
+                self.assertEqual(row["state"], "failed")
+                self.assertIsNone(row["note_id"])
 
     def test_presentation_order_uses_slide_relationships_and_positions(self):
         mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"

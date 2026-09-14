@@ -70,7 +70,7 @@ Os formatos aceitos e sua cobertura são concretos; aceitar um arquivo não sign
 | JPEG/PNG | Decodificação e prévia visual, com transparência composta sobre branco; o principal precisa abrir a imagem. |
 | PDF | Texto extraível e prévias de todas as páginas aceitas, inclusive páginas digitalizadas; não há OCR automático nem execução de JavaScript/formulários. |
 | TXT UTF-8 | Texto integral dentro do limite de extração. |
-| DOCX/XLSX/PPTX | Texto de documento/slides e valores armazenados das células; slides seguem a ordem da apresentação, com posição indicada; fórmulas não são calculadas, macros não são executadas, imagens incorporadas e layout não são interpretados. |
+| DOCX/XLSX/PPTX | Texto de documento/slides e valores armazenados das células; trechos de formatação permanecem concatenados dentro de parágrafos/células; slides e abas seguem a ordem declarada, com posição e nome das abas indicados; fórmulas não são calculadas, macros não são executadas, imagens incorporadas e layout não são interpretados. |
 | Ogg/Opus mono, AAC ADTS, M4A/AAC, MP3, AMR-NB | Decodificação local e transcrição; `audio.voice:true` distingue a nota de voz do anexo de áudio. |
 | MP4/3GPP H.264, com até uma faixa AAC | Prévias amostradas com tempo aproximado e transcrição da faixa de áudio; eventos entre amostras podem ser perdidos. |
 
@@ -214,5 +214,5 @@ As referências de tarefa apontam para o home/id/revisão canônicos, inclusive 
 Uma resposta genérica ou uma reação não aprova decisões, e o transporte nunca executa a ação aprovada.
 Enquanto houver uma decisão pendente ainda vigente, confirmações genéricas como “sim” e “ok” recebem um pedido de código.
 Sem decisão pendente vigente, essas confirmações seguem como texto conversacional ao principal no próximo checkpoint, mesmo que existam decisões expiradas ainda registradas como pendentes.
-Eventos `completed` e `failed` invalidam decisões pendentes ou respondidas daquele pedido na mesma transação do encerramento; recibos de decisões já consumidas permanecem idempotentes.
+Eventos `completed`, `failed` e `reply` invalidam decisões pendentes ou respondidas daquele pedido na mesma transação do encerramento; recibos de decisões já consumidas permanecem idempotentes.
 Uma resposta explícita com código expirado continua recusada, sem aprovar a ação nem encaminhar essa resposta ao principal.

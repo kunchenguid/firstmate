@@ -74,7 +74,8 @@ A prova local de decodificação ou transcrição não demonstra a entrega de me
 Registros de prova controlada e evidências da conta real pertencem ao relatório privado da tarefa ou ao PR; não transformam esta matriz em atestado automático de produção.
 A validação e publicação do código podem terminar com a aceitação externa explicitamente pendente; isso não dispensa nem satisfaz a exigência de funcionamento completo.
 Agentes dos gates não devem iniciar consumidor real, instalar ou ativar produção para produzir essa evidência.
-As regressões locais incluem AAC silencioso com STT de fixture concluindo vazio, vídeo sem áudio, falha real de processo transcritor, recusa de áudio isolado sem transcrição, pixels RGBA/paleta e ordem reordenada de PPTX por relações internas.
+As regressões locais incluem AAC silencioso com STT de fixture concluindo vazio, vídeo sem áudio, falha real de processo transcritor, recusa de áudio isolado sem transcrição, pixels RGBA/paleta, ordem reordenada de PPTX e nomes/ordem das abas XLSX por relações internas.
+Casos de Office verificam conteúdo dividido em trechos de formatação, fronteiras de parágrafos/células e valores numéricos armazenados; os casos de encerramento incluem `reply`, rollback e preservação de recibos consumidos.
 Esses casos usam decodificadores reais quando disponíveis, mas não comprovam um modelo STT instalado: a prova desse modelo exige áudio representativo e resultado observado separado da transcrição injetada.
 
 ### Plano de aceitação na conta instalada
