@@ -339,6 +339,48 @@ SH
   pass "fm-codex-stop-autoarm: an unbindable rewake is refused rather than delivered unbound"
 }
 
+# A rewake row is what both guards read as proof recovery is owned, so it must
+# never outlive a delivery that did not happen. The ledger row is written before
+# the push because that write is the single-flight gate, which means a rejected
+# push has to be corrected afterwards; left alone it claims a wake nobody got,
+# the turn-end guard allows the very stop it exists to block, and the mid-turn
+# pull guard stays quiet too. That is the original failure with the banner
+# suppressed as well.
+test_a_rejected_rewake_push_leaves_no_recovery_claim_behind() {
+  local dir ledger
+  dir=$(make_primary_dir "$TMP_ROOT/rewake-push-rejected")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" actionable
+  export FM_TEST_CODEX_QUEUE_RC=1
+  run_autoarm "$dir" >/dev/null || true
+  unset FM_TEST_CODEX_QUEUE_RC
+  assert_contains "$(queued_log "$dir")" "firstmate watcher wake" \
+    "the wake push is attempted, and the fixture CLI rejects it"
+  # state/.codex-autoarm-epoch is the persisted ledger both guards read to decide
+  # whether recovery is owned; outcome is the field that decides it.
+  ledger=$(cat "$dir/state/.codex-autoarm-epoch" 2>/dev/null)
+  assert_not_contains "$ledger" "outcome=rewake" \
+    "a rejected push must not leave a rewake row claiming recovery nobody received"
+  assert_contains "$ledger" "outcome=failed-suppressed" \
+    "the corrected row must be one neither guard accepts as owned recovery"
+  pass "fm-codex-stop-autoarm: a rejected rewake push leaves no recovery claim for the guards to trust"
+}
+
+# The guard writes the attended fail-open alarm once per episode and then expects
+# silence, so a queued wake after it would start a turn and defeat it - a queued
+# message reaches an idle session in seconds.
+test_a_consumed_attended_alarm_suppresses_further_wakes() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/alarm-consumed")
+  need_supervision "$dir"
+  write_arm_fixture "$dir" actionable
+  : > "$dir/state/.codex-autoarm-failure-alarmed"
+  run_autoarm "$dir" >/dev/null || true
+  assert_absent "$dir/state/queued.log" \
+    "no wake may be queued once the episode's one attended fail-open is spent"
+  pass "fm-codex-stop-autoarm: a consumed attended alarm silences later automatic wakes"
+}
+
 # The failure notice is the only operator-visible report that the automatic
 # mechanism is broken, so a push the CLI rejected must not consume the episode.
 test_a_rejected_failure_push_is_retried_on_the_next_stop() {
@@ -520,6 +562,8 @@ test_it_keeps_its_own_ledger_separate_from_claudes
 test_a_bound_rewake_keeps_the_pull_guard_quiet_through_the_real_caller
 test_a_codex_home_with_no_ledger_still_gets_the_banner
 test_an_unbindable_rewake_is_refused
+test_a_rejected_rewake_push_leaves_no_recovery_claim_behind
+test_a_consumed_attended_alarm_suppresses_further_wakes
 test_a_rejected_failure_push_is_retried_on_the_next_stop
 test_a_notice_with_no_writable_marker_is_never_pushed
 test_a_healthy_watcher_is_not_announced

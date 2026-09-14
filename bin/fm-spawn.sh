@@ -4095,6 +4095,10 @@ if [ "$KIND" = secondmate ]; then
   # exec. Such a home is on the foreground-checkpoint fallback, whose watcher IS
   # a tracked live process, so persistent is both accurate and stricter there: it
   # refuses to accept a fresh beacon with no live watcher, which autoarm allows.
+  # A codex PRIMARY carries that same looser fresh-beacon reading for as long as
+  # it is on the fallback, which fm_supervision_model records as an accepted
+  # limitation rather than covering here; the two comments describe one property
+  # seen from the two layers that decide it.
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;

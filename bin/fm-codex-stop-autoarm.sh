@@ -10,9 +10,9 @@
 # reply.
 #
 # It is the Codex sibling of bin/fm-claude-stop-autoarm.sh and keeps that
-# script's ownership model unchanged - same scope, identity, AFK, need, and
-# single-flight generation rules, and the same foreground arm of
-# bin/fm-watch-arm.sh inside the hook's own process tree. Exactly one thing
+# script's ownership model unchanged - same scope, identity, AFK, need,
+# single-flight generation, and attended-alarm rules, and the same foreground arm
+# of bin/fm-watch-arm.sh inside the hook's own process tree. Exactly one thing
 # differs, because Codex and Claude differ there:
 #
 #   Claude delivers the wake by exiting 2 with the banner on stderr.
@@ -97,6 +97,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_AUTOARM_PREFIX=.codex-autoarm
 OWNER_LOCK="$STATE/$FM_AUTOARM_PREFIX.lock"
 FAILURE_NOTICE="$STATE/$FM_AUTOARM_PREFIX-failure-notified"
+FAILURE_ALARM="$STATE/$FM_AUTOARM_PREFIX-failure-alarmed"
 AUTOARM_ATTEMPTS=2
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -206,6 +207,17 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # write, so it commits before the push and a marker that cannot be created
 # refuses instead of announcing something nothing can deduplicate. A rejected
 # push then removes it, leaving the next Stop free to retry.
+#
+# The write has to precede the push because it is the single-flight gate: a
+# superseded generation is refused there and so never pushes at all. That
+# ordering means a REJECTED push leaves a row describing a wake nobody received,
+# and for a rewake that row is read by both guards as proof recovery is owned -
+# the turn-end guard would allow the very stop it exists to block. So a rejected
+# push rewrites the row to failed-suppressed, which neither guard accepts as
+# recovery (bin/fm-turnend-guard.sh's autoarm_owns_recovery falls through it, and
+# fm_autoarm_midturn_healthy demands outcome=rewake). Only the owning generation
+# can make that correction, and a correction refused as superseded needs none:
+# a newer generation already owns the ledger.
 autoarm_deliver() {  # <outcome> <banner> [marker-file]
   local outcome=$1 banner=$2 marker=${3:-} session_pid='' recovery=''
   fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
@@ -223,6 +235,7 @@ autoarm_deliver() {  # <outcome> <banner> [marker-file]
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return 1
   if ! codex queue --thread "$THREAD" --message "$banner" >/dev/null 2>&1; then
     [ -z "$marker" ] || rm -f -- "$marker" 2>/dev/null || true
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" failed-suppressed >/dev/null 2>&1
     return 1
   fi
   return 0
@@ -300,6 +313,15 @@ if [ "$HEALTHY" -eq 1 ]; then
   elif [ "$RESET_RC" -ne 2 ]; then
     autoarm_record failed-suppressed
   fi
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# After the synchronous guard has consumed the episode's one attended fail-open,
+# do not queue another wake that could defeat it: a queued message reaches an idle
+# TUI session in seconds, which starts a turn.
+if [ -e "$FAILURE_ALARM" ]; then
+  autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

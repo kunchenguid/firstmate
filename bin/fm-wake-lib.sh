@@ -191,12 +191,28 @@ fm_watcher_healthy() {
 #               no live watcher process is healthy, and a stale beacon is still
 #               healthy while that harness's own auto-arm generation explains the
 #               gap (fm_autoarm_midturn_healthy).
-#               Classifying a Stop-hook harness as persistent buys no safety: the
-#               mid-turn proof demands a recovery generation only the Stop hook
-#               writes, so a home whose hook never fires has no ledger entry, the
-#               predicate is false, and the guard alarms exactly as it should.
-#               All persistent bought was the alarm firing on HEALTHY hook-owned
-#               supervision too, once per wake-handling turn.
+#               Classifying a Stop-hook harness as persistent buys no safety on
+#               the STALE-beacon path: the mid-turn proof demands a recovery
+#               generation only the Stop hook writes, so a home whose hook never
+#               fires has no ledger entry, the predicate is false, and the guard
+#               alarms exactly as it should. All persistent bought there was the
+#               alarm firing on HEALTHY hook-owned supervision too, once per
+#               wake-handling turn.
+#               It does cost something on the FRESH-beacon path, and this is a
+#               known accepted limitation rather than an oversight. autoarm
+#               accepts a fresh beacon with no live watcher at all, which is
+#               right for a home whose Stop hook fires and whose watcher runs
+#               only between turns. A Codex home on the documented fallback path
+#               instead runs a REAL foreground checkpoint watcher, and there a
+#               watcher that dies mid-turn is reported healthy until the beacon
+#               ages past the grace window rather than immediately. Two
+#               conditions reach it: the first-session hook-approval window, and
+#               an operator who declines the hook (docs/configuration.md, Codex
+#               approval guidance). The turn-end guard stays PID-strict either
+#               way, so this delays a pull warning and never permits a blind
+#               turn. bin/fm-spawn.sh keeps a spawned codex home on persistent
+#               for this same property, where the fallback is the only path there
+#               is; see the comment beside its secondmate supervision-model case.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock

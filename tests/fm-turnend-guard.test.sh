@@ -2038,6 +2038,37 @@ test_hook_unflagged_under_codex_enters_the_cooperative_mode() {
   pass "fm-turnend-guard: the flagless Codex registration resolves its cooperative mode from the running harness"
 }
 
+# Naming the immediate parent is not enough to establish "unresolved":
+# harness_ancestry climbs EIGHT parents and returns the first match, so a suite
+# run from a real Codex primary - the platform this change is for - would find
+# that codex above the fake parent and the case would stop proving anything.
+# This chain interposes more non-matching shells than the walk can climb, so the
+# walk provably exhausts before it can reach whatever the suite itself runs
+# under, and the case means the same thing on every host.
+write_depth_chain() {  # <dir>
+  local dir=$1
+  cat > "$dir/bin/fm-depth-chain.sh" <<'SH'
+#!/usr/bin/env bash
+depth=$1
+guard=$2
+payload=$(cat)
+if [ "$depth" -le 0 ]; then
+  printf '%s' "$payload" | bash "$guard"
+  exit $?
+fi
+printf '%s' "$payload" | bash "$0" "$((depth - 1))" "$guard"
+exit $?
+SH
+  chmod +x "$dir/bin/fm-depth-chain.sh"
+}
+
+run_hook_unflagged_deep() {  # <dir> <stop-active>
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s,"session_id":"sess-codex-unresolved"}' "$stop_active" \
+    | FM_HOME="$home" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
 # The hard safety rule: resolution may only ADD the cooperative mode on a
 # positive codex answer. An unresolved harness must keep the pre-existing default
 # mode, which never consults an auto-arm ledger, so a Codex claim sitting in the
@@ -2046,9 +2077,9 @@ test_hook_unflagged_under_an_unresolved_harness_never_cooperates() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unresolved")
   : > "$dir/state/task1.meta"
+  write_depth_chain "$dir"
   seed_open_generation_claim "$dir" .codex-autoarm-epoch
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 \
-    run_hook_unflagged_under fm-not-a-harness "$dir" false); status=$?
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_unflagged_deep "$dir" false); status=$?
   kill "$CLAIM_PID" 2>/dev/null || true
   wait "$CLAIM_PID" 2>/dev/null || true
   expect_code 2 "$status" \

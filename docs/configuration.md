@@ -329,6 +329,10 @@ Codex persists hook trust per entry, keyed by the hash of that entry's command, 
 The turn-end guard entry beside it keeps its registered command byte-identical, so its existing approval stays valid and it keeps blocking blind turns throughout the approval window; the guard resolves the Codex cooperative mode from the running harness rather than from a flag on its command line, precisely so the upgrade cannot invalidate it.
 Approve the auto-arm entry in the first Codex session after pulling this change, and treat that as the step that turns automatic re-arming on rather than an optional prompt to dismiss.
 Until it is approved, the guard still reports a blind turn and the home supervises itself on Codex's fallback path with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, which is also the standing answer for a spawned worktree whose project hooks never fire at all.
+One accepted limitation applies for as long as a Codex primary is on that fallback, and it is worth knowing rather than discovering.
+A Codex primary is classified as a Stop-hook auto-arm home from the moment the harness is detected, before anything proves the hook fires, and that classification lets the mid-turn pull warning in `bin/fm-guard.sh` read a fresh beacon as healthy with no live watcher.
+On the fallback the watcher is a real foreground checkpoint process, so one that dies mid-turn is reported healthy until its beacon ages past `FM_GUARD_GRACE` rather than immediately.
+The turn-end guard stays strict about a live watcher either way, so this delays a warning and never lets a turn end blind; approving the hook, or restarting the checkpoint, both end it.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
