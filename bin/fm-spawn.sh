@@ -1683,6 +1683,17 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# An unedited scaffold must never launch a worker. fm-brief.sh writes {TASK} in the
+# task position and expects its caller to replace it, and until 2026-09-14 nothing
+# checked: a scout launched with the literal placeholder and burned a worker on an
+# empty task (wiki-layer-swe2-v1, which found and reported it). Only the task
+# position is inspected, because the scaffold's own text mentions the placeholder
+# further down on purpose.
+if sed -n '/^# Task$/,/^# /p' "$BRIEF" | grep -q '{TASK}'; then
+  echo "error: brief at $BRIEF still carries the literal {TASK} placeholder; write the task description before spawning" >&2
+  exit 1
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
