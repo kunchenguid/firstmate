@@ -2397,11 +2397,20 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>"$SPAWN_RECIPE_HOME_ERR") && SPAWN_RECIPE_HOME_RC=0 || SPAWN_RECIPE_HOME_RC=$?
   case $SPAWN_RECIPE_HOME_RC in
     0)
+      SPAWN_RECIPE_DIGEST_RC=0
       if [ "$(cd "$SPAWN_RECIPE_HOME" && pwd -P)" != "$(cd "$PROJ_ABS" && pwd -P)" ]; then
         SPAWN_RECIPE_LIVE_HOME=$SPAWN_RECIPE_HOME
-        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" --absolute 2>/dev/null || true)
+        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" --absolute 2>"$SPAWN_RECIPE_HOME_ERR") || SPAWN_RECIPE_DIGEST_RC=$?
       else
-        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
+        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>"$SPAWN_RECIPE_HOME_ERR") || SPAWN_RECIPE_DIGEST_RC=$?
+      fi
+      # The budget lives in this home's config, not in the project, so one typo
+      # there costs every ship and every scout of every project its digest. A
+      # silent empty digest is indistinguishable from "this project has no
+      # catalog", which is the one reading that must not be guessed.
+      if [ "$SPAWN_RECIPE_DIGEST_RC" -ne 0 ]; then
+        echo "warning: could not render the capability digest of $(basename "$PROJ_ABS") (fm-project-recipes.sh digest exited $SPAWN_RECIPE_DIGEST_RC: $(tr '\n' ' ' <"$SPAWN_RECIPE_HOME_ERR" 2>/dev/null)); launching without it" >&2
+        SPAWN_RECIPE_DIGEST=
       fi
       ;;
     4)

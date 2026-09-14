@@ -39,6 +39,11 @@ bin/fm-project-memory.sh scan --all
 The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, knowledge the project's own ignore rules keep out of every clone (`IGNORED_KNOWLEDGE`, and no other category sees it), and ignored directories that hold working material rather than knowledge.
 `IGNORED_KNOWLEDGE` covers both shapes an ignore rule takes, because the leak is the same either way: a `docs/*-internal.md` rule over a production audit, and a plain `notes/` rule over the whole directory.
 The same classifier decides which of the two an ignored directory is, so `notes/` and `docs/` count in the gap while `vendor/` and `herramientas/` stay working material.
+Untracked paths are listed one by one rather than folded into their directory, so a wholly untracked `informes/` is classified by the documents inside it instead of by its own name, and a document is tested against the knowledge rules before the scratch ones, so a conversation dump named `docs/conversaciones.log` is knowledge rather than build output.
+
+**Known gap, still open: a git submodule's own uncommitted knowledge is invisible to the scan.**
+The superproject reports a dirty submodule as a single modified entry (` M vendorlib`), which the classifier reads as working material, so `vendorlib/docs-audit.md` sitting uncommitted inside it produces `KNOWLEDGE_GAP: 0` and `VERDICT: parity`.
+Closing it means scanning a second repository with its own remotes, its own ignore rules, and its own read-only guarantee, which is a wider contract than this command has; until that is decided, scan each submodule as its own registered project.
 Working material and modified source are counted separately from knowledge and never drive the verdict, so a project whose only divergence is media assets or build output reads as parity rather than as a problem.
 Scratch is counted and not listed at all.
 

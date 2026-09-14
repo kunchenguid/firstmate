@@ -366,6 +366,44 @@ test_the_unverified_date_survives_a_change_of_reason() {
   pass "fm-project-local.sh: the unverified date survives a change of reason"
 }
 
+# A manifest path that was a directory last sync and is a file now: copying
+# without clearing the destination first lands the file INSIDE the stale
+# directory, and the run reports the path as updated while the worker reads
+# material from months ago as the project's current state.
+test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be() {
+  local world out
+  world=$(make_world reshaped)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas"
+  printf 'the old helper\n' >"$world/canonical/herramientas/replay.py"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\n' >"$world/home/data/project-local/demo/manifest"
+  local_cmd "$world" sync demo >/dev/null || fail "the first sync failed"
+  assert_present "$world/home/data/project-local/demo/material/herramientas/replay.py" \
+    "the first sync did not carry the directory"
+
+  rm -rf "$world/canonical/herramientas"
+  printf 'the whole toolbox collapsed into one script\n' >"$world/canonical/herramientas"
+  out=$(local_cmd "$world" sync demo) || fail "the second sync failed: $out"
+  assert_contains "$out" "1 paths updated" "the reshaped path was not reported as updated"
+  [ -f "$world/home/data/project-local/demo/material/herramientas" ] ||
+    fail "the store still holds a directory where the home now has a file"
+  assert_grep "collapsed into one script" "$world/home/data/project-local/demo/material/herramientas" \
+    "the store did not take the file the home now has"
+
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  assert_absent "$world/copy/.fm-local/herramientas/replay.py" \
+    "the worker still receives the material the home replaced"
+  assert_grep "collapsed into one script" "$world/copy/.fm-local/herramientas" \
+    "the worker did not receive what the home holds now"
+  pass "fm-project-local.sh: a path that became a file replaces the directory it used to be"
+}
+
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
   local world out rc
   world=$(make_world visible)
@@ -416,6 +454,7 @@ test_a_nested_symlink_is_refused_before_it_poisons_the_store
 test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest
 test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified
 test_the_unverified_date_survives_a_change_of_reason
+test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

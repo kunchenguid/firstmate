@@ -221,6 +221,16 @@ EOF
 # durable knowledge has to be promoted before teardown, a repeatable way of
 # working belongs in the project's own recipe catalog, and staged local material
 # is read-only reference that never becomes a commit.
+
+# Both kinds receive the same staged directory (bin/fm-spawn.sh stages it for
+# ship and scout alike), so its rules are written once and differ only in where
+# quoting the material would take it outward.
+fm_brief_local_material() {  # <outward-facing destination>
+  cat <<EOF
+A \`.fm-local/\` directory in this copy is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into $1.
+A \`.fm-local/.fm-unverified.md\` there names the paths the last sync could not refresh; treat those as an old copy and confirm what you take from them.
+EOF
+}
 IFS= read -r -d '' PROJECT_MEMORY_SECTION <<EOF || true
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
@@ -236,16 +246,14 @@ If you learned a repeatable way of working in this project - something the proje
 \`$FM_ROOT/bin/fm-project-recipes.sh --help\` owns that catalog's format, its digest budget, and its re-verification contract; run \`$FM_ROOT/bin/fm-project-recipes.sh init .\` when the project has no catalog yet.
 Rewrite or delete an entry you found wrong rather than adding a second one beside it, and refresh an entry's date only for a capability this task actually exercised.
 
-A \`.fm-local/\` directory in this copy is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into a PR, an issue, or anything else outward-facing.
-A \`.fm-local/.fm-unverified.md\` there names the paths the last sync could not refresh; treat those as an old copy and confirm what you take from them.
+$(fm_brief_local_material "a PR, an issue, or anything else outward-facing")
 EOF
 PROJECT_MEMORY_SECTION=${PROJECT_MEMORY_SECTION%$'\n'}
 
 IFS= read -r -d '' SCOUT_MEMORY_SECTION <<EOF || true
 # Project memory
 If the investigation revealed a repeatable way of working in this project - something the project can do and the exact way it is asked for - write it in the report in the recipe shape \`$FM_ROOT/bin/fm-project-recipes.sh --help\` describes, so firstmate can route it into the project's own catalog.
-A \`.fm-local/\` directory in this worktree is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into the report or anything else outward-facing.
-A \`.fm-local/.fm-unverified.md\` there names the paths the last sync could not refresh; treat those as an old copy and confirm what you take from them.
+$(fm_brief_local_material "the report or anything else outward-facing")
 EOF
 SCOUT_MEMORY_SECTION=${SCOUT_MEMORY_SECTION%$'\n'}
 INBOX_SECTION=${INBOX_SECTION%$'\n'}

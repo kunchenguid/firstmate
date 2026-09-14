@@ -287,6 +287,44 @@ test_an_accented_path_is_classified_like_its_ascii_twin() {
   pass "fm-project-memory.sh: an accented path is classified like its ASCII twin"
 }
 
+# git folds a wholly untracked directory into one entry by default, and the
+# classifier reading `informes/` never sees the audit inside it. The proof that
+# the fold - not the content - was deciding: the same two documents counted in
+# the gap as soon as an unrelated tracked file sat beside them.
+test_an_untracked_knowledge_directory_is_classified_by_what_is_inside_it() {
+  local world out
+  world=$(make_world untrackeddir)
+  mkdir -p "$world/source/informes"
+  printf 'the production audit of 500 conversations\n' >"$world/source/informes/audit.md"
+  printf 'the production bug findings\n' >"$world/source/informes/bugs.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 2" "the documents inside the untracked directory were never classified"
+  assert_contains "$out" "informes/audit.md" "the report did not name the production audit"
+  assert_contains "$out" "informes/bugs.md" "the report did not name the bug findings"
+  assert_not_contains "$out" "KNOWLEDGE_GAP: 0" "an untracked knowledge directory did not count in the gap"
+  assert_not_contains "$out" "VERDICT: parity" "a whole untracked knowledge directory still read as parity"
+  pass "fm-project-memory.sh: an untracked knowledge directory is classified by what is inside it"
+}
+
+# A document does not stop being knowledge because its name looks like build
+# output: a conversation dump under docs/ is exactly what this scan exists to
+# find, and counted as scratch it would appear in no category at all.
+test_a_knowledge_document_with_a_scratch_name_is_still_knowledge() {
+  local world out
+  world=$(make_world scratchname)
+  mkdir -p "$world/source/docs"
+  printf 'the conversation dump behind the audit\n' >"$world/source/docs/conversaciones.log"
+  printf 'plain build noise\n' >"$world/source/run.log"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "docs/conversaciones.log" "a knowledge document with a scratch name was swallowed by scratch"
+  assert_not_contains "$out" "KNOWLEDGE_GAP: 0" "the conversation dump did not count in the gap"
+  assert_not_contains "$out" "run.log
+" "ordinary build noise stopped being scratch"
+  pass "fm-project-memory.sh: a knowledge document with a scratch name is still knowledge"
+}
+
 test_scratch_is_counted_but_never_listed() {
   local world out
   world=$(make_world scratch)
@@ -422,6 +460,8 @@ test_scan_reports_a_knowledge_file_the_project_ignores
 test_documents_inside_an_ignored_tree_stay_folded_into_one_line
 test_an_ignored_knowledge_directory_counts_as_a_leak_not_as_material
 test_an_accented_path_is_classified_like_its_ascii_twin
+test_an_untracked_knowledge_directory_is_classified_by_what_is_inside_it
+test_a_knowledge_document_with_a_scratch_name_is_still_knowledge
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak

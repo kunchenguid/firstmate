@@ -304,8 +304,9 @@ case "$CMD" in
     [ -d "$SRC" ] && refuse_symlinks "$SRC" "$SRC"
     MATERIAL=$(material_dir "$NAME")
     mkdir -p "$MATERIAL/$(dirname "$AS")"
+    chmod -R u+w "${MATERIAL:?}/$AS" 2>/dev/null || true
+    rm -rf -- "${MATERIAL:?}/$AS"
     if [ -d "$SRC" ]; then
-      rm -rf -- "${MATERIAL:?}/$AS"
       mkdir -p "$MATERIAL/$AS"
       (cd "$SRC" && tar cf - .) | (cd "$MATERIAL/$AS" && tar xf -) || die "could not copy $SRC"
     else
@@ -387,9 +388,13 @@ case "$CMD" in
         fi
       fi
       mkdir -p "$MATERIAL/$(dirname "$REL")"
+      # The old copy goes before the new one lands, whatever shape either has:
+      # a path that was a directory last sync and is a file now would otherwise
+      # have the file copied INSIDE the stale directory, and the run would
+      # report it as updated while the worker read the old material as current.
+      chmod -R u+w "${MATERIAL:?}/$REL" 2>/dev/null || true
+      rm -rf -- "${MATERIAL:?}/$REL"
       if [ -d "$HOME_DIR/$REL" ]; then
-        chmod -R u+w "${MATERIAL:?}/$REL" 2>/dev/null || true
-        rm -rf -- "${MATERIAL:?}/$REL"
         mkdir -p "$MATERIAL/$REL"
         (cd "$HOME_DIR/$REL" && tar cf - .) | (cd "$MATERIAL/$REL" && tar xf -) || die "could not copy $REL"
       else

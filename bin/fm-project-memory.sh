@@ -529,7 +529,14 @@ scan_project() {  # <project> <limit>
     printf 'UNPUSHED_COMMITS: none\n'
   fi
 
-  source_git "$source" status --porcelain >"$tmp/status" 2>/dev/null || : >"$tmp/status"
+  # --untracked-files=all: git's default folds a wholly untracked directory into
+  # one entry, and the classifier reading `informes/` never sees the production
+  # audit inside it - the same content counted 0 or 2 in the gap depending only
+  # on whether some unrelated tracked file sat beside it. Every untracked path
+  # reaches the classifier one by one instead. The walk is still one git call,
+  # and what it costs on /mnt/c is bounded by the project's own ignore rules,
+  # which is where a vendored tree belongs anyway.
+  source_git "$source" status --porcelain --untracked-files=all >"$tmp/status" 2>/dev/null || : >"$tmp/status"
   : >"$tmp/modified_knowledge"
   : >"$tmp/knowledge"
   : >"$tmp/other"
@@ -542,11 +549,15 @@ scan_project() {  # <project> <limit>
     # backslash; keep that form so the report never prints a half-decoded path
     # as if it were the real name.
     case $code in
+      # Knowledge is asked first: a document can carry a scratch name and still
+      # be the thing this scan exists to find - `docs/conversaciones.log` is a
+      # conversation dump, not build output - and counted as scratch it would
+      # appear in no category at all.
       '??')
-        if looks_like_scratch "$path"; then
-          scratch=$((scratch + 1))
-        elif looks_like_knowledge "$path"; then
+        if looks_like_knowledge "$path"; then
           printf '%s\n' "$path" >>"$tmp/knowledge"
+        elif looks_like_scratch "$path"; then
+          scratch=$((scratch + 1))
         else
           printf '%s\n' "$path" >>"$tmp/other"
         fi

@@ -154,6 +154,27 @@ test_spawn_says_why_it_could_not_resolve_the_knowledge_home() {
   pass "fm-spawn.sh: a knowledge home it cannot resolve is named instead of silently dropped"
 }
 
+# The digest budget is config of this home, not of the project, so one typo in
+# it costs every ship and every scout of every project its capability digest.
+# Launching without one is allowed; launching without one and saying nothing is
+# indistinguishable from "this project has no catalog".
+test_spawn_says_why_the_capability_digest_could_not_be_rendered() {
+  local id=capbudget-a1 out rc brief
+  read_world "$(make_world capbudget "$id")"
+  write_catalog "$PROJ_DIR" "A capability the worker should have been told about"
+  printf '1500 tokens\n' >"$HOME_DIR/config/project-recipe-budget"
+  out=$(run_spawn "$id") && rc=0 || rc=$?
+  expect_code 0 "$rc" "spawn refused the launch over an unreadable digest budget: $out"
+  assert_contains "$out" "could not render the capability digest" "spawn dropped the digest without saying why"
+  assert_contains "$out" "$(basename "$PROJ_DIR")" "the warning did not name the project"
+  assert_contains "$out" "project-recipe-budget" "the warning did not carry the reason the digest failed"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  assert_present "$brief" "no launch brief was rendered"
+  assert_no_grep "A capability the worker should have been told about" "$brief" \
+    "a digest was rendered from a budget that could not be read"
+  pass "fm-spawn.sh: a capability digest it could not render is named instead of silently dropped"
+}
+
 test_spawn_stages_local_material_where_git_cannot_see_it() {
   local id=material-a1 out rc project
   read_world "$(make_world material "$id")"
@@ -187,5 +208,6 @@ test_spawn_renders_the_project_capability_digest_into_the_launch_brief
 test_spawn_reads_the_catalog_from_a_source_canonical_home
 test_spawn_names_an_unreachable_live_home_without_refusing_the_launch
 test_spawn_says_why_it_could_not_resolve_the_knowledge_home
+test_spawn_says_why_the_capability_digest_could_not_be_rendered
 test_spawn_stages_local_material_where_git_cannot_see_it
 test_a_project_with_neither_costs_nothing
