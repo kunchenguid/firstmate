@@ -272,6 +272,13 @@ make_spawn_fakebin() {
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
 # CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
 # that need a delivery contract pass those flags themselves.
+# FM_BACKEND is pinned rather than left to runtime auto-detection. These
+# fixtures spawn against a fake tmux, but auto-detection reads the DEVELOPER's
+# own runtime markers, which the test process inherits: running the suite from
+# inside herdr, cmux, or thurbox would otherwise select that backend and fail
+# the spawn against a fake tmux for reasons that have nothing to do with the
+# case under test. Pinning matches what the suites that call fm-spawn.sh
+# directly already do, and keeps a local run identical to CI.
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
@@ -292,6 +299,7 @@ fm_test_run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
+    FM_BACKEND=tmux \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
 }

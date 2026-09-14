@@ -313,6 +313,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/thurbox-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/codex-app-backend.md",
       "audience": "operator-current"
     },

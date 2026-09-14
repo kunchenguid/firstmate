@@ -180,7 +180,26 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  cat > "$fb/thurbox-cli" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "session capture")
+    [ "${FM_FAKE_THURBOX_CAPTURE_FAIL:-0}" = 1 ] && exit 1
+    printf '{"foreground_process":"bash","foreground_command":"bash"}\n' ;;
+  "session list")
+    if [ "${3:-}" = --deleted ]; then
+      [ "${FM_FAKE_THURBOX_DELETED_FAIL:-0}" = 1 ] && exit 1
+      printf '[]\n'
+    else
+      [ "${FM_FAKE_THURBOX_LIST_FAIL:-0}" = 1 ] && exit 1
+      printf '%s\n' "${FM_FAKE_THURBOX_LIST:-[]}"
+    fi ;;
+  *) exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/thurbox-cli"
   printf '%s\n' "$fb"
 }
 
@@ -234,9 +253,14 @@ reset_fakes() {
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_THURBOX_CAPTURE_FAIL=0
+  FM_FAKE_THURBOX_LIST_FAIL=0
+  FM_FAKE_THURBOX_DELETED_FAIL=0
+  FM_FAKE_THURBOX_LIST="[]"
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
+  export FM_FAKE_THURBOX_CAPTURE_FAIL FM_FAKE_THURBOX_LIST_FAIL FM_FAKE_THURBOX_DELETED_FAIL FM_FAKE_THURBOX_LIST
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1594,6 +1618,61 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
   pass "a husk pane (agent gone) still reads gone for reclaim"
 }
 
+# Regression: thurbox has a verified endpoint classifier (fm_backend_agent_state
+# dispatches to fm_backend_thurbox_agent_state, docs/architecture.md claims it),
+# but the no-run fallback's dispatch/verdict tables were never extended to
+# consult it, so a thurbox task fell into the unclassified catch-all and read
+# every capture failure - including a merely transient thurbox-cli error - as
+# authoritative death. This pins the fix: an unreadable thurbox endpoint must
+# stay unknown/unreachable, never gone.
+test_no_run_thurbox_cli_failure_reads_unreachable_not_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "thurbox cli-failure fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case thurbox-cli-dead)
+  make_repo_on_branch "$d/wt" fm/feat-thurbox-cli
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-thurbox-cli.meta" "window=thurbox:sess-1" "worktree=$d/wt" "kind=ship" \
+    "backend=thurbox" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_THURBOX_CAPTURE_FAIL=1
+  FM_FAKE_THURBOX_LIST_FAIL=1
+  local out; out=$(run_crew_state "$d" feat-thurbox-cli)
+  assert_contains "$out" "state: unknown" "a failed thurbox CLI must stay unknown"
+  assert_contains "$out" "source: none" "a failed thurbox CLI has no state source"
+  assert_contains "$out" "backend unreachable" "a failed thurbox CLI must read as unreachable, not gone"
+  assert_not_contains "$out" "backend target gone" "a failed thurbox CLI is not positive death evidence"
+  pass "a thurbox CLI that fails to answer reads unknown/unreachable, never gone"
+}
+
+# Regression: a PARKED thurbox session (`session stop`) keeps its row but has
+# no pane, so its classifier answers `dead` without ever reading a pane -
+# unlike herdr/tmux `dead`, which does read one. Before the fix, thurbox never
+# reached this classifier at all, so a parked session read as generic
+# unclassified death rather than the same "agent gone, pane shell remains"
+# verdict tmux/herdr give, which is what licenses relaunch recovery.
+test_no_run_thurbox_parked_dead_reads_gone_with_shell_note() {
+  command -v jq >/dev/null 2>&1 || { pass "thurbox parked-dead fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case thurbox-parked-dead)
+  make_repo_on_branch "$d/wt" fm/feat-thurbox-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-thurbox-parked.meta" "window=thurbox:sess-2" "worktree=$d/wt" "kind=ship" \
+    "backend=thurbox" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  # A parked session has no pane, so capture must fail; the classifier still
+  # answers `dead` straight from the inventory row's `stopped` field, with no
+  # pane read of its own.
+  FM_FAKE_THURBOX_CAPTURE_FAIL=1
+  FM_FAKE_THURBOX_LIST='[{"id":"sess-2","stopped":true}]'
+  local out; out=$(run_crew_state "$d" feat-thurbox-parked)
+  assert_contains "$out" "state: unknown" "a parked thurbox session has no live current state"
+  assert_contains "$out" "backend target gone" "a parked thurbox session keeps its gone-class death evidence"
+  assert_contains "$out" "agent gone, pane shell remains" "a parked thurbox session reads the same death detail as a shell husk"
+  pass "a parked thurbox session (no pane) still reads gone for reclaim"
+}
+
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
 # herdr's agent.get reports generation state ("working" only while the model is
 # actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
@@ -2531,6 +2610,8 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
+test_no_run_thurbox_cli_failure_reads_unreachable_not_gone
+test_no_run_thurbox_parked_dead_reads_gone_with_shell_note
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
