@@ -85,7 +85,11 @@ bin/fm-project-local.sh list <project>
 It says when the home was being worked in while the copy was taken, and says separately when that could not be determined, so a possibly torn file is never presented as clean.
 The store holds regular files only, so **a directory holding symlinks is not transportable** - a `herramientas/` with a Python venv inside it is the ordinary case, since a venv keeps links like `bin/python`.
 `add` refuses such a path before anything is copied, so a refusal never leaves the store in a state that blocks every later spawn of the project.
-`sync` names that path and the symlink it found on stderr, skips it, and carries the rest of the manifest, because one untransportable path must not keep the material a worker does need from reaching it; list the symlink-free subdirectories instead, or move what has to travel out from under the venv.
+`sync` names that path and the symlink it found on stderr, leaves it un-updated, and carries the rest of the manifest, because one untransportable path must not keep the material a worker does need from reaching it; list the symlink-free subdirectories instead, or move what has to travel out from under the venv.
+
+A path `sync` cannot refresh - untransportable, or gone from the home - **never loses the copy an earlier sync took**: that copy can be the last one left of the captain's material, and deleting it is not firstmate's call.
+It stays in the store and keeps reaching every worker, but it is **marked**: `sync` records the path, the reason, and the date it stopped being confirmable, and staging writes those marks into the task copy as `.fm-local/.fm-unverified.md`, the same contract the recipe catalog keeps when it marks a lapsed entry `UNVERIFIED`.
+The run's counts say so too - updated, kept from an earlier sync and marked, and the paths with nothing to carry at all - so a skipped path never reads as "nothing travelled".
 
 Every spawn stages the store into the task copy at `.fm-local/` before the worker starts.
 Staging adds that path to the repository's exclude file and then **verifies that git reports nothing under it**; if git can still see the material, the staged copy is removed and the spawn is refused, because a worker cannot be told not to commit something git is offering it.

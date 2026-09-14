@@ -34,9 +34,16 @@
 # was taken instead of presenting a possibly torn file as clean, and says so
 # separately when that could not be determined at all.
 # The store holds regular files only, so a manifest path that is a symlink or a
-# directory holding one is not transportable. `sync` names it on stderr, skips
-# it, and carries the rest of the manifest: one untransportable path must never
-# keep the material a worker does need from reaching it.
+# directory holding one is not transportable. `sync` names it on stderr, leaves
+# it un-updated, and carries the rest of the manifest: one untransportable path
+# must never keep the material a worker does need from reaching it.
+# A path `sync` cannot refresh - untransportable, or gone from the home - keeps
+# the copy an earlier run took, because that copy can be the last one left and
+# deleting the captain's material is not firstmate's call. It is marked
+# instead: `sync` records the path, the reason, and the date it stopped being
+# confirmable, and `stage` writes those marks into the task copy as
+# `.fm-local/.fm-unverified.md`, so the worker reads an old copy as old rather
+# than as the project's current material.
 #
 # `stage` is the spawn-time step, called by bin/fm-spawn.sh once a task copy is
 # known to be isolated. It is idempotent and self-cleaning: a pool slot reused by
@@ -61,6 +68,12 @@ STORE_ROOT="$DATA/project-local"
 # The single name of the staged directory inside a task copy. Everything that
 # reads or excludes it derives from this constant.
 STAGE_DIR_NAME='.fm-local'
+
+# The note staging writes beside the material when the store carries a copy the
+# last sync could not refresh. `.fm-` is firstmate's own prefix inside a task
+# copy, and `valid_relative_path` keeps it out of the store, so material can
+# never shadow this note nor be shadowed by it.
+STAGE_NOTE_NAME='.fm-unverified.md'
 
 usage() {
   awk '
@@ -92,6 +105,7 @@ valid_relative_path() {  # <path>
   case "$1" in
     '' | /* | -*) return 1 ;;
     *[[:cntrl:]]*) return 1 ;;
+    .fm-*) return 1 ;;
   esac
   case "/$1/" in
     */../* | */./*) return 1 ;;
@@ -105,6 +119,23 @@ store_dir() {  # <project>
 
 material_dir() {  # <project>
   printf '%s\n' "$STORE_ROOT/$1/material"
+}
+
+# A path the sync could not refresh keeps the copy an earlier sync took: that
+# copy can be the last one left of the captain's material, so deleting it is
+# not firstmate's call. What firstmate owes instead is the mark - which path,
+# why, and since when - so the worker never reads an old copy as current, the
+# same contract the recipe catalog keeps with a lapsed entry.
+unverified_file() {  # <project>
+  printf '%s\n' "$STORE_ROOT/$1/unverified"
+}
+
+unverified_since() {  # <record file> <rel> <reason>; prints the date already recorded
+  [ -f "$1" ] || return 1
+  awk -F'\t' -v rel="$2" -v reason="$3" '
+    $1 == rel && $3 == reason { print $2; found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$1"
 }
 
 require_project() {  # <project>
@@ -147,11 +178,8 @@ note_home_activity() {  # <home-dir>
 
 # --- staging ----------------------------------------------------------------
 
-# The note that travels with the material into every task copy. It is the
-# worker-facing half of the contract; the exclude entry and the post-stage
-# verification below are the half that does not depend on the worker reading it.
 stage_material() {  # <project> <worktree>
-  local project=$1 wt=$2 material dest excl seen empty=0
+  local project=$1 wt=$2 material dest excl seen empty=0 record marks= rel since reason
   material=$(material_dir "$project")
   if [ ! -d "$material" ] ||
     [ -z "$(find "$material" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
@@ -199,6 +227,21 @@ stage_material() {  # <project> <worktree>
   dest="$wt/$STAGE_DIR_NAME"
   mkdir -p "$dest"
   (cd "$material" && tar cf - .) | (cd "$dest" && tar xf -) || die "could not stage local material into $dest"
+  record=$(unverified_file "$project")
+  if [ -s "$record" ]; then
+    while IFS="$(printf '\t')" read -r rel since reason; do
+      [ -n "$rel" ] && [ -e "$dest/$rel" ] || continue
+      marks="${marks}- \`$rel\` (UNVERIFIED since $since - $reason)
+"
+    done <"$record"
+  fi
+  if [ -n "$marks" ]; then
+    {
+      printf '# Unverified material\n\n'
+      printf 'The last sync could not refresh these paths from the project'"'"'s canonical home, so what is staged here is the copy an earlier sync took. Confirm anything you take from them against the project before you rely on it, and say so in your report if it turns out to be wrong.\n\n'
+      printf '%s' "$marks"
+    } >"$dest/$STAGE_NOTE_NAME"
+  fi
   find "$dest" -type f -exec chmod 0444 {} + 2>/dev/null || true
 
   # The mechanism, not the instruction: if git can still see anything under the
@@ -294,9 +337,28 @@ case "$CMD" in
     note_home_activity "$HOME_DIR"
     MATERIAL=$(material_dir "$NAME")
     mkdir -p "$MATERIAL"
-    COPIED=0
-    MISSING=0
-    SKIPPED=0
+    RECORD=$(unverified_file "$NAME")
+    RECORD_NEW="$STORE/.unverified.$$"
+    : >"$RECORD_NEW"
+    TODAY=$(date -u +%Y-%m-%d)
+    UPDATED=0
+    KEPT=0
+    NOTHING=0
+    # A path this run could not carry never loses the copy an earlier run took.
+    # It is recorded instead, so staging can hand the worker the copy AND the
+    # reason it is no longer known to be current.
+    not_updated() {  # <rel> <reason>
+      local since
+      if [ -e "$MATERIAL/$1" ]; then
+        since=$(unverified_since "$RECORD" "$1" "$2") || since=$TODAY
+        printf '%s\t%s\t%s\n' "$1" "$since" "$2" >>"$RECORD_NEW"
+        KEPT=$((KEPT + 1))
+        echo "project-local: $1 was not updated ($2); the copy from an earlier sync stays in the store and reaches every worker marked UNVERIFIED since $since" >&2
+      else
+        NOTHING=$((NOTHING + 1))
+        echo "project-local: $1 did not travel ($2) and the store has no earlier copy of it" >&2
+      fi
+    }
     while IFS= read -r REL; do
       case "$REL" in
         '' | \#*) continue ;;
@@ -305,20 +367,17 @@ case "$CMD" in
         die "manifest line is not a safe relative path: $REL"
       fi
       if [ -L "$HOME_DIR/$REL" ]; then
-        echo "project-local: skipping symlink $REL" >&2
-        SKIPPED=$((SKIPPED + 1))
+        not_updated "$REL" "it is a symlink, so it is not transportable"
         continue
       fi
       if [ ! -e "$HOME_DIR/$REL" ]; then
-        echo "project-local: manifest path absent in $HOME_DIR: $REL" >&2
-        MISSING=$((MISSING + 1))
+        not_updated "$REL" "it is absent from the project's home"
         continue
       fi
       if [ -d "$HOME_DIR/$REL" ]; then
         NESTED=$(first_symlink "$HOME_DIR/$REL")
         if [ -n "$NESTED" ]; then
-          echo "project-local: skipping $REL: it holds the symlink $NESTED, and a directory with symlinks is not transportable" >&2
-          SKIPPED=$((SKIPPED + 1))
+          not_updated "$REL" "it holds the symlink ${NESTED#"$HOME_DIR/"}, so it is not transportable"
           continue
         fi
       fi
@@ -332,10 +391,16 @@ case "$CMD" in
         cp -- "$HOME_DIR/$REL" "$MATERIAL/$REL" || die "could not copy $REL"
       fi
       chmod -R u+w "$MATERIAL/$REL" 2>/dev/null || true
-      COPIED=$((COPIED + 1))
+      UPDATED=$((UPDATED + 1))
     done <"$MANIFEST"
+    if [ -s "$RECORD_NEW" ]; then
+      mv -- "$RECORD_NEW" "$RECORD"
+    else
+      rm -f -- "$RECORD_NEW" "$RECORD"
+    fi
     note_home_activity "$HOME_DIR"
-    printf 'synced: %s from %s (%s paths copied, %s skipped, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$SKIPPED" "$MISSING"
+    printf 'synced: %s from %s (%s paths updated, %s kept from an earlier sync and marked UNVERIFIED, %s with nothing to carry)\n' \
+      "$NAME" "$HOME_DIR" "$UPDATED" "$KEPT" "$NOTHING"
     if [ "$HOME_ACTIVE" -eq 1 ]; then
       printf 'warning: %s was being worked in while this copy was taken, so a file may have been caught mid-write; re-run sync once it is quiet if anything looks truncated\n' "$HOME_DIR" >&2
     elif [ "$HOME_ACTIVITY_UNKNOWN" -eq 1 ]; then

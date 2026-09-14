@@ -244,7 +244,7 @@ test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest() {
   printf 'herramientas\ndocs\n' >"$world/home/data/project-local/demo/manifest"
   out=$(local_cmd "$world" sync demo) && rc=0 || rc=$?
   expect_code 0 "$rc" "one untransportable manifest path killed the whole sync"
-  assert_contains "$out" "skipping herramientas" "the skip did not name the manifest path"
+  assert_contains "$out" "herramientas did not travel" "the skip did not name the manifest path"
   assert_contains "$out" "symlink" "the skip did not name the symlink it found"
   [ -z "$(find "$world/home/data/project-local" -type l 2>/dev/null)" ] ||
     fail "the skipped path still left a symlink in the store"
@@ -254,6 +254,69 @@ test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest() {
   out=$(local_cmd "$world" stage demo "$world/copy") || fail "a later stage failed after the skip: $out"
   assert_present "$world/copy/.fm-local/docs/audit.md" "the staged copy is missing the material that could travel"
   pass "fm-project-local.sh: sync skips a directory holding a symlink and carries the rest of the manifest"
+}
+
+# A path sync cannot refresh keeps the copy an earlier run took - for a project
+# whose knowledge lives outside git, that copy can be the last one left, so
+# deleting it is not firstmate's call. What the worker must never get is that
+# copy presented as the project's current material: `.fm-unverified.md` staged
+# beside it is the mark that says which paths those are and since when.
+test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified() {
+  local world out rc note today
+  world=$(make_world stale)
+  today=$(date -u +%Y-%m-%d)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas" "$world/canonical/docs"
+  printf 'tool v1\n' >"$world/canonical/herramientas/replay.py"
+  printf 'the deposit refund policy\n' >"$world/canonical/docs/policy.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\ndocs\n' >"$world/home/data/project-local/demo/manifest"
+  out=$(local_cmd "$world" sync demo) || fail "the first sync failed: $out"
+  assert_contains "$out" "2 paths updated" "the first sync did not carry both manifest paths"
+
+  # `python -m venv` inside herramientas/ after a clean sync, and docs/ gone.
+  mkdir -p "$world/canonical/herramientas/venv/bin"
+  printf 'interp\n' >"$world/canonical/herramientas/venv/bin/python3"
+  ln -s python3 "$world/canonical/herramientas/venv/bin/python"
+  printf 'tool v2 CORRECTED\n' >"$world/canonical/herramientas/replay.py"
+  rm -rf "$world/canonical/docs"
+
+  out=$(local_cmd "$world" sync demo) && rc=0 || rc=$?
+  expect_code 0 "$rc" "a sync that could refresh nothing failed outright"
+  assert_contains "$out" "0 paths updated, 2 kept from an earlier sync and marked UNVERIFIED" \
+    "the counts still read as though nothing reached the worker"
+  assert_contains "$out" "was not updated" "the sync did not say the path stayed at its earlier copy"
+  assert_grep "tool v1" "$world/home/data/project-local/demo/material/herramientas/replay.py" \
+    "the sync deleted material it could not refresh"
+  assert_present "$world/home/data/project-local/demo/material/docs/policy.md" \
+    "a path gone from the home lost the last copy of its material"
+
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  note="$world/copy/.fm-local/.fm-unverified.md"
+  assert_present "$world/copy/.fm-local/herramientas/replay.py" "the kept copy never reached the worker"
+  assert_present "$note" "the worker got an unrefreshed copy with nothing marking it"
+  assert_grep "herramientas" "$note" "the mark did not name the untransportable path"
+  assert_grep "docs" "$note" "the mark did not name the path absent from the home"
+  assert_grep "UNVERIFIED since $today" "$note" "the mark did not say since when the copy stopped being confirmable"
+  out=$(git_q -C "$world/copy" status --porcelain --untracked-files=all)
+  [ -z "$out" ] || fail "git can see the staged material: $out"
+
+  # Once the home can be read again, the mark goes with the refresh.
+  rm -rf "$world/canonical/herramientas/venv"
+  mkdir -p "$world/canonical/docs"
+  printf 'the deposit refund policy\n' >"$world/canonical/docs/policy.md"
+  out=$(local_cmd "$world" sync demo) || fail "the third sync failed: $out"
+  assert_contains "$out" "2 paths updated" "the paths that became readable again were not refreshed"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "the later stage failed: $out"
+  assert_absent "$note" "a refreshed path is still marked unverified"
+  assert_grep "tool v2 CORRECTED" "$world/copy/.fm-local/herramientas/replay.py" \
+    "the refreshed copy did not reach the worker"
+  pass "fm-project-local.sh: a path sync could not refresh reaches the worker marked unverified"
 }
 
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
@@ -304,6 +367,7 @@ test_sync_refuses_an_escaping_manifest_path
 test_a_symlink_never_enters_the_store
 test_a_nested_symlink_is_refused_before_it_poisons_the_store
 test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest
+test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

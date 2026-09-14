@@ -237,6 +237,7 @@ If you learned a repeatable way of working in this project - something the proje
 Rewrite or delete an entry you found wrong rather than adding a second one beside it, and refresh an entry's date only for a capability this task actually exercised.
 
 A \`.fm-local/\` directory in this copy is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into a PR, an issue, or anything else outward-facing.
+A \`.fm-local/.fm-unverified.md\` there names the paths the last sync could not refresh; treat those as an old copy and confirm what you take from them.
 EOF
 PROJECT_MEMORY_SECTION=${PROJECT_MEMORY_SECTION%$'\n'}
 
@@ -244,6 +245,7 @@ IFS= read -r -d '' SCOUT_MEMORY_SECTION <<EOF || true
 # Project memory
 If the investigation revealed a repeatable way of working in this project - something the project can do and the exact way it is asked for - write it in the report in the recipe shape \`$FM_ROOT/bin/fm-project-recipes.sh --help\` describes, so firstmate can route it into the project's own catalog.
 A \`.fm-local/\` directory in this worktree is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into the report or anything else outward-facing.
+A \`.fm-local/.fm-unverified.md\` there names the paths the last sync could not refresh; treat those as an old copy and confirm what you take from them.
 EOF
 SCOUT_MEMORY_SECTION=${SCOUT_MEMORY_SECTION%$'\n'}
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
