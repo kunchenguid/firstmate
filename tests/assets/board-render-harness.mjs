@@ -141,6 +141,7 @@ const rowsOf = (id) => {
         badges: badgesOf(row),
         pr: pr ? { text: pr.textContent, href: pr.href } : null,
         age: age ? age.textContent : null,
+        pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
       };
     });
 };
@@ -162,17 +163,7 @@ const call = (byId.get("bb-call") || new Node("div")).children
   });
 
 const ch = byId.get("bb-charted") || new Node("div");
-const charted = ch.children
-  .filter((r) => r.className.split(/\s+/).includes("bb-row"))
-  .map((row) => {
-    const main = row.children.find((c) => c.className.includes("bb-row__main"));
-    return {
-      title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
-      sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
-      badges: badgesOf(row),
-      pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
-    };
-  });
+const charted = rowsOf("bb-charted");
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]

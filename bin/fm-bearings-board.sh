@@ -88,6 +88,13 @@
 # graveyard for the rows that most need him. The skill's fresh-snapshot rule
 # governs later reclassification if the task's wait or current state changes.
 #
+# Every Underway row likewise carries a non-empty `name`: the durable task name
+# when known, otherwise its durable identifier.
+# A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
+# that date with a UTC timestamp) the template orders the section by, newest
+# first; a row with no comparable date keeps its payload order after every dated
+# row. Anything else in that field refuses rather than sorting on garbage.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -125,6 +132,17 @@ validate_payload() {  # <data.json>
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
+    def name_marker: has("name") and (.name | nonempty_string);
+    def valid_filed:
+      . as $filed
+      | type == "string"
+      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$")
+      and (if test("T")
+        then try ((fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) == $filed) catch false
+        else try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $filed) catch false
+        end);
+    def optional_filed:
+      (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
     def optional_https_url($name):
       (has($name) | not)
@@ -173,7 +191,7 @@ validate_payload() {  # <data.json>
              and (has("close") | not)
            else true end);
     def underway_item:
-      type == "object" and repo_marker and (.id | nonempty_string)
+      type == "object" and repo_marker and name_marker and (.id | nonempty_string)
       and (.owner | nonempty_string)
       and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
       and optional_https_url("pr_url");
@@ -196,6 +214,7 @@ validate_payload() {  # <data.json>
       and (.title | nonempty_string) and (.reason | type == "string")
       and (.dispatchable | type == "boolean")
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
+      and optional_filed
       and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)

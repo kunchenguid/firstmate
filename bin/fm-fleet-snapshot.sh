@@ -105,6 +105,10 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
+#     Before that queued bound is applied, non-captain-actionable rows are selected
+#     ahead of captain-actionable rows so separately projected live decisions cannot
+#     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
+#     filed date newest first, with undated rows stable at the end.
 #     Structured-home input must declare the current home-summary and hold-classifier
 #     schemas; a live ledger or cached copy missing either declaration or declaring
 #     an unsupported version is unavailable even when it contains no captain holds.
@@ -978,6 +982,16 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
       and (.current_state.state == "paused" or .current_state.state == "done"
            or (.current_state.state == "unknown"
                and .current_state.source == "endpoint-gone"));
+    def filed_epoch:
+      (.since // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -1046,6 +1060,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
                       and (delivered_and_waiting($work) | not)))
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             pr_url:(if .pr.source == "meta" then .pr.url else null end),
             doing:((.current_state.detail // "") | trunc(120))} ]
@@ -1129,7 +1144,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           pr_url:(. as $row
             | ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
                 | .pr.url] | first) // null),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          since:((.since // null) | if . == null then null else trunc(40) end)}]
+          | ((map(select(.captain_actionable != true)) | newest_filed_first)
+             + (map(select(.captain_actionable == true)) | newest_filed_first))
+          | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),

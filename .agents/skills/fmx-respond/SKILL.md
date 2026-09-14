@@ -257,7 +257,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 
 **When you promise a final (including every Relay request whose work is routed to a second mate):**
 
-1. Create the typed obligation with `tasks-axi public-followup add` and bind the work with `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
+1. Create the typed obligation with `bin/fm-tasks-axi.sh public-followup add` and bind the work with its `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
    When the public ask plainly implies follow-on work ("look into X and fix it"), register the promised-final against the outcome and deliver any interim report as a separate `--purpose milestone` obligation on the same thread.
    An ask that genuinely terminates at a report stays `report-ready`; do not invent a ship commitment for work the captain has not authorized.
 2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.

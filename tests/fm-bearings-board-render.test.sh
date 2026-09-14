@@ -80,6 +80,14 @@ render_payload() {  # <home> <payload-overrides-json>
     || fail "the built board could not be rendered"
 }
 
+# Build the board from <underway-json> plus <charted-json> and return what the
+# renderer produced.
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
+  render_payload "$1" "$(jq -n --argjson underway "$2" --argjson charted "$3" \
+    --argjson more "${4:-0}" --argjson warning_more "${5:-0}" \
+    '{underway:$underway, charted:$charted, charted_more:$more, charted_warning_more:$warning_more}')"
+}
+
 charted_next_count() {  # <render-json>
   printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
 }
@@ -207,8 +215,8 @@ test_underway_rows_name_their_home_when_the_repo_cannot() {
   local home out
   home=$(make_home owner-rows)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Main fleet work"},
-    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Second mate work"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"Main fleet work"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","name":"fm-self/b","kind":"ship","state":"working","doing":"Second mate work"}
   ]}')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 2
@@ -222,8 +230,8 @@ test_a_tile_owned_by_one_home_still_names_it() {
   local home out
   home=$(make_home owner-single)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
-    {"id":"b","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Two"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"(main)","name":"b","kind":"ship","state":"working","doing":"Two"}
   ]}')
   [ "$(owners_of "$out" underway)" = "2 (main)" ] \
     || fail "a tile owned entirely by one home refused to name it: $out"
@@ -249,10 +257,10 @@ test_owner_labels_do_not_collide_with_inherited_properties() {
   local home out
   home=$(make_home owner-inherited-keys)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
-    {"id":"b","repo":"firstmate","owner":"constructor","kind":"ship","state":"working","doing":"Two"},
-    {"id":"c","repo":"firstmate","owner":"constructor","kind":"ship","state":"working","doing":"Three"},
-    {"id":"d","repo":"firstmate","owner":"__proto__","kind":"ship","state":"working","doing":"Four"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"constructor","name":"b","kind":"ship","state":"working","doing":"Two"},
+    {"id":"c","repo":"firstmate","owner":"constructor","name":"c","kind":"ship","state":"working","doing":"Three"},
+    {"id":"d","repo":"firstmate","owner":"__proto__","name":"d","kind":"ship","state":"working","doing":"Four"}
   ]}')
   [ "$(owners_of "$out" underway)" = "2 constructor · 1 (main) · 1 __proto__" ] \
     || fail "valid owner labels disappeared from the breakdown: $out"
@@ -265,8 +273,8 @@ test_main_home_and_a_mate_named_main_remain_distinct() {
   local home out
   home=$(make_home main-owner-collision)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
-    {"id":"b","repo":"firstmate","owner":"main","kind":"ship","state":"working","doing":"Two"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"main","name":"b","kind":"ship","state":"working","doing":"Two"}
   ]}')
   [ "$(owners_of "$out" underway)" = "1 (main) · 1 main" ] || fail "distinct homes were combined: $out"
   printf '%s' "$out" | jq -e '.underway[0].sub | endswith("(main)")' >/dev/null || fail "main owner was aliased"
@@ -316,9 +324,9 @@ test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
   local home out
   home=$(make_home owner-breakdown)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
-    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Two"},
-    {"id":"fm-self/c","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Three"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","name":"fm-self/b","kind":"ship","state":"working","doing":"Two"},
+    {"id":"fm-self/c","repo":"firstmate","owner":"fm-self","name":"fm-self/c","kind":"ship","state":"working","doing":"Three"}
   ]}')
   [ "$(owners_of "$out" underway)" = "2 fm-self · 1 (main)" ] \
     || fail "the underway tile did not break its count down by owner: $out"
@@ -382,7 +390,7 @@ test_delivered_work_is_no_longer_counted_as_underway() {
   local home out
   home=$(make_home delivered-not-underway)
   out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Still moving"}
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"Still moving"}
   ],"awaiting":[
     {"id":"b","repo":"firstmate","owner":"(main)","what":"Delivered","age_days":2,
      "pr_url":"https://github.com/o/r/pull/33"}
@@ -428,6 +436,74 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
 }
 
 test_queued_owners_remain_visible_beside_the_lavish_sidebar
+
+test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
+  local home out
+  home=$(make_home underway-name)
+  out=$(render_board "$home" '[
+    {"id":"fm-board-name-r1","repo":"firstmate","owner":"(main)","name":"Show task names on the board",
+     "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
+  ]' '[]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 1
+      and (.underway[0]
+        | .title == "Show task names on the board"
+          and (.sub | test("no-mistakes: review round 2"))
+          and (.sub | test("ship")) and (.sub | test("firstmate"))
+          and [.badges[] | .text] == ["working"])
+  ' >/dev/null || fail "an underway row did not lead with the task name: $out"
+  pass "an underway row leads with the task name and still reports its run status"
+}
+
+test_an_underway_identifier_label_is_not_replaced_by_run_status() {
+  local home out
+  home=$(make_home underway-identifier)
+  out=$(render_board "$home" '[
+    {"id":"mate/child-1","repo":null,"owner":"mate","name":"mate/child-1",
+     "state":"working","kind":"secondmate","doing":"fixing the failing check"}
+  ]' '[]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 1
+      and (.underway[0]
+        | .title == "mate/child-1"
+          and (.sub | startswith("fixing the failing check · "))
+          and (.title != "fixing the failing check"))
+  ' >/dev/null || fail "an identifier-labelled underway row rendered as status-only: $out"
+  pass "an underway identifier label is not replaced by run status"
+}
+
+test_charted_next_reads_newest_filed_first() {
+  local home out
+  home=$(make_home charted-order)
+  out=$(render_board "$home" '[]' '[
+    {"id":"oldest","repo":"sample","owner":"(main)","title":"Filed in June","reason":"queued","dispatchable":true,"filed":"2026-06-01"},
+    {"id":"newest","repo":"sample","owner":"(main)","title":"Filed in August","reason":"queued","dispatchable":true,"filed":"2026-08-14T09:30:00Z"},
+    {"id":"middle","repo":"sample","owner":"(main)","title":"Filed in July","reason":"queued","dispatchable":true,"filed":"2026-07-22"}
+  ]')
+  printf '%s' "$out" | jq -e '
+    [.charted[] | .title] == ["Filed in August", "Filed in July", "Filed in June"]
+  ' >/dev/null || fail "charted next was not ordered newest filed first: $out"
+  pass "charted next renders the most recently filed work first"
+}
+
+test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() {
+  local home out
+  home=$(make_home charted-undated)
+  out=$(render_board "$home" '[]' '[
+    {"id":"undated-first","repo":"sample","owner":"(main)","title":"Undated one","reason":"queued","dispatchable":true},
+    {"id":"dated","repo":"sample","owner":"(main)","title":"Dated","reason":"queued","dispatchable":true,"filed":"2026-07-22"},
+    {"id":"undated-second","repo":"sample","owner":"(main)","title":"Undated two","reason":"queued","dispatchable":true,"filed":null}
+  ]')
+  printf '%s' "$out" | jq -e '
+    [.charted[] | .title] == ["Dated", "Undated one", "Undated two"]
+  ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
+  pass "charted rows with no filed date follow the dated rows in payload order"
+}
+
+test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
+test_an_underway_identifier_label_is_not_replaced_by_run_status
+test_charted_next_reads_newest_filed_first
+test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

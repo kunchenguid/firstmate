@@ -317,7 +317,7 @@ warn_stale_public_commitments() { # <secondmate-id> <moved-key>...
     out=$("$SCRIPT_DIR/fm-public-followup.sh" guard-work main "$key" 2>/dev/null) || rc=$?
     [ "$rc" -ne 0 ] || continue
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    printf 'warning: %s still owes a public reply bound to main/%s; rebind it to secondmate:%s (tasks-axi public-followup bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home secondmate:%s --work-id %s --generation <n>) or the promised reply will be reconciled against work this home no longer owns.\n' \
+    printf 'warning: %s still owes a public reply bound to main/%s; rebind it to secondmate:%s (bin/fm-tasks-axi.sh public-followup bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home secondmate:%s --work-id %s --generation <n>) or the promised reply will be reconciled against work this home no longer owns.\n' \
       "$key" "$key" "$id" "$id" "$key" >&2
   done
   if fm_pf_relay_active "$FM_HOME" && fm_pf_has_delivered_open_loops "$STATE"; then
