@@ -21,10 +21,9 @@
 #   (d2) terminal failed run whose only failure is an orphaned ci monitor
 #       after checks read green                                   -> done
 #   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (e2) several runs bound to one worktree: the live one outranks the corpse
-#        (an unclassifiable status word keeps the ledger's newest-first order)
-#   (e3) the live sibling's head was never fetched into the task copy: it still
-#        outranks a terminal row sitting at the worktree's exact commit
+#   (e2) multiple runs: creation order preserves newer failures, replacement
+#        gates retain their run identity, and competing live runs read unknown
+#   (e3) an older live sibling with an unfetched head cannot hide a newer failure
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -66,7 +65,8 @@ make_repo_on_branch() {  # <dir> <branch>
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
+# command surface the helper uses: `axi` (the identity overview), `axi status`,
+# and `axi status --run <id>` (the
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
@@ -80,10 +80,16 @@ set -u
 case "${1:-}" in
   axi)
     shift
+    if [ "$#" = 0 ]; then
+      printf '%s\n' "${FM_FAKE_AXI_HOME:-${FM_FAKE_AXI_STATUS:-}}"
+      exit "${FM_FAKE_AXI_HOME_ERROR:-0}"
+    fi
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        if [ "${1:-}" = --run ]; then
+          printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+          exit "${FM_FAKE_AXI_STATUS_RUN_ERROR:-0}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
@@ -219,6 +225,9 @@ arm_idle_record() {  # <state-dir> <id>
 # command-substitution assignment (SC2155).
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
+  FM_FAKE_AXI_HOME=""
+  FM_FAKE_AXI_HOME_ERROR=0
+  FM_FAKE_AXI_STATUS_RUN_ERROR=0
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
@@ -236,7 +245,8 @@ reset_fakes() {
   FM_FAKE_DAEMON_DOWN=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
+  export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1145,13 +1155,10 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-# Live-over-terminal selection (bin/fm-nm-run-lib.sh). Reproduces the proven
-# 2026-08 case: a crashed validation daemon left a FAILED run at the worktree's
-# exact commit, while the live run that replaced it validates a descendant
-# commit on the same branch. Both bind - the corpse by the equal-commit rule,
-# the live run by the ancestor rule - and bare `axi status` answers with the
-# corpse, so every recomputation read a healthy task as failed.
-test_terminal_corpse_loses_to_live_run_on_same_branch() {
+# The plain ledger is ordered by creation time, not the time a status changed.
+# A newer failure must not be hidden by an older live run, even when both heads
+# bind to the worktree. These legacy CLI cases lack the AXI identity table.
+test_terminal_run_keeps_newer_failure_over_live_sibling() {
   reset_fakes
   local d base_head live_head short_base short_live out
   d=$(new_case live-beats-corpse)
@@ -1166,28 +1173,25 @@ test_terminal_corpse_loses_to_live_run_on_same_branch() {
   [ "$short_base" != "$short_live" ] || fail "live run head did not advance past the worktree"
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/corpse.meta" "window=fm:fm-corpse" "worktree=$d/wt" "kind=ship"
-  # The corpse is the most-recently-touched run, so it is what `axi status`
-  # reports, at this worktree's own commit.
+  # The newest run failed at this worktree's own commit.
   FM_FAKE_RUN_HEAD="$base_head"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-corpse)"
-  # It is also the newest row in the listing (the crash marked it after the
-  # live run started), so row order alone still selects the corpse.
+  # The older live run may have advanced its tip, but it did not replace this run.
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   failed     fm/feat-corpse ${short_base}  2026-08-05 11:20
   running    fm/feat-corpse ${short_live}  2026-08-05 10:05
 EOF
 )"
   out=$(run_crew_state "$d" corpse)
-  assert_contains "$out" "state: working" "the live run outranks the terminal corpse bound to the same worktree"
-  assert_contains "$out" "source: run-step" "the live run is still an attributed run-step verdict"
-  assert_not_contains "$out" "state: failed" "a dead run at the worktree commit must not report a healthy task as failed"
-  pass "a live run outranks a terminal run bound to the same worktree"
+  assert_contains "$out" "state: failed" "the newer failure remains authoritative beside an older live run"
+  assert_contains "$out" "source: run-step" "the newer failure keeps its run-step verdict"
+  pass "a newer failure is not hidden by a live sibling"
 }
 
-# The same preference on the runs-list path itself: `axi status` answers for
+# The same creation-order rule on the runs-list path itself: `axi status` answers for
 # another crew's branch, and this branch's newest row is terminal while an older
 # row is still live.
-test_runs_list_live_row_outranks_newer_terminal_row() {
+test_runs_list_newer_failure_outranks_older_live_row() {
   reset_fakes
   local d base_head live_head short_base short_live out
   d=$(new_case live-row-beats-terminal-row)
@@ -1208,17 +1212,13 @@ test_runs_list_live_row_outranks_newer_terminal_row() {
 EOF
 )"
   out=$(run_crew_state "$d" liverow)
-  assert_contains "$out" "state: working" "an older live row outranks the branch's newest terminal row"
-  assert_not_contains "$out" "state: failed" "the terminal row must not win while a live row binds"
-  pass "runs-list selection prefers a live row over a newer terminal one"
+  assert_contains "$out" "state: failed" "the newest terminal row must not lose to an older live row"
+  pass "runs-list selection keeps the newer failure over an older live row"
 }
 
-# The routine production shape of the same case: the live run's fix-round
-# commits live only in the gate repo, so its head is not a git object in the
-# task copy and can never bind by the head rule. The terminal row sitting at
-# the worktree's EXACT commit is the anchor that proves the unfetched live row
-# is this worktree's own continuation, so the live run still wins.
-test_unfetched_live_sibling_outranks_terminal_row_at_exact_head() {
+# An unfetched head on the older live row does not change creation order.
+# Exact-head compatibility of the newer terminal row is not supersession proof.
+test_unfetched_older_live_sibling_does_not_hide_failure() {
   reset_fakes
   local d base_head short_base unfetched out
   d=$(new_case unfetched-live-sibling)
@@ -1238,9 +1238,8 @@ test_unfetched_live_sibling_outranks_terminal_row_at_exact_head() {
 EOF
 )"
   out=$(run_crew_state "$d" unfetched)
-  assert_contains "$out" "state: working" "an unfetched live row anchored by the exact-head terminal row outranks it"
-  assert_not_contains "$out" "state: failed" "the corpse at the worktree commit must not report a healthy task as failed"
-  pass "an unfetched live sibling outranks a terminal row at the worktree's exact commit"
+  assert_contains "$out" "state: failed" "an older unfetched live head must not hide the newer failure"
+  pass "an older unfetched live sibling does not hide a newer failure"
 }
 
 # The preference must not widen: candidates of the SAME liveness class keep the
@@ -1273,8 +1272,8 @@ EOF
 }
 
 # An unclassifiable status word keeps the ledger's own newest-first precedence:
-# the live-over-terminal preference only ever reorders rows whose liveness is
-# known, so an unexpected newest row is answered as-is instead of being
+# the creation-order preference must preserve a status whose liveness is
+# unknown, so an unexpected newest row is answered as-is instead of being
 # displaced by an older running row and reported as working.
 test_unknown_status_row_keeps_newest_first_precedence() {
   reset_fakes
@@ -2483,6 +2482,109 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
+# The AXI overview supplies run ids in creation order; the plain runs listing
+# cannot identify a replacement or carry its review gate.
+make_competing_runs_case() {  # <name> <new-status> <old-status>
+  local d=$TMP_ROOT/$1 short
+  reset_fakes
+  mkdir -p "$d/state"
+  make_repo_on_branch "$d/wt" fm/competing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship"
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01NEW\",fm/competing,$2,$short,\"\"
+  \"01OLD\",fm/competing,$3,$short,\"\""
+  FM_FAKE_RUNS_LIST="  $2 fm/competing $short 2026-09-14 12:01
+  $3 fm/competing $short 2026-09-14 12:00"
+}
+
+test_superseded_cancelled_run_preserves_replacement_gate() {
+  make_competing_runs_case superseded-gate running cancelled
+  local d=$TMP_ROOT/superseded-gate out
+  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')
+error: \"cancelled: superseded by new push\""
+  # The rerun's rebased head is not in the submitted worktree's object store.
+  FM_FAKE_RUN_HEAD=0123abcd
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: pipeline_owned"
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,[a-f0-9]*,""$/,0123abcd,""/')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: parked' 'superseded cancelled run must expose the live review gate'
+  assert_contains "$out" 'parked at review: 2 finding(s)' 'replacement gate detail survives selection'
+  assert_contains "$out" '01NEW' 'the selected replacement run is identified'
+  pass 'superseded cancelled run preserves the replacement review gate'
+}
+
+test_competing_live_runs_report_unknown_with_both_ids() {
+  make_competing_runs_case ambiguous-runs running running
+  local d=$TMP_ROOT/ambiguous-runs out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+  printf 'done: old completion event\n' > "$d/state/competing.status"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'two live runs cannot establish exclusive authority'
+  assert_contains "$out" '01NEW' 'ambiguity names the newer candidate'
+  assert_contains "$out" '01OLD' 'ambiguity names the older candidate'
+  pass 'competing live runs report unknown with both run ids'
+}
+
+test_newer_failed_run_is_not_hidden_by_older_live_run() {
+  make_competing_runs_case newest-failed failed running
+  local d=$TMP_ROOT/newest-failed out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: failed' 'the newer failed run must not be hidden by an older live run'
+  assert_contains "$out" '01NEW' 'the genuine failure identifies its run'
+  pass 'newer failed run remains failed beside an older live run'
+}
+
+test_unverifiable_run_selection_reports_unknown() {
+  local mode rc=0
+  for mode in missing wrong-id wrong-branch wrong-head missing-status malformed-table inventory-error selected-error; do
+    (
+      make_competing_runs_case "unverified-$mode" running cancelled
+      d=$TMP_ROOT/unverified-$mode
+      FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+      FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+      case "$mode" in
+        missing) FM_FAKE_AXI_STATUS_RUN='' ;;
+        wrong-id) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's/01NEW/01OLD/') ;;
+        wrong-branch) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's@fm/competing@fm/another-task@') ;;
+        wrong-head)
+          FM_FAKE_RUN_HEAD=0123abcd
+          FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+          ;;
+        missing-status) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed '/status:/d') ;;
+        malformed-table) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/') ;;
+        inventory-error) FM_FAKE_AXI_HOME_ERROR=1 ;;
+        selected-error) FM_FAKE_AXI_STATUS_RUN_ERROR=1 ;;
+      esac
+      out=$(run_crew_state "$d" competing)
+      assert_contains "$out" 'state: unknown' "$mode selection must not assert a run state"
+      assert_contains "$out" '01NEW' "$mode selection preserves the replacement id"
+      assert_contains "$out" '01OLD' "$mode selection preserves the original id"
+      pass "$mode run selection reports unknown with candidate ids"
+    ) || rc=1
+  done
+  [ "$rc" = 0 ] || fail 'unverifiable run selections'
+}
+
+test_legacy_conflicting_run_records_report_unknown() {
+  make_competing_runs_case legacy-conflict failed running
+  local d=$TMP_ROOT/legacy-conflict out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_HOME=$FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'conflicting records without identities cannot prove authority'
+  assert_contains "$out" '01OLD' 'legacy ambiguity preserves the available run id'
+  assert_contains "$out" 'unavailable' 'legacy ambiguity states that the competing id is unavailable'
+  pass 'legacy conflicting run records report unknown'
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2516,9 +2618,9 @@ test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown
 test_cross_branch_attribution_picks_most_recent_row
-test_terminal_corpse_loses_to_live_run_on_same_branch
-test_runs_list_live_row_outranks_newer_terminal_row
-test_unfetched_live_sibling_outranks_terminal_row_at_exact_head
+test_terminal_run_keeps_newer_failure_over_live_sibling
+test_runs_list_newer_failure_outranks_older_live_row
+test_unfetched_older_live_sibling_does_not_hide_failure
 test_only_terminal_rows_keep_newest_first_precedence
 test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
@@ -2569,5 +2671,10 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_superseded_cancelled_run_preserves_replacement_gate
+test_competing_live_runs_report_unknown_with_both_ids
+test_newer_failed_run_is_not_hidden_by_older_live_run
+test_unverifiable_run_selection_reports_unknown
+test_legacy_conflicting_run_records_report_unknown
 
 echo "all fm-crew-state tests passed"
