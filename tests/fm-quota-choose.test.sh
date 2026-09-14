@@ -224,15 +224,44 @@ out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/c
 [ "$out" = "omp openai-codex/codex_other" ] || fail "omp prefix: expected the provider-wide codex quota to select the prefixed model, got '$out'"
 ok "omp openai-codex prefix matches the bare codex model scope"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
+# A local model (omp's ollama/ prefix) carries no paid-quota policy: it wins
+# over an otherwise-eligible later candidate and needs no quota-axi row for
+# "ollama" at all, since the snapshot never has one.
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet)
+[ "$out" = "omp ollama/qwen3:8b" ] || fail "local Qwen: expected the local candidate to win, got '$out'"
+ok "local Qwen (omp ollama/ prefix) is eligible with no paid-quota check"
+
+# A local candidate is still selected even as the ONLY candidate, with quota
+# evidence present for other providers but nothing for "local".
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b)
+[ "$out" = "omp ollama/qwen3:8b" ] || fail "local Qwen alone: expected selection, got '$out'"
+ok "local Qwen is selected on its own with no quota-axi coverage"
+
+# The default local Qwen lane is Pi's own gx10-vllm/ prefix, not just omp's
+# ollama/ prefix. It must win even when Pi's own account quota (used by every
+# OTHER Pi candidate) is exhausted, proving it is a genuinely separate local
+# no-paid-quota policy rather than coincidentally riding Pi's healthy window.
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]' \
+  "$LAB/captured.json" > "$LAB/pi-exhausted.json"
+if out=$(call_choose --snapshot "$LAB/pi-exhausted.json" --candidate pi:default 2>/dev/null); then
+  fail "an ordinary Pi candidate should not dispatch once Pi's account quota is exhausted, got '$out'"
+fi
+[ "$out" = "none" ] || fail "exhausted Pi account: expected 'none', got '$out'"
+out=$(call_choose --snapshot "$LAB/pi-exhausted.json" --candidate pi:gx10-vllm/qwen3.8-27b-fp8)
+[ "$out" = "pi gx10-vllm/qwen3.8-27b-fp8" ] || fail "default local Qwen lane: expected selection despite exhausted Pi quota, got '$out'"
+out=$(call_choose --snapshot "$LAB/pi-exhausted.json" --candidate pi:default --candidate pi:gx10-vllm/qwen3.8-27b-fp8)
+[ "$out" = "pi gx10-vllm/qwen3.8-27b-fp8" ] || fail "default local Qwen lane: expected it to win over an exhausted ordinary Pi candidate, got '$out'"
+ok "the default local Qwen lane (pi gx10-vllm/ prefix) is eligible independent of Pi's own account quota"
+
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:vllm/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
   fail "unmapped omp prefix unexpectedly selected a later candidate"
 fi
-[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: ollama/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
+[ "$err" = "error: omp quota mapping covers only the openai-codex, claude-bridge, and ollama prefixes: vllm/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp 2>&1); then
   fail "bare omp candidate unexpectedly selected"
 fi
-[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: default" ] || fail "bare omp candidate returned: $err"
-ok "omp without a mapped prefix fails closed"
+[ "$err" = "error: omp quota mapping covers only the openai-codex, claude-bridge, and ollama prefixes: default" ] || fail "bare omp candidate returned: $err"
+ok "omp without a mapped prefix still fails closed"
 
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:default)
 [ "$out" = "codex default" ] || fail "default scope: expected provider-wide quota, got '$out'"
