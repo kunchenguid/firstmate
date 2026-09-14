@@ -2967,7 +2967,9 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 
 # fm_backend_herdr_launch_shell_accept: unconditionally accept one complete
 # shell command during worker launch. Herdr ctrl+j is the live-proved line-feed
-# mapping; generic Enter remains physical Return for every other caller.
+# mapping; generic Enter remains physical Return for every other caller. A failed
+# accept attempts C-c cleanup, returning 1 when cleared and 2 when pending input
+# may remain.
 fm_backend_herdr_launch_shell_accept() {  # <target>
   fm_backend_herdr_send_key "$1" ctrl+j && return 0
   fm_backend_herdr_send_key "$1" C-c >/dev/null 2>&1 && return 1

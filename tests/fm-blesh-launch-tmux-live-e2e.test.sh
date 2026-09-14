@@ -63,13 +63,19 @@ SH
 cat > "$SHIM/pi" <<'SH'
 #!/usr/bin/env bash
 mkdir -p "${FM_BLESH_MARKERS:?}"
-printf 'started\n' > "$FM_BLESH_MARKERS/${FM_TASK_ID:?}"
+printf 'started\ntraceparent=%s\ngotmpdir=%s\n' \
+  "${TRACEPARENT:?}" "${GOTMPDIR:?}" > "$FM_BLESH_MARKERS/${FM_TASK_ID:?}"
 SH
 chmod +x "$SHIM/tmux" "$SHELL_WRAPPER" "$SHIM/treehouse" "$SHIM/pi"
 
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/projects" "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'pi\n' > "$HOME_DIR/config/crew-harness"
-touch "$HOME_DIR/state/.last-watcher-beat"
+touch "$HOME_DIR/config/trace-context" "$HOME_DIR/state/.last-watcher-beat"
+printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$ROOT/bin/fm-trace-context-lib.sh"
+FM_TRACE_CONTEXT=on fm_trace_context_session_start \
+  "$HOME_DIR/config" "$HOME_DIR/state/.trace-context-effective"
 git init -q "$PROJ_DIR"
 git -C "$PROJ_DIR" config user.email test@example.invalid
 git -C "$PROJ_DIR" config user.name test
@@ -82,7 +88,7 @@ PATH="$SHIM:$PATH" SHELL="$SHELL_WRAPPER" FM_BLESH_WORKTREE="$WT_DIR" \
   FM_BLESH_MARKERS="$MARKERS" tmux new-session -d -s firstmate -x 120 -y 40
 
 run_one() {  # <ordinal> <busy 0|1>
-  local ordinal=$1 busy=$2 id out status capture i=0
+  local ordinal=$1 busy=$2 id out status capture traceparent i=0
   id="blesh-tmux-$ordinal"
   mkdir -p "$HOME_DIR/data/$id"
   cat > "$HOME_DIR/data/$id/brief.md" <<EOF
@@ -114,6 +120,13 @@ EOF
     esac
     fail "tmux ble.sh spawn $ordinal did not start the fake worker: $out"
   fi
+  traceparent=$(sed -n 's/^traceparent=//p' "$MARKERS/$id")
+  fm_trace_context_valid "$traceparent" \
+    || fail "tmux ble.sh spawn $ordinal did not deliver a valid trace context"
+  [ "$(sed -n 's/^traceparent=//p' "$HOME_DIR/state/$id.meta")" = "$traceparent" ] \
+    || fail "tmux ble.sh spawn $ordinal recorded a different trace context from the fake worker"
+  [ "$(sed -n 's/^gotmpdir=//p' "$MARKERS/$id")" = "/tmp/fm-$id/gotmp" ] \
+    || fail "tmux ble.sh spawn $ordinal did not deliver its worker temp directory"
   PATH="$SHIM:$PATH" tmux kill-window -t "firstmate:fm-$id" >/dev/null 2>&1 \
     || fail "could not remove tmux test window $ordinal"
 }
@@ -127,4 +140,4 @@ while [ "$ordinal" -le "$REPEATS" ]; do
   ordinal=$((ordinal + 1))
 done
 
-pass "real tmux and ble.sh executed $REPEATS/$REPEATS complete token-free worker launches across settled and busy shells"
+pass "real tmux and ble.sh executed $REPEATS/$REPEATS complete token-free worker launches with environment and trace delivery across settled and busy shells"

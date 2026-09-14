@@ -4189,7 +4189,23 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_launch_shell_accept "$T"
+if spawn_send_launch_shell_accept "$T"; then
+  LAUNCH_ACCEPT_STATUS=0
+else
+  LAUNCH_ACCEPT_STATUS=$?
+fi
+if [ "$LAUNCH_ACCEPT_STATUS" -ne 0 ]; then
+  if [ "$BACKEND" = herdr ]; then
+    if [ "$LAUNCH_ACCEPT_STATUS" -eq 2 ]; then
+      echo "error: worker launch input could not be accepted or cleared for $W; refusing to report a worker start with unsafe pending input" >&2
+    else
+      echo "error: worker launch input was not accepted for $W; pending input was cleared" >&2
+    fi
+  else
+    echo "error: worker launch input could not be accepted for $W; refusing to report a worker start" >&2
+  fi
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

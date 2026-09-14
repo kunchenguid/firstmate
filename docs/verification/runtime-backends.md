@@ -115,7 +115,7 @@ Zellij, cmux, and Orca retain their prior physical-Enter launch behavior because
 
 Verified on 2026-09-14 on Linux under WSL2 with Bash 5.3.9, ble.sh `0.4.0-devel3+1a5c451c`, tmux 3.6, and Herdr 0.8.2.
 Both guards are token-free and run the public `fm-spawn.sh` path with a real linked worktree, a nested interactive Bash transition, and a fake Pi only at the final process boundary.
-The tmux guard uses a private server and covers settled plus deliberately busy shells.
+The tmux guard uses a private server, covers settled plus deliberately busy shells, and confirms that the worker receives its temporary-directory and trace-context exports while the durable trace carrier matches.
 The Herdr guard provisions and tears down a generated non-default session only through `bin/fm-herdr-lab.sh`, rejects pane operations without the matching explicit trailing session, runs busy-shell launches, and verifies the emitted `ctrl+j` spelling.
 
 ```sh
@@ -129,14 +129,16 @@ Observed output:
 
 ```text
 ok - fm-spawn commits treehouse, environment, trace, and worker launch shell commands with tmux C-j
+ok - fm-spawn refuses to report a worker start when final launch acceptance fails
 ok - generic tmux Enter remains physical Enter outside launch-shell submission
 ok - unavailable Zellij, Orca, and cmux mappings retain their existing physical-Enter behavior
 # all fm-spawn-shell-accept tests passed
-ok - real tmux and ble.sh executed 50/50 complete token-free worker launches across settled and busy shells
+ok - real tmux and ble.sh executed 50/50 complete token-free worker launches with environment and trace delivery across settled and busy shells
 ok - real Herdr and ble.sh executed 20/20 complete token-free worker launches with explicit lab binding and ctrl+j
 ```
 
-The deterministic Herdr adapter regression additionally requires literal `pane send-text` followed by `pane send-keys ... ctrl+j` in the same named session, rejects the old `pane run` shell-line path for launches, and proves generic `Enter` still emits Herdr `enter`.
+The deterministic Herdr adapter regression in `tests/fm-backend-herdr.test.sh` additionally requires literal `pane send-text` followed by `pane send-keys ... ctrl+j` in the same named session, rejects the old `pane run` shell-line path for launches, and proves generic `Enter` still emits Herdr `enter`.
+It also proves that a failed launch accept attempts to clear pending input and distinguishes failed cleanup as unsafe.
 
 ## tmux
 

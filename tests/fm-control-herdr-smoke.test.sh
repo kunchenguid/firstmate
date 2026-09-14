@@ -163,9 +163,9 @@ EOF
 chmod +x "$FAKEBIN/codex"
 printf -v FAKEBIN_Q '%q' "$FAKEBIN"
 printf -v PROJ_Q '%q' "$PROJ"
-fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "export PATH=$FAKEBIN_Q:\$PATH" \
+fm_backend_herdr_launch_shell_line "$SESSION:$PANE_ID" "export PATH=$FAKEBIN_Q:\$PATH" \
   || fail "could not put the inert test harness on the pane PATH"
-fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "cd -- $PROJ_Q" \
+fm_backend_herdr_launch_shell_line "$SESSION:$PANE_ID" "cd -- $PROJ_Q" \
   || fail "could not move the agent-free pane out of its recorded worktree"
 for _ in $(seq 1 20); do
   [ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" != "$PROJ_REAL" ] || break

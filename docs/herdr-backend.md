@@ -31,6 +31,7 @@ No separate first-run provisioning is required.
 
 During worker startup, Firstmate sends each shell command literally and accepts it with Herdr's `ctrl+j` line-feed mapping instead of `pane run`'s physical Return, avoiding ble.sh's spawn-time Return race.
 This mapping is launch-only; generic Enter remains physical Return for post-launch interaction.
+If the final accept fails, Firstmate attempts to clear the pending command and reports whether unsafe input may remain instead of claiming the worker started.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#spawn-time-shell-acceptance-with-blesh) records the live evidence.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.

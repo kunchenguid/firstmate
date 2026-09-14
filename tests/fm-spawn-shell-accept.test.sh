@@ -35,6 +35,10 @@ case "${1:-}" in
   send-keys)
     for arg in "$@"; do printf '%s\037' "$arg" >> "${FM_FAKE_TMUX_LOG:?}"; done
     printf '\n' >> "${FM_FAKE_TMUX_LOG:?}"
+    if [ "${FM_FAKE_FINAL_ACCEPT_FAIL:-0}" = 1 ] \
+       && [ "$#" -eq 4 ] && [ "${4:-}" = C-j ]; then
+      exit 1
+    fi
     exit 0
     ;;
 esac
@@ -80,6 +84,20 @@ grep -F 'pi' "$LOG" | tail -1 >/dev/null \
 sed -n "$((launch_number + 1))p" "$LOG" | grep -Fq "${US}C-j${US}" \
   || fail "spawn did not commit the final worker launch with native tmux C-j"
 pass "fm-spawn commits treehouse, environment, trace, and worker launch shell commands with tmux C-j"
+
+ID=shell-accept-fail-z2
+fm_test_spawn_brief "$HOME_DIR" "$ID" "Refuse a worker start when its launch command is not accepted."
+: > "$LOG"
+out=$(FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_FINAL_ACCEPT_FAIL=1 \
+  fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN" \
+    "$ID" "$PROJ_DIR" --scout --harness pi --backend tmux)
+status=$?
+[ "$status" -ne 0 ] || fail "spawn reported success after the final launch acceptance failed"
+assert_contains "$out" "worker launch input could not be accepted" \
+  "spawn did not explain the failed launch acceptance"
+assert_not_contains "$out" "spawned $ID" \
+  "spawn reported a worker start after its final launch acceptance failed"
+pass "fm-spawn refuses to report a worker start when final launch acceptance fails"
 
 before=$(wc -l < "$LOG" | tr -d ' ')
 FM_FAKE_TMUX_LOG="$LOG" PATH="$FAKEBIN:$PATH" bash -c \
