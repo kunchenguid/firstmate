@@ -157,6 +157,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/goal-kanban/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/goal-prompt-builder/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
       "audience": "agent-runtime"
     },
