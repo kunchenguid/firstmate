@@ -64,8 +64,11 @@
 # the moment the auto-arm needs to bring the next one up. Blocking there is a
 # false alarm on healthy supervision, and it is what made the guard banner recur
 # once per wake on a Codex primary. Each harness keeps its own single-flight
-# ledger and markers under its own FM_AUTOARM_PREFIX, and the mode flag selects
+# ledger and markers under its own FM_AUTOARM_PREFIX, and the selected mode picks
 # which one this guard reads, so the two can never read each other's claims.
+# Claude passes --claude from its registration; Codex's registration passes no
+# flag and the mode is resolved from the running harness instead, for the
+# hook-trust reason recorded at the mode-selection block below.
 #
 # --claude additionally IGNORES stop_hook_active, because Claude Code marks EVERY
 # stop after ANY stop-hook-driven continuation stop_hook_active=true, including
@@ -128,10 +131,31 @@ for arg in "$@"; do
 done
 
 # Which harness's Stop-owned auto-arm this guard cooperates with, and therefore
-# which single-flight ledger, micro-mutex, and failure markers it reads. The
-# flag is authoritative over detection because the hook that passed it is the
+# which single-flight ledger, micro-mutex, and failure markers it reads. An
+# explicit flag is authoritative, because the hook that passed it is the
 # registration of exactly one harness (bin/fm-wake-lib.sh honors an explicit
 # FM_AUTOARM_PREFIX for the same reason).
+#
+# With no flag, resolve the primary the way every other supervision decision in
+# this repo does, through bin/fm-harness.sh: this guard runs as a child of the
+# harness process, so that ancestry walk answers here. Codex carries its mode
+# this way rather than on the command line ON PURPOSE. Codex persists hook trust
+# per entry keyed by the hash of that entry's COMMAND, so appending a flag to the
+# already-approved turn-end guard registration would invalidate its approval and
+# leave the upgrade window with no blind-turn guard at all - the exact outage
+# this guard exists to prevent. Keeping the registered command byte-identical
+# means only the genuinely new auto-arm entry waits on an operator.
+#
+# Detection can only ever ADD the cooperative mode on a positive `codex` answer.
+# Anything else, including an unresolved harness, keeps the pre-existing default
+# mode untouched, so an inconclusive answer can never produce an allow this guard
+# would not already have produced on its own.
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$CODEX_MODE" -eq 0 ] && [ "$CURSOR_MODE" -eq 0 ]; then
+  case "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)" in
+    codex) CODEX_MODE=1 ;;
+  esac
+fi
+
 COOP_MODE=0
 if [ "$CLAUDE_MODE" -eq 1 ] || [ "$CODEX_MODE" -eq 1 ]; then
   COOP_MODE=1

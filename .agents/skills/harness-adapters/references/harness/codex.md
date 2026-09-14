@@ -32,9 +32,10 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 ## Primary integration
 
 The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
-The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard.sh --codex`.
-Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` for the same one-block loop safety used by the guard's default mode, which `--codex` keeps.
-`--codex` adds only the Stop-owned auto-arm cooperation: the guard reads the Codex auto-arm's own generation ledger, so a turn that ends while its Stop hook is re-arming the watcher is allowed on that positive claim instead of blocking on a watcher that is coming back up.
+The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard.sh`, with no flag.
+The guard resolves the Codex cooperative mode from the running harness instead, because Codex keys hook trust to the hash of the registered command and a flag there would invalidate the guard's existing approval on every upgrade that touched it.
+Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` for the same one-block loop safety used by the guard's default mode, which the Codex mode keeps.
+That mode adds only the Stop-owned auto-arm cooperation: the guard reads the Codex auto-arm's own generation ledger, so a turn that ends while its Stop hook is re-arming the watcher is allowed on that positive claim instead of blocking on a watcher that is coming back up.
 
 The Stop payload includes `cwd`, but the tracked hook does not use it to choose the guard executable.
 Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.

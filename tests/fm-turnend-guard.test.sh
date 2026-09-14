@@ -188,6 +188,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-gemini-lib.sh" "$dir/bin/fm-gemini-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
@@ -1999,6 +2001,63 @@ test_hook_codex_mode_allows_on_open_codex_generation_claim() {
   pass "fm-turnend-guard --codex: a live Codex auto-arm claim ends the false blind-turn banner"
 }
 
+# The TRACKED Codex registration passes no flag, so everything above is reached
+# in production only through harness resolution. That is deliberate: Codex keys
+# hook trust to the hash of the registered command, so carrying the mode on the
+# command line would invalidate the already-approved guard entry on upgrade and
+# leave the window with no blind-turn guard at all. These two cases pin the
+# resolution itself, because without it the registration silently runs in default
+# mode and the false banner returns.
+#
+# Run the guard with NO flag, from a parent whose command name is what
+# bin/fm-harness.sh's ancestry walk reads. FAKE_HARNESS_BIN holds one bash
+# symlink per harness name the cases need.
+FAKE_HARNESS_BIN="$TMP_ROOT/fake-harness-bin"
+run_hook_unflagged_under() {  # <harness-name> <dir> <stop-active>
+  local name=$1 dir=$2 stop_active=$3 home
+  home=$(cd "$dir" && pwd)
+  mkdir -p "$FAKE_HARNESS_BIN"
+  [ -e "$FAKE_HARNESS_BIN/$name" ] || ln -s /bin/bash "$FAKE_HARNESS_BIN/$name"
+  # shellcheck disable=SC2016 # the fake harness expands these inside its child shell.
+  printf '{"stop_hook_active":%s,"session_id":"sess-codex-detected"}' "$stop_active" \
+    | FM_HOME="$home" "$FAKE_HARNESS_BIN/$name" -c \
+      'printf "%s" "$(cat)" | bash "$1"' _ "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+test_hook_unflagged_under_codex_enters_the_cooperative_mode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-detected")
+  : > "$dir/state/task1.meta"
+  seed_open_generation_claim "$dir" .codex-autoarm-epoch
+  out=$(run_hook_unflagged_under codex "$dir" false); status=$?
+  kill "$CLAIM_PID" 2>/dev/null || true
+  wait "$CLAIM_PID" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "the flagless tracked registration must reach the Codex cooperative mode through harness resolution"
+  [ -z "$out" ] || fail "detected-codex claimed allow produced output: $out"
+  pass "fm-turnend-guard: the flagless Codex registration resolves its cooperative mode from the running harness"
+}
+
+# The hard safety rule: resolution may only ADD the cooperative mode on a
+# positive codex answer. An unresolved harness must keep the pre-existing default
+# mode, which never consults an auto-arm ledger, so a Codex claim sitting in the
+# home cannot buy an allow that the old guard would have blocked.
+test_hook_unflagged_under_an_unresolved_harness_never_cooperates() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unresolved")
+  : > "$dir/state/task1.meta"
+  seed_open_generation_claim "$dir" .codex-autoarm-epoch
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 \
+    run_hook_unflagged_under fm-not-a-harness "$dir" false); status=$?
+  kill "$CLAIM_PID" 2>/dev/null || true
+  wait "$CLAIM_PID" 2>/dev/null || true
+  expect_code 2 "$status" \
+    "an unresolved harness must not cooperate, even with a live Codex claim in the home"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "an unresolved harness must keep the pre-existing default-mode block"
+  pass "fm-turnend-guard: an unresolved harness never enters the cooperative mode"
+}
+
 test_hook_codex_mode_blocks_without_any_claim() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unclaimed")
@@ -2357,6 +2416,8 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_codex_mode_allows_on_open_codex_generation_claim
+test_hook_unflagged_under_codex_enters_the_cooperative_mode
+test_hook_unflagged_under_an_unresolved_harness_never_cooperates
 test_hook_codex_mode_blocks_without_any_claim
 test_hook_codex_mode_never_reads_claudes_ledger
 test_hook_codex_mode_keeps_the_one_shot_loop_guard

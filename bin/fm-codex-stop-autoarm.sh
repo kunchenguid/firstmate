@@ -97,11 +97,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_AUTOARM_PREFIX=.codex-autoarm
 OWNER_LOCK="$STATE/$FM_AUTOARM_PREFIX.lock"
 FAILURE_NOTICE="$STATE/$FM_AUTOARM_PREFIX-failure-notified"
-AUTOARM_ATTEMPTS=${FM_CODEX_AUTOARM_ATTEMPTS:-2}
-case "$AUTOARM_ATTEMPTS" in
-  1|2|3) : ;;
-  *) AUTOARM_ATTEMPTS=2 ;;
-esac
+AUTOARM_ATTEMPTS=2
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -297,7 +293,13 @@ if ! need_supervision; then
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
-  fm_autoarm_reset_owned "$STATE" "$MY_GEN" || autoarm_record clean
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN"
+  RESET_RC=$?
+  if [ "$RESET_RC" -eq 0 ]; then
+    autoarm_record clean
+  elif [ "$RESET_RC" -ne 2 ]; then
+    autoarm_record failed-suppressed
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
