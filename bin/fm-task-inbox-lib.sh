@@ -283,8 +283,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
 # record), 4 typed but the submit was PROVENLY swallowed, so this attempt's own
-# doorbell text is stranded in the composer. No return value is delivery proof;
-# the acknowledgement move is the only delivery signal.
+# doorbell text is stranded in the composer. 4 is reserved for backends whose
+# submit core can tell a swallowed Enter from one queued behind a busy agent
+# (fm_backend_submit_pending_is_proof); elsewhere a pending verdict is not
+# proof of anything and the attempt reports 0 as it did before. No return value
+# is delivery proof; the acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -323,12 +326,17 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # Exact `pending` is the backend's proof that our text is still sitting in
-  # the composer after its Enter retries; every other value (empty, unknown,
-  # pending-unproven, ...) stays advisory and never blocks a ring.
+  # Exact `pending` is a stranded-text proof only on a backend whose submit
+  # core resolves a queued Enter (fm_backend_submit_pending_is_proof); every
+  # other value (empty, unknown, pending-unproven, ...) and every `pending`
+  # from a backend without that proof stays advisory and never blocks a ring.
   case "$verdict" in
     send-failed) return 2 ;;
-    pending) return 4 ;;
+    pending)
+      if fm_backend_submit_pending_is_proof "$backend"; then
+        return 4
+      fi
+      ;;
   esac
   return 0
 }

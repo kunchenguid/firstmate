@@ -486,11 +486,14 @@ inbox_steer_check() {  # <window> <task>
       # type. Naming the worker there sends the investigation to the wrong
       # place, so the input-blocked case says what is actually stuck and what
       # releases it. The ladder budget is what bounds it: the suppression is
-      # surfaced once instead of repeating the blocked path forever.
+      # surfaced once instead of repeating the blocked path forever - and
+      # because this escalation marks the record, no further watcher ring will
+      # reach it, so the wake must hand the reader a delivery path of its own
+      # rather than promise one.
       blocked=$(fm_task_inbox_blocked_streak "$STATE" "$task" "$rec")
       case "$blocked" in ''|*[!0-9]*) blocked=0 ;; esac
       if [ "$count" -gt 0 ] && [ "$blocked" -ge "$count" ]; then
-        reason="stale: $w (unread firstmate instruction: $rec still unhandled; all $count doorbell delivery attempts were suppressed because the endpoint's input line holds unsubmitted text while the pane is idle - the worker is not the blocker; inspect that input line, submit or clear what is stranded there, then re-ring)"
+        reason="stale: $w (unread firstmate instruction: $rec still unhandled; all $count doorbell delivery attempts were suppressed because the endpoint's input line holds unsubmitted text while the pane is idle - the worker is not the blocker; inspect that input line, submit it when it is firstmate's own stranded doorbell or clear it when it is the worker's own half-typed text, then deliver the steer yourself with bin/fm-send.sh or hand $rec to the worker - this ladder has already escalated and will not ring this record again)"
       else
         reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
       fi
