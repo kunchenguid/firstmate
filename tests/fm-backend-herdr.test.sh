@@ -569,12 +569,15 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # A symlink to a shell blocking on sleep inside, so the kernel records `pi`
+  # as the executable identity (a copied platform binary fails code signing on
+  # macOS) while the process genuinely stays alive under every sleep build: a
+  # symlink straight to sleep dies at once where sleep is a multicall binary
+  # (uutils coreutils), whose dispatcher rejects the unknown applet name `pi`.
+  ln -sf "$(command -v sh)" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
-  sh -c "'$lab/pi' 300; :" &
+  sh -c "'$lab/pi' -c 'sleep 30'; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
@@ -595,14 +598,15 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 }
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
-  local lab sleep_bin shell_pid out
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local lab shell_pid out
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
-  sh -c "'$lab/pi' 300; :" &
+  # Same construction as the descendant case above: the shell symlink keeps
+  # `pi` alive under every sleep build, multicall binaries included.
+  ln -sf "$(command -v sh)" "$lab/pi"
+  sh -c "'$lab/pi' -c 'sleep 30'; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")
