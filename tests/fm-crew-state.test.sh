@@ -3259,7 +3259,7 @@ make_uninitialized_worker_case() {
   make_repo_on_branch "$d/wt" fm/no-gate
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS="error: \"repo not initialized (run 'no-mistakes init' first)\""
+  FM_FAKE_AXI_STATUS=$(cat "$ROOT/tests/captures/no-mistakes-v1.70.1/uninitialized.toon")
   FM_FAKE_AXI_STATUS_ERROR=1
   FM_FAKE_AXI_HOME_ERROR=1
   printf 'working: implementation continues\n' > "$d/state/worker.status"
@@ -3409,6 +3409,128 @@ test_legacy_conflicting_run_records_report_unknown() {
   pass 'legacy conflicting run records report unknown'
 }
 
+# Captured AXI stdout is a serialized input contract, not implementation source.
+# Only the run identity is rebound to each disposable git repository; status,
+# outcome, steps, findings, and gate bytes stay as emitted. The capture README
+# distinguishes genuine histories from deliberately composed scenarios.
+captured_axi_status() {  # <capture> [branch] [run-id]
+  awk -v branch="${2:-fm/competing}" -v id="${3:-01NEW}" -v head="$FM_FAKE_RUN_HEAD" '
+    /^  id:/ { print "  id: \"" id "\""; next }
+    /^  branch:/ { print "  branch: " branch; next }
+    /^  head:/ { print "  head: " head; next }
+    /^  head_sha:/ { print "  head_sha: " head; next }
+    { print }
+  ' "$ROOT/tests/captures/no-mistakes-v1.70.1/$1.toon"
+}
+
+test_captured_axi_status_shapes() {
+  local shape status expected d out toolbin
+  for shape in replacement parked failed; do
+    status=running; expected=working
+    case "$shape" in parked) expected=parked ;; failed) status=failed; expected=failed ;; esac
+    make_competing_runs_case "captured-$shape" "$status" cancelled
+    d=$TMP_ROOT/captured-$shape
+    FM_FAKE_AXI_STATUS=$(captured_axi_status superseded fm/competing 01OLD)
+    FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status "$shape")
+    # A newer failure must remain visible even with an older live record.
+    if [ "$shape" = failed ]; then
+      FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,cancelled,/,running,/')
+      FM_FAKE_AXI_STATUS=$(captured_axi_status replacement fm/competing 01OLD)
+    fi
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" "state: $expected" "captured $shape status is understood"
+    assert_contains "$out" '01NEW' "captured $shape preserves the selected identity"
+    if [ "$shape" = parked ]; then
+      assert_contains "$out" 'parked at test: 1 finding(s)' 'the captured gate retains its actual step and finding count'
+      toolbin=$(make_no_python_toolbin "$d")
+      out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+      assert_contains "$out" 'parked at test: 1 finding(s)' 'a complete captured gate remains readable without Python'
+      assert_contains "$out" '01NEW' 'the captured gate retains its id without Python'
+    fi
+    pass "captured AXI $shape status replays through crew-state"
+  done
+}
+
+test_captured_inventory_replay() {
+  make_capped_runs_case captured-inventory running cancelled
+  local d=$TMP_ROOT/captured-inventory out before after branch newer older toolbin
+  branch=fm/fm-bearings-board-loses-owner-state-and-links
+  newer=01M2GAWMSDQK4B5EA9GZW35RXE
+  older=01M20MQ02N69VJKXW9N8321SQW
+  git -C "$d/wt" checkout -q -b "$branch"
+  python3 - "$NM_HOME/state.sqlite" "$ROOT/tests/captures/no-mistakes-v1.70.1/same-branch-inventory.json" <<'PY'
+import json
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("DELETE FROM runs")
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
+        (r["id"], "repo", r["branch"], r["status"], r["head_sha"], r["created_at"])
+        for r in json.load(open(sys.argv[2]))
+    ])
+PY
+  FM_FAKE_AXI_HOME="repo: $d/wt
+$(cat "$ROOT/tests/captures/no-mistakes-v1.70.1/overview.toon")"
+  FM_FAKE_AXI_STATUS=$(captured_axi_status superseded "$branch" 01M2FNFPK984YP0EHFTD1XEF8P)
+  FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status replacement "$branch" "$newer")
+  before=$(git hash-object "$NM_HOME/state.sqlite")
+  out=$(run_crew_state "$d" competing)
+  after=$(git hash-object "$NM_HOME/state.sqlite")
+  assert_contains "$out" 'state: working' 'the recorded live successor outranks its superseded cancellation'
+  assert_contains "$out" "$newer" 'the recorded successor keeps its real run id'
+  [ "$before" = "$after" ] || fail 'captured inventory replay wrote to the database'
+  assert_not_contains "$FM_FAKE_AXI_HOME" "$older" 'the competing candidate is outside the real overview window'
+  # Counterfactual, not a recorded competing-live history: revive one hidden
+  # cancelled row, keeping its captured id, branch, head, and creation order.
+  python3 - "$NM_HOME/state.sqlite" "$older" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE runs SET status = 'running' WHERE id = ?", (sys.argv[2],))
+PY
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'a hidden counterfactual live competitor prevents selection'
+  assert_contains "$out" "$newer" 'captured ambiguity retains the visible id'
+  assert_contains "$out" "$older" 'captured ambiguity retains the hidden id'
+  toolbin=$(make_no_python_toolbin "$d")
+  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+  assert_contains "$out" 'state: unknown' 'missing optional lookup cannot imply exclusive authority'
+  assert_contains "$out" "$newer" 'unavailable lookup retains the captured visible id'
+  assert_contains "$out" 'inventory' 'unavailable lookup reports its evidence gap'
+  pass 'captured capped inventory replays selection, ambiguity, and unavailable lookup'
+}
+
+test_captured_authority_transition() {
+  make_competing_runs_case captured-transition running cancelled
+  local d=$TMP_ROOT/captured-transition out
+  FM_FAKE_AXI_STATUS=$(captured_axi_status replacement)
+  FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status superseded)
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'captured terminal output cannot validate a live selection'
+  assert_contains "$out" '01NEW' 'the changing selected id is preserved'
+  assert_contains "$out" '01OLD' 'the other available id is preserved'
+  pass 'captured status formats reject a synthetic authority transition'
+}
+
+test_captured_completed_history() {
+  local activity d out source
+  for activity in busy idle; do
+    make_historical_inventory_case "captured-history-$activity" "$activity"
+    d=$TMP_ROOT/captured-history-$activity
+    FM_FAKE_AXI_STATUS=$(captured_axi_status completed)
+    FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+    source=pane; [ "$activity" = busy ] || source=status-log
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" 'state: working' 'captured completion does not hide subsequent development'
+    assert_contains "$out" "source: $source" 'captured historical validation yields to current worker evidence'
+  done
+  pass 'captured completed status yields to synthetic subsequent development'
+}
+
+test_captured_axi_status_shapes
+test_captured_inventory_replay
+test_captured_authority_transition
+test_captured_completed_history
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
