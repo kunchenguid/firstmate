@@ -150,7 +150,10 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--retire-secondmate <task-id>]
+#   "--" ends the options: every argument after it is a target, so a selection
+#   list whose later ids spell option names refuses as a multi-target mistake
+#   instead of being read as flags.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -164,6 +167,17 @@
 #   an abandoned attempt left behind never counts as a published incarnation:
 #   the record still reads as a legacy record, so the endpoint gate runs again
 #   and the retry still needs --legacy-record.
+#   --retire-secondmate <task-id> is the per-target authority a kind=secondmate
+#   teardown requires. Its value must equal the task being torn down, so a
+#   cleanup list assembled by a caller cannot retire a persistent home as a side
+#   effect, and passing it for any other kind refuses as a mis-selected target.
+#   --force never substitutes for it: forced discard and choosing which home to
+#   retire are separate decisions.
+# Exactly one target per invocation. Extra task ids are refused before the lock,
+# naming the count and, when any of them is a secondmate, those ids - so a
+# mistaken selection list is caught while every seat is still alive. Choose
+# targets from bin/fm-fleet-view.sh --cleanup-candidates, which labels each live
+# task with its kind, rather than inferring persistence from a worktree path.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -286,25 +300,85 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
+TEARDOWN_TARGETS=()
+FORCE=
+LEGACY_RECORD_GIVEN=0
+RETIRE_AUTH=
+RETIRE_AUTH_GIVEN=0
+# The target is positional-first (usage above), exactly as it was before this
+# script took options at all. Parsing the first argument as an option would
+# strand any task whose id happens to spell one - fm_task_id_path_safe permits
+# "--force" and "--retire-secondmate" - leaving its worktree and treehouse
+# lease allocated with no way to reach it. So the first argument is always a
+# target, and only the arguments after it are read as options.
+if [ "$#" -gt 0 ]; then
+  TEARDOWN_TARGETS+=("$1")
+  shift
+fi
+# After "--" every remaining argument is a target: a selection list whose later
+# ids spell option names still reaches the multi-target refusal below instead
+# of being silently read as flags, where "--force" could also discard the first
+# target's work. Before it, the long options keep their flag meanings.
+SEEN_END_OF_OPTIONS=0
+while [ "$#" -gt 0 ]; do
+  if [ "$SEEN_END_OF_OPTIONS" = 1 ]; then
+    TEARDOWN_TARGETS+=("$1")
+  else
+    case "$1" in
+      --)
+        SEEN_END_OF_OPTIONS=1
+        ;;
+      --force) FORCE=--force ;;
+      --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+      --retire-secondmate)
+        shift
+        [ "$#" -gt 0 ] || {
+          echo "error: --retire-secondmate needs the exact task id it authorizes" >&2
+          exit 2
+        }
+        RETIRE_AUTH=$1
+        RETIRE_AUTH_GIVEN=1
+        ;;
+      --retire-secondmate=*)
+        RETIRE_AUTH=${1#*=}
+        RETIRE_AUTH_GIVEN=1
+        ;;
+      # Anything else is a target, not an unknown option: a task id may
+      # legitimately start with dashes. Same idiom as bin/fm-spawn.sh.
+      *) TEARDOWN_TARGETS+=("$1") ;;
+    esac
+  fi
+  shift
+done
+if [ "${#TEARDOWN_TARGETS[@]}" -lt 1 ]; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
-ID=$1
-FORCE=
-LEGACY_RECORD_GIVEN=0
-shift
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --force) FORCE=--force ;;
-    --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
-    *)
-      echo "error: invalid teardown request" >&2
-      exit 2
-      ;;
-  esac
-  shift
+for teardown_target in "${TEARDOWN_TARGETS[@]}"; do
+  fm_task_id_path_safe "$teardown_target" || {
+    echo "error: invalid teardown request" >&2
+    exit 2
+  }
 done
+# Loop-shape refusal. Teardown acts on exactly one target, so a selection list
+# handed to one invocation is a caller mistake, not a request. Answered here,
+# before the lock and before any read that could mutate, so a list that sweeps
+# up persistent homes is caught while every seat is still alive.
+if [ "${#TEARDOWN_TARGETS[@]}" -gt 1 ]; then
+  TEARDOWN_BATCH_SECONDMATES=()
+  for teardown_target in "${TEARDOWN_TARGETS[@]}"; do
+    [ "$(fm_meta_get "$STATE/$teardown_target.meta" kind)" = secondmate ] || continue
+    TEARDOWN_BATCH_SECONDMATES+=("$teardown_target")
+  done
+  echo "error: teardown acts on exactly one task, but ${#TEARDOWN_TARGETS[@]} targets were given: ${TEARDOWN_TARGETS[*]}" >&2
+  if [ "${#TEARDOWN_BATCH_SECONDMATES[@]}" -gt 0 ]; then
+    echo "error: ${#TEARDOWN_BATCH_SECONDMATES[@]} of those targets are persistent secondmate homes, not finished workers: ${TEARDOWN_BATCH_SECONDMATES[*]}" >&2
+    echo "Retiring a secondmate is a per-target decision. Nothing was changed." >&2
+  fi
+  echo "List candidates with their kinds using bin/fm-fleet-view.sh --cleanup-candidates, then act on one target per invocation." >&2
+  exit 2
+fi
+ID=${TEARDOWN_TARGETS[0]}
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -422,6 +496,30 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+# Per-target authority for a persistent home. A secondmate is retired only by a
+# decision naming that exact home, so a cleanup list a caller assembled - from a
+# path glob, a pane sweep, an idle-looking queue - can never retire one as a
+# side effect. Asked before every destructive step, including the remote
+# retirement path below, and answered from the task's own kind rather than from
+# anything the caller passed in.
+if [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  if [ "$RETIRE_AUTH_GIVEN" != 1 ]; then
+    echo "REFUSED: task $ID is a persistent secondmate home, not a finished worker; nothing was changed." >&2
+    echo "An idle queue is a healthy secondmate's normal state, never evidence it is done." >&2
+    echo "Retiring it takes authority naming that exact home: bin/fm-teardown.sh $ID --retire-secondmate $ID" >&2
+    echo "List candidates with their kinds using bin/fm-fleet-view.sh --cleanup-candidates rather than inferring persistence from a worktree path." >&2
+    exit 1
+  fi
+  if [ "$RETIRE_AUTH" != "$ID" ]; then
+    echo "REFUSED: --retire-secondmate names ${RETIRE_AUTH:-<empty>}, but this teardown targets $ID; nothing was changed." >&2
+    echo "Authority for retiring a persistent home must name that exact home." >&2
+    exit 1
+  fi
+elif [ "$RETIRE_AUTH_GIVEN" = 1 ]; then
+  echo "REFUSED: --retire-secondmate was given for task $ID, which is a $TEARDOWN_META_KIND task and not a secondmate home; nothing was changed." >&2
+  echo "That mismatch means the target was selected wrong; re-check it with bin/fm-fleet-view.sh --cleanup-candidates." >&2
+  exit 1
+fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0

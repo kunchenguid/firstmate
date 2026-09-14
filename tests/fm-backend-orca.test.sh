@@ -1219,7 +1219,7 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force --retire-secondmate domain 2>&1 )
   rc=$?
   set -e
   expect_code 0 "$rc" "forced secondmate teardown should remove Orca child work through Orca"$'\n'"$out"
@@ -1262,7 +1262,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force --retire-secondmate domain 2>&1 )
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "forced secondmate teardown should refuse mismatched Orca child id/path"
@@ -1302,7 +1302,7 @@ test_secondmate_force_teardown_refuses_partial_orca_child() {
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force --retire-secondmate domain 2>&1 )
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "forced secondmate teardown accepted a child with no terminal identity"
