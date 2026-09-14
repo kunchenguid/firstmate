@@ -133,6 +133,23 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
       if (s ~ /^".*"$/) s = substr(s, 2, length(s)-2)
       return s
     }
+    function row_fields(s, f, i, ch, n, quoted, escaped) {
+      for (i in f) delete f[i]
+      n = 1; f[n] = ""
+      for (i = 1; i <= length(s); i++) {
+        ch = substr(s, i, 1)
+        if (escaped) { f[n] = f[n] ch; escaped = 0 }
+        else if (quoted && ch == "\\") escaped = 1
+        else if (ch == "\"") quoted = !quoted
+        else if (!quoted && ch == ",") { n++; f[n] = "" }
+        else f[n] = f[n] ch
+      }
+      if (quoted || escaped) return 0
+      for (i = 1; i <= n; i++) {
+        sub(/^[ \t]+/, "", f[i]); sub(/[ \t]+$/, "", f[i])
+      }
+      return n
+    }
     /^count: / {
       if (counts++) bad = 1
       count = scalar(substr($0, 8))
@@ -147,17 +164,19 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     /^runs\[/ { bad = 1; found = 1 }
     inrows && /^[ \t]+/ {
       seen++
-      n = split($0, f, ",")
-      id = scalar(f[1]); br = scalar(f[2]); st = scalar(f[3]); head = scalar(f[4])
-      if (br == branch && id ~ /^[A-Za-z0-9_-]+$/) {
-        if (known[id]++) bad = 1
+      n = row_fields($0, f)
+      if (n != 5) bad = 1
+      id = f[1]; br = f[2]; st = f[3]; head = f[4]
+      if (br != branch) next
+      if (id ~ /^[A-Za-z0-9_-]+$/) {
+        if (known[id]++) invalid_run = 1
         else ids = ids (ids == "" ? "" : ", ") id
       }
-      if (n != 5 || id !~ /^[A-Za-z0-9_-]+$/ || br !~ /^[A-Za-z0-9._\/-]+$/ ||
+      if (n != 5) next
+      if (id !~ /^[A-Za-z0-9_-]+$/ ||
           st !~ /^[a-z_-]+$/ || head !~ /^[a-fA-F0-9]+$/ || length(head) < 7 || length(head) > 40) {
-        bad = 1; next
+        invalid_run = 1; next
       }
-      if (br != branch) next
       if (first == "") { first = id; first_status = st }
       if (st == "running" || st == "pending") live++
       if (st !~ /^(pending|running|completed|failed|cancelled)$/) unknown_status = 1
@@ -169,6 +188,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
       else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
         print "unknown|unreadable runs table; run ids: " ids
       else if (shown < total) print "incomplete|" ids
+      else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids
       else if (unknown_status) print "unknown|unrecognized run status; run ids: " ids
       else if (first == "") print "absent"
       else if ((first_status == "running" || first_status == "pending") && live > 1)
@@ -224,7 +244,7 @@ try:
     print("count: %d of %d total" % (len(rows), len(rows)))
     print("runs[%d]{id,branch,status,head,pr}:" % len(rows))
     for row in rows:
-        print("  " + ",".join(row) + ",")
+        print("  " + ",".join(json.dumps(value, ensure_ascii=False) for value in row) + ',""')
 except (ValueError, OSError, sqlite3.Error):
     print("unknown|complete same-branch run inventory unreadable; run ids: " + ", ".join(ids))
 PY
