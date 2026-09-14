@@ -240,8 +240,8 @@ test_spawn_tmux_and_fakebin() {
   assert_grep 'codex --yolo' "$log" "send-keys -l payload was not logged"
   [ -x "$fakebin/treehouse" ] || fail "spawn fakebin should include treehouse"
   [ -x "$fakebin/gh-axi" ] || fail "extra exit-0 tools should land in the spawn fakebin"
-  "$fakebin/treehouse" get
-  expect_code 0 $? "fake treehouse should exit 0"
+  "$fakebin/treehouse" get >/dev/null 2>&1
+  expect_code 1 $? "fake treehouse must refuse a missing allocation path"
   pass "spawn fakebin answers pane path, logs -l payloads, and installs extra tools"
 }
 
@@ -279,6 +279,75 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+test_treehouse_native_state_is_fixture_owned() {
+  local inner fakebin slot shallow outside sentinel before cmd out rc
+  inner=$(TMPDIR="$TMP_ROOT" fm_test_tmproot fm-inner-pool)
+  fakebin=$(fm_fakebin "$inner/tool")
+  slot="$inner/pool/1/project"
+  shallow="$inner/worktree"
+  outside="$TMP_ROOT/outside/1/project"
+  sentinel="$TMP_ROOT/treehouse-state.json"
+  mkdir -p "$slot" "$shallow" "$outside"
+  if fm_test_fake_treehouse "$fakebin" 2>/dev/null; then
+    fail "ambiguous nested fixture roots were accepted without an explicit owner"
+  fi
+  fm_test_fake_treehouse "$fakebin" "$inner" || fail "explicit registered fixture owner was refused"
+  # The historical shape computes state in the selected fixture's parent.
+  # That parent is itself our outer fixture: no shared /tmp file is accessed.
+  for cmd in status get lease return; do
+    out=$(FM_FAKE_LEASE_PATH="$shallow" "$fakebin/treehouse" "$cmd" --json 2>&1); rc=$?
+    expect_code 1 "$rc" "shallow $cmd must refuse before native-state access"
+    assert_contains "$out" 'fixture Treehouse refused' "shallow refusal lost its fixture cause"
+    assert_absent "$sentinel" "shallow $cmd created native state outside its owner"
+  done
+  printf '{"worktrees":[],"sentinel":"unchanged"}\n' > "$sentinel"
+  before=$(cksum "$sentinel")
+  for cmd in status get lease return; do
+    FM_FAKE_LEASE_PATH="$shallow" "$fakebin/treehouse" "$cmd" --json >/dev/null 2>&1
+    expect_code 1 $? "shallow $cmd accepted existing outside state"
+    [ "$(cksum "$sentinel")" = "$before" ] || fail "shallow $cmd modified outside state"
+    FM_FAKE_LEASE_PATH="$outside" "$fakebin/treehouse" "$cmd" --json >/dev/null 2>&1
+    expect_code 1 $? "escaped $cmd accepted a sibling fixture path"
+  done
+  # Return must validate its argument, not the safe default allocation path.
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" return "$shallow" >/dev/null 2>&1
+  expect_code 1 $? "return's explicit target escaped its owner"
+  ln -s "$outside" "$inner/pool/1/escape"
+  FM_FAKE_LEASE_PATH="$inner/pool/1/escape" "$fakebin/treehouse" get >/dev/null 2>&1
+  expect_code 1 $? "a canonical copy path escaped through a symlink"
+  ln -s "$sentinel" "$inner/pool/treehouse-state.json"
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" status --json >/dev/null 2>&1
+  expect_code 1 $? "status followed a native-state symlink"
+  rm "$inner/pool/treehouse-state.json"
+  ln "$sentinel" "$inner/pool/treehouse-state.json"
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" get >/dev/null 2>&1
+  expect_code 1 $? "get wrote a native-state hardlink"
+  rm "$inner/pool/treehouse-state.json"
+  mv "$inner/.fm-test-fixture" "$inner/owner.saved"
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" status --json >/dev/null 2>&1
+  expect_code 1 $? "status accepted a missing fixture owner"
+  printf '0\nwrong-owner\n' > "$inner/.fm-test-fixture"
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" get >/dev/null 2>&1
+  expect_code 1 $? "get accepted a replaced fixture owner"
+  mv "$inner/owner.saved" "$inner/.fm-test-fixture"
+  [ "$(cksum "$sentinel")" = "$before" ] || fail "negative probes changed outside state"
+  assert_absent "$TMP_ROOT/outside/treehouse-state.json" "escaped probe created outside state"
+  assert_absent "$inner/pool/treehouse-state.json" "refused probe created inside state"
+  out=$(FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" get --lease --lease-holder fixture-owner --json)
+  expect_code 0 $? "owned native allocation should succeed"
+  local lease_id
+  lease_id=$(printf '%s\n' "$out" | jq -er .lease_id) || fail "owned allocation has no lease"
+  out=$(FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" status --json)
+  [ "$(printf '%s\n' "$out" | jq -r '.[0].status')" = leased ] || fail "owned status lost its lease"
+  FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" return "$slot" --if-lease-id "$lease_id"
+  expect_code 0 $? "owned conditional return should succeed"
+  out=$(FM_FAKE_LEASE_PATH="$slot" "$fakebin/treehouse" status --json)
+  [ "$(printf '%s\n' "$out" | jq -r '.[0].status')" = available ] || fail "owned return did not release"
+  [ "$(cksum "$sentinel")" = "$before" ] || fail "owned lifecycle modified outside state"
+  pass "native-state reads and writes stay within one registered fixture owner"
+}
+
+test_treehouse_native_state_is_fixture_owned
 test_git_config_isolation || fail "Git fixture config isolation"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant

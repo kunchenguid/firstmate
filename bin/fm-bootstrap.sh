@@ -54,7 +54,7 @@
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          Treehouse reservation capabilities (bin/fm-wake-lib.sh).
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -918,7 +918,10 @@ GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.46
 
 treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+  # Shared feature probe: bootstrap and acquisition require the same contract.
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_treehouse_supports_reservations
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that

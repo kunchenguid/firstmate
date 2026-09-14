@@ -266,7 +266,7 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log lease out
+  local home acquired acquired_abs fakebin log lease out status retained_status
   home="$TMP_ROOT/dash-home"
   acquired="$TMP_ROOT/dash-acquired-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -277,6 +277,20 @@ test_home_seed_uses_treehouse_acquired_home() {
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
   log="$TMP_ROOT/dash-fake/tmux.log"
   lease="$TMP_ROOT/dash-fake/lease"
+
+  fm_write_meta "$home/state/preserved.meta" "kind=ship" "worktree=$acquired" "project=$ROOT"
+  retained_status=$(jq -nc --arg p "$acquired" '[{name:"1",path:$p,status:"available"}]')
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_STATUS="$retained_status" FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "home seeding acquired an unleased retained worker copy"
+  assert_contains "$out" "without a durable lease" "home seeding did not report the retained copy"
+  [ ! -e "$lease" ] || fail "refused home seeding acquired a lease"
+  [ -f "$home/state/preserved.meta" ] && [ -f "$acquired/AGENTS.md" ] || fail "home seeding removed retained work or metadata"
+  ! grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "home seeding requested a copy before resolving its retained record"
+  rm "$home/state/preserved.meta"
+  : > "$log"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
@@ -1925,8 +1939,8 @@ EOF
     fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
-    || fail "force teardown failed to discard child work"
+    "$ROOT/bin/fm-teardown.sh" domain --force >"$TMP_ROOT/force-teardown-result" 2>&1 \
+    || fail "force teardown failed to discard child work: $(cat "$TMP_ROOT/force-teardown-result")"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"

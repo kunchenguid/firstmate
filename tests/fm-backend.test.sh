@@ -29,8 +29,8 @@
 # kill) lives in tests/fm-backend-tmux-smoke.test.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
@@ -807,7 +807,10 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_treehouse "$fb"
+  mv "$fb/treehouse" "$fb/treehouse-model"
+  printf '#!/usr/bin/env bash\nexport FM_FAKE_LEASE_PATH=%q\nexec %q "$@"\n' "$wt" "$fb/treehouse-model" > "$fb/treehouse"
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -877,7 +880,10 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_treehouse "$fb"
+  mv "$fb/treehouse" "$fb/treehouse-model"
+  printf '#!/usr/bin/env bash\nexport FM_FAKE_LEASE_PATH=%q\nexec %q "$@"\n' "$wt" "$fb/treehouse-model" > "$fb/treehouse"
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -887,7 +893,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   mkdir -p "$real_root"
   ln -s "$real_root" "$link_root"
   proj="$link_root/proj"
-  wt="$TMP_ROOT/symlink-wt-$label"
+  wt="$TMP_ROOT/symlink-wt-$label-pool/1/worktree"
   id="spawnsymlink$label"
   fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
   # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
@@ -954,7 +960,8 @@ SH
 run_teardown_case() {
   local script=$1 fmroot=$2 fb=$3 log=$4 state=$5 data=$6 config=$7 id=$8
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$fmroot" \
+  mkdir -p "${state%/*}/teardown-home/state"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="${state%/*}/teardown-home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_TMUX_LOG="$log" \
     "$script" "$id"
@@ -975,7 +982,7 @@ test_teardown_conformance_old_vs_new() {
   git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
     || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
   BASE_REF=$saved_base_ref
-  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
+  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt-pool/1/worktree"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake")
@@ -1060,7 +1067,7 @@ test_spawn_refuses_unknown_fm_backend_env() {
 
 test_spawn_default_backend_writes_no_meta_field() {
   local proj wt data id state config out
-  proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
+  proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt-pool/1/worktree"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
@@ -1083,7 +1090,7 @@ test_spawn_default_backend_writes_no_meta_field() {
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
-  proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
+  proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt-pool/1/worktree"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
@@ -1107,7 +1114,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 
 test_spawn_autodetect_nesting_resolves_tmux_silently() {
   local proj wt data id state config out fb
-  proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
+  proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt-pool/1/worktree"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")

@@ -154,7 +154,7 @@ test_spawn_refuses_and_admits() {
   proj=$(make_normal_repo "$TMP/spawn-proj")
   fm_git_add_origin "$proj" "$TMP/spawn-origin.git"
   fakebin=$(make_spawn_fakebin "$TMP/spawn-fake")
-  wt="$TMP/spawn-wt"
+  wt="$TMP/spawn-pool/1/project"
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
 
   # env-marker refuse: neutral cwd, marker set.

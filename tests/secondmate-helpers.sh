@@ -72,7 +72,12 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${2:-}" = --help ]; then
+  printf '%s\n' 'get --lease --json --lease-holder; status --json; return --if-lease-id'
+  exit 0
+fi
 case "${1:-}" in
+  status) printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS:-[]}"; exit 0 ;;
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
     # and record the lease holder so tests can assert it is set and later cleared.

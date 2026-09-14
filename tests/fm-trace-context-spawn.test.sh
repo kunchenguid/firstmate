@@ -4,8 +4,8 @@
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -33,11 +33,13 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"#{pane_current_command}"*) printf 'bash\n'; exit 0 ;;
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
+    if [ -n "${FM_FAKE_RELAUNCH_WINDOW:-}" ]; then printf '%s\n' "$FM_FAKE_RELAUNCH_WINDOW"; exit 0; fi
     [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     exit 0
     ;;
@@ -89,7 +91,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_test_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -119,6 +121,13 @@ make_spawn_case() {
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
+  local -a args
+  args=("$@" --mode no-mistakes --yolo off)
+  local relaunch_window=''
+  if [ -f "$home/state/$1.meta" ]; then
+    args=("$1" --relaunch --harness claude)
+    relaunch_window="fm-$1"
+  fi
   : > "$launchlog"
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
@@ -132,9 +141,10 @@ run_spawn() {
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
+    FM_FAKE_RELAUNCH_WINDOW="$relaunch_window" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "${args[@]}" 2>&1
 }
 
 # Same, but with an explicit FM_TRACE_CONTEXT override, to prove the env decides.
@@ -431,7 +441,7 @@ test_relaunch_reuses_recorded_carrier() {
   # restarts.
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "relaunch spawn should succeed"
+  expect_code 0 "$status" "relaunch spawn should succeed: $out"
   assert_contains "$out" "spawned $CASE_ID" "relaunch spawn should report success"
   second=$(meta_traceparent "$meta")
   injected=$(injected_traceparent "$LAUNCH_LOG")
@@ -527,8 +537,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   id_a=routed-a-z1
   id_b=routed-b-z1
-  proj_a="$base/proj-a"; wt_a="$base/wt-a"
-  proj_b="$base/proj-b"; wt_b="$base/wt-b"
+  proj_a="$base/proj-a"; wt_a="$base/slot-a/worktree"
+  proj_b="$base/proj-b"; wt_b="$base/slot-b/worktree"
   fm_git_worktree "$proj_a" "$wt_a" wt-routed-a
   fm_git_worktree "$proj_b" "$wt_b" wt-routed-b
   mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"

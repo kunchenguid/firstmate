@@ -19,7 +19,7 @@ make_case() {
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
+  pool="$case_dir/slots/1/project"
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
@@ -149,9 +149,9 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
       # own project comparison, and the repository primary (named directly or
       # through a symlink) fails the isolation screen the poll shares with the
       # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "did not enter an isolated worktree" \
+      assert_contains "$out" "isolated worktree" \
         "spawn did not explain its isolation refusal"
-      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      assert_contains "$out" "resolved" "refusal did not name the path the pane reported"
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
@@ -168,6 +168,7 @@ test_stale_pool_base_refreshes_before_branching() {
   id='pool-current-base-r1'
   rec=$(make_case current-base "$id")
   read_case_record "$rec"
+  lay_out_as_pool_slot
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -184,10 +185,13 @@ test_stale_pool_base_refreshes_before_branching() {
   fi
 
   id='pool-current-base-repeat-r1'
+  # A second task needs a second free copy; the first task still owns its lease.
+  POOL_DIR="$CASE_DIR/slots/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$current"
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "repeating the base refresh should be idempotent"
+  expect_code 0 "$status" "repeating the base refresh should be idempotent: $out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
     || fail "an idempotent repeat moved the pool away from current origin/main"
 
@@ -220,7 +224,7 @@ make_originless_case() {  # <name> <id>
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
-  pool="$case_dir/pool"
+  pool="$case_dir/slots/1/project"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
@@ -465,7 +469,7 @@ make_submodule_case() {  # <name> <id>
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
+  pool="$case_dir/slots/1/project"
   publisher="$case_dir/publisher"
   sub="$case_dir/sub-origin"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
@@ -528,6 +532,13 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # The first task now retains its lease. Recreate that proven Git/submodule
+  # snapshot in a second free slot to exercise the independent freshness gate.
+  POOL_DIR="$CASE_DIR/slots/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$ADVANCED_SHA"
+  git -C "$POOL_DIR" -c protocol.file.allow=always submodule --quiet update --init
+  git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN1"
+
 }
 
 test_stale_submodule_pin_explains_itself() {
@@ -682,7 +693,9 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
 lay_out_as_pool_slot() {
   local slot_root="$CASE_DIR/slots"
   mkdir -p "$slot_root/1"
-  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  if [ "$POOL_DIR" != "$slot_root/1/project" ]; then
+    git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  fi
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
     > "$slot_root/treehouse-state.json"
   POOL_DIR="$slot_root/1/project"
@@ -692,7 +705,7 @@ lay_out_as_pool_slot() {
 # The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
 # a launched task's claim names it, a slot that cannot be claimed refuses before
 # anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
+# preserves the exact claim even when no task record was published.
 test_pool_slot_claim_follows_the_spawn_outcome() {
   local rec id out status before
 
@@ -720,7 +733,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   out=$(run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
-  assert_contains "$out" "could not claim Treehouse pool slot" \
+  assert_contains "$out" "retained owner claim" \
     "spawn did not name the unclaimable slot as the reason"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
@@ -738,11 +751,194 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   assert_contains "$out" "could not fetch origin" \
     "the aborted spawn did not refuse on its unusable origin"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
-  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
-    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
-  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+  [ -f "$SLOT_CLAIM" ] || fail "aborted spawn lost its exact reservation claim"
+  before=$(cat "$SLOT_CLAIM")
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a retry reused an interrupted acquisition"
+  assert_contains "$out" "retained Treehouse acquisition" "retry did not identify the prior reservation"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] || fail "retry replaced the earlier claim"
+  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and survives abort plus retry"
 }
 
+# Wait for the external child to start before asking it to exit. An immediate
+# TERM can hit Bash before exec and run the parent's inherited EXIT cleanup.
+# The FIFO protocol proves the child occupied the copy and exited normally.
+fixture_process_exits_from_copy() { # <copy> <fixture-directory>
+  local copy=$1 fixture=$2 worker ready_pid
+  mkfifo "$fixture/process-ready" "$fixture/process-stop"
+  exec 8<>"$fixture/process-stop" 9<>"$fixture/process-ready"
+  bash -c 'cd "$1" || exit; printf "%s\n" "$$" >&9; read -r -t 5 stop <&8; [ "$stop" = stop ]' _ "$copy" & worker=$!
+  read -r -t 5 ready_pid <&9 || fail "fixture child did not become ready"
+  [ "$ready_pid" = "$worker" ] || fail "fixture readiness named a different process"
+  printf 'stop\n' >&8
+  wait "$worker" || fail "fixture child did not acknowledge its normal exit"
+  exec 8>&- 9>&-
+}
+
+# The reported boundary: a stopped record still owns its clean slot. The
+# native lease, task claim and metadata each have an interruption window.
+test_retained_records_and_interrupted_acquisitions() {
+  local rec id=reserve-legacy new_id=reserve-new out status before old_slot lease foreign
+  rec=$(make_case reserve-legacy "$new_id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  old_slot=$POOL_DIR
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" "harness=codex" \
+    "kind=ship" "worktree=$POOL_DIR" "project=$PROJECT_DIR"
+  before=$(cat "$CASE_DIR/slots/treehouse-state.json")
+  out=$(run_spawn "$new_id" --scout); status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a retained unleased task copy"
+  assert_contains "$out" "without a durable lease" "legacy refusal did not identify the missing reservation"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "legacy preflight changed native allocation state"
+
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_FAKE_POOL_STATUS='[]' PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "reserve accepted a copy outside the configured native pool"
+  assert_contains "$out" "configured native pool" "reserve did not identify the pool mismatch"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "pool mismatch changed native state"
+
+  # Metadata-only secondmate homes participate before registry publication.
+  foreign="$CASE_DIR/foreign-home"
+  mkdir -p "$foreign/state"
+  fm_write_meta "$HOME_DIR/state/other-home.meta" "kind=secondmate" "home=$foreign"
+  fm_write_meta "$foreign/state/$id.meta" "kind=ship" "worktree=$POOL_DIR"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "reserve adopted a copy also recorded in another home"
+  assert_contains "$out" "also records" "reserve did not identify the conflicting home record"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "duplicate-record refusal changed the native pool"
+  rm "$foreign/state/$id.meta" "$HOME_DIR/state/other-home.meta"
+  printf 'task=%s\nhome=%s\n' "$id" "$foreign" > "$SLOT_CLAIM"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "same task id in a foreign home stole the claim"
+  assert_contains "$out" "foreign or ambiguous claim" "reserve did not refuse the foreign home"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "foreign-claim refusal changed the native pool"
+  rm "$SLOT_CLAIM"
+
+  # Losing the in-place lease reply leaves native exclusion in force.
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_FAKE_LEASE_RESPONSE_FAIL=1 PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "lost lease response unexpectedly published a claim"
+  [ ! -f "$SLOT_CLAIM" ] || fail "lost response published an unverified claim"
+  before=$(cat "$CASE_DIR/slots/treehouse-state.json")
+  jq '.worktrees[0].lease_holder = "another-owner"' "$CASE_DIR/slots/treehouse-state.json" > "$CASE_DIR/slots/foreign.json"
+  mv "$CASE_DIR/slots/foreign.json" "$CASE_DIR/slots/treehouse-state.json"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "reserve stole a foreign native lease"
+  assert_contains "$out" "another native lease holder" "reserve did not refuse the foreign native lease"
+  [ "$(jq -r '.worktrees[0].lease_holder' "$CASE_DIR/slots/treehouse-state.json")" = another-owner ] || fail "reserve replaced another native holder"
+  printf '%s\n' "$before" > "$CASE_DIR/slots/treehouse-state.json"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_PANE_PATH="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  expect_code 0 "$status" "reserve must adopt the exact retained copy in place: $out"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "reserve retry changed the interrupted native reservation"
+  assert_contains "$out" "reserved $id" "reserve did not report its verified binding"
+  lease=$(sed -n 's/^lease_id=//p' "$SLOT_CLAIM")
+  [ -n "$lease" ] || fail "reserve did not bind the lease identity"
+  before=$(cat "$CASE_DIR/slots/treehouse-state.json")
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_PANE_PATH="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  expect_code 0 "$status" "repeating reserve should retain the same lease: $out"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "repeated reserve changed native ownership"
+
+  # A normal fixture subprocess is deliberately independent of the lease.
+  fixture_process_exits_from_copy "$POOL_DIR" "$CASE_DIR"
+  mkdir -p "$CASE_DIR/slots/2"
+  POOL_DIR="$CASE_DIR/slots/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" HEAD
+  out=$(run_spawn "$new_id" --scout); status=$?
+  expect_code 0 "$status" "a genuinely free new copy should remain assignable: $out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$new_id.meta" "new task did not get the free copy"
+  [ "$(sed -n 's/^lease_id=//p' "$CASE_DIR/slots/1/.fm-slot-owner")" = "$lease" ] || fail "process exit/new spawn changed the old reservation"
+  [ "$(git -C "$old_slot" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "adoption or new spawn refreshed retained work"
+
+  id=reserve-interrupted
+  rec=$(make_case reserve-interrupted "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(FM_FAKE_LEASE_RESPONSE_FAIL=1 run_spawn "$id" --scout); status=$?
+  [ "$status" -ne 0 ] || fail "interrupted lease response should refuse launch"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "interrupted acquisition published a worker record"
+  before=$(cat "$CASE_DIR/slots/treehouse-state.json")
+  out=$(run_spawn "$id" --scout); status=$?
+  [ "$status" -ne 0 ] || fail "retry allocated over its older interrupted acquisition"
+  assert_contains "$out" "retained Treehouse acquisition" "retry did not surface the older lease"
+  [ "$(cat "$CASE_DIR/slots/treehouse-state.json")" = "$before" ] || fail "retry released or replaced a prior acquisition"
+  pass "retained legacy copies refuse get, reserve converges, process exit preserves ownership, and interrupted acquisition cannot be stolen by retry"
+}
+
+# Real Treehouse, ordinary subprocesses only. No backend, agent or Herdr call.
+# This counterfactual remains useful on newer Treehouse versions that protect
+# unlanded commits: a clean/landed task copy is still reserved by its metadata.
+test_native_process_exit_vs_durable_reservation() (
+  local native lab project ready get_pid='' shell_pid='' slot native_slot other_slot json n out status before
+  native=$(command -v treehouse || true)
+  if [ -z "$native" ] || ! "$native" get --help 2>&1 | grep -q -- '--json'; then
+    printf 'skip - native Treehouse lease JSON unavailable; portable reservation fixtures still run\n'
+    return
+  fi
+  lab="$TMP_ROOT/native-reservations"
+  project="$lab/project"
+  ready="$lab/ready"
+  mkdir -p "$lab/home/state" "$lab/home/data" "$lab/home/config"
+  fm_git_init_commit "$project"
+  export TREEHOUSE_ROOT="$lab/pool" FM_HOME="$lab/home"
+  export FM_RESERVATION_READY="$ready"
+  cat > "$lab/hold-shell" <<'HOLD'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "$PWD" "$$" > "$FM_RESERVATION_READY"
+exec sleep 120
+HOLD
+  chmod +x "$lab/hold-shell"
+  trap '[ -z "$get_pid" ] || kill -KILL "$get_pid" 2>/dev/null || true; [ -z "$shell_pid" ] || kill -KILL "$shell_pid" 2>/dev/null || true' EXIT
+  (cd "$project" && SHELL="$lab/hold-shell" exec "$native" get --no-fetch) > "$lab/plain.log" 2>&1 &
+  get_pid=$!
+  for n in $(seq 1 200); do [ ! -s "$ready" ] || break; sleep 0.1; done
+  [ -s "$ready" ] || fail "native interactive get did not enter the fixture slot: $(cat "$lab/plain.log")"
+  slot=$(sed -n '1p' "$ready")
+  shell_pid=$(sed -n '2p' "$ready")
+  fm_write_meta "$FM_HOME/state/retained.meta" "worktree=$slot" "project=$project" "kind=ship" \
+    "window=isolated:fm-retained" "endpoint_task_id=retained" "harness=codex"
+  kill -KILL "$get_pid" "$shell_pid"
+  wait "$get_pid" 2>/dev/null || true
+  get_pid='' shell_pid=''
+  if ! "$native" lease --help 2>&1 | grep -q 'lease <name>'; then
+    before=$(cat "$(dirname "$(dirname "$slot")")/treehouse-state.json")
+    out=$(FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-control.sh" retained reserve 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "old Treehouse was silently used to migrate retained work"
+    assert_contains "$out" "lacks in-place" "missing native adoption capability was not diagnosed"
+    [ "$(cat "$(dirname "$(dirname "$slot")")/treehouse-state.json")" = "$before" ] || fail "capability refusal changed the real pool"
+  fi
+  json=$(cd "$project" && "$native" get --lease --no-fetch --json --lease-holder native-first) || fail "native leased get failed"
+  native_slot=$(printf '%s\n' "$json" | jq -r '.path')
+  [ "$native_slot" = "$slot" ] || fail "native counterfactual did not reproduce process-only reissue"
+  fixture_process_exits_from_copy "$slot" "$lab"
+  json=$(cd "$project" && "$native" get --lease --no-fetch --json --lease-holder native-second) || fail "native second lease failed"
+  other_slot=$(printf '%s\n' "$json" | jq -r '.path')
+  [ "$other_slot" != "$slot" ] || fail "native lease was reissued after subprocess exit"
+  json=$(cd "$project" && "$native" status --json) || fail "native status failed"
+  printf '%s\n' "$json" | jq -e --arg p "$slot" \
+    'any(.[]; .path == $p and .status == "leased" and .lease_holder == "native-first" and (.processes | length == 0))' >/dev/null \
+    || fail "process-free native reservation no longer names its original owner"
+  out=$(cd "$project" && "$native" return "$slot" --if-lease-id wrong-lease-id 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "native conditional return accepted a different lease id"
+  json=$(cd "$project" && "$native" status --json) || fail "native status failed after wrong-id return"
+  printf '%s\n' "$json" | jq -e --arg p "$slot" \
+    'any(.[]; .path == $p and .status == "leased" and .lease_holder == "native-first")' >/dev/null \
+    || fail "wrong-id return altered native ownership"
+  pass "real Treehouse: stopped process-only copy is reissued; durable reservation remains owned with zero processes while a free copy is assigned"
+)
+
+
+test_retained_records_and_interrupted_acquisitions
+test_native_process_exit_vs_durable_reservation || exit $?
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh

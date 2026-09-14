@@ -6,6 +6,44 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Preserved Treehouse reservations
+
+Verified on Linux on 2026-09-14 with Treehouse v2.2.1 and isolated Git projects, `FM_HOME`, and `TREEHOUSE_ROOT`:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh tests/fm-spawn-worktree-settle.test.sh
+```
+
+The native counterfactual opens an ordinary fixture shell through process-scoped Treehouse get, ends those exact processes, preserves the task record, and observes that a subsequent allocation reuses the copy.
+With a durable native lease, normal fixture subprocess exit leaves the old copy leased with zero processes while another free copy is allocated.
+A wrong lease-id return is refused by the installed native tool.
+The same executable regression refuses an unsupported in-place adoption capability without changing native pool state.
+Observed reservation output:
+
+```text
+ok - retained legacy copies refuse get, reserve converges, process exit preserves ownership, and interrupted acquisition cannot be stolen by retry
+ok - real Treehouse: stopped process-only copy is reissued; durable reservation remains owned with zero processes while a free copy is assigned
+# all fm-spawn-pool-base-freshen tests passed
+```
+
+The portable native model additionally exercises duplicate records across homes, the same task id with a foreign home claim, native lease publication before claim publication, and claim publication before task metadata.
+It tests the in-place lease contract without certifying an installed build of that newer native command.
+[`tests/fm-teardown-endpoint-safety.test.sh`](../../tests/fm-teardown-endpoint-safety.test.sh) retains dirty/unlanded refusal tests and verifies that safely landed own work reaches conditional return with its exact lease id.
+It also refuses a surviving claim with missing or symlinked native state before cleanup.
+[`tests/fm-test-fixtures.test.sh`](../../tests/fm-test-fixtures.test.sh) verifies that the native model refuses shallow or escaping paths before any state read/write, while an owned lease/status/return cycle succeeds.
+The reservation mechanism and recovery boundaries are owned by [`bin/fm-wake-lib.sh`](../../bin/fm-wake-lib.sh), with executable entry points in spawn, control, home seeding, and guarded teardown.
+
+| Integration surface | Scope of this evidence |
+|---|---|
+| tmux, Herdr, zellij, cmux | Share native acquisition before harness launch; the nested task shell and each adapter's cwd reader remain in use. Portable terminal fixtures exercise handoff; this record does not certify a new real-backend lifecycle run. |
+| Orca | Owns its worktree provider and bypasses Treehouse acquisition; its cleanup authority is unchanged. |
+| Secondmate home seeding | Existing durable home leases remain; the shared allocation lock and retained-record preflight protect the same pool before seeding. |
+| Harness adapters | Reservation identity is independent of harness output and process classification. No vendor classifier, exit sequence, or launch flag is changed. |
+
+No real harness process or model turn was started for this reservation evidence.
+Herdr lifecycle verification was not performed for this change because the required lab safety precondition was unavailable; no production session was used as a substitute.
+Existing live backend and `live-harness-optin` checks remain the refresh route for claims about those installed surfaces.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

@@ -4,6 +4,7 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> reserve
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -31,6 +32,14 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
+#   reserve    Durably protect this task's already-recorded Treehouse copy,
+#              without starting or stopping an agent. Requires the installed
+#              Treehouse `lease <name> --json --lease-holder` capability for an
+#              unleased copy. Existing matching leases are rebound idempotently;
+#              other tasks/homes, duplicate records, ambiguous claims and native
+#              leases refuse. No get, fetch, reset or cleanup is performed.
+#              The shared reservation owner in bin/fm-wake-lib.sh holds the
+#              task-set/project/control/meta locks and binds the exact lease.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -271,6 +280,10 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
+if [ "$VERB" = reserve ]; then
+  fm_treehouse_reserve_record "$ID"
+  exit $?
+fi
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1

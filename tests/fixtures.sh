@@ -250,15 +250,111 @@ Exercise the spawn behavior under test.
 EOF
 }
 
+# Native lease/status/conditional-return contract for spawn fixtures. The fake
+# terminal may expose stale cwd independently of this allocation response.
+fm_test_fake_treehouse() { # <fakebin> [registered-fixture-root]
+  local fakebin candidate fixture=${2:-} marker expected matches=0
+  fakebin=$(cd -P -- "$1" && pwd -P) || return 1
+  # Bind the generated executable to the existing cleanup owner's registered
+  # root, never an ambient Treehouse home or a guessed /tmp ancestor.
+  while IFS= read -r candidate; do
+    [ -z "$fixture" ] || [ "$candidate" = "$fixture" ] || continue
+    case "$fakebin/" in "$candidate/"*) matches=$((matches + 1)); marker=$candidate ;; esac
+  done < "$FM_TEST_CLEANUP_REGISTRY"
+  [ "$matches" = 1 ] || { echo 'fixture Treehouse requires one registered owner root' >&2; return 1; }
+  fixture=$marker
+  [ "$(cd -P -- "$fixture" && pwd -P)" = "$fixture" ] && [ "$fixture" != / ] || return 1
+  expected=$(printf '%s\n%s' "$$" "$FM_TEST_OWNER_IDENTITY")
+  [ -f "$fixture/.fm-test-fixture" ] && [ ! -L "$fixture/.fm-test-fixture" ] &&
+    [ "$(cat "$fixture/.fm-test-fixture")" = "$expected" ] || return 1
+  {
+    printf '#!/usr/bin/env bash\nset -eu\n'
+    printf 'fixture=%q\nexpected_owner=%q\n' "$fixture" "$expected"
+    cat <<'TOOL'
+refuse() { echo 'fixture Treehouse refused: unowned or escaping native-state path' >&2; exit 1; }
+regular_private_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    [ "$(stat -c %h "$1" 2>/dev/null || stat -f %l "$1")" = 1 ]
+}
+# Validate the bound owner before even a status read. No environment override
+# can redirect this binding, and symlink/hardlink state cannot reach a sibling.
+[ "$fixture" != / ] && [ "$(cd -P -- "$fixture" && pwd -P)" = "$fixture" ] || refuse
+regular_private_file "$fixture/.fm-test-fixture" || refuse
+[ "$(cat "$fixture/.fm-test-fixture")" = "$expected_owner" ] || refuse
+case "$*" in
+  'status --help') echo 'status --json'; exit 0 ;;
+  'get --help') echo 'get --lease --json --lease-holder'; exit 0 ;;
+  'lease --help') echo 'lease <name> --lease-holder --json'; exit 0 ;;
+  'return --help') echo 'return --force --if-lease-id --if-lease-holder'; exit 0 ;;
+esac
+cmd=${1:-}; shift || true
+path=${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
+holder= expected_id= expected_holder=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --lease-holder) holder=$2; shift ;;
+    --if-lease-id) expected_id=$2; shift ;;
+    --if-lease-holder) expected_holder=$2; shift ;;
+    --*) ;;
+    *) [ "$cmd" != return ] || path=$1 ;;
+  esac
+  shift
+done
+# Parse return's explicit target before selecting or accessing native state.
+case "$path" in "$fixture/"*) ;; *) refuse ;; esac
+resolved=$(cd -P -- "$path" && pwd -P) || refuse
+case "$resolved/" in "$fixture/"*) ;; *) refuse ;; esac
+pool=$(cd -P -- "$(dirname "$(dirname "$path")")" && pwd -P) || refuse
+case "$pool/" in "$fixture/"*) ;; *) refuse ;; esac
+state="$pool/treehouse-state.json"
+if [ -e "$state" ] || [ -L "$state" ]; then regular_private_file "$state" || refuse; fi
+if [ "$cmd" = status ]; then
+  if [ -n "${FM_FAKE_POOL_STATUS:-}" ]; then printf '%s\n' "$FM_FAKE_POOL_STATUS"; exit 0; fi
+  if [ -f "$state" ]; then
+    jq '[.worktrees[] | . + {status:(if .leased then "leased" else "available" end)}]' "$state"
+  else
+    echo '[]'
+  fi
+  exit 0
+fi
+scratch=$(mktemp "$state.tmp.XXXXXX")
+trap 'rm -f "$scratch"' EXIT
+case "$cmd" in
+  get|lease)
+    [ -f "$state" ] || printf '{"worktrees":[]}\n' > "$state"
+    jq --arg p "$path" 'if any(.worktrees[]; .path == $p) then . else .worktrees += [{name:"1",path:$p}] end' "$state" > "$scratch"
+    cat "$scratch" > "$state"
+    jq -e --arg p "$path" 'any(.worktrees[]; .path == $p and .leased == true)' "$state" >/dev/null \
+      && { echo 'fixture slot is already leased' >&2; exit 1; }
+    jq --arg p "$path" --arg h "$holder" --arg id "fixture-lease-$$" \
+      '(.worktrees[] | select(.path == $p)) += {leased:true,lease_id:$id,lease_holder:$h}' "$state" > "$scratch"
+    cat "$scratch" > "$state"
+    [ "${FM_FAKE_LEASE_RESPONSE_FAIL:-0}" != 1 ] || exit 1
+    jq -c --arg p "$path" '.worktrees[] | select(.path == $p) | {path,lease_id,lease_holder}' "$state"
+    ;;
+  return)
+    [ -f "$state" ] || exit 0
+    jq -e --arg p "$path" --arg id "$expected_id" --arg h "$expected_holder" \
+      'any(.worktrees[]; .path == $p and ($id == "" or .lease_id == $id) and ($h == "" or .lease_holder == $h))' "$state" >/dev/null || exit 1
+    jq --arg p "$path" '(.worktrees[] | select(.path == $p)) |= del(.leased,.lease_id,.lease_holder)' "$state" > "$scratch"
+    cat "$scratch" > "$state"
+    ;;
+esac
+TOOL
+  } > "$fakebin/treehouse"
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
+# Creates <dir>/fakebin with the spawn tmux stub, the native lease model, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_test_fake_treehouse "$fakebin"
+  fm_fake_exit0 "$fakebin" "$@"
   printf '%s\n' "$fakebin"
 }
 

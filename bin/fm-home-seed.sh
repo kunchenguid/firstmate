@@ -387,8 +387,16 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
-acquire_treehouse_home() {
-  local id=$1 home
+acquire_treehouse_home() (
+  local id=$1 home project_lock
+  # Home seeding uses the same pool: protect retained worker records before
+  # native get can reset a slot, under the shared allocation/return lock.
+  # shellcheck source=bin/fm-backend.sh
+  . "$SCRIPT_DIR/fm-backend.sh"
+  project_lock=$(fm_treehouse_project_lock_path "$FM_ROOT") || exit 1
+  fm_lock_try_acquire "$project_lock" || { echo "REFUSED: Treehouse project is being changed" >&2; exit 1; }
+  trap 'fm_lock_release "$project_lock"' EXIT
+  fm_treehouse_acquire_preflight "$FM_ROOT" "$id" || exit 1
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
@@ -399,7 +407,7 @@ acquire_treehouse_home() {
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
-}
+)
 
 ensure_home() {
   local id=$1 requested=$2 home

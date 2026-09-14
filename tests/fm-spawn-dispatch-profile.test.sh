@@ -36,6 +36,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -k ]; then shift 2; fi
 shift
 exec "$@"
 SH
@@ -59,7 +60,7 @@ make_spawn_case() {
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
-  wt="$case_dir/wt"
+  wt="$case_dir/slots/1/project"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" "$harness"
@@ -209,6 +210,9 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
+  # A separate task needs a free copy; the relative-home task retains its lease.
+  WT_DIR="$CASE_DIR/slots/2/project"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$WT_DIR" HEAD
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
   : > "$LAUNCH_LOG"
@@ -222,7 +226,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
   )
   status=$?
-  expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
+  expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
@@ -646,10 +650,29 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
   pass "Ultra is explicit for native Pi and Pi-signed, including direct-PR, and refuses unsupported profiles before provisioning"
 }
 
+# The native allocator and terminal each report the copy for that exact task.
+# Keep both batch reservations alive so the second task cannot reuse the first.
+prepare_two_slot_batch() { # <second-task-id>
+  local second_id=$1 second_copy="$CASE_DIR/slots/2/project" tool
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$second_copy" HEAD
+  for tool in treehouse tmux; do
+    mv "$FAKEBIN_DIR/$tool" "$FAKEBIN_DIR/$tool.single"
+    cat > "$FAKEBIN_DIR/$tool" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'$second_id'*) export FM_FAKE_PANE_PATH='$second_copy' FM_FAKE_LEASE_PATH='$second_copy' ;;
+esac
+exec '$FAKEBIN_DIR/$tool.single' "\$@"
+SH
+    chmod +x "$FAKEBIN_DIR/$tool"
+  done
+}
+
 test_batch_preserves_native_ultra() {
   local rec id1=ultra-batch-a id2=ultra-batch-b out launch
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
+  prepare_two_slot_batch "$id2"
   enable_dispatch_profile "$HOME_DIR"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
@@ -809,6 +832,7 @@ test_batch_forwards_shared_profile_flags() {
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
+  prepare_two_slot_batch "$id2"
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
