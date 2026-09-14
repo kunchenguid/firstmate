@@ -124,10 +124,11 @@ wait "$assign_two" || fail "second colliding assignment failed"
 
 route=$("$FLEET" route --project AutoDev --issue MIX-900)
 case "$route" in *"harness -> manager-1 (generation 1)"*) ;; *) fail "complete route missing: $route" ;; esac
+if "$FLEET" route --project AutoDev --domain unknown >/dev/null 2>&1; then fail "known project hid an unknown semantic routing key"; fi
 "$FLEET" route --project unknown --issue MIX-X >/dev/null 2>&1 || true
 "$FLEET" route --project unknown --issue MIX-X >/dev/null 2>&1 || true
-[ "$("$FLEET" status --json | json_value 'len(json.load(sys.stdin)["unassigned"])')" = 1 ] || fail "unknown route duplicated triage"
-[ "$("$FLEET" status --json | json_value 'json.load(sys.stdin)["unassigned"][0]["attempts"]')" = 2 ] || fail "triage attempt count"
+[ "$("$FLEET" status --json | json_value 'sum(1 for r in json.load(sys.stdin)["unassigned"] if r.get("project")=="unknown")')" = 1 ] || fail "unknown route duplicated triage"
+[ "$("$FLEET" status --json | json_value 'next(r["attempts"] for r in json.load(sys.stdin)["unassigned"] if r.get("project")=="unknown")')" = 2 ] || fail "triage attempt count"
 
 "$FLEET" dep add --owner harness --from MIX-900 --needs paperclip --task PC-1
 deps=$("$FLEET" dep list)
@@ -262,9 +263,25 @@ FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$tx" >/dev/null ||
 grep -q "$TROOT/manager-2|harness|start-secondmate" "$FM_HOOK_LOG" || fail "SecondMate relaunch did not use destination parent"
 
 FM_FLEET_ROOT=$TROOT "$FLEET" transfer rollback --transaction "$tx" >/dev/null || fail "rollback transfer"
+grep -q "$TROOT/manager-2|harness|stop-secondmate" "$FM_HOOK_LOG" || fail "rollback did not stop the destination-bound SecondMate"
 grep -q "parent_home=$TROOT/manager-1" "$SMHOME/.fm-secondmate-parent" || fail "rollback did not restore parent binding"
 [ -f "$TROOT/manager-1/state/harness.meta" ] && [ ! -f "$TROOT/manager-2/state/harness.meta" ] || fail "rollback did not restore parent records"
 [ "$(FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev | sed -n 's/.*-> \(manager-[0-9]*\).*/\1/p')" = manager-1 ] || fail "rollback did not restore assignment"
+
+# Recovery publishes a records-ready transaction exactly once even when a later relaunch fails.
+records_tx=records-ready-recovery
+records_journal="$TROOT/transactions/$records_tx.json"
+python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$TROOT/fleet.json" --secondmate harness \
+  --manager manager-2 --source-home "$TROOT/manager-1" --transaction "$records_tx" \
+  --journal "$records_journal" >/dev/null || fail "prepare records-ready recovery fixture"
+python3 "$ROOT/bin/fm-fleet-transfer.py" apply --journal "$records_journal" || fail "apply records-ready recovery fixture"
+python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$records_journal" --set preparing >/dev/null || fail "simulate crash before records-ready journal publication"
+export FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$FAIL_HOOK
+if FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$records_tx" >/dev/null 2>&1; then fail "records-ready recovery ignored a relaunch failure"; fi
+[ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$records_journal" | json_value 'json.load(sys.stdin)["state"]')" = published ] || fail "records-ready recovery did not durably record publication"
+export FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$HOOK
+FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$records_tx" >/dev/null || fail "published recovery tried to republish its assignment"
+FM_FLEET_ROOT=$TROOT "$FLEET" transfer rollback --transaction "$records_tx" >/dev/null || fail "rollback records-ready recovery"
 
 add_lock "$TROOT/manager-1"; live_source=$LAST_HOLDER
 if FM_FLEET_ROOT=$TROOT "$FLEET" transfer begin --secondmate harness --to manager-2 >/dev/null 2>&1; then fail "transfer accepted a live source lock"; fi

@@ -152,7 +152,11 @@ case "$SUB" in
     [ -f "$home/state/.fleet-herdr-target" ] && target=$(cat "$home/state/.fleet-herdr-target" 2>/dev/null || true)
     [ -n "$target" ] || { echo "fm-fleet-herdr: no recorded target for $mid" >&2; exit 0; }
     fm_backend_herdr_kill "$target" 2>/dev/null || true
-    rm -f "$home/state/.fleet-herdr-target" 2>/dev/null || true
+    fm_backend_herdr_endpoint_confirmed_gone "$target" || {
+      echo "fm-fleet-herdr: target $target is not confirmed gone; retaining its recovery record" >&2
+      exit 1
+    }
+    rm -f "$home/state/.fleet-herdr-target" || exit 1
     echo "closed $mid ($target)"
     ;;
 

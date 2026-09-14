@@ -217,7 +217,7 @@ def apply_records(args: argparse.Namespace) -> None:
         f"parent_home={journal['destination_home']}\n"
     ).encode())
     atomic_bytes(paths["source_registry"], remove_registry_line(source_registry_data, secondmate))
-    paths["source_meta"].unlink()
+    paths["source_meta"].unlink(missing_ok=True)
     if paths["source_status"].exists():
         paths["source_status"].unlink()
     journal["state"] = "records-ready"

@@ -493,6 +493,20 @@ def command_route(args: argparse.Namespace) -> None:
             claims["project"] = owner["secondmate"]
         if args.domain and args.domain in owner["domains"]:
             claims["domain"] = owner["secondmate"]
+    unresolved = [
+        key for key in ("secondmate", "project", "domain")
+        if dimensions[key] and key not in claims
+    ]
+    if unresolved:
+        row = upsert_triage(
+            reg,
+            dimensions,
+            "unowned semantic routing key: " + ", ".join(unresolved),
+        )
+        require_valid(reg)
+        write_atomic(path, reg)
+        print(json.dumps({"state": "unassigned", "claims": claims, "triage": row}, sort_keys=True))
+        raise SystemExit(3)
     if not claims:
         row = upsert_triage(reg, dimensions, "no semantic SecondMate owner")
         require_valid(reg)

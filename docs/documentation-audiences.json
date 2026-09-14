@@ -353,6 +353,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fleet-assignment-premise.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/fleet-autodev-convergence.md",
       "audience": "maintainer-architecture"
     },
