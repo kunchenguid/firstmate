@@ -24,6 +24,19 @@ trap cleanup EXIT INT TERM
 
 json_value() { python3 -c "import json,sys; print($1)"; }
 
+HOOK="$TMP_ROOT/hook.sh"
+cat > "$HOOK" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$FM_HOOK_LOG"
+SH
+chmod +x "$HOOK"
+FAIL_HOOK="$TMP_ROOT/fail-hook.sh"
+cat > "$FAIL_HOOK" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAIL_HOOK"
+
 add_lock() {  # <home>
   local home=$1 pid
   mkdir -p "$home/state"
@@ -136,11 +149,31 @@ case "$deps" in *owner_secondmate*) ;; *) fail "dependency owner is not SecondMa
 case "$deps" in *needs_secondmate*) ;; *) fail "dependency target is not SecondMate-keyed" ;; esac
 "$FLEET" dep "done" --owner harness --from MIX-900
 
-# Recovery refuses a possibly live manager, then selects the least-loaded healthy peer.
-if "$FLEET" recover --secondmate paperclip >/dev/null 2>&1; then fail "recovery replaced a live reasoning manager"; fi
+# Recovery refuses a possibly live manager, then fails supervision over to the least-loaded healthy peer.
+PCHOME="$FROOT/secondmates/paperclip"; mkdir -p "$PCHOME" "$FROOT/homes/manager-2/data" "$FROOT/homes/manager-1/data"
+printf '%s\n' '# SecondMates' '- paperclip - Paperclip (home: '"$PCHOME"'; scope: paperclip; projects: paperclip; added 2026-09-13)' > "$FROOT/homes/manager-2/data/secondmates.md"
+printf '%s\n' '# SecondMates' '- other - Other (home: /tmp/other; scope: other; projects: other; added 2026-09-13)' > "$FROOT/homes/manager-1/data/secondmates.md"
+printf 'kind=secondmate\nhome=%s\n' "$PCHOME" > "$FROOT/homes/manager-2/state/paperclip.meta"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$FROOT/homes/manager-2" > "$PCHOME/.fm-secondmate-parent"
+recover_hooks() { FM_HOOK_LOG="$TMP_ROOT/recover-hooks.log" FM_FLEET_TRANSFER_STOP_HOOK=$HOOK FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$HOOK "$@"; }
+if recover_hooks "$FLEET" recover --secondmate paperclip >/dev/null 2>&1; then fail "recovery replaced a live reasoning manager"; fi
 remove_lock "$FROOT/homes/manager-2" "$holder_2"
-"$FLEET" recover --secondmate paperclip >/dev/null || fail "recover paperclip after manager death"
+recover_hooks "$FLEET" recover --secondmate paperclip >/dev/null || fail "recover paperclip after manager death"
 [ "$(manager_for paperclip):$(generation_for paperclip)" = manager-1:2 ] || fail "recovery was not deterministic or generation-safe"
+grep -q "parent_home=$FROOT/homes/manager-1" "$PCHOME/.fm-secondmate-parent" || fail "recovery did not move the parent binding"
+grep -q '^- paperclip ' "$FROOT/homes/manager-1/data/secondmates.md" && grep -q '^- other ' "$FROOT/homes/manager-1/data/secondmates.md" || fail "recovery did not install the route beside existing routes"
+! grep -q '^- paperclip ' "$FROOT/homes/manager-2/data/secondmates.md" || fail "recovery left the dead manager's route"
+[ -f "$FROOT/homes/manager-1/state/paperclip.meta" ] && [ ! -f "$FROOT/homes/manager-2/state/paperclip.meta" ] || fail "recovery did not move endpoint metadata"
+grep -q "$FROOT/homes/manager-1|paperclip|start-secondmate" "$TMP_ROOT/recover-hooks.log" || fail "recovery did not relaunch the SecondMate under the new parent"
+
+# A crashed lock holder never wedges the registry; a live one makes route fail without claiming triage.
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); print("locked",flush=True); time.sleep(300)' "$FROOT/.fleet.lock" > "$TMP_ROOT/lock-holder.out" & lock_holder=$!
+HOLDERS="$HOLDERS $lock_holder"
+i=0; while ! grep -q locked "$TMP_ROOT/lock-holder.out" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+"$FLEET" route --project AutoDev >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] || fail "locked route exited $rc instead of a non-triage failure"
+kill -9 "$lock_holder" >/dev/null 2>&1; wait "$lock_holder" 2>/dev/null
+"$FLEET" route --project AutoDev >/dev/null || fail "crashed lock holder wedged the registry"
 
 python3 - "$FROOT/fleet.json" <<'PY' || fail "assignment crossed the root completion boundary"
 import json,sys
@@ -228,18 +261,6 @@ add_lock "$TROOT/manager-1"; transfer_source_holder=$LAST_HOLDER
 FM_FLEET_ROOT=$TROOT "$FLEET" assign --secondmate harness --reason fixture >/dev/null
 remove_lock "$TROOT/manager-1" "$transfer_source_holder"
 
-HOOK="$TMP_ROOT/hook.sh"
-cat > "$HOOK" <<'SH'
-#!/usr/bin/env bash
-printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$FM_HOOK_LOG"
-SH
-chmod +x "$HOOK"
-FAIL_HOOK="$TMP_ROOT/fail-hook.sh"
-cat > "$FAIL_HOOK" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-chmod +x "$FAIL_HOOK"
 export FM_HOOK_LOG="$TMP_ROOT/hooks.log"
 export FM_FLEET_TRANSFER_STOP_HOOK=$HOOK
 export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$HOOK
@@ -262,7 +283,11 @@ export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$HOOK
 FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$tx" >/dev/null || fail "recover interrupted transfer"
 grep -q "$TROOT/manager-2|harness|start-secondmate" "$FM_HOOK_LOG" || fail "SecondMate relaunch did not use destination parent"
 
+printf '%s\n' '- later - Later (home: /tmp/later; scope: later; projects: later; added 2026-09-13)' >> "$TROOT/manager-2/data/secondmates.md"
+printf '%s\n' '- sibling - Sibling (home: /tmp/sibling; scope: sibling; projects: sibling; added 2026-09-13)' >> "$TROOT/manager-1/data/secondmates.md"
 FM_FLEET_ROOT=$TROOT "$FLEET" transfer rollback --transaction "$tx" >/dev/null || fail "rollback transfer"
+grep -q '^- later ' "$TROOT/manager-2/data/secondmates.md" && ! grep -q '^- harness ' "$TROOT/manager-2/data/secondmates.md" || fail "rollback clobbered the destination registry"
+grep -q '^- sibling ' "$TROOT/manager-1/data/secondmates.md" && grep -q '^- harness ' "$TROOT/manager-1/data/secondmates.md" || fail "rollback clobbered the source registry"
 grep -q "$TROOT/manager-2|harness|stop-secondmate" "$FM_HOOK_LOG" || fail "rollback did not stop the destination-bound SecondMate"
 grep -q "parent_home=$TROOT/manager-1" "$SMHOME/.fm-secondmate-parent" || fail "rollback did not restore parent binding"
 [ -f "$TROOT/manager-1/state/harness.meta" ] && [ ! -f "$TROOT/manager-2/state/harness.meta" ] || fail "rollback did not restore parent records"

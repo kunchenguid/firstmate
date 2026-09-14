@@ -515,6 +515,7 @@ def command_route(args: argparse.Namespace) -> None:
         raise SystemExit(3)
     if len(set(claims.values())) != 1:
         row = upsert_triage(reg, dimensions, "routing dimensions disagree")
+        require_valid(reg)
         write_atomic(path, reg)
         print(json.dumps({"state": "unassigned", "claims": claims, "triage": row}, sort_keys=True))
         raise SystemExit(3)
@@ -537,23 +538,19 @@ def command_assign(args: argparse.Namespace) -> None:
         raise ValueError(f"unknown SecondMate owner: {args.secondmate}")
     assignments = assignment_map(reg)
     prior = assignments.get(args.secondmate)
-    if prior and not args.replace:
+    if prior:
         print(json.dumps(prior, sort_keys=True))
         return
     if args.manager not in {row["id"] for row in reg["managers"]}:
         raise ValueError(f"unknown manager: {args.manager}")
-    generation = (prior.get("generation", 0) if prior else 0) + 1
     row = {
         "secondmate": args.secondmate,
         "manager": args.manager,
-        "generation": generation,
+        "generation": 1,
         "state": "active",
         "assigned_at": now(),
         "recovery_reason": args.reason,
     }
-    reg["assignments"] = [
-        item for item in reg["assignments"] if item["secondmate"] != args.secondmate
-    ]
     reg["assignments"].append(row)
     reg["assignments"].sort(key=lambda value: value["secondmate"])
     require_valid(reg)
@@ -645,6 +642,7 @@ def command_transfer_state(args: argparse.Namespace) -> None:
             "transaction": args.transaction,
             "state": args.state,
         })
+    require_valid(reg)
     write_atomic(path, reg)
 
 
@@ -716,7 +714,6 @@ def parser() -> argparse.ArgumentParser:
     assign.add_argument("--secondmate", required=True)
     assign.add_argument("--manager", required=True)
     assign.add_argument("--reason", default="")
-    assign.add_argument("--replace", action="store_true")
     assign.set_defaults(function=command_assign)
     dep = commands.add_parser("dep")
     dep.add_argument("action", choices=("add", "done", "list"))

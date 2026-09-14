@@ -54,9 +54,13 @@ def restore(path: Path, value: dict) -> None:
         path.unlink()
 
 
-def registry_line(document: bytes, secondmate: str) -> bytes:
+def routes(document: bytes, secondmate: str) -> list[bytes]:
     prefix = f"- {secondmate} ".encode()
-    matches = [line for line in document.splitlines(keepends=True) if line.startswith(prefix)]
+    return [line for line in document.splitlines(keepends=True) if line.startswith(prefix)]
+
+
+def registry_line(document: bytes, secondmate: str) -> bytes:
+    matches = routes(document, secondmate)
     if len(matches) != 1:
         raise ValueError(f"source registry needs exactly one route for {secondmate}")
     return matches[0]
@@ -68,8 +72,7 @@ def remove_registry_line(document: bytes, secondmate: str) -> bytes:
 
 
 def append_registry_line(document: bytes, line: bytes, secondmate: str) -> bytes:
-    prefix = f"- {secondmate} ".encode()
-    if any(item.startswith(prefix) for item in document.splitlines(keepends=True)):
+    if routes(document, secondmate):
         raise ValueError(f"destination registry already routes {secondmate}")
     if document and not document.endswith(b"\n"):
         document += b"\n"
@@ -170,6 +173,7 @@ def prepare(args: argparse.Namespace) -> None:
         "source_home": str(source_home),
         "destination_home": str(destination_home),
         "destination_manager": args.manager,
+        "failover": bool(args.failover),
         "expected_generation": assignment_generation,
         "prior_assignment": assignment,
         "paths": {key: str(value) for key, value in paths.items()},
@@ -202,13 +206,14 @@ def apply_records(args: argparse.Namespace) -> None:
     paths = {key: Path(value) for key, value in journal["paths"].items()}
     snapshots = journal["snapshots"]
     secondmate = journal["secondmate"]
-    source_registry_data = base64.b64decode(snapshots["source_registry"]["data"])
-    line = registry_line(source_registry_data, secondmate)
-    destination_registry_data = (
-        base64.b64decode(snapshots["destination_registry"]["data"])
-        if snapshots["destination_registry"]["exists"] else b"# SecondMates\n\n"
-    )
-    atomic_bytes(paths["destination_registry"], append_registry_line(destination_registry_data, line, secondmate))
+    parent = os.path.normpath(binding_parent(paths["binding"].read_bytes()))
+    if parent not in {os.path.normpath(journal["source_home"]), os.path.normpath(journal["destination_home"])}:
+        raise ValueError("SecondMate parent binding moved outside this transfer")
+    line = registry_line(base64.b64decode(snapshots["source_registry"]["data"]), secondmate)
+    destination = paths["destination_registry"]
+    destination_data = destination.read_bytes() if destination.exists() else b"# SecondMates\n\n"
+    if line not in destination_data.splitlines(keepends=True):
+        atomic_bytes(destination, append_registry_line(destination_data, line, secondmate))
     atomic_bytes(paths["destination_meta"], base64.b64decode(snapshots["source_meta"]["data"]))
     if snapshots["source_status"]["exists"]:
         atomic_bytes(paths["destination_status"], base64.b64decode(snapshots["source_status"]["data"]))
@@ -216,7 +221,8 @@ def apply_records(args: argparse.Namespace) -> None:
         "schema=fm-secondmate-parent.v1\nroute=local\n"
         f"parent_home={journal['destination_home']}\n"
     ).encode())
-    atomic_bytes(paths["source_registry"], remove_registry_line(source_registry_data, secondmate))
+    if paths["source_registry"].exists():
+        atomic_bytes(paths["source_registry"], remove_registry_line(paths["source_registry"].read_bytes(), secondmate))
     paths["source_meta"].unlink(missing_ok=True)
     if paths["source_status"].exists():
         paths["source_status"].unlink()
@@ -229,8 +235,21 @@ def rollback(args: argparse.Namespace) -> None:
     journal = read_json(journal_path)
     if journal.get("schema") != "fm-fleet-transfer.v1":
         raise ValueError("unsupported transfer journal")
-    for key, raw_path in journal["paths"].items():
-        restore(Path(raw_path), journal["snapshots"][key])
+    paths = {key: Path(value) for key, value in journal["paths"].items()}
+    snapshots = journal["snapshots"]
+    secondmate = journal["secondmate"]
+    line = registry_line(base64.b64decode(snapshots["source_registry"]["data"]), secondmate)
+    if paths["destination_registry"].exists():
+        atomic_bytes(paths["destination_registry"], remove_registry_line(paths["destination_registry"].read_bytes(), secondmate))
+    source_data = paths["source_registry"].read_bytes() if paths["source_registry"].exists() else b""
+    if not routes(source_data, secondmate):
+        atomic_bytes(paths["source_registry"], append_registry_line(source_data, line, secondmate))
+    for kind in ("meta", "status"):
+        moved = paths[f"destination_{kind}"]
+        if moved.exists():
+            atomic_bytes(paths[f"source_{kind}"], moved.read_bytes())
+            moved.unlink()
+    restore(paths["binding"], snapshots["binding"])
     journal["state"] = "rolled-back"
     atomic_json(journal_path, journal)
 
@@ -253,6 +272,7 @@ def main() -> int:
     prep.add_argument("--source-home", default="")
     prep.add_argument("--transaction", required=True)
     prep.add_argument("--journal", required=True)
+    prep.add_argument("--failover", type=int, choices=(0, 1), default=0)
     prep.set_defaults(function=prepare)
     apply_command = commands.add_parser("apply")
     apply_command.add_argument("--journal", required=True)

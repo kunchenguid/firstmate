@@ -41,6 +41,7 @@ The assignment stays sticky while its manager is healthy.
 Manager death leaves the assignment and SecondMate known.
 Recovery deliberately replaces the assignment generation only after the prior manager is proven dead or stopped.
 No manager may acquire a SecondMate whose current manager can still be alive.
+Recovery moves the authoritative supervision binding into the selected live manager through the journaled transfer transaction before it publishes the new generation.
 
 The SecondMate's persistent home, project registry, backlog, and completion evidence remain the semantic execution state.
 The manager registry does not clone or move that home.

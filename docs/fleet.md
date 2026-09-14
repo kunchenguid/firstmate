@@ -19,7 +19,7 @@ It is not the fleet's exclusive intake key.
 The SecondMate home remains the source of truth for its backlog, project registry, lifecycle evidence, and Definition of Done.
 Fleet assignment state has no completion, review, landing, or acceptance field.
 
-Every registry mutation holds `<fleet-root>/.fleet.lock.d`, validates the full document, writes a temporary file in the same directory, calls `fsync`, and publishes it with `rename`.
+Every registry mutation holds a kernel `flock` on `<fleet-root>/.fleet.lock`, which the operating system releases when a holder crashes, validates the full document, writes a temporary file in the same directory, calls `fsync`, and publishes it with `rename`.
 Manager health is collected before assignment locking.
 The selected home session lock is checked again before the short assignment mutation.
 
@@ -62,7 +62,9 @@ For an unassigned SecondMate it chooses the healthy reasoning manager with the f
 A heartbeat daemon, stopped manager, dead manager, stalled manager, blocked manager, or manager without a live home lock is not an assignment candidate.
 
 A dead manager does not erase or move its assignments.
-`recover --secondmate <id>` proves the current manager no longer has a live reasoning lock, then selects the least-loaded healthy peer and publishes the next generation.
+`recover --secondmate <id>` proves the current manager no longer has a live reasoning lock, selects the least-loaded healthy peer, and runs a failover supervision transfer into that live manager.
+The failover moves `.fm-secondmate-parent`, the parent route, and the endpoint records before it publishes the next generation, so the assignment never names a manager that the owner records do not back.
+A SecondMate without a valid source binding and route cannot be recovered.
 
 `route` accepts a known SecondMate, project, domain, issue, or combination and prints the complete route.
 
@@ -117,6 +119,7 @@ Any pending-reply record whose phase is not `resolved` blocks the move.
 Resolved records stay in the source home and are not deleted or copied.
 
 Both source and destination home session locks must be stopped before `transfer begin`.
+`recover` uses the same transaction with a live destination, journals it as a failover, and does not relaunch the destination manager.
 The command stops the SecondMate endpoint, writes a transaction journal under `<fleet-root>/transactions/`, moves the parent route and metadata, rewrites `.fm-secondmate-parent`, publishes the next assignment generation, restarts the destination manager, and relaunches the SecondMate from the destination home.
 The assignment publishes after the owner records, so a crash cannot leave both parents authoritative.
 
@@ -129,8 +132,10 @@ bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer rollback \
   --transaction <transaction-id>
 ```
 
-Recovery and rollback refuse while either home has a live session lock.
-Rollback restores exact source and destination record snapshots and restores the prior assignment only when the published generation still matches the transaction.
+Transfer recovery refuses while the source home has a live session lock, and while the destination home is live for a planned transfer or stopped for a failover.
+Rollback refuses while either home has a live session lock.
+Apply and rollback edit only the transferred SecondMate's route line and endpoint records, so other routes added to either registry after the transfer survive.
+Rollback restores the parent binding and restores the prior assignment only when the published generation still matches the transaction.
 Lifecycle hooks named in `bin/fm-fleet.sh` let tests and a controlled pilot replace endpoint operations without weakening the default path.
 
 No transfer copies or removes a SecondMate home, backlog, project checkout, worktree, or completion evidence.
