@@ -13,7 +13,10 @@ Actionable wakes include captain-relevant status signals, no-verb signals withou
 For an ordinary crew task, a wait is read from both of its records: the status line a worker declared, and the backlog hold `bin/fm-captain-hold.sh` recorded once firstmate handed the work to the captain.
 So a delivered ordinary crew task whose last line stays `done: PR ...` bounds repeated alarms from new pane hashes to the `FM_PAUSE_RESURFACE_SECS` cadence for the length of the captain's decision.
 The first hash still alarms, each new hash inside that window is absorbed, and a new hash after the window re-surfaces the hold; a terminal pane hash that never changes stays inert after its first alarm exactly as it did before this bound.
+A delivered task also bounds that alarm on its own armed PR merge poll, which is already the thing watching the PR: a `done:` line whose validated poll artifacts are published takes the same cadence whether or not the work was ever held.
+Because that poll reports only a merge and is silent on every other outcome, the bound stays a cadence rather than an absolute silence, so a PR closed unmerged still re-surfaces its finished task; retiring the poll at merge lifts the bound outright.
 The throttle is scoped to both the current captain-call lifecycle and the status-log state, so releasing and re-holding the same task without a status append starts a fresh window whose first new hash alarms.
+The merge-poll throttle is scoped the same way to the poll's own canonical PR beside that status-log state, so a replacement PR armed for the same task starts its own window.
 A secondmate reaches the stale path only for a wait declared in its status line, so a hold recorded only in the backlog while its last line is `working:` or `done:` is outside this guard.
 Reaching that case would require consulting the backlog for windows the secondmate gate deliberately skips, putting backlog reads on the ordinary poll hot path this design preserves.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.

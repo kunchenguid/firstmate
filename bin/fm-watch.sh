@@ -1248,6 +1248,50 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# The one record on this list that is not a wait at all: a DELIVERED task whose
+# PR merge poll is armed. Its worker has finished and its pane will never move
+# again on its own, while the armed poll - not a pane hash - is what is watching
+# that PR, so every new hash on that idle pane had nothing to add. Before this
+# bound a settled task alarmed once per poll for as long as the PR stayed open,
+# which on a one-minute cadence is one supervision turn a minute, indefinitely.
+# Only the `done` verb qualifies: a `blocked:` or `needs-decision:` delivery
+# needs firstmate whatever its PR is doing.
+# Bounded on the shared cadence rather than absolute, because the poll speaks
+# only on a merge (bin/fm-pr-poll.sh is silent on every other outcome, including
+# every error): a PR closed unmerged, or one that simply sits, must not leave a
+# finished task silent forever. A merge retires the poll, which invalidates the
+# artifacts and lifts the bound on its own.
+# Sets STALE_WAIT_DECLARATION to the POLL's own scope - its canonical PR beside
+# the status signature - so a replacement PR armed for the same task starts its
+# own window instead of inheriting the silence of the one before it.
+merge_poll_stale_bound() {  # <window-key> <task> <status-line>
+  local key=$1 task=$2 last=$3
+  STALE_WAIT_DECLARATION=
+  [ -n "$task" ] || return 1
+  [ "$(status_line_verb "$last")" = "done" ] || return 1
+  fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  STALE_WAIT_DECLARATION="merge-poll:$FM_PR_DATA_URL:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  afk_record_present && return 0
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# Which bound applies to a stale window whose last line IS captain-relevant, and
+# the triage label naming it. Resolved in ONE place so that only the matching
+# bound's declaration survives in STALE_WAIT_DECLARATION: a bound that matched
+# but is due to alarm must keep its own scope for stale_wait_record, and asking
+# the next bound in turn would overwrite that scope with its own empty result -
+# the alarm would then record nothing and the very next hash would alarm again.
+# Returns 0 to absorb this sighting; 1 to alarm.
+STALE_BOUND_LABEL=
+terminal_stale_bound() {  # <window-key> <task> <status-line>
+  local key=$1 task=$2 last=$3
+  STALE_BOUND_LABEL="delivered work whose PR merge poll is armed and watching it"
+  merge_poll_stale_bound "$key" "$task" "$last" && return 0
+  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
+  STALE_BOUND_LABEL="open captain call already surfaced for this status"
+  captain_call_stale_bound "$key" "$task"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -2211,18 +2255,19 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif captain_call_stale_bound "$key" "$task"; then
-              # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further NEW pane hashes with
-              # the same status-log state have nothing to add while they are
-              # deciding. Only that new-hash repetition is bounded - the first
+            elif terminal_stale_bound "$key" "$task" "$last"; then
+              # The line is captain-relevant and stays so, but something else is
+              # already holding or watching this work: the captain, per the
+              # backlog, or the task's own armed PR merge poll. Further NEW pane
+              # hashes with the same status-log state have nothing to add while
+              # that stands. Only that new-hash repetition is bounded - the first
               # sight already alarmed, a new hash inside the window is absorbed,
               # and a new hash after it alarms again. A stable hash stays as inert
               # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+              triage_log "absorbed stale ($STALE_BOUND_LABEL): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
