@@ -60,10 +60,11 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # Exact lowercase tool names that match a stem above but only OBSERVE or STOP
 # work that already exists. Reading or ending unaccounted work is not creating
 # it, and denying these would strand already-running work with no way to inspect
-# or end it. A local Claude deny list may still remove these from the
+# or end it. listagents only enumerates the sessions the harness can already
+# message and starts nothing, so it observes too. A local Claude deny list may still remove these from the
 # schema; this shipped guard deliberately stays narrower so it can never be the
 # reason a runaway task cannot be stopped.
-OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell listagents'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
 # work. These write only the harness's session-local todo list, which has no
