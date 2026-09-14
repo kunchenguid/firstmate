@@ -46,6 +46,12 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
     # unrelated commands containing that fragment.
     agy) printf 'agent' ;;
+    # codebuddy is anchored for the same reason as muse, omp, and agy: its two
+    # live process names are the bare words `codebuddy` and `cbc` (verified,
+    # codebuddy 2.150.0), and `cbc` is a fragment short enough that a glob would
+    # claim unrelated commands. Its install path component `codebuddy` is also
+    # covered by fm_harness_path_name once the session-lock vocabulary lists it.
+    codebuddy|cbc) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

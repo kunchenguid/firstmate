@@ -218,6 +218,26 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_codebuddy_shares_the_stop_owned_model() {
+  local out ordinary
+  out=$("$RENDER" --harness codebuddy)
+  assert_contains "$out" "primary harness: codebuddy" "codebuddy heading missing"
+  assert_contains "$out" "Mode: CodeBuddy Stop-hook-owned supervision." "codebuddy snippet missing"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "codebuddy fell back to the unknown protocol"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Stop-owned auto-arm" "codebuddy ordinary-wake line does not leave continuity to the Stop hook"
+  assert_contains "$ordinary" "bin/fm-claude-stop-autoarm.sh" "codebuddy ordinary-wake line lost the auto-arm script name"
+  assert_contains "$ordinary" ".codebuddy/settings.json" "codebuddy ordinary-wake line does not name its own hook file"
+  assert_contains "$ordinary" "do not arm another cycle" "codebuddy ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codebuddy ordinary-wake line incorrectly calls the manual arm"
+  out=$("$RENDER" --harness codebuddy --repair-line)
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "codebuddy repair line lost its neutral automatic-recovery guidance"
+  assert_contains "$out" ".codebuddy/settings.json" "codebuddy repair line does not name the hook file to inspect"
+  assert_not_contains "$out" "is broken" "codebuddy repair line claimed failure before verification"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "codebuddy repair line must not create a repeatable manual arm loop"
+  pass "codebuddy shares the Claude-family Stop-owned supervision protocol through its own hook file"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -228,3 +248,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_codebuddy_shares_the_stop_owned_model

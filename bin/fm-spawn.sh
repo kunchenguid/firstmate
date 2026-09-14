@@ -133,7 +133,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|codebuddy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -671,7 +671,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|codebuddy) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1400,7 +1400,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|codebuddy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1721,6 +1721,27 @@ launch_template() {
     # when a supported effort is requested, since a second --config-override
     # would silently discard the first (confirmed live).
     rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
+    # codebuddy (CodeBuddy Code, cbc): a positional prompt starts the supervised
+    # interactive session and auto-submits it, so the brief rides the launch
+    # command exactly as it does for claude and grok. --model takes a catalog id
+    # from `codebuddy --help`'s supported list, and --effort accepts
+    # minimal|low|medium|high|xhigh|max (verified on 2.150.0). codebuddy
+    # publishes no harness-identity marker of its own (detection is comm-level
+    # ancestry in bin/fm-harness.sh), and it does not clear an inherited
+    # CLAUDECODE, so foreign primary markers are cleared here as defense in
+    # depth, the same reason cursor, muse, rovo, and agy clear them. Unlike the
+    # -y shorthand (HIGH/CRITICAL still ask), --permission-mode bypassPermissions
+    # is the full auto-approve posture an unattended worker needs. The turn-end
+    # hook surface is unverified; busy state is a rendered-tail fallback in
+    # bin/fm-busy-lib.sh and nothing is armed below until a supervised trial
+    # task verifies a semantic source (harness-adapters owns that gate).
+    codebuddy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS codebuddy --permission-mode bypassPermissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # The catch-all is the unverified-adapter guard: every caller treats a
+    # non-zero return as "no launch template for this harness" and aborts the
+    # spawn. Without it a case with no match falls through to exit 0 and hands
+    # back an EMPTY launch command, which silently admits a harness nobody
+    # verified (regression caught by tests/fm-secondmate-harness.test.sh's
+    # unverified-secondmate case).
     *) return 1 ;;
   esac
 }
@@ -1774,7 +1795,7 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = codebuddy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1783,8 +1804,13 @@ fi
 # verified primary integration, so a secondmate (a firstmate instance that must
 # itself act as a primary) could never be supervised. Refuse loudly rather than
 # standing one up with no way to arm its watch cycle.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
-  echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+# codebuddy is refused for a secondmate for the same boundary even though its
+# launch wiring exists: statics were established from the binary, but no live
+# busy signature, trust behavior, or primary supervision protocol has survived
+# the supervised trial yet, so a codebuddy secondmate would stand up with no
+# way to arm its watch cycle either (references/harness/codebuddy.md).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = rovo ] || [ "$HARNESS" = codebuddy ]; }; then
+  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1984,7 +2010,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|codebuddy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2066,6 +2092,15 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+    codebuddy)
+      # codebuddy 2.150.0 --effort accepts exactly
+      # minimal|low|medium|high|xhigh|max, a superset of the shared vocabulary
+      # above minimal (which, like muse's extra levels, is deliberately
+      # unreachable rather than remapped). xhigh and max map straight across.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -4062,7 +4097,7 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy|codebuddy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
@@ -4080,13 +4115,16 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Stop auto-arm, Cursor's stop-hook park, and codebuddy's Claude-compatible
+  # Stop auto-arm all run the watcher only BETWEEN turns, so a fresh beacon with
+  # no live watcher is their healthy mid-turn state. codebuddy is refused as a
+  # secondmate above, so its arm is currently unreachable here; it is listed
+  # anyway so the two tables cannot drift apart.
   # Pi and pi-signed secondmates previously received persistent here and now
   # receive extension to match fm_supervision_model's own table, so their pull
   # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
+    claude|cursor|codebuddy) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;
     *) supervision_model=persistent ;;
   esac

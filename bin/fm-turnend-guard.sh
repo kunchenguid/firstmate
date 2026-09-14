@@ -57,7 +57,8 @@
 # never a wedged, un-endable session - while still nagging again on a later turn
 # if the problem persists.
 #
-# Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
+# Loop-guard, --claude mode (Stop-owned auto-arm cooperation; --codebuddy is an
+# alias for the same mode on a Claude-compatible primary): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
 # including turns started by the asyncRewake auto-arm, so the one-shot allow
 # would re-open the exact blind window this guard exists to close
@@ -106,8 +107,13 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
+    # codebuddy is a Claude-compatible primary whose tracked .codebuddy/settings.json
+    # registers the same Stop pair, so it shares the --claude autoarm-cooperation
+    # mode verbatim; the distinct flag keeps the hook file self-documenting
+    # without adding a second behavioural path to maintain.
+    --codebuddy) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--codebuddy|--cursor]" >&2; exit 2 ;;
   esac
 done
 

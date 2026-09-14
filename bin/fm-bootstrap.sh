@@ -1114,7 +1114,10 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"] | index($h);
+    # codebuddy admitted to verified harnesses by the captain (2026-09-14) after
+    # the supervised trial (trial-codebuddy-todo) passed: brief read, isolated
+    # worktree assertion, branch commit, and correct done ending.
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","codebuddy"] | index($h);
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1126,6 +1129,11 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
+      # codebuddy has its own launch mapping (bin/fm-spawn.sh
+      # effort_flag_for_harness) that accepts exactly low|medium|high|xhigh|max;
+      # `minimal` is deliberately unreachable there, so it must be refused here
+      # too rather than recorded and silently dropped at launch.
+      elif $h == "codebuddy" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;
