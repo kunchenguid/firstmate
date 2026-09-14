@@ -71,26 +71,42 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
-  let lockPid = "";
+// fm-lock.sh records the outermost session harness pid. Walk from this
+// extension worker to find that already-recorded pid, including omp's nested
+// broker/worker processes, rather than publishing process.pid.
+function sessionLockPid(): string {
+  let recordedPid = "";
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    recordedPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return "";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(recordedPid) || recordedPid === "1") return "";
   let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+  for (let i = 0; i < 16; i += 1) {
+    if (pid === recordedPid) return recordedPid;
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return "";
+}
+
+function lockOwnership(): LockOwnership {
+  let recordedPid = "";
+  try {
+    recordedPid = readFileSync(`${state}/.lock`, "utf8").trim();
+  } catch {
+    return "missing";
+  }
+  if (!/^[0-9]+$/.test(recordedPid) || recordedPid === "1") return "other";
+  if (sessionLockPid() === recordedPid) return "owned";
+  return pidAlive(recordedPid) ? "other" : "missing";
 }
 
 function markLoaded(): void {
   if (!existsSync(state) || lockOwnership() === "other") return;
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  const sessionPid = sessionLockPid() || String(process.pid);
+  writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }
 
 const sessionstartDeliveryBytes = 512 * 1024;

@@ -204,27 +204,43 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
-  let lockPid = "";
+// fm-lock.sh records the outermost session harness pid. Walk from this
+// extension worker to find that already-recorded pid, including omp's nested
+// broker/worker processes, rather than publishing process.pid.
+function lockPid(): string {
+  let recordedPid = "";
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    recordedPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return "";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(recordedPid) || recordedPid === "1") return "";
   let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+  for (let i = 0; i < 16; i += 1) {
+    if (pid === recordedPid) return recordedPid;
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return "";
+}
+
+function lockOwnership(): LockOwnership {
+  let recordedPid = "";
+  try {
+    recordedPid = readFileSync(`${state}/.lock`, "utf8").trim();
+  } catch {
+    return "missing";
+  }
+  if (!/^[0-9]+$/.test(recordedPid) || recordedPid === "1") return "other";
+  if (lockPid() === recordedPid) return "owned";
+  return pidAlive(recordedPid) ? "other" : "missing";
 }
 
 function markLoaded(): void {
   if (lockOwnership() === "other") return;
+  const sessionPid = lockPid() || String(process.pid);
   mkdirSync(state, { recursive: true });
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }
 
 function actionableLine(output: string): string {
@@ -495,7 +511,7 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return false;
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. After handling the drain output, proactively summarize to the captain any decision, blocker, failure, terminal outcome, or review-ready result before running the printed acknowledgement. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
