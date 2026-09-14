@@ -612,31 +612,26 @@ print_status_presentation() {  # [<deduped-raw-rows>]
 }
 
 # Classify only the presentation of one already-durable row.
-# This never changes wake eligibility, queue contents, or acknowledgement; it
-# may record presentation-only bookkeeping (which fingerprint the captain has
-# already been shown) through fm-inactive-reconcile.sh's captain-surfaced.
+# This never changes wake eligibility, queue contents, or acknowledgement.
 # A row is routine only when its structured kind proves that no newly unread
 # captain-relevant status is attached; every unknown or unsafe read fails toward
-# ATTENTION. A first-time inactive-outcome/inactive-reconcile receipt is
-# always ATTENTION, consistent with done/failed being captain-relevant; only a
-# REPEAT presentation of an already-surfaced fingerprint (still queued, not
-# yet acknowledged) is routine. A signal or stale row is routine only after
-# its status span has no actionable event or newly declared captain hold.
+# ATTENTION. Every inactive-outcome/inactive-reconcile check wake is always
+# ATTENTION, consistent with done/failed being captain-relevant, on every
+# presentation - including a repeat of one still queued and unacknowledged.
+# A per-fingerprint "already surfaced" downgrade was deliberately rejected:
+# this classifier runs on any plain (non-ack) drain, including ones an
+# automated caller (for example the AFK supervise daemon's own internal
+# housekeeping drain) issues and immediately acknowledges without ever
+# showing the output to the captain, so marking a fingerprint "surfaced"
+# here could poison presentation state and hide the captain's own first,
+# real look at a finished-or-failed child behind a ROUTINE label. A signal
+# or stale row is routine only after its status span has no actionable event
+# or newly declared captain hold.
 wake_row_needs_attention() {  # <kind> <key>
   local kind=$1 key=$2 status task offset record needs=0 rc
   case "$kind" in
     heartbeat) return 1 ;;
-    check)
-      case "$key" in
-        inactive-outcome:*|inactive-reconcile:*)
-          "$SCRIPT_DIR/fm-inactive-reconcile.sh" captain-surfaced "${key#*:}"
-          rc=$?
-          [ "$rc" -eq 1 ] && return 1
-          return 0
-          ;;
-      esac
-      return 0
-      ;;
+    check) return 0 ;;
     signal)
       fm_wake_status_key_map "$key" || return 0
       status="$STATE/$FM_WAKE_STATUS_KEY"

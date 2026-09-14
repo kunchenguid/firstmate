@@ -166,13 +166,16 @@ test_main_direct_terminal_presentation_receipt() {
 
 # A captain-facing inactive terminal outcome is exactly the kind of finished-or-
 # failed child notice done/failed status lines are always captain-relevant for,
-# so its first presentation must be ATTENTION. Once the captain has seen it, the
-# wake stays durably queued (nothing was acknowledged), and re-presenting the
-# very same still-unhandled receipt on a later plain drain is routine repeat
-# noise, not a fresh alarm - the raw row itself is never hidden either way.
-test_inactive_outcome_wake_is_attention_once_then_routine() {
+# so every presentation must be ATTENTION - including a repeat of the same
+# still-queued, unacknowledged receipt. A per-fingerprint downgrade to ROUTINE
+# on repeat was deliberately rejected: a plain (non-ack) drain can be issued by
+# an automated caller that never shows its output to the captain, so nothing
+# here may depend on how many times the row has merely been drained. The raw
+# row itself is never hidden either way, and the outcome remains fully
+# acknowledgeable afterward.
+test_inactive_outcome_wake_is_always_attention() {
   local out1 out2 err seq generation
-  make_world attention-then-routine
+  make_world attention-always
   write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "reconcile did not queue the terminal outcome wake"
@@ -186,10 +189,10 @@ test_inactive_outcome_wake_is_attention_once_then_routine() {
 
   out2="$WORLD/drain-second.out"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$out2" 2>/dev/null
-  grep -Fxq 'WAKE CLASS: ROUTINE - queued records declare no new captain-relevant event; supervisor handling only.' "$out2" \
-    || fail "repeated presentation of the same unacknowledged outcome was not ROUTINE: $(cat "$out2")"
+  grep -Fxq 'WAKE CLASS: ATTENTION - at least one queued record carries a new captain-relevant event or could not be safely classified.' "$out2" \
+    || fail "a repeated, still-unacknowledged presentation of the same outcome was downgraded off ATTENTION: $(cat "$out2")"
   grep "$(printf '\tcheck\tinactive-outcome:')" "$out2" >/dev/null \
-    || fail "routine repeat presentation hid the durable raw row"
+    || fail "repeated attention presentation hid the durable raw row"
 
   err="$WORLD/drain.err"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2> "$err"
@@ -198,7 +201,29 @@ test_inactive_outcome_wake_is_attention_once_then_routine() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "repeated presentation lost the acknowledgement boundary"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
     || fail "repeatedly presented outcome wake could not be acknowledged"
-  pass "an inactive terminal outcome is ATTENTION once and ROUTINE on every unacknowledged repeat"
+  pass "an inactive terminal outcome stays ATTENTION on every presentation, including an unacknowledged repeat"
+}
+
+# The inactive-reconcile: notice (an undeliverable parent report) is also
+# always captain-relevant, and gets the same unconditional ATTENTION treatment
+# as inactive-outcome:.
+test_inactive_reconcile_notice_wake_is_attention() {
+  local out rc
+  make_world attention-notice; bind_secondmate local
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  write_child "$MATE" stuck 'failed: cannot reach anyone'
+  rc=0
+  run_report "$MATE" stuck >/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "report claimed delivery through an unusable parent binding"
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "undeliverable report did not queue its notice"
+
+  out="$WORLD/drain.out"
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" > "$out" 2>/dev/null
+  grep -Fxq 'WAKE CLASS: ATTENTION - at least one queued record carries a new captain-relevant event or could not be safely classified.' "$out" \
+    || fail "an undeliverable-report notice was not ATTENTION: $(cat "$out")"
+  grep "$(printf '\tcheck\tinactive-reconcile:')" "$out" >/dev/null \
+    || fail "attention presentation hid the durable raw row"
+  pass "an inactive-reconcile notice is ATTENTION"
 }
 
 # A secondmate delivers a child's terminal ledger line to the parent on the
@@ -856,7 +881,8 @@ test_reconciliation_never_calls_forge() {
 }
 
 test_main_direct_terminal_presentation_receipt
-test_inactive_outcome_wake_is_attention_once_then_routine
+test_inactive_outcome_wake_is_always_attention
+test_inactive_reconcile_notice_wake_is_attention
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
