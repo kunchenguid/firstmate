@@ -483,6 +483,13 @@ The measurements that decided the design, all in an isolated Herdr lab session w
 | Does Codex deduplicate concurrent async `Stop` firings? | No. A second Stop started a second concurrent instance, which is why the auto-arm keeps a single-flight generation ledger. |
 | Does an async `Stop` hook wait for a synchronous one registered ahead of it? | No. With one synchronous and one async hook in the same Stop group, the async hook started 0.11s after the synchronous hook began, while that synchronous hook ran for 3.02s. |
 | Can an external process wake an idle session? | Yes. `codex queue --thread <session_id>` reached an idle TUI session in 4s. |
+| Does a synchronous `Stop` hook's stdout `systemMessage` reach the operator on an exit-0 ALLOW? | Yes. A valid `stop.command.output` object carrying `systemMessage`, emitted while exiting 0 to allow the stop, rendered in the TUI transcript as `↳ Hook · <the systemMessage text>`. |
+| Does plain stderr reach the operator on that same exit-0 allow path? | No. Stderr written on the allow path was not surfaced, consistent with stderr being delivered only on the exit-2 block path. |
+| What happens to non-JSON stdout on an exit-0 allow? | It is refused: the TUI reported `• Hook failed └ hook returned invalid stop hook JSON output`, so the JSON shape is what makes the notice arrive. |
+
+Those last three rows were measured on 2026-09-13 in an isolated Herdr lab on codex-cli 0.154.0, with a synchronous Stop hook emitting exactly the shape `bin/fm-turnend-guard.sh`'s attended fail-open emits.
+They matter because putting a Codex primary into the cooperative mode makes that fail-open reachable on Codex for the first time, and its operator notice travels on stdout rather than the exit-2 stderr channel every other Codex block uses.
+The stderr row is the boundary to respect: moving that notice to stderr would silently lose it, because the fail-open allows the stop rather than blocking it.
 
 `codex queue` behavior that bounds the delivery claim: a message queued while the agent is working is delivered after that turn rather than interleaved; two queued messages arrive in submission order; a bogus or unknown thread id exits non-zero with a named error; and a message queued for a thread whose session is already gone is **accepted with exit 0**.
 That last row is why delivery is documented as best effort and the durable wake queue remains the reliable record.

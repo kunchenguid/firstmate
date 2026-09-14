@@ -552,6 +552,13 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
+  # This notice rides stdout as a systemMessage while the stop is ALLOWED, and
+  # that channel is verified on both harnesses that reach here: Claude renders
+  # it, and codex-cli 0.154.0 renders it in the TUI transcript as
+  # "Hook - <text>" (docs/verification/supervision.md, Codex Stop-hook facts).
+  # Do not move it to stderr. Stderr is delivered only on the exit-2 BLOCK path,
+  # so on this allow path it is silently dropped, and the JSON object shape is
+  # itself load-bearing: non-JSON stdout is refused as invalid hook output.
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi

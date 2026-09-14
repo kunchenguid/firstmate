@@ -218,8 +218,15 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # fm_autoarm_midturn_healthy demands outcome=rewake). Only the owning generation
 # can make that correction, and a correction refused as superseded needs none:
 # a newer generation already owns the ledger.
+#
+# That correction is the one write here whose failure cannot be shrugged off, so
+# its status is never discarded: a contended micro-mutex is retried over the same
+# bounded budget fm_autoarm_write_owned itself uses, because the alternative is a
+# row claiming a delivery that did not happen. Return 3 says exactly that - the
+# push was rejected AND the row still claims recovery - so the state is named
+# rather than silently indistinguishable from an ordinary rejected push.
 autoarm_deliver() {  # <outcome> <banner> [marker-file]
-  local outcome=$1 banner=$2 marker=${3:-} session_pid='' recovery=''
+  local outcome=$1 banner=$2 marker=${3:-} session_pid='' recovery='' fixed i=0
   fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
   [ -e "$STATE/.afk" ] && return 1
   if [ "$outcome" = rewake ]; then
@@ -235,7 +242,15 @@ autoarm_deliver() {  # <outcome> <banner> [marker-file]
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return 1
   if ! codex queue --thread "$THREAD" --message "$banner" >/dev/null 2>&1; then
     [ -z "$marker" ] || rm -f -- "$marker" 2>/dev/null || true
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" failed-suppressed >/dev/null 2>&1
+    while :; do
+      fm_autoarm_write_owned "$STATE" "$MY_GEN" failed-suppressed >/dev/null 2>&1
+      fixed=$?
+      [ "$fixed" -eq 1 ] || break
+      [ "$i" -lt 20 ] || break
+      sleep 0.02
+      i=$((i + 1))
+    done
+    [ "$fixed" -eq 1 ] && return 3
     return 1
   fi
   return 0
