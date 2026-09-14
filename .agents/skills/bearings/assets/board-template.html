@@ -140,13 +140,17 @@ a { color: inherit; text-decoration: none; }
   padding: 26px 28px 72px; display: flex; flex-direction: column; gap: 22px;
 }
 
-/* stat strip */
+/* stat strip - each tile is a real button that jumps to its section */
 .bb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .bb-stat {
   display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 0;
   background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  font: inherit; color: inherit; text-align: left; cursor: pointer; transition: border-color 120ms, background 120ms;
 }
+.bb-stat:hover { border-color: var(--ink-300); }
+.bb-stat:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .bb-stat--call { background: var(--rust-050); border: 2px solid var(--rust-500); }
+.bb-section:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-md); }
 .bb-stat__num { font-family: var(--font-mono); font-size: var(--fs-h3); font-weight: 600; line-height: 1; color: var(--text-strong); }
 .bb-stat--call .bb-stat__num { color: var(--rust-600); }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
@@ -297,6 +301,23 @@ a { color: inherit; text-decoration: none; }
 .bb-row__check { width: 26px; height: 26px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none;
   background: var(--status-online-soft); color: var(--status-online); border: 1.5px solid var(--sea-200); }
 .bb-row__check svg { width: 15px; height: 15px; }
+/* ---- Charted Next rows: a native <details>/<summary> disclosure so a click
+   opens the full item instead of being caught by Lavish's annotation editor
+   (native disclosure controls are exempt from that, the way buttons and
+   radios already are on this board). ---- */
+.bb-row--chart { padding: 0; }
+.bb-row--chart > summary { list-style: none; cursor: pointer; }
+.bb-row--chart > summary::-webkit-details-marker { display: none; }
+.bb-row--chart > summary::marker { content: ""; }
+.bb-row__summary {
+  display: flex; align-items: center; gap: 12px; padding: 11px 18px; min-width: 0;
+}
+.bb-row--chart > summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.bb-row__full { padding: 0 18px 14px 46px; display: flex; flex-direction: column; gap: 4px; }
+.bb-row__full-title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.35; }
+.bb-row__full-reason, .bb-row__full-repo, .bb-row__full-detail {
+  font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.4;
+}
 .bb-morechip {
   display: inline-flex; align-items: center; gap: 6px; margin: 10px 18px 12px;
   font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
@@ -345,7 +366,7 @@ a { color: inherit; text-decoration: none; }
   <div class="bb-filterbar" id="bb-filterbar" hidden></div>
 
   <div class="bb-cols">
-  <section class="bb-section">
+  <section class="bb-section" id="bb-section-call" tabindex="-1">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
@@ -369,7 +390,7 @@ a { color: inherit; text-decoration: none; }
     </div>
   </section>
 
-  <section class="bb-section">
+  <section class="bb-section" id="bb-section-charted" tabindex="-1">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -392,7 +413,7 @@ a { color: inherit; text-decoration: none; }
   </div>
 
   <div class="bb-cols">
-    <section class="bb-section">
+    <section class="bb-section" id="bb-section-underway" tabindex="-1">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
@@ -402,7 +423,7 @@ a { color: inherit; text-decoration: none; }
       <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
     </section>
 
-    <section class="bb-section">
+    <section class="bb-section" id="bb-section-landed" tabindex="-1">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
@@ -494,19 +515,27 @@ __FM_BEARINGS_BOARD_DATA__
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
 
-  /* stat strip */
+  /* stat strip - each tile is a button that jumps the captain to its section,
+     using a native control so Lavish's annotation editor leaves it alone */
   var callTotal = data.captains_call.length;
   var stats = [
-    { n: callTotal, l: "need you", call: true },
-    { n: data.underway.length, l: "underway" },
-    { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
+    { n: callTotal, l: "need you", call: true, target: "bb-section-call" },
+    { n: data.underway.length, l: "underway", target: "bb-section-underway" },
+    { n: data.landed.length, l: "landed recently", target: "bb-section-landed" },
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next", target: "bb-section-charted" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
-    var t = el("div", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    var t = el("button", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    t.type = "button";
     t.appendChild(el("span", "bb-stat__num", String(s.n)));
     t.appendChild(el("span", "bb-stat__label", s.l));
+    t.addEventListener("click", function () {
+      var section = document.getElementById(s.target);
+      if (!section) return;
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (typeof section.focus === "function") section.focus({ preventScroll: true });
+    });
     strip.appendChild(t);
   });
   document.getElementById("bb-call-sub").textContent =
@@ -938,14 +967,21 @@ __FM_BEARINGS_BOARD_DATA__
   }
   var chRows = [];
   data.charted.forEach(function (t) {
-    var row = el("div", "bb-row");
+    /* a native <details>/<summary> disclosure: the click that opens it is a
+       native interaction, so Lavish's annotation editor leaves it alone the
+       same way it already leaves buttons and radios alone, and the captain
+       gets the full title, reason, repo, and detail on open. */
+    var row = el("details", "bb-row bb-row--chart");
     row.dataset.repo = repoKey(t.repo);
     chRows.push(row);
+    var summary = el("summary", "bb-row__summary");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
       pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
+      /* the pick must toggle without also opening/closing the disclosure */
+      pick.addEventListener("click", function (ev) { ev.stopPropagation(); });
       pick.addEventListener("change", function () {
         if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
           pick.checked = false;
@@ -954,18 +990,27 @@ __FM_BEARINGS_BOARD_DATA__
         }
         refreshBar();
       });
-      row.appendChild(pick);
+      summary.appendChild(pick);
     } else {
-      row.appendChild(el("span", "bb-pick-spacer"));
+      summary.appendChild(el("span", "bb-pick-spacer"));
     }
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
     /* second line keeps the title uncrowded in the half-width column */
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
-    row.appendChild(main);
-    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
-    else if (t.reason) row.appendChild(badge("warn", "waiting"));
+    summary.appendChild(main);
+    if (isWarning(t)) summary.appendChild(badge("danger", "needs repair"));
+    else if (t.reason) summary.appendChild(badge("warn", "waiting"));
+    row.appendChild(summary);
+
+    var full = el("div", "bb-row__full");
+    full.appendChild(el("div", "bb-row__full-title", t.title));
+    if (t.reason) full.appendChild(el("div", "bb-row__full-reason", t.reason));
+    if (t.repo) full.appendChild(el("div", "bb-row__full-repo", t.repo));
+    if (t.detail) full.appendChild(el("div", "bb-row__full-detail", t.detail));
+    row.appendChild(full);
+
     ch.appendChild(row);
   });
   var chartedShown = chartedQueued(data.charted).length;

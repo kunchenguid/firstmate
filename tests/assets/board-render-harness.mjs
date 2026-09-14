@@ -229,15 +229,22 @@ const ch = byId.get("bb-charted") || new Node("div");
 const charted = ch.children
   .filter((r) => r.className.split(/\s+/).includes("bb-row"))
   .map((row) => {
-    const main = row.children.find((c) => c.className.includes("bb-row__main"));
-    const pick = row.children.find((c) => c.className.includes("bb-pick") && !c.className.includes("spacer"));
+    // Charted rows are a <details>/<summary> disclosure: the pick and main
+    // content live one level deeper, inside the summary, so this looks
+    // through the whole row rather than only its direct children.
+    const main = row.querySelectorAll(".bb-row__main")[0];
+    const pick = row.querySelectorAll(".bb-pick")[0];
+    const full = row.querySelectorAll(".bb-row__full")[0];
     return {
       title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
       sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
-      badges: badgesOf(row),
+      badges: badgesOf(row.querySelectorAll(".bb-row__summary")[0] || row),
       pickable: !!pick,
       checked: !!pick && !!pick.checked,
       hidden: !!row.hidden,
+      open: !!row.open,
+      fullTitle: full?.children.find((c) => c.className.includes("bb-row__full-title"))?.textContent ?? "",
+      fullDetail: full?.children.find((c) => c.className.includes("bb-row__full-detail"))?.textContent ?? "",
     };
   });
 // A fail-closed render replaces the page body instead of the board sections, so
