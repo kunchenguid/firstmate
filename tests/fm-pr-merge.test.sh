@@ -5112,3 +5112,5 @@ test_expected_head_push_after_verify_is_refused_by_the_forge
 test_expected_head_later_preflight_does_not_adopt_a_new_head
 test_expected_head_bad_inputs_refuse_before_effects
 test_expected_head_keeps_existing_refusals
+python3 "$ROOT/tests/azure-pr-contract.py" || fail "Azure PR contract regression"
+pass "Azure identities, exact-revision policies, guarded completion and merge polls"
