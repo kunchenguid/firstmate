@@ -44,6 +44,7 @@ FM_PR_REG_DATA_HASH=
 FM_PR_REG_TEMPLATE_HASH=
 FM_PR_REG_DATA_IDENTITY=
 FM_PR_REG_CHECK_IDENTITY=
+FM_PR_REG_EPOCH=
 FM_PR_POLL_DATA_TMP=
 FM_PR_POLL_CHECK_TMP=
 FM_PR_POLL_REG_TMP=
@@ -367,7 +368,7 @@ fm_pr_poll_data_parse() {
 # The version tag moved to v2 with the provider tag, so a registration written
 # by the previous release is recognised as old and refused.
 fm_pr_poll_registration_parse() {
-  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
+  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity epoch
   FM_PR_REG_ID=
   FM_PR_REG_PROVIDER=
   FM_PR_REG_URL=
@@ -378,6 +379,7 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=
   FM_PR_REG_DATA_IDENTITY=
   FM_PR_REG_CHECK_IDENTITY=
+  FM_PR_REG_EPOCH=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 7< "$file" || return 1
   IFS= read -r version <&7 || { exec 7<&-; return 1; }
@@ -394,6 +396,11 @@ fm_pr_poll_registration_parse() {
   if IFS= read -r _extra <&7; then
     exec 7<&-
     return 1
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    epoch=$(/usr/bin/stat -L -f %m /dev/fd/7 2>/dev/null) || epoch=
+  else
+    epoch=$(stat -L -c %Y /dev/fd/7 2>/dev/null) || epoch=
   fi
   exec 7<&-
   [ "$version" = fm-pr-poll-registration-v2 ] || return 1
@@ -417,6 +424,7 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=$template_hash
   FM_PR_REG_DATA_IDENTITY=$data_identity
   FM_PR_REG_CHECK_IDENTITY=$check_identity
+  FM_PR_REG_EPOCH=$epoch
 }
 
 fm_pr_poll_cleanup() {

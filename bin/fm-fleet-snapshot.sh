@@ -788,10 +788,10 @@ task_json_lines() {
     fi
     merge_poll_armed=false
     merge_poll_epoch=null
-    if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$meta"; then
+    if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$meta" \
+      && [[ "$FM_PR_REG_EPOCH" =~ ^[0-9]+$ ]]; then
       merge_poll_armed=true
-      merge_poll_epoch=$(file_mtime_epoch "$STATE/$id.pr-poll-registration")
-      case "$merge_poll_epoch" in ''|*[!0-9]*) merge_poll_epoch=null ;; esac
+      merge_poll_epoch=$FM_PR_REG_EPOCH
     fi
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
