@@ -53,6 +53,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-copilot-quota-lib.sh
+. "$SCRIPT_DIR/fm-copilot-quota-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 usage() {
@@ -363,6 +365,11 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
+  if ! fm_copilot_model_available "$model"; then
+    if fm_copilot_model_is_premium "$model"; then
+      continue
+    fi
+  fi
   provider=$(provider_for_harness "$harness" "$model")
   scope_model=$model
   [ "$harness" != omp ] || scope_model=${model#*/}
