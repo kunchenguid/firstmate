@@ -341,13 +341,15 @@ bounded_file_count() {  # <dir> <cap>
 # captain's own document never being printed.
 #   - Order is the signal the classifier already carries, not the alphabet: the
 #     project's knowledge surface first, then documents by name, then the rest.
-#   - The slots go to those names in that order, and only what they leave over
-#     folds - one counted line per directory. So 45 caption files beside one
-#     audit show as a count while the audit is named, and a crowded `docs/` is
-#     never the thing replaced by a number.
-#   - Nothing collapses while everything fits, because the names are the point.
-# The omission line says how many of what it hides is knowledge, which is the
-# number that decides whether to look further with a larger --limit.
+#   - No single directory takes the slots. Every directory is represented before
+#     any of them takes a second name, so 60 session logs cannot bury the
+#     AGENTS.md sitting beside them even though all three are knowledge and the
+#     logs sort first. What a directory cannot show folds into one counted line.
+#   - Slots go to the most valuable RANK first, so when something must fold it
+#     is the least valuable directory, never a crowded `docs/`.
+# Nothing folds while everything fits, because the names are the point, and the
+# omission line says how many of what it hides is knowledge - the number that
+# decides whether to look again with a larger --limit.
 print_path_list() {  # <limit> < paths
   local limit=$1 path rank dir
   while IFS= read -r path; do
@@ -369,46 +371,74 @@ print_path_list() {  # <limit> < paths
       rank[NR] = $1 + 0
       dir[NR] = $2
       path[NR] = $3
+      # Entries arrive sorted by rank then path, so a directory first appears at
+      # its best rank and in value order among its peers.
+      if (!(dir[NR] in count)) {
+        dirorder[++nd] = dir[NR]
+        count[dir[NR]] = 0
+        dirrank[dir[NR]] = rank[NR]
+        if (rank[NR] > maxrank) maxrank = rank[NR]
+      }
+      count[dir[NR]]++
       n = NR
     }
     END {
-      # Entries arrive most valuable first, so the slots go to them in order and
-      # only what is left over folds. Nothing is chosen for folding by how full
-      # its directory is: a crowded `docs/` would be exactly the wrong thing to
-      # replace with a number.
-      take = (limit < n) ? limit : n
-      fold = 1
-      while (take > 0) {
-        gen++
-        spill = 0
-        for (i = take + 1; i <= n; i++) {
-          if (spillgen[dir[i]] != gen) { spillgen[dir[i]] = gen; spill++ }
-        }
-        if (take + spill <= limit) break
-        take--
+      if (n <= limit) {
+        for (i = 1; i <= n; i++) printf "    %s\n", path[i]
+        exit
       }
-      # More directories than slots: folding cannot buy a single name back, so
-      # the omission line carries everything instead.
-      if (take == 0) {
-        fold = 0
-        take = (limit < n) ? limit : n
-      }
-      for (i = 1; i <= take; i++) printf "    %s\n", path[i]
       hidden = 0
       hidden_known = 0
-      nleft = 0
-      for (i = take + 1; i <= n; i++) {
-        d = dir[i]
-        if (!(d in leftover)) { leftover[d] = 0; leftorder[++nleft] = d }
-        leftover[d]++
-        hidden++
-        if (rank[i] < 2) hidden_known++
-      }
-      if (fold) {
-        for (j = 1; j <= nleft; j++) {
-          d = leftorder[j]
-          printf "    %s (%d more files)\n", d, leftover[d]
+      # More directories than slots: a fold line each would buy no name back, so
+      # the omission line carries everything the cap leaves out.
+      if (nd > limit) {
+        for (i = 1; i <= limit; i++) printf "    %s\n", path[i]
+        for (i = limit + 1; i <= n; i++) {
+          hidden++
+          if (rank[i] < 2) hidden_known++
         }
+        printf "    ... and %d more (%d of them knowledge)\n", hidden, hidden_known
+        exit
+      }
+      # One line per directory is held back for its fold line, so every
+      # directory is represented whatever else happens. The rest is handed out a
+      # name at a time, round by round, so no directory takes a second name
+      # before its peers have a first - and rank by rank, so the least valuable
+      # directory is the one left with nothing but its count. A directory that
+      # runs out of entries needs no fold line and gives its held line back.
+      reserve = nd
+      slots = limit - nd
+      for (r = 0; r <= maxrank; r++) {
+        granted = 1
+        while (slots > 0 && granted) {
+          granted = 0
+          for (i = 1; i <= nd && slots > 0; i++) {
+            d = dirorder[i]
+            if (dirrank[d] != r || take[d] >= count[d]) continue
+            take[d]++
+            slots--
+            granted = 1
+            if (take[d] == count[d]) {
+              reserve--
+              slots++
+            }
+          }
+        }
+      }
+      for (i = 1; i <= n; i++) {
+        d = dir[i]
+        if (shown[d] < take[d]) {
+          printf "    %s\n", path[i]
+          shown[d]++
+        } else {
+          leftover[d]++
+          hidden++
+          if (rank[i] < 2) hidden_known++
+        }
+      }
+      for (i = 1; i <= nd; i++) {
+        d = dirorder[i]
+        if (leftover[d] > 0) printf "    %s (%d more files)\n", d, leftover[d]
       }
       if (hidden > 0) printf "    ... and %d more (%d of them knowledge)\n", hidden, hidden_known
     }

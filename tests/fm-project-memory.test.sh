@@ -362,10 +362,85 @@ test_a_vendored_tree_is_not_project_knowledge() {
   pass "fm-project-memory.sh: a vendored tree is not project knowledge"
 }
 
-# The one thing the cap can cost is the captain's own document never being
-# printed. A folder of captions sorts before `docs/` alphabetically and there
-# are more of them than the cap allows, so ordering by the alphabet buries the
-# audit the scan exists to surface.
+# Rule one on its own, with nothing to fold: everything fits, so the only thing
+# under test is the order. A plain text file sorts first in every byte order
+# there is, and it still has to come after the project's own knowledge surface.
+test_the_listing_names_the_knowledge_surface_before_anything_else() {
+  local world out at_text at_audit at_agents
+  world=$(make_world valueorder)
+  mkdir -p "$world/source/docs"
+  printf 'loose notes\n' >"$world/source/.notas.txt"
+  printf 'agent memory\n' >"$world/source/AGENTS.md"
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 3" "the count stopped being complete"
+  assert_not_contains "$out" "more files)" "a listing that fits folded something anyway"
+  at_text=$(printf '%s\n' "$out" | grep -n '\.notas\.txt' | head -1 | cut -d: -f1)
+  at_audit=$(printf '%s\n' "$out" | grep -n 'docs/audit\.md' | head -1 | cut -d: -f1)
+  at_agents=$(printf '%s\n' "$out" | grep -n '^    AGENTS\.md$' | head -1 | cut -d: -f1)
+  [ -n "$at_text" ] && [ -n "$at_audit" ] && [ -n "$at_agents" ] ||
+    fail "the listing did not name all three paths: $out"
+  [ "$at_agents" -lt "$at_text" ] ||
+    fail "a loose text file was listed ahead of the project's agent memory"
+  [ "$at_audit" -lt "$at_text" ] ||
+    fail "a loose text file was listed ahead of the production audit"
+  pass "fm-project-memory.sh: the listing names the knowledge surface before anything else"
+}
+
+# Rule two on its own, and the case the ranking cannot resolve: all three paths
+# are knowledge of the same rank, the session logs sort first AND outnumber the
+# cap. Nothing but a per-directory ceiling keeps the two documents visible, so
+# handing the slots out by position alone fails here and only here.
+test_no_single_directory_takes_every_listing_slot() {
+  local world out i
+  world=$(make_world onedirhog)
+  mkdir -p "$world/source/.claude/history" "$world/source/docs"
+  i=1
+  while [ "$i" -le 60 ]; do
+    printf '{"turn":%s}\n' "$i" >"$world/source/.claude/history/session-$i.jsonl"
+    i=$((i + 1))
+  done
+  printf 'agent memory an earlier worker wrote\n' >"$world/source/AGENTS.md"
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 62" "the count stopped being complete"
+  assert_contains "$out" "
+    AGENTS.md" "a crowded directory of the same rank buried the project's agent memory"
+  assert_contains "$out" "docs/audit.md" "a crowded directory of the same rank buried the production audit"
+  assert_contains "$out" ".claude/history/ (23 more files)" \
+    "the crowded directory did not give up its excess to one counted line"
+  assert_contains "$out" "... and 23 more (23 of them knowledge)" \
+    "the omission line did not say how much of what it hides is knowledge"
+  pass "fm-project-memory.sh: no single directory takes every listing slot"
+}
+
+# Rule three on its own: the hidden count and the knowledge count have to be
+# able to differ, or the line proves nothing. Working material is never
+# knowledge, so its omission line has to say zero while the counts stay whole.
+test_the_omission_line_counts_only_the_knowledge_it_hides() {
+  local world out i
+  world=$(make_world hiddencount)
+  mkdir -p "$world/source/parts"
+  i=1
+  while [ "$i" -le 50 ]; do
+    printf 'binary-ish\n' >"$world/source/parts/blob-$i.bin"
+    i=$((i + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_OTHER: 50" "the count stopped being complete"
+  assert_contains "$out" "parts/ (11 more files)" "the overflow did not collapse into one counted line"
+  assert_contains "$out" "... and 11 more (0 of them knowledge)" \
+    "the omission line counted working material as knowledge"
+  assert_contains "$out" "VERDICT: parity" "working material alone turned the verdict into a leak"
+  pass "fm-project-memory.sh: the omission line counts only the knowledge it hides"
+}
+
+# The cross-rank shape of rule two: here the crowded directory is the LESS
+# valuable one, so the ranking alone would already save the audit. Its own
+# ceiling case lives in test_no_single_directory_takes_every_listing_slot.
 test_a_crowded_directory_never_buries_the_captains_own_document() {
   local world out i
   world=$(make_world crowded)
@@ -573,6 +648,9 @@ test_an_untracked_knowledge_directory_is_classified_by_what_is_inside_it
 test_a_knowledge_document_with_a_scratch_name_is_still_knowledge
 test_documentation_inside_a_dependency_tree_is_not_project_knowledge
 test_a_vendored_tree_is_not_project_knowledge
+test_the_listing_names_the_knowledge_surface_before_anything_else
+test_no_single_directory_takes_every_listing_slot
+test_the_omission_line_counts_only_the_knowledge_it_hides
 test_a_crowded_directory_never_buries_the_captains_own_document
 test_the_fullest_directory_is_not_folded_when_it_is_the_valuable_one
 test_scratch_is_counted_but_never_listed
