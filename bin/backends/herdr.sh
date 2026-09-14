@@ -3202,23 +3202,22 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
 # fm_backend_herdr_submit_pending_is_proof: 0 when a `pending` verdict left by
 # fm_backend_herdr_send_text_submit at <target> proves a swallowed Enter.
 # Answered per pane because this adapter's busy primitive is the harness's own
-# native agent_status, and only two native states let the queued-Enter
-# conversion above act on that verdict at all:
-#   working - fm_backend_herdr_queued_enter_busy reports busy, so a `pending`
-#             that survived it is a swallow and not a queued mid-turn Enter.
+# native agent_status, and only a legibly idle pane carries that proof:
 #   idle/done - the pre-Enter baseline was legibly idle, so allow_rendered was
-#             1 and the rendered busy footer supplied the same signal; a
-#             `pending` that survived that read is a swallow too.
-# Every other native state - notably Cursor's always-`blocked` pane, and an
-# unreadable status - reaches fm_composer_queued_enter_verdict with `idle` and
-# is echoed back as `pending` without any busy read having been possible. That
-# verdict carries no proof, so it must stay advisory rather than name a
-# stranded input line on a pane whose Enter may well have landed.
+#             1 and the rendered busy footer supplied the queued-Enter signal;
+#             a `pending` that survived that read is a genuine swallow.
+# Every other native state carries no proof. `working` read HERE is read AFTER
+# the submit, so it is evidence the Enter LANDED, not that it was swallowed:
+# a pane that was working at conversion time would already have had its
+# `pending` converted to `empty` by fm_composer_queued_enter_verdict, so a
+# `pending` still standing beside a now-working pane is a late transition
+# across our own read. Cursor's always-`blocked` pane and an unreadable status
+# never reached a busy read at all. All of those must stay advisory rather than
+# name a stranded input line on a pane whose Enter may well have landed.
 fm_backend_herdr_submit_pending_is_proof() {  # <target>
   local target=$1 raw
   fm_backend_herdr_parse_target "$target" || return 1
   raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
-  [ "$raw" != working ] || return 0
   [ "$(fm_backend_herdr_classify_submit_agent_status "$raw")" = idle ] || return 1
   return 0
 }

@@ -397,10 +397,13 @@ ring_with_verdict() {  # <state> <backend> <verdict> <record> [env=val...]
 # name. `pending` only proves a swallowed Enter where the submit core could
 # have converted a queued one, and that conversion needs a busy primitive:
 # tmux reads one from the pane, herdr reads the harness's native agent_status,
-# and cmux/orca/zellij have none at all. A harness whose native status never
-# says `working` - Cursor reads `blocked` in every state - is structurally
-# cursorless even on herdr, so its `pending` must stay advisory rather than
-# tell an operator a doorbell is stranded when its Enter may well have landed.
+# and cmux/orca/zellij have none at all. On herdr the proof-carrying read is a
+# legibly idle pane, which is the baseline that let the rendered busy footer
+# supply the queued-Enter signal. Every other native state stays advisory: a
+# `working` pane read AFTER the submit is evidence the Enter LANDED, Cursor
+# reads `blocked` in every state and so never receives the conversion at all,
+# and an unreadable status proves nothing either. None of those may tell an
+# operator a doorbell is stranded when its Enter may well have landed.
 test_ring_stranded_verdict_requires_endpoint_proof() {
   local dir state rec b rc fb
   dir="$TMP_ROOT/ring-capability"
@@ -411,17 +414,25 @@ test_ring_stranded_verdict_requires_endpoint_proof() {
   # can resolve a queued Enter.
   rc=0; ring_with_verdict "$state" tmux pending "$rec" || rc=$?
   [ "$rc" = 4 ] || fail "tmux resolves a queued Enter, so its pending is a stranded line (4), got $rc"
-  # herdr answers per pane. `working` is the queued-Enter signal itself, and a
-  # legibly idle/done pane is the baseline that lets the rendered busy footer
-  # supply it - a pending surviving either read is a genuine swallow. This is
-  # the Codex case: its pane reports those states.
-  for b in working idle done; do
+  # herdr answers per pane. A legibly idle/done pane is the baseline that lets
+  # the rendered busy footer supply the queued-Enter signal, so a pending
+  # surviving that read is a genuine swallow. This is the Codex case.
+  for b in idle done; do
     rc=0
     ring_with_verdict "$state" herdr pending "$rec" \
       PATH="$fb:$PATH" FM_FAKE_HERDR_STATUS="$b" || rc=$?
     [ "$rc" = 4 ] \
       || fail "a herdr pane reading $b can resolve a queued Enter, so pending is stranded (4), got $rc"
   done
+  # This read happens AFTER the submit, so a now-`working` pane is evidence the
+  # Enter LANDED: a pane already working at conversion time would have had its
+  # pending converted to empty, so a surviving pending beside a working pane is
+  # a late transition across our own read, never proof of a swallow.
+  rc=0
+  ring_with_verdict "$state" herdr pending "$rec" \
+    PATH="$fb:$PATH" FM_FAKE_HERDR_STATUS=working || rc=$?
+  [ "$rc" = 0 ] \
+    || fail "a post-submit working herdr pane means the Enter landed, so pending stays advisory (0), got $rc"
   # A Cursor pane reads `blocked` in every state, so the conversion never fires
   # and its pending carries no proof. An unreadable status is no proof either.
   rc=0
