@@ -242,7 +242,7 @@ awaiting holds work that shipped and now waits on a merge we do not control: the
   age_days is that wait in whole days, preserved when the same
   PR is re-recorded. nudge marks a row at or past awaiting_nudge_days, which
   belongs in Captain's Call instead; it is off unless
-  FM_BEARINGS_AWAITING_NUDGE_DAYS is set, and awaiting_nudge_days is then null
+  FM_BEARINGS_AWAITING_NUDGE_DAYS is set; when unset, awaiting_nudge_days is null
   and no row ever nudges.
   See bin/fm-bearings-snapshot.sh's header for delivery retention and bounds.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
