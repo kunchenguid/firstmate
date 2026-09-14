@@ -71,6 +71,9 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# The short worker introduction is shared by ship/scout scaffolds only.
+# Existing authored briefs are not migrated: retain them verbatim and let the
+# next authorized launch apply fm-dod-lib.sh's current role overlay.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -356,6 +359,7 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+WORKER_INTRO="You are firstmate's autonomous crewmate; do not wait for a human."
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
@@ -364,7 +368,7 @@ else
   LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
 fi
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$WORKER_INTRO
 
 $TASK_SECTION
 
@@ -450,7 +454,7 @@ esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$WORKER_INTRO
 
 $TASK_SECTION
 
