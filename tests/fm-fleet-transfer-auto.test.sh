@@ -19,6 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+reasoning_live_test() { case "$(FM_HOME="$1" "$ROOT/bin/fm-lock.sh" status 2>/dev/null)" in "lock: held by live"*) return 0 ;; *) return 1 ;; esac; }
 json_value() { python3 -c "import json,sys; print($1)"; }
 
 add_lock() {  # <home>
@@ -239,8 +240,10 @@ while [ ! -e "$TMP_ROOT/held" ]; do sleep 0.05; done
 SH
 chmod +x "$LOCK_STOP"
 arm_manager_2
-out=$(FM_FLEET_TRANSFER_STOP_HOOK=$LOCK_STOP "$FLEET" transfer begin --secondmate paperclip 2>&1); status=$?
+FM_FLEET_TRANSFER_STOP_HOOK=$LOCK_STOP "$FLEET" transfer begin --secondmate paperclip > "$TMP_ROOT/lock.out" 2>&1 & lock_pid=$!
+i=0; while ! grep -q 'registry is locked' "$TMP_ROOT/lock.out" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 0.05; i=$((i + 1)); done
 kill "$(cat "$TMP_ROOT/lock-holder.pid")" >/dev/null 2>&1 || true; rm -f "$TMP_ROOT/held"
+wait "$lock_pid"; status=$?; out=$(cat "$TMP_ROOT/lock.out")
 [ "$status" -ne 0 ] || fail "transfer ignored a fleet-lock timeout: $out"
 case "$out" in *"registry is locked"*"abandoned before moving records"*) ;; *) fail "lock timeout was not released: $out" ;; esac
 assert_released "fleet-lock timeout" "$(newest_journal paperclip)"
@@ -270,5 +273,74 @@ out=$("$FLEET" transfer rollback --transaction "$(basename "$broken" .json)" 2>&
 grep -q "$FROOT/manager-2|manager-2|start-manager" "$FM_HOOK_LOG" || fail "rollback left the destination stopped by the transfer down"
 [ "$(manager_for paperclip)" = "$(basename "$pc_home")" ] || fail "rollback changed the assignment"
 ! grep -q '^- paperclip ' "$FROOT/manager-2/data/secondmates.md" 2>/dev/null || fail "rollback left the destination route"
+
+# A signal after the record claim commits preserves the stopped endpoints for recovery.
+REG_HOLD="$TMP_ROOT/reg-hold.sh"
+cat > "$REG_HOLD" <<'SH'
+#!/usr/bin/env bash
+STATE="$1/state"
+. "$FM_HOLD_ROOT/bin/fm-wake-lib.sh"
+for home in "$@"; do mkdir -p "$home/state"; fm_lock_acquire_wait "$home/state/.secondmate-registry.lock"; done
+: > "$FM_HOLD_READY"
+while [ ! -e "$FM_HOLD_RELEASE" ]; do sleep 0.05; done
+for home in "$@"; do fm_lock_release "$home/state/.secondmate-registry.lock"; done
+SH
+chmod +x "$REG_HOLD"
+hold_registries() {  # <home>...
+  rm -f "$TMP_ROOT/hold.ready" "$TMP_ROOT/hold.release"
+  FM_HOLD_ROOT=$ROOT FM_HOLD_READY="$TMP_ROOT/hold.ready" FM_HOLD_RELEASE="$TMP_ROOT/hold.release" "$REG_HOLD" "$@" >/dev/null 2>&1 & hold_pid=$!
+  i=0; while [ ! -e "$TMP_ROOT/hold.ready" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$TMP_ROOT/hold.ready" ] || fail "registry lock holder did not start"
+}
+release_registries() { : > "$TMP_ROOT/hold.release"; wait "$hold_pid" 2>/dev/null; }
+start_claimed_transfer() {  # <secondmate> -> sets claim_pid and claim_tx once the claim row commits
+  : > "$FM_HOOK_LOG"
+  "$FLEET" transfer begin --secondmate "$1" > "$TMP_ROOT/claim.out" 2>&1 & claim_pid=$!
+  claim_tx=""; i=0
+  while [ "$i" -lt 200 ]; do
+    claim_tx=$(sed -n 's/.*(transaction \(.*\))$/\1/p' "$TMP_ROOT/claim.out")
+    [ -n "$claim_tx" ] && python3 - "$FROOT/fleet.json" "$claim_tx" <<'PY' && return 0
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+sys.exit(0 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 1)
+PY
+    sleep 0.05; i=$((i + 1))
+  done
+  fail "transfer never committed its record claim: $(cat "$TMP_ROOT/claim.out")"
+}
+assert_preserved() {  # <label> <expected-journal-state>
+  [ "$(tx_state "$FROOT/transactions/$claim_tx.json")" = "$2" ] || fail "$1 did not keep the journal recoverable: $(cat "$TMP_ROOT/claim.out")"
+  ! grep -q 'start-manager\|start-secondmate' "$FM_HOOK_LOG" || fail "$1 restarted an authority after the claim: $(cat "$FM_HOOK_LOG")"
+  case "$(cat "$TMP_ROOT/claim.out")" in *"recover or rollback $claim_tx"*) ;; *) fail "$1 printed no recovery hint: $(cat "$TMP_ROOT/claim.out")" ;; esac
+}
+
+# TERM after the claim commits but before records move.
+src_home=$pc_home
+arm_manager_2
+hold_registries "$src_home" "$FROOT/manager-2"
+start_claimed_transfer paperclip
+kill -TERM "$claim_pid"; pkill -TERM -P "$claim_pid" 2>/dev/null
+if wait "$claim_pid"; then fail "transfer terminated after its claim reported success"; fi
+release_registries
+assert_preserved "claim-time TERM" preparing
+grep -q "parent_home=$src_home" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "claim-time TERM moved records"
+if reasoning_live_test "$FROOT/manager-2" || reasoning_live_test "$src_home"; then fail "claim-time TERM left a live authority"; fi
+out=$("$FLEET" transfer recover --transaction "$claim_tx" 2>&1) || fail "claimed transfer was not recoverable: $out"
+[ "$(manager_for paperclip)" = manager-2 ] || fail "recovery of claimed transfer did not publish"
+grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "recovery of claimed transfer did not move the binding"
+
+# TERM while records move: the move finishes and stays recoverable, with no endpoint restarted.
+add_lock "$src_home"; printf 'test:test\n' > "$src_home/state/.fleet-herdr-target"
+hold_registries "$src_home" "$FROOT/manager-2"
+start_claimed_transfer paperclip
+kill -TERM "$claim_pid"
+release_registries
+if wait "$claim_pid"; then fail "transfer terminated during record move reported success"; fi
+assert_preserved "record-move TERM" records-ready
+grep -q "parent_home=$src_home" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "record-move TERM did not finish moving records"
+! grep -q '^- paperclip ' "$FROOT/manager-2/data/secondmates.md" || fail "record-move TERM left two parent routes"
+if reasoning_live_test "$FROOT/manager-2" || reasoning_live_test "$src_home"; then fail "record-move TERM left a live authority"; fi
+out=$("$FLEET" transfer recover --transaction "$claim_tx" 2>&1) || fail "moved transfer was not recoverable: $out"
+[ "$(manager_for paperclip)" = "$(basename "$src_home")" ] || fail "recovery of moved transfer did not publish"
 
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

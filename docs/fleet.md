@@ -123,7 +123,10 @@ The source home session lock must be stopped before `transfer begin`.
 That journal validates every non-liveness precondition above and reserves the destination, so two concurrent transfers cannot select or stop the same manager.
 Only then does the command stop the selected destination and recheck both endpoint locks.
 The command prints the transaction id before it stops anything.
-One exit trap, armed before the reservation and disarmed by the record claim, handles every failure before records move, including a fleet-lock timeout or a signal. It marks the journal `abandoned`, restarts a destination that this command stopped, relaunches a stopped source SecondMate, and leaves the assignment and parent records unchanged.
+One exit trap is armed from the reservation until the transfer is active. It runs on every failure, including a fleet-lock timeout or a signal.
+Under the fleet lock, the trap checks the registry for a claim row for this transaction. The record claim takes the same lock, and a claim refuses a journal that is no longer `preparing`.
+If no claim row exists, the trap marks the journal `abandoned`, restarts a destination that this command stopped, and relaunches a stopped source SecondMate. The assignment and parent records stay unchanged.
+If the claim has committed, or the lock cannot be taken, the trap restarts nothing. It leaves the journal and the stopped endpoints for `transfer recover` or `transfer rollback`, and prints that hint.
 The journal records `destination_stopped`. So if the owner-record move fails, `transfer rollback` also restarts that destination manager.
 Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.
 `recover` selects its destination the same way, keeps that destination live, journals the move as a failover, and does not relaunch the destination manager.

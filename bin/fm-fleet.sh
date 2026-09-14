@@ -323,15 +323,36 @@ destination_ready() {  # <home> <failover>
   if [ "$2" = 1 ]; then reasoning_live "$1"; else ! reasoning_live "$1"; fi
 }
 
-# The one cleanup owner for a reserved transfer whose records have not moved.
-# Armed before the reservation and disarmed by the record claim, it runs on
-# every exit or signal: abandon the journal, restart a destination this attempt
-# stopped, and relaunch a SecondMate it stopped. Reads transfer_begin globals.
+# Under the fleet lock, abandon the journal only while no registry claim row
+# exists for this transaction; the record claim takes the same lock.
+transfer_abandon_unclaimed_locked() {
+  python3 - "$REG" "$tx" <<'PY' || return
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
+sys.exit(3 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 0)
+PY
+  python3 "$TRANSFER_BIN" state --journal "$journal" --set abandoned >/dev/null
+}
+
+# The one cleanup owner for a reserved transfer, armed until it becomes active.
+# On any exit or signal it releases the reservation and restarts endpoints this
+# attempt stopped only when the conditional abandon proves the record claim
+# never committed; otherwise it leaves every endpoint stopped for recovery.
 transfer_release_trap() {
   [ "${TRANSFER_ARMED:-0}" = 1 ] || return 0
   TRANSFER_ARMED=0
+  exec 9>&-
   [ -f "$journal" ] || return 0
-  python3 "$TRANSFER_BIN" state --journal "$journal" --set abandoned >/dev/null
+  local rc=1 attempts=0
+  while [ "$attempts" -lt 6 ]; do
+    attempts=$((attempts + 1))
+    ( with_lock transfer_abandon_unclaimed_locked ); rc=$?
+    [ "$rc" = 1 ] || break
+  done
+  if [ "$rc" != 0 ]; then
+    echo "fm-fleet: transfer $tx claimed its record move or could not be released; endpoints stay stopped; recover or rollback $tx" >&2
+    return 0
+  fi
   if [ "$stopped_dest" = 1 ] && ! reasoning_live "$dest_home"; then
     transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$dest_home" "$dest" start-manager || echo "fm-fleet: destination manager $dest relaunch failed" >&2
   fi
@@ -440,6 +461,7 @@ transfer_begin() {  # <secondmate> <manager or empty> <source-home or empty> <fa
   with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "$reason" >/dev/null || { echo "fm-fleet: records moved but assignment publication failed; recover $tx" >&2; exit 1; }
   python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null
   transfer_activate "$sm" "$dest" "$dest_home" "$failover" "$tx" "$journal"
+  TRANSFER_ARMED=0
   echo "transfer $tx active: $sm -> $dest"
 }
 
@@ -468,11 +490,11 @@ with_home_registry_locks() {  # <journal> <command...>
 # concurrent transfer for the same SecondMate is abandoned before it touches
 # any record, so it cannot overwrite the winner's relaunched endpoint.
 transfer_apply_locked() {  # <secondmate> <tx> <expected-generation> <journal>
+  [ "$(python3 "$TRANSFER_BIN" state --journal "$4" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')" = preparing ] || { echo "fm-fleet: transfer $2 is no longer preparing" >&2; return 1; }
   if ! python3 "$REGISTRY_BIN" "$REG" transfer-claim --secondmate "$1" --transaction "$2" --expected-generation "$3"; then
     python3 "$TRANSFER_BIN" state --journal "$4" --set abandoned >/dev/null
     echo "fm-fleet: another transfer claimed $1 first" >&2; return 1
   fi
-  TRANSFER_ARMED=0
   with_home_registry_locks "$4" python3 "$TRANSFER_BIN" apply --journal "$4" || { echo "fm-fleet: owner-record move failed; recover or rollback $2" >&2; return 1; }
 }
 
