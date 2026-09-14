@@ -94,6 +94,7 @@ cat > "$CLOSE_HOOK" <<'SH'
 #!/usr/bin/env bash
 home=$3
 pid=$(cat "$home/state/.lock" 2>/dev/null || true)
+[ -n "$pid" ] && printf 'close|%s\n' "$2" >> "$FM_HOOK_LOG"
 [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
 rm -f "$home/state/.lock" "$home/state/.fleet-herdr-target"
 SH
@@ -166,21 +167,13 @@ case "$out" in *"after endpoint stop"*) ;; *) fail "race refusal misnames its wi
 [ "$(journal_count)" -eq "$((journals_before + 1))" ] || fail "raced transfer did not journal exactly one transaction"
 race_tx=$(newest_journal paperclip)
 [ -n "$race_tx" ] || fail "raced transfer left no journal"
-[ "$(tx_state "$race_tx")" = preparing ] || fail "raced transfer journal is not stuck at preparing"
+[ "$(tx_state "$race_tx")" = abandoned ] || fail "raced transfer did not retire its reservation"
 [ "$(manager_for paperclip):$(generation_for paperclip)" = manager-2:1 ] || fail "raced transfer moved records before the endpoint check"
 grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "raced transfer moved the parent binding"
+grep -q "$FROOT/manager-2|paperclip|start-secondmate" "$FM_HOOK_LOG" || fail "raced transfer did not relaunch the source SecondMate"
 export FM_FLEET_TRANSFER_STOP_HOOK=$HOOK
-
-# Rollback of the raced transaction restores with the registry untouched.
 race_pid=$(cat "$TMP_ROOT/race.pid"); kill "$race_pid" >/dev/null 2>&1 || true
 rm -f "$FROOT/manager-3/state/.lock"
-race_tx_name=$(basename "$race_tx" .json)
-out=$(FM_FLEET_ROOT=$FROOT "$FLEET" transfer rollback --transaction "$race_tx_name" 2>&1); status=$?
-expect_code 0 "$status" "rollback of raced transfer failed: $out"
-[ "$(tx_state "$race_tx")" = rolled-back ] || fail "raced journal was not marked rolled-back"
-[ "$(manager_for paperclip):$(generation_for paperclip)" = manager-2:1 ] || fail "rollback changed an unmoved assignment"
-grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "rollback moved the parent binding"
-grep -q "$FROOT/manager-2|paperclip|start-secondmate" "$FM_HOOK_LOG" || fail "rollback did not relaunch the source SecondMate"
 
 # No healthy peer means an explicit refusal with no journal.
 journals_before=$(journal_count)
@@ -189,4 +182,41 @@ out=$(FM_FLEET_ROOT=$FROOT "$FLEET" transfer begin --secondmate paperclip 2>&1);
 case "$out" in *"no healthy reasoning manager"*) ;; *) fail "empty-pool refusal wrong: $out" ;; esac
 [ "$(journal_count)" -eq "$journals_before" ] || fail "refused transfer journaled a transaction"
 
-pass "automatic planned transfer selects, stays exclusive, refuses races, and rolls back"
+# Invalid source preconditions refuse before any manager stops.
+add_lock "$FROOT/manager-1"; printf 'test:test\n' > "$FROOT/manager-1/state/.fleet-herdr-target"; live_1=$LAST_HOLDER
+mkdir -p "$FROOT/manager-2/state/pending-replies"
+printf 'phase=escalated\n' > "$FROOT/manager-2/state/pending-replies/open1"
+: > "$FM_HOOK_LOG"; journals_before=$(journal_count)
+out=$(FM_FLEET_ROOT=$FROOT "$FLEET" transfer begin --secondmate harness 2>&1); status=$?
+[ "$status" -ne 0 ] || fail "automatic transfer ignored an open pending reply"
+[ ! -s "$FM_HOOK_LOG" ] || fail "open pending reply still stopped an endpoint: $(cat "$FM_HOOK_LOG")"
+kill -0 "$live_1" 2>/dev/null && [ -f "$FROOT/manager-1/state/.lock" ] || fail "open pending reply stopped the selected manager"
+[ "$(journal_count)" -eq "$journals_before" ] || fail "refused preflight reserved a manager"
+rm -f "$FROOT/manager-2/state/pending-replies/open1"
+
+# A failure after the destination stops restarts it and retires the reservation.
+: > "$FM_HOOK_LOG"
+export FM_FLEET_TRANSFER_STOP_HOOK=$FAIL_HOOK
+out=$(FM_FLEET_ROOT=$FROOT "$FLEET" transfer begin --secondmate paperclip 2>&1); status=$?
+[ "$status" -ne 0 ] || fail "automatic transfer hid a SecondMate stop failure"
+grep -q '^close|manager-1$' "$FM_HOOK_LOG" || fail "post-stop failure fixture did not stop manager-1: $out"
+grep -q "$FROOT/manager-1|manager-1|start-manager" "$FM_HOOK_LOG" || fail "post-stop failure did not restart the stopped destination: $out"
+[ "$(tx_state "$(newest_journal paperclip)")" = abandoned ] || fail "post-stop failure left its reservation held"
+[ "$(manager_for paperclip):$(generation_for paperclip)" = manager-2:1 ] || fail "post-stop failure changed the assignment"
+grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "post-stop failure moved the parent binding"
+export FM_FLEET_TRANSFER_STOP_HOOK=$HOOK
+
+# Concurrent automatic transfers for different SecondMates reserve different managers.
+SLOW_STOP="$TMP_ROOT/slow-stop.sh"
+printf '#!/usr/bin/env bash\nsleep 1\n' > "$SLOW_STOP"; chmod +x "$SLOW_STOP"
+for n in 1 3; do add_lock "$FROOT/manager-$n"; printf 'test:test\n' > "$FROOT/manager-$n/state/.fleet-herdr-target"; done
+: > "$FM_HOOK_LOG"
+FM_FLEET_TRANSFER_STOP_HOOK=$SLOW_STOP "$FLEET" transfer begin --secondmate harness > "$TMP_ROOT/c1.out" 2>&1 & c1=$!
+FM_FLEET_TRANSFER_STOP_HOOK=$SLOW_STOP "$FLEET" transfer begin --secondmate paperclip > "$TMP_ROOT/c2.out" 2>&1 & c2=$!
+wait "$c1"; s1=$?; wait "$c2"; s2=$?
+[ "$s1:$s2" = 0:0 ] || fail "concurrent automatic transfers failed: $(cat "$TMP_ROOT/c1.out" "$TMP_ROOT/c2.out")"
+pair=$(printf '%s\n' "$(manager_for harness)" "$(manager_for paperclip)" | sort | tr '\n' ' ')
+[ "$pair" = "manager-1 manager-3 " ] || fail "concurrent automatic transfers shared a destination: $pair"
+[ "$(grep -c '^close|' "$FM_HOOK_LOG")" = 2 ] && [ "$(grep -c '^close|manager-1$' "$FM_HOOK_LOG")" = 1 ] || fail "concurrent transfers stopped a manager twice: $(cat "$FM_HOOK_LOG")"
+
+pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

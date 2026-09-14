@@ -13,7 +13,7 @@
 #   route [--secondmate <id>] [--project <name>] [--domain <name>]
 #         [--issue <key>]
 #   assign --secondmate <id> [--reason <text>]
-#   recover --secondmate <id> [--reason <text>]   (failover transfer to a live peer)
+#   recover --secondmate <id> [--reason <text>]   (failover transfer to an auto-selected live peer)
 #   transfer begin --secondmate <id> [--to <manager>] [--source-home <home>]
 #   transfer recover|rollback --transaction <id>
 #   progress <manager> [--note <text>] [--active <count>]
@@ -191,13 +191,13 @@ choose_manager() {
 import json, sys
 with open(sys.argv[1]) as handle: reg=json.load(handle)
 with open(sys.argv[2]) as handle: health=json.load(handle)
-sm, exclude=sys.argv[3], sys.argv[4]
+sm, exclude=sys.argv[3], set(sys.argv[4].split())
 active={row["secondmate"]:row for row in reg["assignments"] if row.get("state")=="active"}
 sticky=active.get(sm)
 healthy={row["manager"] for row in health if row["authority"]=="reasoning" and row["state"] in ("idle","running","model-wait")}
-if sticky and sticky["manager"] in healthy and sticky["manager"] != exclude:
+if sticky and sticky["manager"] in healthy and sticky["manager"] not in exclude:
     print(sticky["manager"]); raise SystemExit
-loads={mid:0 for mid in healthy if mid != exclude}
+loads={mid:0 for mid in healthy if mid not in exclude}
 for row in active.values():
     if row["manager"] in loads: loads[row["manager"]]+=1
 if loads: print(min(loads, key=lambda mid:(loads[mid],mid)))
@@ -323,9 +323,23 @@ destination_ready() {  # <home> <failover>
   if [ "$2" = 1 ]; then reasoning_live "$1"; else ! reasoning_live "$1"; fi
 }
 
-transfer_endpoints_check() {  # <source-home> <destination-home> <failover> <tx> [when]
-  reasoning_live "$1" && die "source parent home became live${5:-}; recover or rollback $4"
-  destination_ready "$2" "$3" || die "destination manager changed session state${5:-}; recover or rollback $4"
+# Retire a reservation whose records never moved: restart a destination this
+# command stopped, relaunch a SecondMate it stopped, and leave the assignment
+# and parent records untouched. Reads the caller's transfer_begin locals.
+transfer_release() {  # <reason>
+  python3 "$TRANSFER_BIN" state --journal "$journal" --set abandoned >/dev/null
+  if [ "$stopped_dest" = 1 ] && ! reasoning_live "$dest_home"; then
+    transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$dest_home" "$dest" start-manager || echo "fm-fleet: destination manager $dest relaunch failed" >&2
+  fi
+  if [ "$stopped_sm" = 1 ] && ! reasoning_live "$source"; then
+    transfer_hook FM_FLEET_TRANSFER_ROLLBACK_START_HOOK "$source" "$sm" start-secondmate || echo "fm-fleet: source SecondMate $sm relaunch failed" >&2
+  fi
+  die "$1; transfer $tx abandoned before moving records"
+}
+
+transfer_endpoints_check() {  # [when]
+  reasoning_live "$source" && transfer_release "source parent home became live${1:-}"
+  destination_ready "$dest_home" "$failover" || transfer_release "destination manager changed session state${1:-}"
 }
 
 transfer_activate() {  # <secondmate> <manager> <destination-home> <failover> <tx> <journal>
@@ -335,28 +349,6 @@ transfer_activate() {  # <secondmate> <manager> <destination-home> <failover> <t
   transfer_hook FM_FLEET_TRANSFER_SECONDMATE_START_HOOK "$3" "$1" start-secondmate || die "assignment published; SecondMate relaunch failed; recover $5"
   with_lock python3 "$REGISTRY_BIN" "$REG" transfer-state --secondmate "$1" --transaction "$5" --state active >/dev/null
   python3 "$TRANSFER_BIN" state --journal "$6" --set active >/dev/null
-}
-
-# A planned transfer needs a stopped destination that it relaunches. A failover
-# (failover=1) moves supervision into an already-live reasoning manager.
-transfer_begin() {  # <secondmate> <manager> <source-home or empty> <failover> <reason>
-  local sm=$1 dest=$2 source=$3 failover=$4 reason=$5 dest_home tx journal info expected
-  dest_home=$(manager_home "$dest") || die "unknown destination manager $dest"
-  [ -n "$source" ] || source=$(manager_home "$(assignment_manager "$sm")" 2>/dev/null || true)
-  [ -n "$source" ] || die "source home is unknown; pass --source-home"
-  reasoning_live "$source" && die "source parent home still has a live session lock"
-  destination_ready "$dest_home" "$failover" || die "destination manager $dest is not in the session state this transfer requires"
-  tx="$(date -u +%Y%m%dT%H%M%SZ)-$sm-$$"; journal="$FLEET_ROOT/transactions/$tx.json"; mkdir -p "$FLEET_ROOT/transactions"
-  info=$(with_lock python3 "$TRANSFER_BIN" prepare "$REG" --secondmate "$sm" --manager "$dest" --source-home "$source" --transaction "$tx" --journal "$journal" --failover "$failover") || exit 1
-  transfer_endpoints_check "$source" "$dest_home" "$failover" "$tx"
-  transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || die "SecondMate stop hook failed; recover $tx"
-  transfer_endpoints_check "$source" "$dest_home" "$failover" "$tx" " after endpoint stop"
-  expected=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])')
-  with_lock transfer_apply_locked "$sm" "$tx" "$expected" "$journal" || exit 1
-  with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "$reason" >/dev/null || { echo "fm-fleet: records moved but assignment publication failed; recover $tx" >&2; exit 1; }
-  python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null
-  transfer_activate "$sm" "$dest" "$dest_home" "$failover" "$tx" "$journal"
-  echo "transfer $tx active: $sm -> $dest"
 }
 
 manager_id_for_home() {  # <home> -> manager id or empty
@@ -369,38 +361,79 @@ for row in reg["managers"]:
 PY
 }
 
-transfer_auto_select() {  # <secondmate> <exclude-manager or empty> -> manager
-  local sm=$1 exclude=$2 health dest
-  health=$(mktemp "$FLEET_ROOT/.auto-health.XXXXXX") || return 1
-  health_json "$health" || { rm -f "$health"; return 1; }
-  dest=$(choose_manager "$health" "$sm" "$exclude")
-  rm -f "$health"
-  [ -n "$dest" ] || { echo "fm-fleet: no healthy reasoning manager remains for automatic transfer" >&2; return 1; }
-  printf '%s\n' "$dest"
+# An unfinished transfer journal reserves its destination manager. A planned
+# transfer stops its destination, so it honors every reservation; a failover
+# shares a live destination, so it honors only planned reservations.
+transfer_reserved_managers() {  # <failover>
+  python3 - "$FLEET_ROOT/transactions" "$1" <<'PY'
+import glob, json, os, sys
+held = set()
+for path in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    with open(path, encoding="utf-8") as handle: journal = json.load(handle)
+    if journal.get("state") in ("active", "abandoned", "rolled-back"): continue
+    if sys.argv[2] == "0" or not journal.get("failover"): held.add(journal["destination_manager"])
+print(" ".join(sorted(held)))
+PY
 }
 
-# Automatic planned transfer: choose the destination instead of requiring
-# --to. Pre-scan healthy reasoning managers excluding the source, revalidate
-# the same choice under the fleet lock, stop the selected destination, prove
-# both endpoint locks stopped, then run the existing journaled planned
-# transfer (which relaunches the destination manager and the SecondMate).
-# Explicit --to stays the administrative override; this path never publishes
-# an assignment before the parent records move.
-transfer_begin_auto() {  # <secondmate> <source-home or empty> <reason>
-  local sm=$1 source=$2 reason=$3 source_manager dest dest_home reselected
+# Runs under the fleet lock: choose the least-loaded healthy unreserved manager
+# when no destination is given, then write the preparing journal, which both
+# validates every non-liveness precondition and reserves the destination.
+transfer_reserve_locked() {  # <secondmate> <manager or empty> <source-home> <failover> <tx> <journal> <health>
+  local dest=$2 held
+  held=$(transfer_reserved_managers "$4") || return 1
+  if [ -z "$dest" ]; then
+    dest=$(choose_manager "$7" "$1" "$(manager_id_for_home "$3") $held")
+    [ -n "$dest" ] || { echo "fm-fleet: no healthy reasoning manager remains unreserved for this transfer" >&2; return 1; }
+  else
+    case " $held " in *" $dest "*) echo "fm-fleet: destination manager $dest is reserved by an unfinished transfer" >&2; return 1 ;; esac
+  fi
+  python3 "$TRANSFER_BIN" prepare "$REG" --secondmate "$1" --manager "$dest" --source-home "$3" --transaction "$5" --journal "$6" --failover "$4"
+}
+
+# Without a destination the fleet selects and reserves one. A planned transfer
+# (failover=0) then stops that live destination and relaunches it; explicit
+# --to is the administrative override and needs an already stopped destination.
+# A failover (failover=1) moves supervision into an already-live manager.
+transfer_begin() {  # <secondmate> <manager or empty> <source-home or empty> <failover> <reason>
+  local sm=$1 dest=$2 source=$3 failover=$4 reason=$5 auto=0 dest_home tx journal info expected health="" rc stopped_dest=0 stopped_sm=0
   [ -n "$source" ] || source=$(manager_home "$(assignment_manager "$sm")" 2>/dev/null || true)
   [ -n "$source" ] || die "source home is unknown; pass --source-home"
-  source_manager=$(manager_id_for_home "$source")
-  dest=$(transfer_auto_select "$sm" "$source_manager") || exit 1
-  echo "auto transfer: $sm -> $dest"
-  reselected=$(with_lock transfer_auto_select "$sm" "$source_manager") || exit 1
-  [ "$reselected" = "$dest" ] || die "destination choice changed under revalidation ($dest -> $reselected); retry the transfer"
-  dest_home=$(manager_home "$dest") || die "unknown destination manager $dest"
-  [ "$dest_home" != "$source" ] || die "automatic selection chose the source home; retry the transfer"
-  stop_manager "$dest" || die "destination manager $dest could not be stopped safely"
-  reasoning_live "$source" && die "source parent home became live; transfer refused"
-  destination_ready "$dest_home" 0 || die "destination manager $dest is not stopped after stop; transfer refused"
-  transfer_begin "$sm" "$dest" "$source" 0 "$reason"
+  reasoning_live "$source" && die "source parent home still has a live session lock"
+  if [ -n "$dest" ]; then
+    dest_home=$(manager_home "$dest") || die "unknown destination manager $dest"
+    destination_ready "$dest_home" "$failover" || die "destination manager $dest is not in the session state this transfer requires"
+  else
+    auto=1
+    health=$(mktemp "$FLEET_ROOT/.transfer-health.XXXXXX") || exit 1
+    health_json "$health" || { rm -f "$health"; exit 1; }
+  fi
+  tx="$(date -u +%Y%m%dT%H%M%SZ)-$sm-$$"; journal="$FLEET_ROOT/transactions/$tx.json"; mkdir -p "$FLEET_ROOT/transactions"
+  info=$(with_lock transfer_reserve_locked "$sm" "$dest" "$source" "$failover" "$tx" "$journal" "$health"); rc=$?
+  [ -z "$health" ] || rm -f "$health"
+  [ "$rc" -eq 0 ] || exit 1
+  dest=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])')
+  dest_home=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_home"])')
+  expected=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])')
+  if [ "$auto" = 1 ]; then
+    echo "auto transfer: $sm -> $dest"
+    if [ "$failover" != 1 ]; then
+      stopped_dest=1
+      stop_manager "$dest" || transfer_release "destination manager $dest could not be stopped safely"
+    fi
+  fi
+  transfer_endpoints_check
+  transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || transfer_release "SecondMate stop hook failed"
+  stopped_sm=1
+  transfer_endpoints_check " after endpoint stop"
+  if ! with_lock transfer_apply_locked "$sm" "$tx" "$expected" "$journal"; then
+    [ "$(python3 "$TRANSFER_BIN" state --journal "$journal" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')" = abandoned ] || exit 1
+    stopped_sm=0; transfer_release "another transfer claimed $sm first"
+  fi
+  with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "$reason" >/dev/null || { echo "fm-fleet: records moved but assignment publication failed; recover $tx" >&2; exit 1; }
+  python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null
+  transfer_activate "$sm" "$dest" "$dest_home" "$failover" "$tx" "$journal"
+  echo "transfer $tx active: $sm -> $dest"
 }
 
 with_home_registry_locks() {  # <journal> <command...>
@@ -491,12 +524,7 @@ case "$CMD" in
     [ "$CMD" = recover ] || { do_assign "$sm" "$reason"; exit; }
     current=$(assignment_manager "$sm"); [ -n "$current" ] || die "$sm has no assignment to recover"
     old_home=$(manager_home "$current") || die "unknown manager $current"
-    reasoning_live "$old_home" && die "current manager $current can still be alive"
-    health=$(mktemp "$FLEET_ROOT/.health.XXXXXX") || exit 1
-    health_json "$health" || { rm -f "$health"; exit 1; }
-    dest=$(choose_manager "$health" "$sm" "$current"); rm -f "$health"
-    [ -n "$dest" ] || die "no healthy reasoning manager remains assignable"
-    transfer_begin "$sm" "$dest" "$old_home" 1 "$reason"
+    transfer_begin "$sm" "" "$old_home" 1 "$reason"
     ;;
   route)
     need_registry; flags=()
@@ -567,7 +595,7 @@ PY
     if [ "$sub" = begin ]; then
       sm=""; dest=""; source=""; while [ $# -gt 0 ]; do case "$1" in --secondmate) sm=${2:-}; shift 2;; --to) dest=${2:-}; shift 2;; --source-home) source=${2:-}; shift 2;; *) exit 2;; esac; done
       [ -n "$sm" ] || exit 2
-      if [ -n "$dest" ]; then transfer_begin "$sm" "$dest" "$source" 0 "supervision transfer"; else transfer_begin_auto "$sm" "$source" "supervision transfer"; fi
+      transfer_begin "$sm" "$dest" "$source" 0 "supervision transfer"
     elif [ "$sub" = recover ]; then
       [ "${1:-}" = --transaction ] && [ -n "${2:-}" ] || exit 2; tx=$2; journal="$FLEET_ROOT/transactions/$tx.json"; data=$(python3 "$TRANSFER_BIN" state --journal "$journal") || exit 1
       sm=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secondmate"])'); dest=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])'); source=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_home"])'); dest_home=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_home"])')

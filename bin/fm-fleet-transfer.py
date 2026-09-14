@@ -190,6 +190,7 @@ def prepare(args: argparse.Namespace) -> None:
         "expected_generation": assignment_generation,
         "source_home": str(source_home),
         "destination_home": str(destination_home),
+        "destination_manager": args.manager,
         "secondmate_home": str(secondmate_home),
     }, sort_keys=True))
 

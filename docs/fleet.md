@@ -118,10 +118,14 @@ It validates the owner, assignment generation, source route, source metadata and
 Any pending-reply record whose phase is not `resolved` blocks the move.
 Resolved records stay in the source home and are not deleted or copied.
 
-Both source and destination home session locks must be stopped before `transfer begin`.
-`--to` is optional: without it the transfer pre-scans healthy reasoning managers, deterministically selects the least-loaded candidate excluding the source, revalidates the same choice under the fleet lock, stops the selected destination, proves both endpoint locks stopped, then runs the same journaled transfer and restarts.
-Explicit `--to` remains the deliberate administrative override.
-`recover` uses the same transaction with a live destination, journals it as a failover, and does not relaunch the destination manager.
+The source home session lock must be stopped before `transfer begin`.
+`--to` is optional. Without it, one fleet-lock critical section selects the least-loaded healthy reasoning manager, excluding the source and any manager reserved by an unfinished transfer journal, and writes the `preparing` journal.
+That journal validates every non-liveness precondition above and reserves the destination, so two concurrent transfers cannot select or stop the same manager.
+Only then does the command stop the selected destination and recheck both endpoint locks.
+If a step fails before records move, the journal becomes `abandoned`. A destination that this command stopped is restarted, a stopped source SecondMate is relaunched, and the assignment and parent records stay unchanged.
+Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.
+`recover` selects its destination the same way, keeps that destination live, journals the move as a failover, and does not relaunch the destination manager.
+A failover honors only planned-transfer reservations, because it does not stop its destination.
 The command stops the SecondMate endpoint, writes a transaction journal under `<fleet-root>/transactions/`, moves the parent route and metadata, rewrites `.fm-secondmate-parent`, publishes the next assignment generation, restarts the destination manager, and relaunches the SecondMate from the destination home.
 The assignment publishes after the owner records, so a crash cannot leave both parents authoritative.
 
