@@ -87,27 +87,23 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    case " $* " in
-      *' Enter '*)
-        case "$state" in
-          launched)
-            if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
-            fi
-            ;;
-          pointer-typed)
-            if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
-              if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
-                 && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
-                : > "$FM_FAKE_KIMI_SWALLOWED"
-              else
-                printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
-              fi
-            else
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
-            fi
-            ;;
-        esac
+    case "$state: $* " in
+      launched:*' C-j '*)
+        if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+          printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+        fi
+        ;;
+      pointer-typed:*' Enter '*)
+        if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
+          if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
+             && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
+            : > "$FM_FAKE_KIMI_SWALLOWED"
+          else
+            printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+          fi
+        else
+          printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+        fi
         ;;
     esac
     exit 0

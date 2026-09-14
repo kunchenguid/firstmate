@@ -83,22 +83,18 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    case " $* " in
-      *' Enter '*)
-        case "$state" in
-          launched)
-            if [ "${FM_FAKE_ROVO_READY:-yes}" = yes ]; then
-              printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
-            fi
-            ;;
-          pointer-typed)
-            if [ "${FM_FAKE_ROVO_DELIVERY:-yes}" = yes ]; then
-              printf 'delivered\n' > "$FM_FAKE_ROVO_STATE"
-            else
-              printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
-            fi
-            ;;
-        esac
+    case "$state: $* " in
+      launched:*' C-j '*)
+        if [ "${FM_FAKE_ROVO_READY:-yes}" = yes ]; then
+          printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
+        fi
+        ;;
+      pointer-typed:*' Enter '*)
+        if [ "${FM_FAKE_ROVO_DELIVERY:-yes}" = yes ]; then
+          printf 'delivered\n' > "$FM_FAKE_ROVO_STATE"
+        else
+          printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
+        fi
         ;;
     esac
     exit 0
