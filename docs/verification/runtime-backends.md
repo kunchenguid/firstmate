@@ -788,6 +788,31 @@ Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files w
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
 
+## Devin CLI
+
+Verified 2026-09-10 on Devin `3000.10.21 (611c1cba)` and Herdr `0.9.0`, protocol `22`, with `swe-2-high`.
+The [adapter skill](../../.agents/skills/harness-adapters/SKILL.md#devin-verified-crewmatescout-on-herdr-2026-09-10-devin-30001021) owns operational limits; `bin/fm-devin-lib.sh` owns direct launch mechanics.
+Refresh the credentialed proof with:
+
+```sh
+FM_DEVIN_LIVE=1 bash tests/fm-devin-live-e2e.test.sh
+```
+
+The guard provisions a named lab through `fm-herdr-lab.sh`, mediates even nested Firstmate Herdr calls through that helper, and verifies its default-session tripwire on cleanup.
+It uses actual Devin tool execution to verify ancestry detection, a real `fm-send` follow-up receipt, native busy/idle observations, `fm-control` interruption and exit, and the complete same-task `fm-spawn --relaunch` path.
+Observed output includes:
+
+```text
+state: working · source: pane · harness busy (herdr-native)
+interrupt-delivered probe harness=devin backend=herdr verified=agent-alive cancel=unconfirmed
+```
+
+Tool ancestry contained exact native `devin` processes, no Devin identity marker, and an inherited `PI_CODING_AGENT` before launch sanitization.
+Direct `agent get <pane>` identified `devin` without an `interactive_ready` field, while native `agent start` responses included that field.
+Double Escape produced `Canceled. What should Devin do?` and an empty composer; a follow-up was accepted, but tool-subprocess cancellation is not claimed.
+The portable guard is `tests/fm-devin-harness.test.sh`, and `tests/fm-herdr-lab.test.sh` proves explicit session selection survives a `--` separator without changing agent arguments.
+The native named-agent startup race is a separate follow-up, not a prerequisite for the verified direct path.
+
 ## Cursor Agent CLI
 
 Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.

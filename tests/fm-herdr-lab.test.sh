@@ -20,13 +20,19 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
-last=
+# Like Herdr, only parse options BEFORE the agent-argument separator.
+# Ambient HERDR_SESSION is deliberately insufficient for explicit selection.
+session=default
+want_session=0
 for arg in "$@"; do
-  previous=$last
-  last=$arg
+  [ "$arg" != -- ] || break
+  if [ "$want_session" = 1 ]; then
+    session=$arg
+    want_session=0
+  elif [ "$arg" = --session ]; then
+    want_session=1
+  fi
 done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -41,6 +47,17 @@ case "$1 ${2:-}" in
       jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
         '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
+    ;;
+  "agent start")
+    printf '%s\n' "$session" > "$state/$session-agent"
+    after_separator=0
+    for arg in "$@"; do
+      if [ "$after_separator" = 1 ]; then
+        printf '%s\n' "$arg" >> "$state/agent-args"
+      elif [ "$arg" = -- ]; then
+        after_separator=1
+      fi
+    done
     ;;
   "server --session")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
@@ -156,6 +173,23 @@ test_provision_run_and_guarded_teardown() {
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
 }
 
+test_separator_keeps_explicit_lab_selection() {
+  local name="fm-lab-separator-$$" status=0
+  rm -f "$FAKE_STATE/agent-args" "$FAKE_STATE/default-agent"
+  # Exercise the public CLI, not source bytes or an assumption about argv order.
+  HERDR_SESSION=default run_with_fake "$ROOT/bin/fm-herdr-lab.sh" run "$name" \
+    agent start smoke --kind devin --pane w1:p1 -- --model swe-2-high \
+    --prompt-file '/path with spaces/brief.md' || fail "separator launch failed"
+  assert_present "$FAKE_STATE/$name-agent" "launch did not target the named lab"
+  assert_absent "$FAKE_STATE/default-agent" "launch escaped into default"
+  [ "$(printf '%s\n' --model swe-2-high --prompt-file '/path with spaces/brief.md')" = \
+    "$(cat "$FAKE_STATE/agent-args")" ] || fail "agent argv changed or swallowed session selection"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" run "$name" \
+    agent start smoke -- --session default >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "caller session flag after separator must still be refused"
+  pass "fm-herdr-lab: separator preserves explicit lab selection and exact agent arguments"
+}
+
 test_missing_tripwire_blocks_destruction() {
   local name="fm-lab-no-tripwire-$$" status=0 before after
   printf '%s\n' running > "$FAKE_STATE/$name"
@@ -235,6 +269,7 @@ SH
 }
 
 test_refuses_unsafe_names
+test_separator_keeps_explicit_lab_selection
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown

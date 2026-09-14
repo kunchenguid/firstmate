@@ -297,6 +297,8 @@ HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
+fm_control_harness_supports_backend "$HARNESS" "$BACKEND" \
+  || die "$HARNESS is not verified on $BACKEND; refusing unverified lifecycle actions"
 fm_backend_validate "$BACKEND" || exit 1
 
 # --- shared helpers ---------------------------------------------------------
@@ -647,6 +649,8 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  fm_control_harness_supports_backend "$TARGET_HARNESS" "$BACKEND" \
+    || die "$TARGET_HARNESS is not verified on $BACKEND; refusing before stopping the current agent"
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.

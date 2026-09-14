@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and devin.
 user-invocable: false
 metadata:
   internal: true
@@ -131,6 +131,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| devin | `--model <id>` | none | Verified on Devin 3000.10.21 with reasoning class encoded in model ids such as `swe-2-high` and `swe-2-max`, while requested effort is recorded but not emitted. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
 
@@ -151,6 +152,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| devin | Run `devin models list --format json` for authenticated families, aliases, and variant ids, and use `devin auth status` for the credential/account surface without inferring another harness's credential store from a routed model. |
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
@@ -469,6 +471,35 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## devin (VERIFIED CREWMATE/SCOUT on Herdr, 2026-09-10, Devin 3000.10.21)
+
+Devin is a crewmate/scout adapter on Herdr only, never a primary or secondmate.
+Launch mechanics and permission-mode validation are owned by `bin/fm-spawn.sh` and `bin/fm-devin-lib.sh`; no default selection or global Devin configuration is changed.
+
+| Fact | Value |
+|---|---|
+| Binary | Uses the stable `devin` executable from PATH, falling back to `~/.local/bin/devin`, without pinning the versioned symlink target. |
+| Launch | Uses a direct interactive pane launch with `--prompt-file`, selected `--model`, and `--permission-mode` rather than single-turn `-p`. |
+| Trust | `--respect-workspace-trust false` skips the directory prompt for each fresh disposable worker path without changing a global trust setting. |
+| Permissions | Defaults to `dangerous` for unattended tool use, while explicit `auto`, `accept-edits`, and `smart` can stop for approval and a permission wait must not be interpreted as progress. |
+| Detection | Uses exact native process basename `devin` in tool ancestry because no Devin identity environment marker was observed and inherited `PI_CODING_AGENT` requires clearing foreign markers before the stable binary runs. |
+| Busy state | Treats Herdr native `agent get <pane>` `working` as busy and conservatively reports unknown for native `idle`, without installing a custom spinner classifier, lifecycle hook, or seeded busy record. |
+| Interrupt | Uses double Escape 0.2 seconds apart, with the first press offering `esc again to interrupt` and the second displaying `Canceled. What should Devin do?` with an empty composer, while tool subprocess cancellation and acknowledgement remain unproven. |
+| Exit | `/exit`; verified through `fm-control` to leave an agent-free pane. |
+| Steer | `fm-send` is verified on Herdr, including a follow-up after interruption, with native transition confirmation and shared composer recognition of `❭` and Devin placeholders. |
+| Relaunch | `fm-control`/`fm-spawn --relaunch` start a fresh conversation from the durable instructions in the same local copy and retain the recorded permission mode for Devin. |
+| Resume | CLI help advertises `-c` and `-r <id>` and `/exit` prints a resume command, but this adapter neither automates nor independently live-verifies private-session continuation. |
+| Skill invocation | No slash-skill invocation is verified; send natural language naming the installed skill file and require the worker to read it. |
+
+### Limits and recovery
+
+Herdr native `agent start` intermittently loses its named-agent terminal binding, so use the direct path rather than retrying native startup or creating a second pane.
+Direct launch exposes native pane identity but does not publish the `interactive_ready` field belonging to native start registration.
+An identity match proves the agent exists, not that it processed its instructions; require the normal processing receipt.
+If identity verification fails, preserve the recorded pane and inspect it before any retry.
+Other backends are refused rather than inheriting unverified steering or control behavior.
+The active proof and refresh command are in [runtime backend verification](../../../docs/verification/runtime-backends.md#devin-cli).
 
 ## muse (VERIFIED 2026-08-05, Muse Code 0.1.0-R708.1, build sha 427a430436)
 

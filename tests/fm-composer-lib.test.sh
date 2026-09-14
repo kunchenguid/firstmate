@@ -120,6 +120,19 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+test_devin_placeholders_are_harness_scoped() {
+  local placeholder harness out
+  for placeholder in 'Ask Devin to build features, fix bugs, or work on your code' 'Guide Devin while it works'; do
+    out=$(classify 1 "$placeholder" '' sensitive "$placeholder" 1 0 devin)
+    [ "$out" = empty ] || fail "Devin placeholder '$placeholder' must read empty for Devin, got '$out'"
+    for harness in claude cursor; do
+      out=$(classify 1 "$placeholder" '' sensitive "$placeholder" 1 0 "$harness")
+      [ "$out" = pending ] || fail "Devin placeholder '$placeholder' must remain pending for $harness, got '$out'"
+    done
+  done
+  pass "fm_composer_classify_content: Devin placeholders are scoped to Devin"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -200,6 +213,18 @@ test_matrix_codex_dim_hint_row() {
   assert_screen "codex idle on zellij" empty "$CAPS_STYLED_NOID" "$styled"
   assert_screen "codex idle on plain backends" unknown "$CAPS_PLAIN" "$plain"
   pass "matrix: codex's dim hint is empty when styling proves it, unknown (never pending) when it cannot"
+}
+
+test_matrix_devin_dim_hint_row() {
+  # Real idle Devin 3000.10.21 on Herdr: `❭`, then a harness-owned prompt
+  # hint between horizontal rules. Herdr's ANSI capture can omit styling, so
+  # the structural row is the proof of an empty Devin placeholder.
+  local screen typed
+  screen=$'──────────────── (bypass permissions on) ────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n────────────────────────────────────────────────────────────\nSWE-2 High'
+  assert_screen "Devin idle on Herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent devin
+  typed=$'──────────────── (bypass permissions on) ────────────────\n❭ Guide Devin while it works\n────────────────────────────────────────────────────────────\nSWE-2 High'
+  assert_screen "Devin second idle hint on Herdr" empty "$CAPS_STYLED" "$typed" '' probe-absent devin
+  pass "matrix: Devin's ❭ placeholders are empty on Herdr"
 }
 
 test_matrix_muse_truecolor_glyph_survives_signal_loss() {
@@ -606,9 +631,11 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_devin_placeholders_are_harness_scoped
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
+test_matrix_devin_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap

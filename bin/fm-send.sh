@@ -597,7 +597,7 @@ else
       verdict=send-failed
       [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  elif verdict=$(FM_COMPOSER_HARNESS="$TARGET_HARNESS" fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?

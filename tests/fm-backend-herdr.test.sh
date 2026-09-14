@@ -23,6 +23,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+# The source checkout can carry a private secondmate marker. Default-home
+# fixtures must not silently inherit that operator-specific role.
+mkdir -p "$TMP_ROOT/home"
+export FM_HOME="$TMP_ROOT/home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,

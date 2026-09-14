@@ -152,6 +152,24 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_devin_refuses_unverified_backend_before_launch() {
+  local rec out status=0
+  rec=$(make_spawn_case devin-backend devin devin-refusal)
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    devin-refusal "$PROJ_DIR" --harness devin --permission-mode smart --backend tmux) || status=$?
+  expect_code 1 "$status" "Devin must refuse an unverified backend"
+  assert_contains "$out" 'Devin is verified on Herdr only' "wrong Devin refusal"
+  assert_absent "$HOME_DIR/state/devin-refusal.meta" "refusal published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "refusal sent a launch command"
+  status=0
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    devin-refusal "$PROJ_DIR" --harness claude --permission-mode smart --backend tmux) || status=$?
+  expect_code 1 "$status" "Devin permission axis must not affect other adapters"
+  assert_contains "$out" '--permission-mode is only supported for Devin' "foreign permission axis was ignored"
+  pass "Devin backend and permission constraints refuse before launch"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -861,6 +879,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_devin_refuses_unverified_backend_before_launch
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

@@ -13,10 +13,11 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# Every Herdr call made here carries a trailing --session <session>.
+# Every Herdr call carries --session <session> before any -- separator,
+# otherwise trailing, so agent arguments can never swallow session selection.
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
-# operation.
+# operation, including caller-supplied session flags after a -- separator.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -24,6 +25,9 @@
 # Provision records the running default session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
 set -u
+
+# shellcheck source=bin/fm-herdr-cli-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-herdr-cli-lib.sh"
 
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
@@ -49,9 +53,7 @@ fm_herdr_lab_tripwire_path() { # <session>
 }
 
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1
-  shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  fm_herdr_scoped_cli "$@"
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -134,7 +136,7 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   for arg in "$@"; do
     case "$arg" in
       --session|--session=*)
-        fm_herdr_lab_error "run forbids caller-supplied --session; the helper appends the lab session"
+        fm_herdr_lab_error "run forbids caller-supplied --session; the helper owns lab session selection"
         return 1
         ;;
     esac
