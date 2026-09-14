@@ -897,7 +897,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
-  local percent_tail percent_valid
+  local percent_tail percent_valid note_branch
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
@@ -992,7 +992,34 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          # A local-only landing note is "local <delivery target branch>", and
+          # that branch is the task's own recorded base, not always main. The
+          # branch itself is already validated at intake (git check-ref-format,
+          # plus an explicit whitespace refusal), so this replay-side check only
+          # has to keep the marker's own format unambiguous: the single space
+          # rides as the `local%20` prefix the staging step writes, and the
+          # decode below strips exactly that prefix rather than rewriting every
+          # `%20`, so a git-legal branch that itself contains `%` survives the
+          # round trip untouched. What is still refused is a value that would
+          # change meaning on replay: raw whitespace (the `arg=` line is one
+          # value per line, and a second space could only come from a malformed
+          # note), a leading dash a replayed argument list could read as a flag,
+          # a control character, and anything past the length cap.
+          arg_value=${args[1]}
+          case "$arg_value" in
+            local%20*) true ;;
+            *) false ;;
+          esac \
+            && {
+              note_branch=${arg_value#local%20}
+              [ "${#note_branch}" -le 256 ] \
+                && case "$note_branch" in
+                  ''|-*|*[[:space:]]*|*[[:cntrl:]]*) false ;;
+                  *) true ;;
+                esac
+            }
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1090,8 +1117,16 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    # The note is "local <branch>": one space, and the branch is whitespace-free
+    # by intake validation. Only that first space is escaped, so the encode and
+    # the replay decode are exact inverses and a branch containing `%` is never
+    # rewritten. A malformed note carrying a second space keeps it, and the
+    # validator below refuses the marker rather than storing a mangled value.
+    if [ "$previous_arg" = --note ]; then
+      case "$arg" in
+        *' '*) serialized_args+=("${arg%% *}%20${arg#* }") ;;
+        *) serialized_args+=("$arg") ;;
+      esac
     else
       serialized_args+=("$arg")
     fi
@@ -1167,7 +1202,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    case "${args[1]-}" in
+      local%20*) args[1]="local ${args[1]#local%20}" ;;
+    esac
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
