@@ -38,7 +38,10 @@ Each gate fails the spawn loudly (a `failed:` line in the task status file) if i
 
 ### Why not a positional brief
 
-A positional brief is dead-on-arrival. `rovo run --yolo "<brief>"` loads a spinner, never enters a working state, prints no reply, and drops back to a bare idle shell prompt within about 10-15 seconds. This was reproduced independently four times over a raw PTY (varying `TERM`, window size, workspace, and 60-150s windows) and once more under real tmux 3.6a driven with the exact `fm-spawn.sh` send-keys shape (new window, `send-keys -l` the full launch line, then `Enter`). `--startup-receipt` cannot rescue that shape either - it is rejected before start alongside any message:
+A positional brief is dead-on-arrival.
+`rovo run --yolo "<brief>"` loads a spinner, never enters a working state, prints no reply, and drops back to a bare idle shell prompt within about 10-15 seconds.
+This was reproduced independently four times over a raw PTY (varying `TERM`, window size, workspace, and 60-150s windows) and once more under real tmux 3.6a driven with the then-current physical-Return launch sequence (new window, `send-keys -l` the full launch line, then `Enter`).
+`--startup-receipt` cannot rescue that shape either - it is rejected before start alongside any message:
 
 ```
 $ rovo run --startup-receipt receipt.json --yolo "Reply with PONG"

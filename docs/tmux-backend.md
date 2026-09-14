@@ -14,6 +14,10 @@ An explicit selection is also the opt-out from Herdr or cmux runtime auto-detect
 
 No provisioning is required before the first task.
 
+During worker startup, Firstmate accepts shell setup and final launch commands with tmux's `C-j` line-feed mapping instead of physical Return, avoiding ble.sh's spawn-time Return race.
+This mapping is launch-only; generic Enter remains physical Return for post-launch interaction.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#spawn-time-shell-acceptance-with-blesh) records the live evidence.
+
 ## Watching the crew
 
 For the best visible experience, launch the primary harness inside a tmux session:

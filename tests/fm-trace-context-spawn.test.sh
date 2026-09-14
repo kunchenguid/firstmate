@@ -23,9 +23,9 @@ Verify the spawned process receives the expected trace context.
 EOF
 }
 
-# Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
-# one per line, in send order, so ordering is observable.
+# Fake tmux: answers the pane-path query and logs every accepted shell-line
+# payload plus the literal final launch command, one per line in send order, so
+# GOTMPDIR and TRACEPARENT injection ordering remains observable.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
