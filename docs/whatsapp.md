@@ -75,6 +75,7 @@ Os formatos aceitos e sua cobertura são concretos; aceitar um arquivo não sign
 | MP4/3GPP H.264, com até uma faixa AAC | Prévias amostradas com tempo aproximado e transcrição da faixa de áudio; eventos entre amostras podem ser perdidos. |
 
 Sticker/WebP, reações, Office binário antigo (`.doc`, `.xls`, `.ppt`), arquivos com macros, arquivos compactados genéricos, executáveis, binários genéricos e PDFs criptografados são recusados para interpretação.
+Em `mc:AlternateContent`, a extração textual seleciona a primeira alternativa que exija somente os namespaces principais de WordprocessingML, DrawingML, PresentationML ou SpreadsheetML de 2006; extensões como `wps` usam o fallback, e a ausência de representação suportada causa recusa explícita.
 Áudio isolado sem fala reconhecível falha explicitamente, sem produzir uma transcrição inventada.
 Um vídeo com áudio exige a mesma configuração de transcrição que uma nota de voz; sem ela, o processamento falha explicitamente.
 Quando a transcrição do vídeo conclui com texto vazio, as prévias são preservadas para interpretação visual, com `speech_detected:false` e transcrição vazia; isso indica ausência de fala detectada, não prova de silêncio acústico.

@@ -13,6 +13,7 @@ Owns interpretation limits: 120 seconds, 12 video frames, 20 PDF pages,
 """
 
 import importlib.util
+import io
 import json
 import math
 import os
@@ -35,6 +36,51 @@ OFFICE = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xl",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "ppt",
 }
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+OFFICE_TEXT_NAMESPACES = {
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+}
+
+
+def office_xml(data):
+    namespaces, scopes, supported_choices = {}, [], set()
+    parser = ET.iterparse(io.BytesIO(data), events=("start-ns", "end-ns", "start"))
+    for event, node in parser:
+        if event == "start-ns":
+            prefix, uri = node
+            scopes.append((prefix, namespaces.get(prefix)))
+            namespaces[prefix] = uri
+        elif event == "end-ns":
+            prefix, previous = scopes.pop()
+            if previous is None:
+                del namespaces[prefix]
+            else:
+                namespaces[prefix] = previous
+        elif node.tag == MC + "Choice":
+            required = node.get("Requires", "").split()
+            if required and all(namespaces.get(prefix) in OFFICE_TEXT_NAMESPACES for prefix in required):
+                supported_choices.add(node)
+    pending = [parser.root]
+    while pending:
+        parent = pending.pop()
+        children, remaining = [], list(reversed(parent))
+        while remaining:
+            child = remaining.pop()
+            if child.tag == MC + "AlternateContent":
+                selected = next((choice for choice in child if choice in supported_choices), None)
+                if selected is None:
+                    selected = child.find(MC + "Fallback")
+                if selected is None:
+                    raise ValueError("Office compatibility representation unsupported")
+                remaining.extend(reversed(selected))
+            else:
+                children.append(child)
+        parent[:] = children
+        pending.extend(children)
+    return parser.root
 
 
 def preview(image, name):
@@ -123,7 +169,7 @@ def office_content(path, mime):
             declarations = data.replace(b"\x00", b"").upper()
             if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
                 raise ValueError("Office entities refused")
-            return ET.fromstring(data)
+            return office_xml(data)
 
         def text_piece(node):
             tag = node.tag.rsplit("}", 1)[-1]

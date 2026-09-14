@@ -1615,6 +1615,69 @@ for line in sys.stdin:
                 self.assertEqual(claimed["attachment"]["extracted_text"],
                                  "[word/document.xml]\n" + "\n".join(expected))
 
+    def extract_docx_body(self, body):
+        word = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:feature="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+                'xmlns:v="urn:schemas-microsoft-com:vml"><w:body>' + body + '</w:body></w:document>')
+        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        row = self.prepared("document", mime, self.office_bytes({"word/document.xml": word}))
+        _, claimed = self.claim(row)
+        return claimed["attachment"]["extracted_text"].split("\n", 1)[1]
+
+    def test_docx_alternate_content_selects_one_representation_without_deduplicating_text(self):
+        text = ('<w:p><w:r><w:t xml:space="preserve">Total: </w:t></w:r>'
+                '<w:r><w:t>1</w:t></w:r><w:r><w:t>00</w:t></w:r></w:p>')
+        body = ('<w:p><w:r><w:t>Before</w:t></w:r><mc:AlternateContent>'
+                '<mc:Choice Requires="w"><w:r><w:txbxContent>' + text + '</w:txbxContent></w:r></mc:Choice>'
+                '<mc:Choice Requires="a"><w:p><w:r><w:t>Later choice</w:t></w:r></w:p></mc:Choice>'
+                '<mc:Fallback><w:r><w:pict><v:shape><v:textbox><w:txbxContent>' + text +
+                '</w:txbxContent></v:textbox></v:shape></w:pict></w:r></mc:Fallback>'
+                '</mc:AlternateContent><w:r><w:t>After</w:t></w:r></w:p>' + text + text)
+        self.assertEqual(self.extract_docx_body(body), "Before\nTotal: 100\nAfter\nTotal: 100\nTotal: 100")
+
+    def test_docx_unsupported_choices_select_fallback(self):
+        for required in ("wps", "unbound", "w wps"):
+            with self.subTest(required=required):
+                body = ('<mc:AlternateContent><mc:Choice Requires="' + required + '">'
+                        '<w:p><w:r><w:t>Unsupported</w:t></w:r></w:p></mc:Choice><mc:Fallback>'
+                        '<w:p><w:r><w:t>Fall</w:t></w:r><w:r><w:t>back</w:t></w:r></w:p>'
+                        '</mc:Fallback></mc:AlternateContent>')
+                self.assertEqual(self.extract_docx_body(body), "Fallback")
+
+    def test_docx_alternate_content_resolves_scoped_namespace_prefixes(self):
+        body = ('<mc:AlternateContent>'
+                '<mc:Choice xmlns:feature="urn:unsupported" Requires="feature">'
+                '<w:p><w:r><w:t>Wrong namespace</w:t></w:r></w:p></mc:Choice>'
+                '<mc:Fallback><w:p><w:r><w:t>Fallback</w:t></w:r></w:p></mc:Fallback>'
+                '</mc:AlternateContent><mc:AlternateContent><mc:Choice Requires="feature a">'
+                '<w:p><w:r><w:t>Restored namespace</w:t></w:r></w:p></mc:Choice>'
+                '<mc:Fallback><w:p><w:r><w:t>Wrong fallback</w:t></w:r></w:p></mc:Fallback>'
+                '</mc:AlternateContent>')
+        self.assertEqual(self.extract_docx_body(body), "Fallback\nRestored namespace")
+
+    def test_docx_nested_alternate_content_only_traverses_selected_branches(self):
+        body = ('<w:p><w:r><w:t>Before</w:t></w:r><mc:AlternateContent><mc:Choice Requires="w">'
+                '<mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:t>Unsupported</w:t></w:r></w:p>'
+                '</mc:Choice><mc:Fallback><w:txbxContent><w:p><w:r><w:t>ABC</w:t></w:r>'
+                '<w:r><w:t>123</w:t></w:r></w:p></w:txbxContent></mc:Fallback></mc:AlternateContent>'
+                '</mc:Choice><mc:Fallback><mc:AlternateContent><mc:Choice Requires="unbound">'
+                '<w:p><w:r><w:t>Unselected</w:t></w:r></w:p></mc:Choice></mc:AlternateContent></mc:Fallback>'
+                '</mc:AlternateContent><w:r><w:t>After</w:t></w:r></w:p>')
+        self.assertEqual(self.extract_docx_body(body), "Before\nABC123\nAfter")
+
+    def test_docx_without_supported_compatibility_representation_fails(self):
+        word = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+                '<w:body><mc:AlternateContent><mc:Choice Requires="unbound">'
+                '<w:p><w:r><w:t>Unsupported</w:t></w:r></w:p></mc:Choice></mc:AlternateContent></w:body></w:document>')
+        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        row = self.prepared("document", mime, self.office_bytes({"word/document.xml": word}))
+        self.assertEqual(row["state"], "failed")
+        self.assertIsNone(row["note_id"])
+
     def test_workbook_rich_strings_match_inline_and_preserve_cached_numbers(self):
         files = self.workbook_files([(1, "Codes")])
         files["xl/sharedStrings.xml"] = '<sst><si><r><t>ABC</t></r><r><t>123</t></r></si></sst>'
