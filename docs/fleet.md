@@ -119,11 +119,15 @@ Any pending-reply record whose phase is not `resolved` blocks the move.
 Resolved records stay in the source home and are not deleted or copied.
 
 Both source and destination home session locks must be stopped before `transfer begin`.
+`--to` is optional: without it the transfer pre-scans healthy reasoning managers, deterministically selects the least-loaded candidate excluding the source, revalidates the same choice under the fleet lock, stops the selected destination, proves both endpoint locks stopped, then runs the same journaled transfer and restarts.
+Explicit `--to` remains the deliberate administrative override.
 `recover` uses the same transaction with a live destination, journals it as a failover, and does not relaunch the destination manager.
 The command stops the SecondMate endpoint, writes a transaction journal under `<fleet-root>/transactions/`, moves the parent route and metadata, rewrites `.fm-secondmate-parent`, publishes the next assignment generation, restarts the destination manager, and relaunches the SecondMate from the destination home.
 The assignment publishes after the owner records, so a crash cannot leave both parents authoritative.
 
 ```sh
+bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer begin \
+  --secondmate harness --source-home "$ORIGINAL_FIRSTMATE_HOME"
 bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer begin \
   --secondmate harness --to manager-1 --source-home "$ORIGINAL_FIRSTMATE_HOME"
 bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer recover \

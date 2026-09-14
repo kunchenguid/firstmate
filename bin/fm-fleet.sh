@@ -14,7 +14,7 @@
 #         [--issue <key>]
 #   assign --secondmate <id> [--reason <text>]
 #   recover --secondmate <id> [--reason <text>]   (failover transfer to a live peer)
-#   transfer begin --secondmate <id> --to <manager> [--source-home <home>]
+#   transfer begin --secondmate <id> [--to <manager>] [--source-home <home>]
 #   transfer recover|rollback --transaction <id>
 #   progress <manager> [--note <text>] [--active <count>]
 #   set-wait <manager> --on|--off
@@ -359,6 +359,50 @@ transfer_begin() {  # <secondmate> <manager> <source-home or empty> <failover> <
   echo "transfer $tx active: $sm -> $dest"
 }
 
+manager_id_for_home() {  # <home> -> manager id or empty
+  python3 - "$REG" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+for row in reg["managers"]:
+    if row["home"] == sys.argv[2]:
+        print(row["id"]); break
+PY
+}
+
+transfer_auto_select() {  # <secondmate> <exclude-manager or empty> -> manager
+  local sm=$1 exclude=$2 health dest
+  health=$(mktemp "$FLEET_ROOT/.auto-health.XXXXXX") || return 1
+  health_json "$health" || { rm -f "$health"; return 1; }
+  dest=$(choose_manager "$health" "$sm" "$exclude")
+  rm -f "$health"
+  [ -n "$dest" ] || { echo "fm-fleet: no healthy reasoning manager remains for automatic transfer" >&2; return 1; }
+  printf '%s\n' "$dest"
+}
+
+# Automatic planned transfer: choose the destination instead of requiring
+# --to. Pre-scan healthy reasoning managers excluding the source, revalidate
+# the same choice under the fleet lock, stop the selected destination, prove
+# both endpoint locks stopped, then run the existing journaled planned
+# transfer (which relaunches the destination manager and the SecondMate).
+# Explicit --to stays the administrative override; this path never publishes
+# an assignment before the parent records move.
+transfer_begin_auto() {  # <secondmate> <source-home or empty> <reason>
+  local sm=$1 source=$2 reason=$3 source_manager dest dest_home reselected
+  [ -n "$source" ] || source=$(manager_home "$(assignment_manager "$sm")" 2>/dev/null || true)
+  [ -n "$source" ] || die "source home is unknown; pass --source-home"
+  source_manager=$(manager_id_for_home "$source")
+  dest=$(transfer_auto_select "$sm" "$source_manager") || exit 1
+  echo "auto transfer: $sm -> $dest"
+  reselected=$(with_lock transfer_auto_select "$sm" "$source_manager") || exit 1
+  [ "$reselected" = "$dest" ] || die "destination choice changed under revalidation ($dest -> $reselected); retry the transfer"
+  dest_home=$(manager_home "$dest") || die "unknown destination manager $dest"
+  [ "$dest_home" != "$source" ] || die "automatic selection chose the source home; retry the transfer"
+  stop_manager "$dest" || die "destination manager $dest could not be stopped safely"
+  reasoning_live "$source" && die "source parent home became live; transfer refused"
+  destination_ready "$dest_home" 0 || die "destination manager $dest is not stopped after stop; transfer refused"
+  transfer_begin "$sm" "$dest" "$source" 0 "$reason"
+}
+
 with_home_registry_locks() {  # <journal> <command...>
   local journal=$1; shift
   (
@@ -522,8 +566,8 @@ PY
     need_registry; [ $# -ge 1 ] || exit 2; sub=$1; shift
     if [ "$sub" = begin ]; then
       sm=""; dest=""; source=""; while [ $# -gt 0 ]; do case "$1" in --secondmate) sm=${2:-}; shift 2;; --to) dest=${2:-}; shift 2;; --source-home) source=${2:-}; shift 2;; *) exit 2;; esac; done
-      [ -n "$sm" ] && [ -n "$dest" ] || exit 2
-      transfer_begin "$sm" "$dest" "$source" 0 "supervision transfer"
+      [ -n "$sm" ] || exit 2
+      if [ -n "$dest" ]; then transfer_begin "$sm" "$dest" "$source" 0 "supervision transfer"; else transfer_begin_auto "$sm" "$source" "supervision transfer"; fi
     elif [ "$sub" = recover ]; then
       [ "${1:-}" = --transaction ] && [ -n "${2:-}" ] || exit 2; tx=$2; journal="$FLEET_ROOT/transactions/$tx.json"; data=$(python3 "$TRANSFER_BIN" state --journal "$journal") || exit 1
       sm=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secondmate"])'); dest=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])'); source=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_home"])'); dest_home=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_home"])')
