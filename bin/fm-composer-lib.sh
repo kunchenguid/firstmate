@@ -54,7 +54,7 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
-#                tolerated, not ambiguity.
+#                tolerated, including Grok 1.0.5's three-column title overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -842,7 +842,7 @@ EOF
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces
+  local family=$1 inner=$2 expected=$3 dash spaces title effort model
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -860,7 +860,28 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
   esac
-  [ "$spaces" = "$expected" ]
+  [ "$spaces" = "$expected" ] && return 0
+
+  # Grok 1.0.5 renders its real model title three columns wider than the
+  # otherwise aligned top and content rows (issue #3436). Accept only that
+  # exact overhang and only the typed Grok model/effort title shape. This keeps
+  # arbitrary malformed bottoms ambiguous while preserving the complete-box
+  # proof around a genuinely idle or pending Grok composer.
+  [ "$spaces" = "$expected   " ] || return 1
+  title=${inner//"$dash"/}
+  fm_composer_normalize_trim_var title
+  case "$title" in
+    'Grok '*\ \(low\)) effort=low ;;
+    'Grok '*\ \(medium\)) effort=medium ;;
+    'Grok '*\ \(high\)) effort=high ;;
+    'Grok '*\ \(xhigh\)) effort=xhigh ;;
+    *) return 1 ;;
+  esac
+  model=${title#Grok }
+  model=${model%" ($effort)"}
+  [ -n "$model" ] || return 1
+  case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
 }
 
 # fm_composer_row_has_edge: 0 when the trimmed row starts or ends with a
