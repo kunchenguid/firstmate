@@ -262,6 +262,88 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+# A bare "answered:" note on a reserved key is deliberately NOT a close.
+# bin/fm-send.sh speaks the owning library's vocabulary on its --resolve-key
+# path for reserved keys and never writes a bare answered: note for them, so
+# such a line is a foreign writer and must leave the decision open - while the
+# operator path through the owning vocabulary still closes.
+test_reserved_key_bare_answered_note_does_not_close() {
+  local dir f
+  dir=$(case_dir reserved-answered)
+  f="$dir/t.status"
+  printf 'blocked [key=pending-reply-23332bee7274560a]: pending-reply-missed: task=lucie pending-reply-id=23332bee7274560a request=CONFIG_REREAD: go\n' > "$f"
+  printf 'resolved [key=pending-reply-23332bee7274560a]: answered: operator thought this would close it\n' >> "$f"
+  assert_fold "$f" "$(printf 'pending-reply-23332bee7274560a\tblocked\tpending-reply-missed: task=lucie pending-reply-id=23332bee7274560a request=CONFIG_REREAD: go\n')" \
+    "bare answered: on a reserved key"
+  printf 'resolved [key=pending-reply-23332bee7274560a]: pending-reply-resolved: task=lucie pending-reply-id=23332bee7274560a via=operator-resolve-key\n' >> "$f"
+  assert_fold "$f" "" "owning-vocabulary operator close"
+  pass "a bare 'answered:' note cannot close a reserved-key decision; the owning vocabulary still can"
+}
+
+# A reserved-key decision transferred to the durable captain-held inventory
+# carries a "tracked by" note. The fold must accept that transfer as a close -
+# otherwise the transferred decision re-appears in OPEN DECISIONS forever.
+test_reserved_key_tracked_by_transfer_closes() {
+  local dir f
+  dir=$(case_dir reserved-tracked-by)
+  f="$dir/t.status"
+  printf 'blocked [key=pending-reply-cafe0001]: pending-reply-missed: task=z pending-reply-id=cafe0001 request=THING: go\n' > "$f"
+  printf 'captain-held [key=pending-reply-cafe0001]: tracked by hold-pending-reply-cafe0001\n' >> "$f"
+  assert_fold "$f" "" "reserved-key tracked-by transfer"
+  pass "a reserved-key decision transferred with a 'tracked by' note folds as resolved"
+}
+
+# The widened vocabulary must not become an open door: a foreign resolution
+# carrying no recognized system provenance still cannot close a reserved key.
+test_reserved_key_foreign_resolution_still_rejected() {
+  local dir f
+  dir=$(case_dir reserved-foreign)
+  f="$dir/t.status"
+  printf 'blocked [key=pending-reply-abcdef01]: pending-reply-missed: task=ios pending-reply-id=abcdef01 request=ship: go\n' > "$f"
+  printf 'resolved [key=pending-reply-abcdef01]: all good now\n' >> "$f"
+  assert_fold "$f" "$(printf 'pending-reply-abcdef01\tblocked\tpending-reply-missed: task=ios pending-reply-id=abcdef01 request=ship: go\n')" \
+    "foreign resolution on a reserved key"
+  pass "a foreign resolution with no system provenance still cannot close a reserved-key decision"
+}
+
+# Version 5 named two different rule sets across the two trees, so a cursor
+# stamped version=5 may carry an open set folded under older semantics -
+# still listing a key the status log already closes. The bump to 6 must
+# invalidate it and rebuild from byte 0, closing the key.
+test_stale_version5_cursor_is_invalidated() {
+  local dir f cf file_ident file_size incr new_version
+  dir=$(case_dir stale-version5)
+  f="$dir/t.status"
+  printf 'blocked [key=pending-reply-23332bee7274560a]: pending-reply-missed: task=lucie pending-reply-id=23332bee7274560a request=CONFIG_REREAD: go\n' > "$f"
+  printf 'captain-held [key=pending-reply-23332bee7274560a]: tracked by hold-pending-reply-23332bee7274560a\n' >> "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "stale-cursor sanity: the full fold should be empty"
+
+  # Forge a cursor as the narrow reading would have written it: all bytes
+  # consumed, file identity current, but the key still open - stamped with the
+  # ambiguous version 5.
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  file_ident=$(_fm_open_decisions_file_ident "$f")
+  file_size=$(_fm_status_file_size "$f")
+  file_size=${file_size//[[:space:]]/}
+  {
+    printf 'version=5\n'
+    printf 'offset=%s\n' "$file_size"
+    printf 'ident=%s\n' "$file_ident"
+    printf 'pending-reply-23332bee7274560a\tblocked\tpending-reply-missed: task=lucie pending-reply-id=23332bee7274560a request=CONFIG_REREAD: go\n'
+  } > "$cf"
+
+  incr=$(status_open_decisions_incremental "$f")
+  [ -z "$incr" ] \
+    || fail "stale version-5 cursor was trusted: incremental fold still reports '$incr'"
+  new_version=$(head -1 "$cf")
+  [ "$new_version" = "version=$FM_OPEN_DECISIONS_FOLD_VERSION" ] \
+    || fail "the cursor was not rewritten with the current version: got '$new_version'"
+  [ "$FM_OPEN_DECISIONS_FOLD_VERSION" = "6" ] \
+    || fail "the fold version is $FM_OPEN_DECISIONS_FOLD_VERSION, want 6"
+  pass "a stale version-5 cursor is invalidated by the bump to 6 and refolds to resolved"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -269,6 +351,10 @@ test_blocked_is_position_tolerant_like_needs_decision
 test_two_colon_form_decisions_stay_distinct
 test_mid_note_prose_mention_is_not_a_stated_key
 test_malformed_stated_key_never_collapses_to_default
+test_reserved_key_bare_answered_note_does_not_close
+test_reserved_key_tracked_by_transfer_closes
+test_reserved_key_foreign_resolution_still_rejected
+test_stale_version5_cursor_is_invalidated
 test_status_line_verb_strips_every_bracket_tag_before_colon
 test_corr_and_key_tags_open_and_close_under_the_stated_key
 test_corr_only_tag_opens_as_default_like_a_bare_line

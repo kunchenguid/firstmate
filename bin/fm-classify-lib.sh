@@ -434,14 +434,27 @@ EOF
 # The rule is deliberately generic, so this fold needs no knowledge of any
 # particular owner: a reserved key may only be opened or closed by a line whose
 # note speaks that namespace's own vocabulary, which its owner states by
-# beginning the note with a `<namespace>...:` token. A line failing that is not a
-# decision transition at all here and is folded as ordinary status. This is a
-# consumer-side rule on purpose - it protects local and remote writers
-# identically, and it can never fail a whole delta or wedge a stream the way a
-# writer-side rejection would.
+# beginning the note with a `<namespace>...:` token.  The captain-hold transfer
+# ("tracked by") is recognized as universal resolution vocabulary alongside
+# each namespace's own, because bin/fm-captain-hold.sh transfers every open key
+# with that note and the transferred decision must fold as closed.  A bare
+# "answered:" note is deliberately NOT recognized here: bin/fm-send.sh speaks
+# the owning library's vocabulary on its --resolve-key path for reserved keys
+# and never writes a bare answered: note for them, so such a line is a foreign
+# writer and must not close the decision.  A line failing all vocabulary checks
+# is not a decision transition at all here and is folded as ordinary status.
+# This is a consumer-side rule on purpose - it protects local and remote
+# writers identically, and it can never fail a whole delta or wedge a stream
+# the way a writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
-# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
+# The captain-hold transfer note, accepted as valid vocabulary for closing ANY
+# reserved-key decision alongside the namespace's own prefix.  Matched as a
+# case pattern rather than a list entry because "tracked by" contains a space,
+# which would break IFS-delimited iteration.
+
+# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary
+# (either the namespace's own prefix or the captain-hold transfer note).
 _fm_decision_key_transition_allowed() {  # <key> <note>
   local key=$1 note=$2 prefix
   for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
@@ -449,8 +462,9 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
       "$prefix"*)
         case "$note" in
           "$prefix"*:*) return 0 ;;
-          *) return 1 ;;
+          "tracked by "*) return 0 ;;
         esac
+        return 1
         ;;
     esac
   done
@@ -681,7 +695,13 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+# 6: _fm_decision_key_transition_allowed now recognizes the captain-hold
+# transfer vocabulary ("tracked by") for closing reserved-key decisions, so
+# lines that previously folded as ordinary status become closes. Version 5 is
+# ambiguous across trees - it named two different rule sets - so a cursor
+# persisted under either 5 reading must be discarded and rebuilt from byte 0
+# under the widened one.
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
