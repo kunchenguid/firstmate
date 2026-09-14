@@ -221,6 +221,61 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# --forge names which CLI the brief tells the worker to use for this project's
+# forge operations. It is resolved by firstmate at intake (bin/fm-project-mode.sh
+# --forge), exactly like --mode, and defaults to github so every pre-existing
+# caller that never passes it renders byte-identical Rule-3 wording to before
+# this flag existed. Covers a ship brief's Rule 3, a scout brief's Rule 3 (a
+# scout also names a forge CLI for read-only research), the direct-PR
+# Definition-of-done's own open-a-PR line, and the closed set of accepted
+# values.
+test_forge_selection_renders_correct_cli() {
+  local home id brief
+  home="$TMP_ROOT/forge-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-default some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "a ship brief with no --forge should still scaffold"
+  brief="$home/data/brief-forge-default/brief.md"
+  assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+    "a brief with no --forge must render the exact pre-existing gh-axi Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `gh-axi`' "$brief" \
+    "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-gitlab some-proj --mode direct-PR --forge gitlab >/dev/null 2>&1 \
+    || fail "--forge gitlab should scaffold a ship brief"
+  brief="$home/data/brief-forge-gitlab/brief.md"
+  assert_grep "3. Use glab for GitLab operations and chrome-devtools-axi for browser operations." "$brief" \
+    "--forge gitlab must render the glab Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `glab`' "$brief" \
+    "--forge gitlab's direct-PR DOD must tell the worker to open the PR with glab"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
+    || fail "--forge forgejo should scaffold a ship brief"
+  brief="$home/data/brief-forge-forgejo/brief.md"
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+    "--forge forgejo must render the tea Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `tea`' "$brief" \
+    "--forge forgejo's direct-PR DOD must tell the worker to open the PR with tea"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-scout some-proj --scout --forge forgejo >/dev/null 2>&1 \
+    || fail "--forge forgejo should scaffold a scout brief"
+  brief="$home/data/brief-forge-scout/brief.md"
+  assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+    "a scout brief's Rule 3 must also honor --forge"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-bad some-proj --mode direct-PR --forge bitbucket 2>&1); rc=$?
+  expect_code 1 "$rc" "an unrecognized --forge value must be refused"
+  printf '%s' "$out" | grep -q -- "--forge must be one of github, gitlab, forgejo" \
+    || fail "an unrecognized --forge value must name the closed set: $out"
+  [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "a refused --forge value must not leave a brief behind"
+
+  pass "fm-brief.sh: --forge selects the correct CLI in Rule 3 and the direct-PR DOD, defaults to github, and rejects an unknown value"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -910,6 +965,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_forge_selection_renders_correct_cli
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

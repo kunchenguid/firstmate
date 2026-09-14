@@ -4,7 +4,9 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# host and path, so any instance works and no host is hardcoded; a Forgejo
+# pull request is addressed through tea by the derived owner and repository
+# plus a "tea login" resolved fresh from the parsed host on every run.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -65,6 +67,32 @@
 # reported rather than trusted, because a rebase moves the head and leaves the
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
+#
+# A Forgejo merge is refused unless every pre-merge condition holds, each read
+# live at merge time: the pull request is open, mergeable is true, and the
+# combined commit status at the exact current head is success (an unconfigured
+# status, reported as "none", refuses rather than being treated as nothing to
+# check, the same reading GitLab's null head_pipeline gets above). Every
+# failing condition is reported, not just the first. tea exposes no head-
+# binding flag on its own merge subcommand, so the verified head is instead
+# passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
+# (through "tea api"), which rejects a mismatched value with "head out of
+# date" - verified against a real instance, along with every claim below about
+# tea's and the API's exact behavior. Also unlike gh and glab, that API call
+# reports an HTTP-level failure with exit status 0, so the merge is never
+# judged by its own exit status: only a follow-up read confirming merged=true
+# counts as landed. tea addresses a repository by owner/repository slug only;
+# the host comes from a named "tea login" rather than the URL the way gh and
+# glab take one, so the login registered for the parsed host is re-resolved
+# fresh at merge time (bin/fm-pr-check.sh already required one at arm time,
+# but a login can be renamed or removed afterwards). Reading and merging both
+# need tea and jq, and either one absent stops the merge before any state is
+# recorded. Forgejo has no merge-queue or scheduled-merge concept, so unlike
+# GitHub and GitLab there is no away-mode async/queued case to detect: every
+# accepted Forgejo merge here is immediate, and any caller-passed extra
+# argument beyond a merge method is refused rather than silently dropped,
+# because there is no established translation from a gh/glab-style flag into
+# a Forgejo API field yet.
 #
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
@@ -373,11 +401,44 @@ if [ "$PROVIDER" = github ]; then
     exit 1
   fi
 fi
+# tea addresses a repo by slug only; the host comes from a named "tea login"
+# rather than the URL, so the login registered for this exact host is
+# resolved here too (bin/fm-pr-check.sh already refused arming without one,
+# but a login can be removed or renamed after arming, so this is re-derived
+# fresh rather than trusted from that earlier check).
+FORGEJO_MISSING=
+FORGEJO_LOGIN=
+if [ "$PROVIDER" = forgejo ]; then
+  command -v tea >/dev/null 2>&1 || FORGEJO_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    FORGEJO_MISSING="${FORGEJO_MISSING:+$FORGEJO_MISSING and }jq"
+  fi
+  if [ -n "$FORGEJO_MISSING" ]; then
+    echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
+    exit 1
+  fi
+  FORGEJO_LOGIN=$(
+    tea login list --output json 2>/dev/null | awk -F'"' -v h="$PR_HOST" '
+      /"name":/ { name = $4 }
+      /"url":/ {
+        u = $4
+        sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
+        sub(/\/.*$/, "", u)
+        sub(/:[0-9]+$/, "", u)
+        if (u == h) { print name; n++ }
+      }
+      END { exit (n == 1) ? 0 : 1 }
+    '
+  ) || {
+    echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -484,6 +545,120 @@ FIELDS
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
+}
+
+# Pre-merge conditions for a Forgejo pull request, read from one live view of
+# it. tea's single-PR view ignores field selection entirely (verified against
+# a real instance), so the raw API is read directly through "tea api" instead
+# of any tea subcommand, exactly like glab's JSON view above but through
+# Forgejo/Gitea's REST API. Sets FM_PR_MERGE_HEAD to the verified head on
+# success and returns non-zero after reporting every condition that failed.
+#
+# Forgejo has no merge-queue or scheduled-merge concept to detect, so unlike
+# GitHub and GitLab this never sets an async/queued signal: every accepted
+# Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
+forgejo_verify_mergeable() {
+  local pr_json status_json fields line
+  local total=0 named=0 refusals=''
+  local state='' mergeable='' live_head='' ci_state='' ci_total=''
+
+  if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$pr_json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "mergeable=" + (.mergeable | tostring),
+        "head=" + ((.head.sha // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      head=*) live_head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ]; then
+    echo "error: could not read the Forgejo pull request state before merging" >&2
+    return 1
+  fi
+
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Forgejo pull request head commit before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  # An absent combined status (total_count 0, as a repo with no configured
+  # Actions reports) is a real "none" here rather than nothing to check, the
+  # same reading GitLab's null head_pipeline gets above.
+  ci_state=none
+  if status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "/repos/{owner}/{repo}/commits/$live_head/status" 2>/dev/null) && [ -n "$status_json" ]; then
+    ci_total=$(printf '%s' "$status_json" | jq -r '(.total_count // 0) | tostring' 2>/dev/null || echo 0)
+    if [ "$ci_total" != 0 ] && [ -n "$ci_total" ]; then
+      ci_state=$(printf '%s' "$status_json" | jq -r '.state // ""' 2>/dev/null || true)
+      [ -n "$ci_state" ] || ci_state=none
+    fi
+  fi
+
+  [ "$state" = open ] \
+    || refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+  [ "$mergeable" = true ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  [ "$ci_state" = success ] \
+    || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
+"
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
+}
+
+# The caller's own extra arguments may only name a merge method, in the same
+# forms caller_merge_method reads. There is no translation from a gh/glab-style
+# flag such as --auto, --admin, or --delete-branch into a Forgejo API field
+# yet (reject_protected_forge_args above already forbids those exact spellings
+# outright), so anything else is refused rather than silently dropped.
+forgejo_reject_unsupported_args() {
+  local arg pending=false
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      pending=false
+      continue
+    fi
+    case "$arg" in
+      --squash|--merge|--rebase) ;;
+      --method) pending=true ;;
+      --method=*) ;;
+      *)
+        echo "error: extra merge arguments are not yet supported for Forgejo merges" >&2
+        return 1
+        ;;
+    esac
+  done
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -1121,6 +1296,26 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# Unlike gh and glab, "tea api" reports an HTTP-level failure (a rejected or
+# malformed merge request included) with exit status 0 and the error only in
+# the response body, verified empirically against a real Forgejo instance. So
+# this confirmation is not a bonus corroboration of an already-trusted exit
+# code the way gitlab_confirm_merged's is: it is the only reliable signal that
+# a Forgejo merge landed at all.
+forgejo_confirm_merged() {
+  local json merged
+  if ! json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! merged=$(printf '%s' "$json" | jq -r \
+    'if type == "object" and (.merged | type == "boolean") then .merged else error("invalid merged field") end' \
+    2>/dev/null); then
+    return 1
+  fi
+  [ "$merged" = true ]
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -1225,6 +1420,44 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  forgejo)
+    forgejo_reject_unsupported_args "$@" || exit 1
+    forgejo_method=$(caller_merge_method "$@")
+    [ -n "$forgejo_method" ] || forgejo_method=merge
+    forgejo_verify_mergeable || exit 1
+    # The away record is locked first, so this last presence and authority
+    # read and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    # head_commit_id binds the merge to the head this run verified: Forgejo's
+    # REST API rejects a mismatched value with "head out of date" (verified
+    # against a real instance), matching --match-head-commit/--sha above. tea
+    # exposes no such flag on its own merge subcommand, so the API is called
+    # directly through "tea api" instead.
+    merge_output=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      -X POST "/repos/{owner}/{repo}/pulls/$PR_NUMBER/merge" \
+      -f "Do=$forgejo_method" -f "head_commit_id=$FM_PR_MERGE_HEAD" 2>&1) || true
+    # "tea api" reports an HTTP-level failure with exit status 0 (also
+    # verified against a real instance), so that output is kept only for the
+    # failure report below; the merge is judged solely by reading the pull
+    # request back through forgejo_confirm_merged.
+    forgejo_confirm_rc=0
+    forgejo_confirm_merged || forgejo_confirm_rc=$?
+    if [ "$forgejo_confirm_rc" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      [ -z "$merge_output" ] || printf 'error: > %s\n' "$merge_output" >&2
+      echo "error: Forgejo did not confirm $URL as merged" >&2
+      exit 1
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
     ;;
   *)
     echo "error: invalid PR merge request" >&2

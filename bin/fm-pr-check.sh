@@ -60,17 +60,49 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# Refuse to arm a Forgejo watch with no tea on PATH, for the same reason as
+# the GitLab case above. tea also addresses a repo by slug only, resolving the
+# host from a named "tea login" rather than from the URL the way gh and glab
+# do, so a poll can only ever succeed when exactly one registered login
+# matches this host; refuse now rather than watch something that can never
+# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
+# that script is a static, standalone watcher body with no sourced
+# dependency, so it re-derives the same match at every poll instead of
+# trusting a name recorded here.
+if [ "$PROVIDER" = forgejo ]; then
+  if ! command -v tea >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea on PATH" >&2
+    exit 1
+  fi
+  tea login list --output json 2>/dev/null | awk -F'"' -v h="$HOST" '
+      /"name":/ { name = $4 }
+      /"url":/ {
+        u = $4
+        sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
+        sub(/\/.*$/, "", u)
+        sub(/:[0-9]+$/, "", u)
+        if (u == h) { print name; n++ }
+      }
+      END { exit (n == 1) ? 0 : 1 }
+    ' >/dev/null || {
+    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# output, which would need a JSON processor firstmate does not require, and
+# tea's single-PR view ignores field selection entirely, so neither a GitLab
+# nor a Forgejo task records a pr_head here. Both consumers already treat it
+# as optional: bin/fm-teardown.sh reads the head from the forge at teardown
+# rather than from metadata and falls back to its provider-agnostic content
+# check, and bin/fm-review-diff.sh resolves the head from the remote when none
+# is recorded. bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge
+# time for the same reason, and treats a recorded value that disagrees as
+# stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then

@@ -14,9 +14,14 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <github|gitlab|forgejo>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--forge <github|gitlab|forgejo>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --forge names which CLI the brief tells the worker to use for this
+#   project's PR/issue operations (gh-axi, glab, or tea); it defaults to
+#   github, so every existing caller is unaffected. Resolve it at intake from
+#   the project's registered forge: token (bin/fm-project-mode.sh --forge),
+#   exactly like --mode, rather than guessed from the repo-name string.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -125,6 +130,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+FORGE=github
 POS=()
 want_value=
 for a in "$@"; do
@@ -134,6 +140,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      forge) FORGE=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -146,6 +153,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --forge) want_value=forge ;;
+    --forge=*) FORGE=${a#--forge=} ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -154,6 +163,20 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+
+# --forge names which CLI a worker uses for this project's PR operations; it
+# is resolved by firstmate at intake from the project's registered forge:
+# token (bin/fm-project-mode.sh --forge), exactly like --mode, rather than
+# read here, so this script never has to guess it from the caller-supplied
+# repo string. Absent, it defaults to github, the only behavior every existing
+# caller ever exercised.
+case "$FORGE" in
+  github) FORGE_CLI=gh-axi; FORGE_LABEL=GitHub ;;
+  gitlab) FORGE_CLI=glab; FORGE_LABEL=GitLab ;;
+  forgejo) FORGE_CLI=tea; FORGE_LABEL=Forgejo ;;
+  *) echo "error: --forge must be one of github, gitlab, forgejo (got '$FORGE')" >&2; exit 1 ;;
+esac
+FORGE_RULE_LINE="Use $FORGE_CLI for $FORGE_LABEL operations and chrome-devtools-axi for browser operations."
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -379,7 +402,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -447,7 +470,7 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$FORGE_CLI") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -468,7 +491,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

@@ -498,6 +498,18 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Forge selection (data/projects.md forge: token)
+
+Every project defaults to GitHub, using `gh`/`gh-axi` exactly as before this token existed.
+A remote-backed project registered with a `forge:gitlab` or `forge:forgejo` bracket token (`bin/fm-project-mode.sh` owns the exact grammar, alongside the existing `<mode>` and `+yolo` tokens) tells a generated brief to name `glab` or `tea` instead, and the URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) already recognizes a GitHub, GitLab, or Forgejo PR/MR URL once one exists, regardless of this token.
+The token changes nothing for existing entries and needs no migration.
+`bin/fm-project-mode.sh --forge <name>` reads it back; every other invocation's output is unchanged.
+`bin/fm-brief.sh`'s `--forge` (default `github`) is the explicit per-task input a generated brief actually renders from, resolved by firstmate at intake from this token the same way `--mode` is (AGENTS.md section 7); the brief scaffold never reads the registry itself.
+
+A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
+A GitLab project needs `glab` on `PATH`, authenticated via `glab auth login`.
+[`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
+
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
