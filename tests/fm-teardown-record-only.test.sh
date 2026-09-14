@@ -488,6 +488,32 @@ test_record_only_resumes_after_an_interrupted_archive() {
   pass "fm-teardown --record-only resumes cleanly after a kill between writing the archive record and finishing cleanup"
 }
 
+test_record_only_backfills_a_status_copy_lost_to_the_crash_window() {
+  local dir
+  dir=$(make_case status-copy-gap)
+  write_meta "$dir" ship "pr=https://github.com/example/repo/pull/7"
+  claim_pool_slot "$dir" other-task
+  seed_backlog_in_flight "$dir" ship
+  write_done_status "$dir"
+  set_pr_merged "$dir"
+
+  # Simulate a kill in the window between the archive record's durable write
+  # and the redundant status-history copy: the archive record already exists,
+  # but its .status copy was never made, and the task record is untouched.
+  mkdir -p "$dir/home/state/archived-records"
+  printf 'schema=fm-record-only-archive.v1\ntask_id=%s\nreason=confirmed-pooled-location-reused\n' \
+    "$ID" > "$dir/home/state/archived-records/$ID.record"
+
+  run_record_only "$dir" >/dev/null || fail "status-copy-gap: resumed run failed: $(cat "$dir/stderr" 2>/dev/null)"
+  assert_absent "$dir/home/state/$ID.meta" "status-copy-gap: resumed run did not finish archiving"
+  assert_equals "done" "$(backlog_row_state "$dir")" "status-copy-gap: resumed run did not close the backlog row"
+  assert_present "$dir/home/state/archived-records/$ID.status" \
+    "status-copy-gap: the resumed run never backfilled the archived status copy lost to the crash"
+  assert_grep 'done: shipped' "$dir/home/state/archived-records/$ID.status" \
+    "status-copy-gap: the backfilled archived status copy lost the status history"
+  pass "fm-teardown --record-only backfills an archived status copy that a crash between the archive write and the copy lost"
+}
+
 test_record_only_control_lock_contention_refuses_before_mutation() {
   local dir lock holder i=0 rc
   dir=$(make_case control-lock)
@@ -547,4 +573,5 @@ test_record_only_refuses_when_pending_reply_unresolved
 test_record_only_archives_a_completed_ship_task_and_is_idempotent
 test_record_only_archives_a_completed_scout_task
 test_record_only_resumes_after_an_interrupted_archive
+test_record_only_backfills_a_status_copy_lost_to_the_crash_window
 test_record_only_control_lock_contention_refuses_before_mutation

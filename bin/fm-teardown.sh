@@ -465,10 +465,14 @@ remove_pr_poll_artifacts() {
 # state/archived-records/<id>.record is written, durably, BEFORE any removal
 # below, so a process killed mid-cleanup leaves it behind as proof the
 # archive was already validated and committed; a re-run sees every check
-# still passes and resumes rather than re-refusing. Once the task record
-# itself (state/<id>.meta) is gone and the archive record exists, a re-run
-# reports success and changes nothing further - the same crash-recovery shape
-# as ordinary teardown's own state/<id>.backlog-close window.
+# still passes and resumes rather than re-refusing. The redundant
+# status-history copy beside the archive record is written OUTSIDE the
+# first-write gate, so a kill between the archive record's write and the copy
+# is repaired by the resuming run instead of staying lost forever. Once the
+# task record itself (state/<id>.meta) is gone and the archive record exists,
+# a re-run reports success and changes nothing further - the same
+# crash-recovery shape as ordinary teardown's own state/<id>.backlog-close
+# window.
 fm_teardown_record_only() {
   local id=$1
   local meta="$STATE/$id.meta" archive_dir="$STATE/archived-records" archive_file
@@ -740,9 +744,14 @@ fm_teardown_record_only() {
       echo "error: could not write the archive record for $id at $archive_file; nothing was changed" >&2
       return 1
     fi
-    if [ -f "$status_file" ]; then
-      cp -p "$status_file" "$archive_dir/$id.status" 2>/dev/null || true
-    fi
+  fi
+  # The status-history copy is deliberately NOT inside the first-write gate
+  # above: a kill between the archive record's mv and this cp must not leave
+  # every resume skipping the copy forever, so a resumed run backfills a
+  # missing copy from the surviving history instead. Nothing in this flow
+  # removes state/<id>.status, so the source always outlives the copy.
+  if [ -f "$status_file" ] && [ ! -f "$archive_dir/$id.status" ]; then
+    cp -p "$status_file" "$archive_dir/$id.status" 2>/dev/null || true
   fi
 
   remove_pr_poll_artifacts "$STATE" "$id" || return 1
