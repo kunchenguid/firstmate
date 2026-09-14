@@ -66,7 +66,9 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -174,6 +176,20 @@ test_pending_composer_skips_ring_advisorily() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the skip notice should point at the re-ring"
   pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
+}
+
+test_animation_styled_codex_draft_skips_ring() {
+  local dir err capture rc
+  dir=$(setup_case codex-animation-draft codex); err="$dir/send.err"
+  capture="$dir/styled.txt"
+  printf '\033[0m\033[38;2;143;147;156m\033[48;2;65;69;76m⠁\033[0m\033[48;2;65;69;76m       \033[0m\r\n\033[0m\033[1m\033[48;2;65;69;76m›\033[0m\033[38;2;143;147;156m\033[48;2;65;69;76mreal draft!?\033[2m\033[48;2;65;69;76mAsk Codex to do anything\033[0m\033[48;2;65;69;76m  \033[0m\r\n\033[0m\033[48;2;65;69;76m      \033[0m\033[38;2;98;102;110m\033[48;2;65;69;76m⠠\033[0m\033[48;2;65;69;76m \033[0m\r\n' > "$capture"
+  run_send "$dir" "$err" FM_FAKE_TMUX_CAPTURE="$capture" -- t1 "preserve the draft"; rc=$?
+  expect_code 0 "$rc" "an animation-styled draft should leave the steer durably recorded"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
+  [ ! -s "$dir/send.log" ] || fail "an animation-styled draft should block the ring:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "doorbell skipped (composer visibly holds pending text)" \
+    "an animation-styled draft should produce the pending-composer skip"
+  pass "fm-send inbox: an animation-styled Codex draft blocks the ring"
 }
 
 test_failed_ring_is_still_sent() {
@@ -342,6 +358,7 @@ test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
+test_animation_styled_codex_draft_skips_ring
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
