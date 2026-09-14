@@ -7,11 +7,11 @@
 // installed and removed, and stays the sole caller of setWorkingVisible().
 // docs/calm.md owns the captain-facing contract.
 //
-// Cadence: one scheduler drives two logically independent clocks. Every tick advances
-// the water phase, and only every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the
-// boat, so the water visibly ripples several times between boat steps and the boat
-// itself reads as calm. Both clocks stop together when the widget is disposed. Ticks,
-// not wall-clock timestamps, drive every state change, so tests can seek time exactly.
+// Cadence: one scheduler drives two linked cadences. Every tick advances the wave by
+// one quarter-cell, and every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the boat
+// one whole cell, so the trough stays phase-locked to a deliberately calm boat.
+// Both cadences stop together when the widget is disposed.
+// Ticks, not wall-clock timestamps, drive every state change, so tests can seek time exactly.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
 // Pi process and Calm extension lifetime. Disposing the widget freezes column,
@@ -26,24 +26,31 @@
 // module recomputes its track from that width on every frame instead of caching a
 // terminal size that a resize would invalidate. A resize while the boat is hidden is
 // applied on the first resumed frame through the same clamp path.
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
-// The hull is symmetric and replaces waves on its row rather than adding a third row.
-const HULL = "\\__/";
-// A mainsail extends aft of the mast, so it trails behind the bow relative to travel.
-const SAIL_RIGHT = "<|";
-const SAIL_LEFT = "|>";
-// Centers the two-cell sail over the four-cell hull.
+// The three-cell sail is centered over a five-cell hull. The hull's inner cells retain
+// zero-height water glyphs instead of interrupting the trough beneath the boat.
+const SAIL = "◢│◣";
+const HULL_LEFT = "╲";
+const HULL_WATER = "▁▁▁";
+const HULL_RIGHT = "╱";
+const HULL = `${HULL_LEFT}${HULL_WATER}${HULL_RIGHT}`;
 const SAIL_OFFSET = 1;
-const HULL_WIDTH = HULL.length;
-const SAIL_WIDTH = SAIL_RIGHT.length;
+const HULL_WIDTH = visibleWidth(HULL);
+const SAIL_WIDTH = visibleWidth(SAIL);
 
-// Bounded deterministic fixed-cell water phases. Every entry is exactly one column, so
-// advancing the phase ripples the surface without changing visible width or row count.
-const WAVE_CYCLE = ["~", "~", "-", "~"] as const;
+// Pi Dictation uses these bottom-aligned one-cell bars for truthful level history.
+// Calm deliberately keeps only its lower half: a long, low ocean swell rather than an
+// audio-sized waveform. Every glyph is one terminal column under Pi TUI's width rules.
+const WAVE_BARS = ["▁", "▂", "▃", "▄"] as const;
+const WAVE_MAX_LEVEL = WAVE_BARS.length - 1;
+const WAVE_HALF_LENGTH_MIN = 9;
+const WAVE_HALF_LENGTH_SPAN = 5;
+const WAVE_TROUGH_RADIUS = 5;
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
 const BLUE = "\u001b[34m";
+const CYAN = "\u001b[36m";
 const YELLOW = "\u001b[33m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
@@ -82,6 +89,62 @@ function trackSpan(width: number): number {
   return 0;
 }
 
+/** Stable bounded variation for successive half-waves on either side of the trough. */
+function halfWaveLength(index: number, negative: boolean): number {
+  let value =
+    ((negative ? 0xc411 : 0x5ea1) + Math.imul(index + 1, 0x9e3779b1)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d) >>> 0;
+  value ^= value >>> 15;
+  value >>>= 0;
+  return WAVE_HALF_LENGTH_MIN + (value % WAVE_HALF_LENGTH_SPAN);
+}
+
+function smoothstep(value: number): number {
+  const bounded = Math.max(0, Math.min(1, value));
+  return bounded * bounded * (3 - 2 * bounded);
+}
+
+/** Smooth amplitude at one fractional cell in the deterministic variable wave field. */
+function waveAmplitude(coordinate: number): number {
+  const negative = coordinate < 0;
+  let distance = Math.abs(coordinate);
+  let rising = true;
+  for (let index = 0; ; index += 1) {
+    const length = halfWaveLength(index, negative);
+    if (distance <= length) {
+      const eased = smoothstep(distance / length);
+      return (rising ? eased : 1 - eased) * WAVE_MAX_LEVEL;
+    }
+    distance -= length;
+    rising = !rising;
+  }
+}
+
+/**
+ * One bottom-aligned bar at an absolute column.
+ *
+ * The wave advances one quarter-cell on every water tick and exactly one cell on the
+ * boat's slower movement tick. Anchoring that displacement to the hull center keeps
+ * the boat inside the same broad trough without per-frame randomness or jitter.
+ */
+function waveLevel(
+  column: number,
+  hullCenter: number,
+  direction: number,
+  phase: number,
+): number {
+  const displacement =
+    hullCenter + (direction * phase) / CALM_WORKING_SHIP_TICKS_PER_MOVE;
+  const coordinate = column - displacement;
+  if (Math.abs(coordinate) <= WAVE_TROUGH_RADIUS) return 0;
+  const beyondTrough = coordinate - Math.sign(coordinate) * WAVE_TROUGH_RADIUS;
+  return Math.max(
+    0,
+    Math.min(WAVE_MAX_LEVEL, Math.round(waveAmplitude(beyondTrough))),
+  );
+}
+
 export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   let position = 0;
   let direction = 1;
@@ -94,8 +157,8 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   let renderedPhase = phase;
   let renderedTicks = ticks;
 
-  // Reversing the moment the boat lands on an endpoint means the endpoint frame itself
-  // already shows the new heading, so no frame at or after a bounce shows the old sail.
+  // Reversing the moment the boat lands on an endpoint means the endpoint frame already
+  // carries the new wave direction, so the trough follows the next boat movement.
   const settleDirectionAtEdges = (): void => {
     if (span <= 0) return;
     if (position >= span) direction = -1;
@@ -129,17 +192,20 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     ticks = renderedTicks;
   };
 
-  /** One colored run of water covering absolute columns [from, from + count). */
-  const water = (from: number, count: number): string => {
-    if (count <= 0) return "";
+  /** One colored run of low water covering absolute columns [from, from + count). */
+  const water = (from: number, count: number, hullCenter: number): string => {
     let cells = "";
     for (let column = from; column < from + count; column += 1) {
-      cells += WAVE_CYCLE[(column + phase) % WAVE_CYCLE.length];
+      const level = waveLevel(column, hullCenter, direction, phase);
+      const color = level >= 2 ? CYAN : BLUE;
+      cells += `${color}${WAVE_BARS[level]}${RESET}`;
     }
-    return `${BLUE}${cells}${RESET}`;
+    return cells;
   };
 
   const boat = (text: string): string => `${YELLOW}${text}${RESET}`;
+  const hull = (): string =>
+    `${boat(HULL_LEFT)}${BLUE}${HULL_WATER}${RESET}${boat(HULL_RIGHT)}`;
 
   return {
     position: () => position,
@@ -163,7 +229,7 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
 
     tick(): void {
       ticks += 1;
-      phase = (phase + 1) % WAVE_CYCLE.length;
+      phase = (phase + 1) % CALM_WORKING_SHIP_TICKS_PER_MOVE;
       if (ticks % CALM_WORKING_SHIP_TICKS_PER_MOVE !== 0) return;
       if (span <= 0) {
         position = 0;
@@ -180,25 +246,29 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
       // immediately rather than trusting a position measured against the old width.
       applyWidth(width);
 
-      const sail = direction >= 0 ? SAIL_RIGHT : SAIL_LEFT;
+      const hullCenter =
+        position +
+        (width >= HULL_WIDTH
+          ? Math.floor(HULL_WIDTH / 2)
+          : Math.floor(SAIL_WIDTH / 2));
 
       let frame: string[];
       if (width < SAIL_WIDTH) {
-        // Too narrow for even the sail: a deterministic single row of water.
-        frame = [water(0, width)];
+        // Too narrow for even the sail: a deterministic single row of low water.
+        frame = [water(0, width, hullCenter)];
       } else if (width < HULL_WIDTH) {
-        // Too narrow for the hull: the sail alone rides the water row.
+        // Too narrow for the hull: the sail alone rides inside the water row.
         frame = [
-          water(0, position) +
-            boat(sail) +
-            water(position + SAIL_WIDTH, width - position - SAIL_WIDTH),
+          water(0, position, hullCenter) +
+            boat(SAIL) +
+            water(position + SAIL_WIDTH, width - position - SAIL_WIDTH, hullCenter),
         ];
       } else {
         frame = [
-          " ".repeat(position + SAIL_OFFSET) + boat(sail),
-          water(0, position) +
-            boat(HULL) +
-            water(position + HULL_WIDTH, width - position - HULL_WIDTH),
+          " ".repeat(position + SAIL_OFFSET) + boat(SAIL),
+          water(0, position, hullCenter) +
+            hull() +
+            water(position + HULL_WIDTH, width - position - HULL_WIDTH, hullCenter),
         ];
       }
 
