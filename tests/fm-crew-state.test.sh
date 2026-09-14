@@ -2585,11 +2585,12 @@ test_capped_replacement_keeps_gate_and_inventory_unchanged() {
 }
 
 test_capped_inventory_failures_report_unknown() {
-  local mode rc=0
+  local mode rc=0 overview
   for mode in missing corrupt schema repo count; do
     (
       make_capped_runs_case "capped-unreadable-$mode" running running
       d=$TMP_ROOT/capped-unreadable-$mode
+      overview=$FM_FAKE_AXI_HOME
       case "$mode" in
         missing) rm "$NM_HOME/state.sqlite" ;;
         corrupt) printf 'invalid database\n' > "$NM_HOME/state.sqlite" ;;
@@ -2604,9 +2605,9 @@ with sqlite3.connect(sys.argv[1]) as db:
         db.execute("DELETE FROM repos WHERE id = 'repo'")
 PY
           ;;
-        count) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/^count:/d') ;;
+        count) overview=$(printf '%s\n' "$overview" | sed '/^count:/d') ;;
       esac
-      out=$(run_crew_state "$d" competing)
+      out=$(FM_FAKE_AXI_HOME="$overview" run_crew_state "$d" competing)
       assert_contains "$out" 'state: unknown' "$mode cannot fall back to a confident verdict from capped rows"
       assert_contains "$out" '01NEW' "$mode preserves the available run identity"
       if [ "$mode" = missing ]; then
@@ -2935,8 +2936,7 @@ test_unverifiable_run_selection_reports_unknown() {
         wrong-id) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's/01NEW/01OLD/') ;;
         wrong-branch) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's@fm/competing@fm/another-task@') ;;
         wrong-head)
-          FM_FAKE_RUN_HEAD=0123abcd
-          FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+          FM_FAKE_AXI_STATUS_RUN="$(FM_FAKE_RUN_HEAD=0123abcd run_parked fm/competing | sed 's/01RUN/01NEW/')"
           ;;
         missing-status) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed '/status:/d') ;;
         malformed-table) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/') ;;
@@ -3075,7 +3075,7 @@ test_captured_completed_history() {
     d=$TMP_ROOT/captured-history-$activity
     FM_FAKE_AXI_STATUS=$(captured_axi_status completed)
     FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
-    source=pane; [ "$activity" = busy ] || source=status-log
+    source=pane; [ "$activity" = busy ] || source='status-log'
     out=$(run_crew_state "$d" competing)
     assert_contains "$out" 'state: working' 'captured completion does not hide subsequent development'
     assert_contains "$out" "source: $source" 'captured historical validation yields to current worker evidence'
