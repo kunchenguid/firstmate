@@ -87,8 +87,8 @@
 # returned out from under a live worker (observed 2026-09-07). So teardown also
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
+# owns the claim, its location, and its states. A claim naming a different task
+# ID is proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
 # status, records, checks, backlog - while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
@@ -2150,11 +2150,11 @@ require_exclusive_task_worktree_slot() {
 # exited and its record been cleaned up, or it may belong to a home this machine
 # does not register. The claim closes that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# that allocates it - so a claim naming a different task ID is proof the slot
+# was reassigned after this record was written.
 #
-# A claim naming another owner does not refuse: it means the slot is no longer
-# this task's, so the record's own cleanup proceeds and every slot step is
+# A claim naming a different task ID does not refuse: it means the slot is no
+# longer this task's, so the record's own cleanup proceeds and every slot step is
 # skipped (see the script header for why refusing would strand the record and
 # why skipping discards nothing). Returns TEARDOWN_SLOT_REASSIGNED_RC for that
 # state so each caller gates its slot steps on one determination; the claimant
@@ -2171,6 +2171,11 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree> <home>
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) return 0 ;;
     other)
+      if [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$record_id" ]; then
+        echo "REFUSED: task $record_id's recorded worktree $worktree carries a slot-owner claim for the same task ID in a different physical Firstmate home ($FM_TREEHOUSE_SLOT_OWNER_HOME); nothing was changed - not even with --force." >&2
+        echo "Reconcile the stale same-named task record or foreign claim before retrying teardown." >&2
+        return 1
+      fi
       echo "warning: task $record_id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; that slot is no longer $record_id's, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
       ;;

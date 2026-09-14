@@ -1412,7 +1412,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 # Read the claim on a pool slot and compare it with a task owner.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
 #   mine   - the claim names this task and home
-#   other  - the claim names a different owner, so the slot was reassigned
+#   other  - the claim names a different task/home owner
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded

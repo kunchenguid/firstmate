@@ -1086,23 +1086,6 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
-  dir=$(make_case slot-reassigned-same-id-other-home)
-  mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  mkdir -p "$dir/other-home"
-  claim_pool_slot "$dir" "$id" "$dir/other-home"
-
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "teardown refused a same-named claim from a different physical home: $(cat "$dir/stderr")"
-  assert_reassigned_slot_left_alone "$dir" "$id" "$id" "same task ID in a different physical home"
-  assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
-    "the same-ID reassignment warning should name the foreign home"
-
   # The same reassignment on a CLEAN slot: a landed ship task torn down without
   # --force, which is the shape of the real incident. A clean, fully landed copy
   # passes every unlanded-work check, so only the ownership determination can
@@ -1155,6 +1138,43 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "unreadable-claim refusal should name the claim file to inspect"
 
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
+}
+
+test_same_id_foreign_home_claim_refuses_before_cleanup() {
+  local dir id=shared-task foreign_tasktmp worker rc
+
+  dir=$(make_case slot-same-id-foreign-home)
+  mark_case_as_treehouse_pool "$dir"
+  foreign_tasktmp="$dir/foreign-tasktmp"
+  mkdir -p "$dir/other-home" "$foreign_tasktmp"
+  : > "$foreign_tasktmp/sentinel"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "tasktmp=$foreign_tasktmp"
+  claim_pool_slot "$dir" "$id" "$dir/other-home"
+  ( cd "$foreign_tasktmp" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted a same-ID claim from a different physical home"
+  assert_contains "$(cat "$dir/stderr")" "same task ID in a different physical Firstmate home" \
+    "same-ID foreign-home refusal did not explain the ownership conflict"
+  assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
+    "same-ID foreign-home refusal did not name the claimant's home"
+  assert_present "$dir/home/state/$id.meta" "same-ID foreign-home refusal removed the task record"
+  assert_present "$dir/worktree/sentinel" "same-ID foreign-home refusal reset the claimed slot"
+  assert_present "$dir/pool/1/.fm-slot-owner" "same-ID foreign-home refusal removed the claim"
+  assert_present "$foreign_tasktmp/sentinel" "same-ID foreign-home refusal removed shared task temp"
+  kill -0 "$worker" 2>/dev/null || fail "same-ID foreign-home refusal killed a process in shared task temp"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "same-ID foreign-home refusal reached endpoint cleanup: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown refuses same-ID slot ownership from another physical home"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1246,6 +1266,7 @@ test_forced_secondmate_refuses_descendant_on_other_task_branch
 test_forced_secondmate_refuses_nonpool_descendant_on_other_task_branch
 test_forced_secondmate_refuses_orca_descendant_on_other_task_branch
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_same_id_foreign_home_claim_refuses_before_cleanup
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
