@@ -23,9 +23,12 @@
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
-# Underway (in_flight) projects every main live worker plus every active child
-# from every readable secondmate ledger, independently of that home's
-# bearings_state. Each row's name is the durable task title when nonblank and
+# Underway (in_flight) excludes program rows, nonworking held main tasks, and
+# qualifying deliveries. It retains other main worker records and the canonical
+# active_children rows from every readable secondmate ledger, independently of
+# that home's bearings_state. bin/fm-fleet-snapshot.sh owns which nonworking PR
+# tasks active_children retains; renderers must preserve each row's actual state.
+# Each row's name is the durable task title when nonblank and
 # its durable task id otherwise, so renderers always receive a task-identifying
 # label instead of having to substitute run status. A home classified
 # captain_decision because it has an open
