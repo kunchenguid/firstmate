@@ -26,9 +26,9 @@
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # A project opts out of every behavior below by committing an empty
-# .fm-no-agents-md file at its root (obsidian-vault does this to keep its
-# captain-ordered deletion of AGENTS.md and CLAUDE.md stable); when that marker
-# is present the script prints one skipped: line and changes nothing.
+# .fm-no-agents-md file at its root to keep the project permanently free of
+# both AGENTS.md and CLAUDE.md; when that marker is present the script prints
+# one skipped: line and changes nothing.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
