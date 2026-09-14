@@ -862,24 +862,18 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # without a scoped declaration keep the timestamp body. Shared by the
 # declared-pause absorb and the worktree-write deferral so the two cadences cannot
 # drift apart; each caller owns its own marker and reason.
-# Returns without waking while either the absorb or the throttle is inside the
-# window; wake() itself exits the cycle, exactly as it does inline. An optional
-# <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
-# declared `until` time that has just passed re-surface at once), while the
-# throttle keeps the cadence between repeats.
+# Returns without waking while the absorb is younger than <min-age>, regardless
+# of scope. A throttle inside the cadence also suppresses the wake, but only for
+# the same declaration or an unscoped caller: a replacement reaches its own
+# <min-age> instead of waiting out the previous declaration's throttle.
+# An optional <min-age> defaults to PAUSE_RESURFACE_SECS; 0 lets a declared `until`
+# time that has just passed re-surface at once, while the throttle keeps the
+# cadence between repeats. wake() itself exits the cycle, exactly as it does inline.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
-  # The absorb age always gates: a freshly declared wait is absorbed while it is
-  # fresh, which is this path's whole contract, and a REPLACEMENT wait is no
-  # different from the first one - the status append that declared it already woke
-  # firstmate through the signal path, so firing here as well would nag twice for
-  # one event, on the path that exists not to nag.
+  # Keep the age gate outside the scope check: the replacement's status append
+  # already woke firstmate, so an early recheck here would duplicate that wake.
   [ "$age" -ge "$min_age" ] || return 0
-  # The throttle, by contrast, bounds ONE declared wait. A caller that passes a
-  # scope names the declaration its marker was written for, so a marker written
-  # for a DIFFERENT declaration must not suppress this one: the replacement serves
-  # its own window instead of the remainder of the previous wait's. A scope-less
-  # caller keeps the pure timestamp cadence it always had.
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
