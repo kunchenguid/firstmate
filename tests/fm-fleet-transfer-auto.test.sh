@@ -370,4 +370,35 @@ out=$("$FLEET" transfer abandon --transaction "$stale_tx" 2>&1) || fail "abandon
 [ "$(records_digest)" = "$before" ] || fail "abandon rewrote owner records"
 if "$FLEET" transfer abandon --transaction "$claim_tx" >/dev/null 2>&1; then fail "abandon accepted a claimed transfer"; fi
 
+# A newer claim supersedes an older active transfer's mutation authority.
+tx_a=$(basename "$(newest_journal paperclip)" .json)
+[ "$(tx_state "$FROOT/transactions/$tx_a.json")" = active ] || fail "fixture: newest paperclip transfer is not active"
+export FM_FLEET_TRANSFER_STOP_HOOK=$BREAK_STOP
+out=$("$FLEET" transfer begin --secondmate paperclip --to manager-2 2>&1) && fail "fixture: broken record move succeeded"
+export FM_FLEET_TRANSFER_STOP_HOOK=$HOOK
+tx_b=$(basename "$(newest_journal paperclip)" .json)
+[ "$tx_b" != "$tx_a" ] && [ "$(tx_state "$FROOT/transactions/$tx_b.json")" = preparing ] || fail "fixture: claimed transfer B missing: $out"
+rmdir "$FROOT/manager-2/state/paperclip.meta"
+before=$(records_digest); : > "$FM_HOOK_LOG"
+if "$FLEET" transfer rollback --transaction "$tx_a" >/dev/null 2>&1; then fail "rollback accepted superseded transfer A"; fi
+if "$FLEET" transfer recover --transaction "$tx_a" >/dev/null 2>&1; then fail "recover accepted superseded transfer A"; fi
+if "$FLEET" transfer abandon --transaction "$tx_a" >/dev/null 2>&1; then fail "abandon accepted finished transfer A"; fi
+[ "$(records_digest)" = "$before" ] || fail "superseded transfer A rewrote owner records"
+[ ! -s "$FM_HOOK_LOG" ] || fail "superseded transfer A ran an endpoint lifecycle action: $(cat "$FM_HOOK_LOG")"
+out=$("$FLEET" transfer recover --transaction "$tx_b" 2>&1) || fail "current claimed transfer B was not recoverable: $out"
+[ "$(manager_for paperclip)" = manager-2 ] || fail "recovery of B did not publish manager-2"
+grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "recovery of B did not move the binding"
+
+# A failed relaunch during abandon exits non-zero and keeps the retry state.
+relaunch_tx=relaunch-fail
+relaunch_journal="$FROOT/transactions/$relaunch_tx.json"
+python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$FROOT/fleet.json" --secondmate paperclip --manager "$newer" \
+  --source-home "$FROOT/manager-2" --transaction "$relaunch_tx" --journal "$relaunch_journal" >/dev/null || fail "prepare relaunch fixture"
+python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" --destination-stopped 1 --secondmate-stopped 1 >/dev/null
+out=$(FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK "$FLEET" transfer abandon --transaction "$relaunch_tx" 2>&1) && fail "abandon hid a destination relaunch failure: $out"
+case "$out" in *"retry transfer abandon --transaction $relaunch_tx"*) ;; *) fail "relaunch failure printed no retry command: $out" ;; esac
+[ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" | json_value '(json.load(sys.stdin).get("destination_stopped"))')" = True ] || fail "relaunch failure lost its retry state"
+out=$("$FLEET" transfer abandon --transaction "$relaunch_tx" 2>&1) || fail "abandon retry after relaunch failure: $out"
+[ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" | json_value '(json.load(sys.stdin).get("destination_stopped"))')" = False ] || fail "abandon retry did not clear the restarted destination"
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

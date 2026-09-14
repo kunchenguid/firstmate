@@ -327,11 +327,17 @@ journal_field() {  # <journal> <python expression over j>
   python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print('"$2"')' "$1"
 }
 
-transfer_claimed() {  # <tx>; exit 0 when the registry holds a row for exactly this transaction
-  python3 - "$REG" "$1" <<'PY'
+# A transfer claim supersedes every older row for its SecondMate, so the only
+# row left for a SecondMate is its one current transfer authority.
+transfer_claimed() {  # <tx> [eligible-state...]; exit 0 when tx is that current row
+  python3 - "$REG" "$@" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
-sys.exit(0 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 3)
+tx, states = sys.argv[2], sys.argv[3:]
+mine = [row for row in reg.get("transfers", []) if row.get("transaction") == tx]
+if len(mine) != 1: sys.exit(3)
+rows = [row for row in reg.get("transfers", []) if row.get("secondmate") == mine[0].get("secondmate")]
+sys.exit(0 if len(rows) == 1 and (not states or mine[0].get("state") in states) else 3)
 PY
 }
 
@@ -339,15 +345,20 @@ PY
 # row exists for its transaction; the record claim takes the same lock.
 transfer_abandon_unclaimed_locked() {
   case "$(journal_field "$journal" 'j["state"]')" in preparing|abandoned) ;; *) return 3 ;; esac
-  if transfer_claimed "$tx"; then return 3; fi
+  if python3 - "$REG" "$tx" <<'PY'; then return 3; fi
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
+sys.exit(0 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 1)
+PY
   python3 "$TRANSFER_BIN" state --journal "$journal" --set abandoned >/dev/null
 }
 
 # Release a journal that never acquired a claim: abandon it, then restart the
 # endpoints it records as stopped. Returns 0 when released, 3 when the
-# transaction is claimed or finished, and 1 when the fleet lock stayed busy.
+# transaction is claimed or finished, 1 when the fleet lock stayed busy, and 2
+# when a relaunch failed; the journal keeps that endpoint's stopped flag.
 transfer_abandon() {  # uses tx and journal
-  local rc=1 attempts=0 dest_home dest source sm
+  local rc=1 attempts=0 dest_home dest source sm relaunch=0
   while [ "$attempts" -lt 6 ]; do
     attempts=$((attempts + 1))
     ( with_lock transfer_abandon_unclaimed_locked ); rc=$?
@@ -358,13 +369,14 @@ transfer_abandon() {  # uses tx and journal
   source=$(journal_field "$journal" 'j["source_home"]'); sm=$(journal_field "$journal" 'j["secondmate"]')
   if [ "$(journal_field "$journal" '1 if j.get("destination_stopped") else 0')" = 1 ] && ! reasoning_live "$dest_home"; then
     if transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$dest_home" "$dest" start-manager; then python3 "$TRANSFER_BIN" state --journal "$journal" --destination-stopped 0 >/dev/null
-    else echo "fm-fleet: destination manager $dest relaunch failed" >&2; fi
+    else echo "fm-fleet: destination manager $dest relaunch failed" >&2; relaunch=2; fi
   fi
   if [ "$(journal_field "$journal" '1 if j.get("secondmate_stopped") else 0')" = 1 ] && ! reasoning_live "$source"; then
     if transfer_hook FM_FLEET_TRANSFER_ROLLBACK_START_HOOK "$source" "$sm" start-secondmate; then python3 "$TRANSFER_BIN" state --journal "$journal" --secondmate-stopped 0 >/dev/null
-    else echo "fm-fleet: source SecondMate $sm relaunch failed" >&2; fi
+    else echo "fm-fleet: source SecondMate $sm relaunch failed" >&2; relaunch=2; fi
   fi
   echo "fm-fleet: transfer $tx abandoned before moving records" >&2
+  return "$relaunch"
 }
 
 # The one cleanup owner for a reserved transfer, armed until it becomes active.
@@ -376,6 +388,7 @@ transfer_release_trap() {
   transfer_abandon
   case $? in
     0) ;;
+    2) echo "fm-fleet: stopped endpoints of transfer $tx did not all relaunch; retry with: fm-fleet.sh transfer abandon --transaction $tx" >&2; exit 1 ;;
     3) echo "fm-fleet: transfer $tx claimed its record move; endpoints stay stopped; recover or rollback $tx" >&2 ;;
     *) echo "fm-fleet: fleet lock stayed busy; cleanup of unclaimed transfer $tx did not run; retry with: fm-fleet.sh transfer abandon --transaction $tx" >&2 ;;
   esac
@@ -647,17 +660,18 @@ PY
       failover=$(printf '%s' "$data" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("failover") else 0)')
       reasoning_live "$source" && die "source home has a live lock; recovery refused"; destination_ready "$dest_home" "$failover" || die "destination home session state blocks recovery"; state=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
       [ "$state" != abandoned ] || die "transfer $tx was abandoned before moving records; nothing to recover"
-      transfer_claimed "$tx" || die "transfer $tx never claimed its record move; recovery refused; release it with: fm-fleet.sh transfer abandon --transaction $tx"
+      transfer_claimed "$tx" records-ready published active || die "transfer $tx is not the current claimed transfer for its SecondMate; recovery refused; if it never claimed, release it with: fm-fleet.sh transfer abandon --transaction $tx"
       if [ "$state" = preparing ]; then transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || die "SecondMate stop hook failed"; expected=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])'); with_lock transfer_apply_locked "$sm" "$tx" "$expected" "$journal" || exit 1; state=records-ready; fi
       if [ "$state" = records-ready ]; then expected=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])'); with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "recovered supervision transfer" >/dev/null || exit 1; python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null || exit 1; fi
       transfer_activate "$sm" "$dest" "$dest_home" "$failover" "$tx" "$journal"; echo "transfer $tx recovered"
     elif [ "$sub" = rollback ]; then
       [ "${1:-}" = --transaction ] && [ -n "${2:-}" ] || exit 2; tx=$2; journal="$FLEET_ROOT/transactions/$tx.json"; data=$(python3 "$TRANSFER_BIN" state --journal "$journal") || exit 1; source=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_home"])'); dest_home=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_home"])'); sm=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secondmate"])')
-      state=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])'); prior=$(printf '%s' "$data" | python3 -c 'import json,sys; value=json.load(sys.stdin).get("prior_assignment"); print(json.dumps(value) if value else "")'); if [ "$state" = abandoned ]; then echo "transfer $tx was abandoned before moving records; nothing to roll back"; exit 0; fi; reasoning_live "$source" && die "source home has a live lock; rollback refused"; reasoning_live "$dest_home" && die "destination home has a live lock; rollback refused"; if [ "$state" = rolled-back ]; then echo "transfer $tx already rolled back"; exit 0; fi; transfer_claimed "$tx" || die "transfer $tx holds no registry claim; rollback refused"; if [ "$state" = preparing ]; then stop_home=$source; else stop_home=$dest_home; fi; transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$stop_home" "$sm" stop-secondmate || die "SecondMate stop hook failed; rollback refused"; ROLLBACK_SM=$sm; ROLLBACK_TX=$tx; ROLLBACK_JOURNAL=$journal; ROLLBACK_PRIOR=$prior; with_lock transfer_rollback_locked >/dev/null || exit 1; if [ "$(printf '%s' "$data" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("destination_stopped") else 0)')" = 1 ]; then dest=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])'); transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$dest_home" "$dest" start-manager || die "records restored; destination manager $dest relaunch failed"; fi; transfer_hook FM_FLEET_TRANSFER_ROLLBACK_START_HOOK "$source" "$sm" start-secondmate || die "records restored; source SecondMate relaunch failed"; echo "transfer $tx rolled back"
+      state=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])'); prior=$(printf '%s' "$data" | python3 -c 'import json,sys; value=json.load(sys.stdin).get("prior_assignment"); print(json.dumps(value) if value else "")'); if [ "$state" = abandoned ]; then echo "transfer $tx was abandoned before moving records; nothing to roll back"; exit 0; fi; reasoning_live "$source" && die "source home has a live lock; rollback refused"; reasoning_live "$dest_home" && die "destination home has a live lock; rollback refused"; if [ "$state" = rolled-back ]; then echo "transfer $tx already rolled back"; exit 0; fi; transfer_claimed "$tx" records-ready published active || die "transfer $tx is not the current transfer for its SecondMate; rollback refused"; if [ "$state" = preparing ]; then stop_home=$source; else stop_home=$dest_home; fi; transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$stop_home" "$sm" stop-secondmate || die "SecondMate stop hook failed; rollback refused"; ROLLBACK_SM=$sm; ROLLBACK_TX=$tx; ROLLBACK_JOURNAL=$journal; ROLLBACK_PRIOR=$prior; with_lock transfer_rollback_locked >/dev/null || exit 1; if [ "$(printf '%s' "$data" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("destination_stopped") else 0)')" = 1 ]; then dest=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])'); transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$dest_home" "$dest" start-manager || die "records restored; destination manager $dest relaunch failed"; fi; transfer_hook FM_FLEET_TRANSFER_ROLLBACK_START_HOOK "$source" "$sm" start-secondmate || die "records restored; source SecondMate relaunch failed"; echo "transfer $tx rolled back"
     elif [ "$sub" = abandon ]; then
       [ "${1:-}" = --transaction ] && [ -n "${2:-}" ] || exit 2; tx=$2; journal="$FLEET_ROOT/transactions/$tx.json"; [ -f "$journal" ] || die "no transfer journal $journal"
       transfer_abandon; rc=$?
       [ "$rc" != 3 ] || die "transfer $tx claimed its record move or finished; use recover or rollback"
+      [ "$rc" != 2 ] || die "stopped endpoints did not all relaunch; retry transfer abandon --transaction $tx"
       [ "$rc" = 0 ] || die "fleet lock stayed busy; retry transfer abandon --transaction $tx"
     else echo "fm-fleet: transfer needs begin, recover, rollback, or abandon" >&2; exit 2; fi
     ;;

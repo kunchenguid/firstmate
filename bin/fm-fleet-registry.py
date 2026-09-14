@@ -612,7 +612,7 @@ def command_transfer_claim(args: argparse.Namespace) -> None:
                 and row.get("state") == "records-ready"):
             raise ValueError(f"transfer {row.get('transaction')} is already moving {args.secondmate}")
     reg["transfers"] = [
-        row for row in reg["transfers"] if row.get("transaction") != args.transaction
+        row for row in reg["transfers"] if row.get("secondmate") != args.secondmate
     ] + [{"secondmate": args.secondmate, "transaction": args.transaction, "state": "records-ready"}]
     require_valid(reg)
     write_atomic(path, reg)
@@ -668,12 +668,11 @@ def command_transfer_state(args: argparse.Namespace) -> None:
 
 
 def transfer_rollback_valid(reg: dict, args: argparse.Namespace) -> dict | None:
-    transfer = next(
-        (row for row in reg["transfers"] if row.get("transaction") == args.transaction),
-        None,
-    )
-    if not transfer or transfer.get("secondmate") != args.secondmate:
-        raise ValueError(f"transfer {args.transaction} holds no registry claim; rollback refused")
+    rows = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
+    transfer = rows[0] if len(rows) == 1 else None
+    if (not transfer or transfer.get("transaction") != args.transaction
+            or transfer.get("state") not in ("records-ready", "published", "active")):
+        raise ValueError(f"transfer {args.transaction} is not the current transfer for {args.secondmate}; rollback refused")
     current = assignment_map(reg).get(args.secondmate)
     if transfer.get("generation"):
         if not current or current.get("generation") != transfer["generation"]:

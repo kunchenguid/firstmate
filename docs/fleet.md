@@ -129,8 +129,11 @@ If no claim row exists, the trap marks the journal `abandoned`, restarts a desti
 If the claim has committed, the trap restarts nothing. It leaves the journal and the stopped endpoints for `transfer recover` or `transfer rollback`, and prints that hint.
 If the fleet lock stays busy, the trap also restarts nothing. It prints `transfer abandon --transaction <id>`, which retries the same conditional release.
 The journal records `destination_stopped` and `secondmate_stopped`, so the trap and `transfer abandon` restart the same endpoints.
-The registry transaction row is the only source of mutation authority. `transfer recover` and `transfer rollback` refuse a journal that has no registry row for its exact transaction, and they refuse before running any endpoint hook. That covers an unclaimed stale journal and a transaction whose row a later transfer replaced.
+The registry transaction row is the only source of mutation authority.
+Each SecondMate has one current transfer. A record claim removes every older transfer row for that SecondMate, and the journals keep the audit history.
+`transfer recover` and `transfer rollback` require their transaction to be that SecondMate's only row, in the `records-ready`, `published` or `active` state. They check this before running any endpoint hook. So an unclaimed stale journal, or an older active transaction that a newer claim superseded, is refused even when the generations match.
 `transfer abandon` refuses a claimed or finished transaction.
+If a relaunch fails, `transfer abandon` and the exit trap exit non-zero. The endpoint's stopped flag stays in the journal, and the output names the `transfer abandon --transaction <id>` retry command.
 The journal records `destination_stopped`. So if the owner-record move fails, `transfer rollback` also restarts that destination manager.
 Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.
 `recover` selects its destination the same way, keeps that destination live, journals the move as a failover, and does not relaunch the destination manager.
