@@ -512,6 +512,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-copilot-quota-lib.sh
+. "$SCRIPT_DIR/fm-copilot-quota-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2088,6 +2090,12 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
       esac
     fi
+  fi
+fi
+if ! fm_copilot_model_available "$MODEL"; then
+  if fm_copilot_model_is_premium "$MODEL"; then
+    fm_copilot_model_refusal "$MODEL"
+    exit 1
   fi
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
