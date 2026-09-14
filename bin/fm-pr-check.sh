@@ -8,7 +8,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
-# instance.
+# instance. Azure DevOps Services URLs use bin/fm-azure-pr.py and require
+# python3 and az/azure-devops; a failed live identity/head read refuses
+# registration rather than arming an unusable Azure poll.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -131,6 +133,13 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+
+if [ "$PROVIDER" = azuredevops ]; then
+  PR_HEAD=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" head "$URL") || {
+    echo "error: Azure PR identity/head unavailable; registration refused" >&2
+    exit 1
+  }
 fi
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)

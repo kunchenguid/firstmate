@@ -533,6 +533,32 @@ EOF
   pass "fm-project-mode: the registry lookup matches a whole multi-word name, not just its first token"
 }
 
+test_project_branch_prefix_selection() {
+  local home id prefix out
+  home="$TMP_ROOT/branch-prefix/home"
+  mkdir -p "$home/state"
+  id=branch-prefix
+  FM_HOME="$home" "$BRIEF" "$id" fixture --scout >/dev/null 2>&1 || fail "scout scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the fix." "Keep project branch naming."
+  printf 'kind=scout\nworktree=/tmp/unused\n' > "$home/state/$id.meta"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode local-only --yolo off --branch-prefix users/example/ >/dev/null 2>&1 \
+    || fail "prefix promotion"
+  assert_grep "git checkout -b users/example/$id" "$home/data/$id/ship-instructions.md" "promotion ignored prefix"
+  assert_grep "ready in branch users/example/$id" "$home/data/$id/ship-instructions.md" "promotion DOD ignored prefix"
+  FM_HOME="$home" "$BRIEF" ship-prefix fixture --mode local-only --branch-prefix users/example/ >/dev/null 2>&1 \
+    || fail "prefix ship scaffold"
+  assert_grep 'git checkout -b users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold ignored prefix"
+  assert_grep 'ready in branch users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold DOD ignored prefix"
+  for prefix in '../bad/' 'users//name/' 'users/name~/' 'users/name:/' 'users/name?/' 'users/name.lock/'; do
+    if out=$(FM_HOME="$home" "$BRIEF" invalid-prefix fixture --mode no-mistakes --branch-prefix "$prefix" 2>&1); then
+      fail "invalid branch prefix was accepted: $prefix"
+    fi
+    assert_contains "$out" 'must form a valid git branch' "invalid prefix lacked diagnostic"
+    [ ! -f "$home/data/invalid-prefix/brief.md" ] || fail "invalid branch wrote brief"
+  done
+  pass "project-specific branch prefixes reach scaffold, promotion and DOD; unsafe prefixes refuse"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -1636,6 +1662,7 @@ test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_matches_whole_multiword_names
+test_project_branch_prefix_selection
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding

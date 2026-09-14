@@ -327,6 +327,15 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/git-config-helpers.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm git-config-helper-change
 
+  local azure_path
+  for azure_path in bin/fm-azure-pr.py tests/azure-pr-contract.py; do
+    printf '# Azure fixture\n' > "$repo/$azure_path"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-pr-merge.test.sh" "Azure source selects its forge behavior coverage"
+    git -C "$repo" add "$azure_path"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm azure-source-change
+  done
+
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" "eventwait test selects Herdr coverage"
