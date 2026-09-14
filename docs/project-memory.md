@@ -47,13 +47,14 @@ Anywhere else, knowledge wins over a scratch NAME or extension, so a conversatio
 
 Each bounded list spends its slots on what the report exists to surface, since the one thing the cap can cost is the captain's own document never being printed.
 Paths are ordered by the signal the classifier already carries - the project's knowledge surface (`docs/`, `.agents/`, `AGENTS.md`) first, then documents by name, then the rest - rather than alphabetically.
-Then, without touching that order, **no directory contributes more than five names**; a directory holding more shows those five and one line counting the rest of itself.
+Then, without touching that order and **only when the listing does not fit** under `--limit`, no directory contributes more than five names; a directory holding more shows those five and one line counting the rest of itself.
+A listing that fits is printed whole - nineteen documents under `docs/` are nineteen names - because the ceiling is a rule about scarcity and there is none.
 Five examples are enough to recognise what a folder holds, and against the default cap of 40 they leave room for at least eight distinct places - which is where the value of this report is.
 That fixed ceiling is what keeps 60 session logs from burying the `AGENTS.md` beside them even though all of them are knowledge and the logs sort first.
 The omission line says how many of what it hides is knowledge, which is what decides whether to re-run with a larger `--limit`.
 
 **Known limit, deliberate: a crowded directory is handled only by that fixed ceiling, not by any finer sharing.**
-Five names and a count is all a directory gets, whether it holds six documents or six hundred, and whether its neighbours are crowded or empty.
+Once the listing does not fit, five names and a count is all a directory gets, whether it holds six more documents or six hundred, and whether its neighbours are crowded or empty.
 Three rounds of finer slot-sharing each satisfied one rule by breaking another, so the ceiling is applied after the ordering and never feeds back into it: the report stays predictable, at the cost of not naming every document in a large folder.
 Re-run with a larger `--limit` to see past it; the counts and the verdict are complete either way.
 

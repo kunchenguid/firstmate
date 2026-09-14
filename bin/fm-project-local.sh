@@ -415,7 +415,10 @@ case "$CMD" in
         echo "project-local: $1 did not travel ($2) and the store has no earlier copy of it" >&2
       fi
     }
-    while IFS= read -r REL; do
+    # `|| [ -n "$REL" ]`: the manifest is written by hand, and a file whose last
+    # line carries no newline would otherwise lose that path with no count and
+    # no message - the silent blindness this whole capability exists to end.
+    while IFS= read -r REL || [ -n "$REL" ]; do
       case "$REL" in
         '' | \#*) continue ;;
       esac

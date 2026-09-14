@@ -408,6 +408,55 @@ places_named() {  # <output>
     LC_ALL=C sort -u | grep -c . || true
 }
 
+# The ceiling is a rule about scarcity, so it must not fire when there is none.
+# Nineteen documents under `docs/` is the exact shape the captain's own project
+# carries, and against the default cap of 40 there is room for every one of
+# them: naming five with twenty-six slots to spare would withhold what the
+# report exists to show.
+test_a_listing_that_fits_is_never_folded() {
+  local world out i
+  world=$(make_world fitslisting)
+  mkdir -p "$world/source/docs"
+  i=1
+  while [ "$i" -le 19 ]; do
+    printf 'audit %s\n' "$i" >"$world/source/docs/audit-$i.md"
+    i=$((i + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 19" "the count stopped being complete"
+  assert_equals "19" "$(names_from "$out" 'docs/audit-')" \
+    "a listing that fits under the limit was folded anyway"
+  assert_not_contains "$out" "more files)" "a listing that fits produced a count line"
+  assert_not_contains "$out" "... and " "a listing that fits hid something"
+
+  # The same documents under a limit they do not fit: the ceiling applies again,
+  # so the guard is a condition and not a removal of the ceiling.
+  out=$(run_scan "$world" --limit 8)
+  assert_equals "5" "$(names_from "$out" 'docs/audit-')" "the ceiling stopped applying to a listing that does not fit"
+  assert_contains "$out" "docs/ (14 more files)" "the overflow did not collapse into one counted line"
+  pass "fm-project-memory.sh: a listing that fits is never folded"
+}
+
+# The source record is written by hand, so its last line may carry no newline.
+# Losing `canonical=source` silently reverts to the default `repo`, which hands
+# back the clone as though it were the project's home - the failure an earlier
+# round closed from the other direction.
+test_a_source_record_without_a_trailing_newline_keeps_its_last_key() {
+  local world out rc
+  world=$(make_world nonewline)
+  mkdir -p "$world/home/config/project-sources"
+  printf 'path=%s\ncanonical=source' "$world/source" \
+    >"$world/home/config/project-sources/demo"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" home demo 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "home failed over a record whose last line has no newline: $out"
+  assert_equals "$world/source" "$out" \
+    "the last key of the record was dropped, so the clone came back as the project's home"
+  out=$(run_scan "$world")
+  assert_contains "$out" "HOME_KIND: source" "the scan read the record's last key as absent"
+  pass "fm-project-memory.sh: a source record without a trailing newline keeps its last key"
+}
+
 # The ceiling of five names was chosen against the default cap of 40 so that a
 # project whose documents are spread over many crowded folders still shows at
 # least eight distinct places. A count line is not a path, so charging it
@@ -739,6 +788,8 @@ test_the_listing_names_the_knowledge_surface_before_anything_else
 test_no_single_directory_takes_every_listing_slot
 test_more_directories_than_slots_still_names_the_agent_memory
 test_a_crowded_project_still_names_at_least_eight_distinct_places
+test_a_listing_that_fits_is_never_folded
+test_a_source_record_without_a_trailing_newline_keeps_its_last_key
 test_a_directory_holding_agent_memory_does_not_take_another_directorys_names
 test_the_omission_line_counts_only_the_knowledge_it_hides
 test_a_crowded_directory_never_buries_the_captains_own_document

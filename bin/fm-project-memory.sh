@@ -155,7 +155,11 @@ read_source_record() {  # <project>
     echo "project-memory: source record $rec is not a regular file" >&2
     return 2
   fi
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]`: this record is written by hand, and a file whose last
+  # line carries no newline would otherwise lose that key - a dropped
+  # `canonical=source` reads as the default `repo`, which hands back the clone
+  # as though it were the project's home.
+  while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
     case $line in
       \#*) continue ;;
@@ -348,11 +352,13 @@ LIST_NAMES_PER_DIR=5
 #   1. Order by value - the signal the classifier already carries, not the
 #      alphabet: the project's knowledge surface first, then documents by name,
 #      then the rest.
-#   2. Then, WITHOUT touching that order, no directory contributes more than
-#      LIST_NAMES_PER_DIR names; a directory that holds more shows those names
-#      and one line counting the rest of itself. This is what keeps 60 session
-#      logs from burying the AGENTS.md beside them even though all of them are
-#      knowledge and the logs sort first.
+#   2. Then, WITHOUT touching that order, and only when the listing does not fit
+#      under the limit, no directory contributes more than LIST_NAMES_PER_DIR
+#      names; a directory that holds more shows those names and one line
+#      counting the rest of itself. This is what keeps 60 session logs from
+#      burying the AGENTS.md beside them even though all of them are knowledge
+#      and the logs sort first. A listing that fits is printed whole, because
+#      the ceiling is a rule about scarcity and there is none.
 #   3. The omission line says how many of what it hides is knowledge - the
 #      number that decides whether to look again with a larger --limit.
 print_path_list() {  # <limit> < paths
@@ -380,6 +386,14 @@ print_path_list() {  # <limit> < paths
       n = NR
     }
     END {
+      # The ceiling is a rule about scarcity, so it only applies when there is
+      # any: a listing that fits under the limit is printed whole. Naming five
+      # of nineteen documents with twenty-six slots to spare would withhold
+      # exactly what the report exists to show.
+      if (n <= limit) {
+        for (i = 1; i <= n; i++) printf "    %s\n", path[i]
+        exit
+      }
       # Step 2, read over the order step 1 produced and never reordering it:
       # the first `ceiling` entries of each directory are the ones that may be
       # named, and the rest of that directory becomes its own counted line.

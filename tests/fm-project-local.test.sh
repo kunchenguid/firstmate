@@ -481,6 +481,32 @@ test_a_directory_read_only_halfway_is_never_counted_as_updated() {
 # truncated stream, so only the producer's status says whether the whole store
 # travelled - and a worker handed a subset of a source-canonical project's
 # material would read it as the whole of it, unmarked.
+# The manifest is written by hand, and an editor or a `printf` without a final
+# newline is ordinary. A path dropped there is the silent blindness this whole
+# capability exists to end: for a source-canonical project the store is the only
+# way its knowledge reaches a worker, and the run would read as an empty
+# manifest with no count and no warning.
+test_a_manifest_without_a_trailing_newline_still_carries_its_last_path() {
+  local world out
+  world=$(make_world nonewline)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas"
+  printf 'the replay tool\n' >"$world/canonical/herramientas/replay.py"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas' >"$world/home/data/project-local/demo/manifest"
+
+  out=$(local_cmd "$world" sync demo) || fail "sync failed: $out"
+  assert_contains "$out" "1 paths updated" "the manifest's last path was dropped without a word"
+  assert_grep "the replay tool" "$world/home/data/project-local/demo/material/herramientas/replay.py" \
+    "the manifest's last path never reached the store"
+  pass "fm-project-local.sh: a manifest without a trailing newline still carries its last path"
+}
+
 test_a_store_read_only_halfway_never_reaches_the_worker() {
   local world out rc material
   world=$(make_world partialstage)
@@ -619,6 +645,7 @@ test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be
 test_a_failed_copy_leaves_the_stores_own_copy_standing
 test_a_directory_read_only_halfway_is_never_counted_as_updated
 test_a_failed_copy_never_leaks_into_the_next_manifest_path
+test_a_manifest_without_a_trailing_newline_still_carries_its_last_path
 test_a_store_read_only_halfway_never_reaches_the_worker
 test_a_write_that_fails_halfway_leaves_no_partial_copy_and_says_why
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
