@@ -9,11 +9,11 @@
 //   - pi.sendUserMessage returns synchronously (no promise) in omp, so "Pi
 //     accepted the follow-up" collapses to "the call returned"; consumption is
 //     still tracked at before_agent_start / message_start exactly as on Pi.
-//   - omp reports no session_shutdown reason, so EVERY shutdown with a pending
-//     actionable close persists the replacement handoff and the next owning
-//     session_start, in this process or a later one, replays it. Replaying a
-//     wake main has already drained is harmless (the queue is durable and the
-//     drain is idempotent); losing one across /new is not.
+//   - omp reports no session_shutdown reason, so a shutdown that still holds a
+//     pending actionable close persists the replacement handoff and the next
+//     owning session_start replays it. "Replacement handoff lifetime" below
+//     owns how long a record stays eligible, why losing one across /new is
+//     still not acceptable, and why replaying finished work is not.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
 //     is delivered to main, so no branch offer is made and no calm presentation
 //     hooks exist.
@@ -30,6 +30,20 @@
 // durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
+// Replacement handoff lifetime (stated once here):
+// The handoff exists to carry a close across ONE session replacement, so a
+// stored record is eligible only while it can still be the pending close it was
+// written for: created within 10 minutes, among the newest 32 records, and
+// still naming live runtime state when it carries state references. Every
+// load, merge, and persist path applies these bounds, so the store cannot grow without bound and
+// a session_start can never replay a long tail of closes for work that has
+// already finished - each record is a fresh snapshot of the actionable state,
+// a newer close supersedes an older one, the durable wake queue already keeps
+// the row the watcher reported, and a condition that is still actionable is
+// re-detected by the new session's first watcher cycle. A close whose delivery
+// genuinely overlapped the shutdown is seconds old, so it stays inside the
+// window and is still replayed exactly once.
+//
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
 // The successor pipeline never waits for the model to read it: a follow-up
@@ -42,7 +56,7 @@
 // replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -104,6 +118,7 @@ type SessionGeneration = {
   restoring: boolean;
   seq: number;
   pendingActionables: PendingActionableClose[];
+  replacementActionables: Set<string>;
   cleanupFailure: string;
   // Main follow-ups omp has accepted but not yet consumed, by pending token.
   // Never cleared at shutdown: a delivery continuation that runs after the
@@ -131,6 +146,9 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// Replacement-handoff bounds (contract: "Replacement handoff lifetime" above).
+const handoffTtlMs = 600_000;
+const handoffMaxPending = 32;
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -304,6 +322,36 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
   return value as PendingActionableClose;
 }
 
+function handoffWorkIsLive(pending: PendingActionableClose): boolean {
+  const line = actionableLine(pending.message);
+  const references: string[] = [];
+  if (line.startsWith("signal:")) {
+    references.push(...line.slice("signal:".length).trim().split(/\s+/).filter((path) => path.startsWith(`${state}/`)));
+  } else {
+    const check = /^check:\s+(.+?\.check\.sh):(?:\s|$)/.exec(line)?.[1];
+    if (check?.startsWith(`${state}/`)) references.push(check);
+  }
+  if (references.length === 0) return true;
+  for (const path of references) {
+    if (!existsSync(path)) return false;
+    const suffix = path.endsWith(".turn-ended") ? ".turn-ended" : path.endsWith(".status") ? ".status" : "";
+    if (suffix && !existsSync(`${path.slice(0, -suffix.length)}.meta`)) return false;
+  }
+  return true;
+}
+
+// Keeps only records that can still be the pending close they were written for,
+// oldest first (the order a replacement replays them in). The token's middle
+// field is the creating process's epoch milliseconds, so a record carries its
+// own age without a second on-disk format.
+function eligibleHandoff(pending: PendingActionableClose[]): PendingActionableClose[] {
+  const now = Date.now();
+  return pending
+    .filter((item) => now - Number(item.token.split("-")[1]) <= handoffTtlMs && handoffWorkIsLive(item))
+    .sort((a, b) => Number(a.token.split("-")[1]) - Number(b.token.split("-")[1]))
+    .slice(-handoffMaxPending);
+}
+
 function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
   if (
     typeof value !== "object" || value === null ||
@@ -321,10 +369,21 @@ function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
 }
 
 function writeReplacementHandoff(pending: PendingActionableClose[]): void {
-  replacementHandoff = [...pending];
+  // Every persistence path funnels through here, so the store can never hold a
+  // record that has outlived its own replacement window or grown past the cap.
+  const eligible = eligibleHandoff(pending);
+  replacementHandoff = [...eligible];
+  if (eligible.length === 0) {
+    try {
+      unlinkSync(actionableHandoff);
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+    }
+    return;
+  }
   mkdirSync(handoffDir, { recursive: true });
   const temporary = `${actionableHandoff}.tmp-${process.pid}-${++nextHandoffId}`;
-  const handoff: ReplacementActionableHandoff = { version: 2, pending };
+  const handoff: ReplacementActionableHandoff = { version: 2, pending: eligible };
   try {
     writeFileSync(temporary, `${JSON.stringify(handoff)}\n`, { mode: 0o600 });
     renameSync(temporary, actionableHandoff);
@@ -345,8 +404,22 @@ function persistReplacementHandoff(pending: PendingActionableClose[]): void {
 
 function loadReplacementHandoff(): PendingActionableClose[] {
   try {
-    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    replacementHandoff = pending;
+    const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    // A session start drops records that can no longer be the pending close
+    // they were written for, so a replacement never inherits a replay backlog
+    // of already-finished work; an empty result clears the store. The replay
+    // bound is enforced from memory here, so a failed prune leaves dead bytes
+    // behind for the next load or persist to clear - never a stale replay, and
+    // never a dropped pending close.
+    const pending = eligibleHandoff(stored);
+    replacementHandoff = [...pending];
+    if (pending.length !== stored.length) {
+      try {
+        writeReplacementHandoff(pending);
+      } catch {
+        // Best-effort cleanup; eligibility is re-applied on every load and write.
+      }
+    }
     return [...pending];
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") {
@@ -427,6 +500,7 @@ function createGeneration(): SessionGeneration {
     restoring: false,
     seq: 0,
     pendingActionables: [],
+    replacementActionables: new Set(),
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     deferredClose: null,
@@ -507,12 +581,17 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     message: string,
     pending?: PendingActionableClose,
+    failure = "",
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. After handling the drain output, proactively summarize to the captain any decision, blocker, failure, terminal outcome, or review-ready result before running the printed acknowledgement. Watcher continuity is extension-owned.`,
     );
+    if (pending && owner.replacementActionables.has(pending.token) && !handoffWorkIsLive(pending)) {
+      if (failure) surfaceFailure(owner, failure);
+      return true;
+    }
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
@@ -591,6 +670,7 @@ export default function (pi: ExtensionAPI) {
     message: string,
     pending: PendingActionableClose,
     recovery?: { generation: string; watcherPid: string },
+    failure = "",
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     if (recovery) {
@@ -600,11 +680,11 @@ export default function (pi: ExtensionAPI) {
         if (!pidAlive(watcherPid)) {
           await retireArm(owner.child);
         }
-        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
+        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending, [failure, confirmed.detail].filter(Boolean).join("\n\n"));
       }
     }
     // No supervision branch on omp: every actionable wake goes to main.
-    return await sendWake(owner, message, pending);
+    return await sendWake(owner, message, pending, failure);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -616,9 +696,11 @@ export default function (pi: ExtensionAPI) {
   function enqueuePendingActionable(
     owner: SessionGeneration,
     pending: PendingActionableClose,
+    replacement = false,
   ): void {
     if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
     owner.pendingActionables.push(pending);
+    if (replacement) owner.replacementActionables.add(pending.token);
     if (owner.stopping && owner.replacement) {
       let replacementPending = pending;
       try {
@@ -640,6 +722,7 @@ export default function (pi: ExtensionAPI) {
 
   function finishPendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
     clearReplacementHandoff(pending);
+    owner.replacementActionables.delete(pending.token);
     const index = owner.pendingActionables.findIndex((item) => item.token === pending.token);
     if (index >= 0) owner.pendingActionables.splice(index, 1);
     owner.cleanupFailure = "";
@@ -685,6 +768,10 @@ export default function (pi: ExtensionAPI) {
           (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
         );
         if (!pending) break;
+        if (owner.replacementActionables.has(pending.token) && !handoffWorkIsLive(pending)) {
+          finishPendingActionable(owner, pending);
+          continue;
+        }
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
         if (existingClaim && existingClaim.owner !== owner) {
           const settlement = await existingClaim.settlement;
@@ -719,7 +806,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, pending, restoration.recovery);
+          const delivered = await deliverActionableWake(owner, message, pending, restoration.recovery, restoration.failure);
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
@@ -777,7 +864,7 @@ export default function (pi: ExtensionAPI) {
 
   const receiveReplacementActionable: ReplacementActionableReceiver = (pending) => {
     if (!generationIsLive(generation)) return;
-    enqueuePendingActionable(generation, pending);
+    enqueuePendingActionable(generation, pending, true);
     void processPendingActionables(generation);
   };
 
@@ -1018,8 +1105,8 @@ export default function (pi: ExtensionAPI) {
       loadFailure = `watcher: FAILED - omp extension could not load a replacement-session actionable wake\n${detail}`;
     }
     const inProcessPending = replacementCoordinator.pending.splice(0);
-    for (const actionable of [...pending, ...inProcessPending]) {
-      enqueuePendingActionable(owner, actionable);
+    for (const actionable of eligibleHandoff([...pending, ...inProcessPending])) {
+      enqueuePendingActionable(owner, actionable, true);
     }
     if (owner.pendingActionables.length > 0) {
       if (loadFailure) surfaceFailure(owner, loadFailure);
