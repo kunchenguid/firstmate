@@ -28,3 +28,13 @@ jobs:
     steps:
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          # The captain ruled on 2026-09-09 that firstmate-repo work ships
+          # direct-PR rather than through no-mistakes, so no PR from one of this
+          # fleet's own fm/ branches can carry a pipeline attestation and the
+          # gate would fail every one of them by construction. exempt-head-branches
+          # is the pinned action's own supported input for exactly this - it
+          # reports the PR as exempt with a reason rather than bypassing the
+          # check - so this is configuration, not a fork patch. Every branch this
+          # fleet ships is named fm/..., and any other branch is still judged.
+          exempt-head-branches: "fm/*"
