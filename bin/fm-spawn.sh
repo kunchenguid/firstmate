@@ -512,8 +512,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-copilot-quota-lib.sh
-. "$SCRIPT_DIR/fm-copilot-quota-lib.sh"
+# shellcheck source=bin/fm-candidate-availability-lib.sh
+. "$SCRIPT_DIR/fm-candidate-availability-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2092,11 +2092,20 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
-if ! fm_copilot_model_available "$MODEL"; then
-  if fm_copilot_model_is_premium "$MODEL"; then
-    fm_copilot_model_refusal "$MODEL"
-    exit 1
-  fi
+# Final pre-launch gate: consult the same generic candidate-availability
+# result fm-quota-choose.sh uses (bin/fm-candidate-availability-lib.sh). No
+# quota-axi snapshot is taken here, so this only ever hard-blocks the one
+# source that already carries its own authoritative live check independent of
+# quota-axi - Copilot's premium-route quota. A local candidate is always
+# eligible and a quota-axi-covered candidate is reported "unknown" here
+# (no snapshot to judge it by) without blocking the launch, preserving the
+# existing routing architecture where dispatch-time quota reasoning for
+# Claude/Codex/etc. happens before fm-spawn.sh is ever invoked.
+CANDIDATE_AVAILABILITY=$(fm_candidate_availability "" "$HARNESS" "$MODEL")
+if [ "$(printf '%s\n' "$CANDIDATE_AVAILABILITY" | jq -r '.source')" = copilot ] &&
+   [ "$(printf '%s\n' "$CANDIDATE_AVAILABILITY" | jq -r '.eligible')" != true ]; then
+  fm_copilot_model_refusal "$MODEL"
+  exit 1
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
