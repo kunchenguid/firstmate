@@ -109,7 +109,13 @@ case "${1:-}" in
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ -s "$D/composer" ]; then
+      printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -322,6 +328,24 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
+  local dir out rc
+  dir=$(new_case pending-exit rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'i' > "$dir/fake/composer"
+
+  out=$(run_control "$dir" rl43 relaunch --note "preserve the pending draft"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch must refuse before typing an exit command into pending composer text"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name the pending composer text"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a pending composer refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be concatenated onto pending composer text"
+  pass "fm-control relaunch: pending composer text refuses before the exit command is typed"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1559,6 +1583,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
