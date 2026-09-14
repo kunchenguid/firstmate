@@ -69,7 +69,13 @@ case "${1-}" in
     if [ -s "$state/open" ]; then
       while IFS= read -r listed; do
         [ -n "$listed" ] || continue
-        printf '  %s,open,"http://127.0.0.1:4387/session/deadbeef",0\n' "$listed"
+        status=open
+        [ ! -f "$state/list-status" ] || status=$(cat "$state/list-status")
+        pending=0
+        [ "$status" != feedback ] || pending=3
+        [ ! -f "$state/pending" ] || pending=$(cat "$state/pending")
+        [ ! -e "$state/wrong-path" ] || listed="$listed-other"
+        printf '  %s,%s,"http://127.0.0.1:4387/session/deadbeef",%s\n' "$listed" "$status" "$pending"
       done < "$state/open"
     fi
     exit 0
@@ -80,6 +86,7 @@ file=$1
 shift
 reopen=0
 for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
+[ "$reopen" = 0 ] || : > "$state/reopen-called"
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
 if [ -e "$state/user-ended" ] && [ "$reopen" = 0 ]; then
   emit "$real" user-ended
@@ -465,6 +472,54 @@ run_lavish_source_id() {  # <home> <artifact>
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$ROOT/bin/fm-procevent-lavish.sh" source-id "$2"
 }
+
+test_feedback_is_usable_without_reopening_or_replacing_its_listener() {
+  local home out sid claim before
+  home=$(make_home queued-feedback)
+  write_valid_payload "$home/payload.json"
+  run_board "$home" build "$home/payload.json" >/dev/null || fail "initial build failed"
+  sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
+  claim="$home/procevent-claims/$sid.claim"
+  before=$(cat "$claim")
+  printf 'feedback\n' > "$home/lavish-state/list-status"
+  out=$(run_board "$home" build "$home/payload.json") || fail "queued feedback prevented listening: $out"
+  assert_contains "$out" "session: live" "feedback was not accepted as the same live session"
+  [ ! -f "$home/lavish-state/reopen-called" ] || fail "feedback caused a reopen"
+  [ "$(cat "$claim")" = "$before" ] || fail "feedback replaced the live listener"
+  pass "a live board carrying feedback keeps its session and listener generation"
+}
+
+test_other_statuses_and_wrong_paths_do_not_become_usable() {
+  local home status rc sid pending
+  for status in ended missing unavailable unknown; do
+    home=$(make_home "unusable-$status")
+    write_valid_payload "$home/payload.json"
+    printf '%s\n' "$status" > "$home/lavish-state/list-status"
+    rc=0; run_board "$home" build "$home/payload.json" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "unusable $status session was accepted"
+    sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
+    [ ! -f "$home/state/procevent/$sid.source" ] || fail "unusable session was armed"
+    ! run_decisions "$home" binding "$sid" >/dev/null 2>&1 || fail "unusable session was bound"
+  done
+  for pending in 0 -1 unknown; do
+    home=$(make_home "unusable-feedback-$pending")
+    write_valid_payload "$home/payload.json"
+    printf 'feedback\n' > "$home/lavish-state/list-status"
+    printf '%s\n' "$pending" > "$home/lavish-state/pending"
+    rc=0; run_board "$home" build "$home/payload.json" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "feedback without proven queued prompts was accepted"
+  done
+  home=$(make_home wrong-feedback-path)
+  write_valid_payload "$home/payload.json"
+  printf 'feedback\n' > "$home/lavish-state/list-status"
+  : > "$home/lavish-state/wrong-path"
+  rc=0; run_board "$home" build "$home/payload.json" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "feedback for another path was accepted"
+  pass "ended, missing, unavailable, unknown, and wrong-path feedback sessions remain unusable"
+}
+
+test_feedback_is_usable_without_reopening_or_replacing_its_listener
+test_other_statuses_and_wrong_paths_do_not_become_usable
 
 test_rebuild_is_idempotent_and_does_not_double_arm() {
   local home data board out records

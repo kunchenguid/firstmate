@@ -191,14 +191,17 @@ a { color: inherit; text-decoration: none; }
 .bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
-.bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+.bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bb-decision__context { min-width: 0; }
+.bb-decision__context summary { cursor: pointer; font-size: var(--fs-sm); margin-bottom: 8px; }
+.bb-ctx__v, .bb-opt__label, .bb-opt__hint { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* about / decide / recommended - three scannable context rows */
 .bb-ctx { display: flex; flex-direction: column; gap: 6px; }
 .bb-ctx__row { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 8px; align-items: baseline; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
 .bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
-.bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow-wrap: anywhere; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
    the card pad, and the foot rides margin-top:auto so every Queue answer button
@@ -500,19 +503,26 @@ __FM_BEARINGS_BOARD_DATA__
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));
 
-    if (item.type === "merge") {
-      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
-      if (item.pr_url) {
-        var pr = el("a", "bb-decision__link", item.pr_url);
-        pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
-        pad.appendChild(pr);
-      }
-    } else {
+    if (item.type !== "merge") {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
       if (item.about) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
+    }
+    if (item.detail) {
+      var context = el("details", "bb-decision__context");
+      context.appendChild(el("summary", "", "Full context"));
+      context.appendChild(el("div", "bb-decision__detail", item.detail));
+      pad.appendChild(context);
+    } else {
+      pad.appendChild(el("p", "bb-decision__detail",
+        "Full context was not supplied. Ask for the complete question and boundaries before approving."));
+    }
+    if (item.pr_url) {
+      var pr = el("a", "bb-decision__link", item.pr_url);
+      pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
+      pad.appendChild(pr);
     }
 
     var form = document.createElement("form");

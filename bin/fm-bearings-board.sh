@@ -39,8 +39,8 @@
 # when it refuses to reopen a session the captain ended from the browser,
 # reporting `status: user-ended` with the same session id, so exit status alone
 # cannot tell a live board from a dead one. build requires the server's fresh
-# session listing to show the canonical board open and refuses rather than
-# arming an ended session. After a reopen it retires the pre-reopen source
+# session listing to show the canonical board open or carrying queued feedback,
+# and refuses rather than arming an ended session. After a reopen it retires the pre-reopen source
 # generation through the guarded adapter path, arms a fresh registration, and
 # accepts only the replacement listener as live. A registered board with no
 # live owner also gets a replacement before build returns, because
@@ -71,6 +71,11 @@
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
+#
+# Captain's Call `detail` is full owner-supplied context, rendered as expandable
+# inert text on every card type; `pr_url` is likewise visible on every type.
+# Missing detail is disclosed, not inferred. The composer obtains full context
+# through fm-bearings-snapshot.sh --fields bodies, not its compact summary.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
@@ -205,12 +210,12 @@ validate_payload() {  # <data.json>
 }
 
 # --- Lavish session liveness -------------------------------------------------
-# Verified against lavish-axi 0.1.61. `lavish-axi <file>` EXITS 0 even when it
+# Verified against lavish-axi 0.1.67. `lavish-axi <file>` EXITS 0 even when it
 # refuses to reopen a session the captain ended from the browser, reporting
 # `status: user-ended` and the same session id, so an exit-code check alone
 # cannot tell a live board from a dead one. The establish status is an initial
 # signal only; the server's fresh session listing must also show the canonical
-# board open before the build may bind or arm its source.
+# board open or carrying feedback before the build may bind or arm its source.
 
 board_realpath() {  # <board>
   perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
@@ -221,8 +226,11 @@ lavish_status_field() {  # <lavish-axi output>
 }
 
 # The server's own listing, keyed on the canonical artifact path. Rows are
-# `<file>,<status>,"<url>",<pending>`, and only a live session is listed `open`.
-lavish_session_listed_open() {  # <canonical-board-path>
+# `<file>,<status>,"<url>",<pending>`. A live session with submitted, uncollected
+# prompts is `feedback`, not `open`; accept that shape only with a positive
+# pending count. A zero-prompt feedback status can instead be an artifact failure.
+# Checking the listing never consumes prompts or establishes browser usability.
+lavish_session_listed_live() {  # <canonical-board-path>
   local listing
   listing=$(lavish-axi 2>/dev/null) || return 1
   printf '%s\n' "$listing" | awk -v path="$1" '
@@ -230,14 +238,14 @@ lavish_session_listed_open() {  # <canonical-board-path>
     index(line, path ",") == 1 {
       rest = substr(line, length(path) + 2)
       split(rest, field, ",")
-      if (field[1] == "open") { found = 1 }
+      if (field[1] == "open" || (field[1] == "feedback" && field[3] ~ /^[1-9][0-9]*$/)) { found = 1 }
     }
     END { exit found ? 0 : 1 }
   '
 }
 
 lavish_board_live() {  # <establish output> <canonical-board-path>
-  lavish_session_listed_open "$2"
+  lavish_session_listed_live "$2"
 }
 
 # Establish the board session and PROVE it is live before anything arms a poll
@@ -414,9 +422,9 @@ command_build() {
     "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$board" >/dev/null \
       || fail "cannot retire the pre-reopen source generation (observed owner: ${pre_reopen_owner:-none})"
   fi
-  if ! lavish_session_listed_open "$(board_realpath "$board")"; then
+  if ! lavish_session_listed_live "$(board_realpath "$board")"; then
     version=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
-    fail "the board Lavish session is not listed open immediately before arming (lavish-axi ${version:-version-unknown}); refusing to arm a poll on observed state not-open"
+    fail "the board Lavish session is not listed live immediately before arming (lavish-axi ${version:-version-unknown}); refusing to arm a poll on observed state not-live"
   fi
   printf 'served: %s\n' "$board"
 

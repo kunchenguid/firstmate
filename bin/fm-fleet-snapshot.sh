@@ -19,7 +19,14 @@
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
-#     hold_reason, and hold_until when tasks-axi emits it. They also carry
+#     hold_reason, and hold_until when tasks-axi emits it. Captain-held records
+#     additionally retain decision_context: the verbatim filed row and indented
+#     body, including blank lines, punctuation, and links. This is owner-supplied
+#     text, not inferred approval terms or independently verified current facts.
+#     Home summaries carry it beside bounded decision/queued excerpts so explicit
+#     detailed Bearings can reveal it without scraping another home. Existing
+#     row and transport-byte bounds still apply; older summaries omit this field.
+#     They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
 #     and hold_bucket fields.
@@ -491,13 +498,17 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              raw:$line,
              body_lines:[],
              body_excerpt:null}
+          | if .hold_kind == "captain" then .decision_context = $line else . end
         end;
     reduce inputs as $line
       ({path:$path,present:true,records:[],section:null,order:0};
        if ($line | test("^##[[:space:]]+")) then
          .section = (($line | sub("^##[[:space:]]+";"") | trim) | section_state)
-       elif .section == null or ($line | trim) == "" then
-         .
+       elif .section == null then .
+       elif ($line | trim) == "" then
+         if .records[-1].decision_context? != null then
+           .records[-1].decision_context += ("\n" + $line)
+         else . end
        elif structured_row($line) then
          .order += 1
          | .records += [parse_row($line; .section; .order)]
@@ -505,6 +516,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          ($line | trim) as $body
          | if $body == "" then .
            else .records[-1].body_lines += [$body] end
+         | if .records[-1].decision_context? != null then
+             .records[-1].decision_context += ("\n" + $line)
+           else . end
        else
          .order += 1
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
@@ -980,6 +994,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
+            decision_context:(.decision_context // null),repo:(.repo // null),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
@@ -1091,6 +1106,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
+          decision_context:(.decision_context // null),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),

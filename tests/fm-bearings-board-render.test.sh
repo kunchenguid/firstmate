@@ -59,11 +59,11 @@ SH
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
 render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} calls=${6:-'[]'} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson calls "$calls" --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -228,6 +228,35 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_full_context_is_text_for_every_card_type() {
+  local home out calls
+  home=$(make_home full-context)
+  calls=$(jq -n '["decision", "credential", "merge"] | map({
+    key:("synthetic-" + .), type:., repo:"sample", title:"Two questions, one call",
+    detail:(("proposal / rationale / boundary; " * 40) + "\n\n1. Use (A), not B?\n2. Keep the rollback?\n<script>throw 1</script><img src=x onerror=alert(1)> & END"),
+    pr_url:"https://github.com/example/sample/pull/1234567890?context=full#evidence",
+    risk:"low", options:[{value:"keep",label:"Keep both boundaries"}], close:"release"})')
+  out=$(render_board "$home" '[]' '[]' 0 0 "$calls")
+  printf '%s' "$out" | jq -e --argjson expected "$calls" '
+    .error == "" and (.calls | length) == 3
+  ' >/dev/null || fail "context board did not render: $out"
+  printf '%s' "$out" | jq -e --argjson expected "$calls" '
+    .calls as $calls | all(range(3); . as $i |
+      $calls[$i].detail == $expected[$i].detail
+      and $calls[$i].expandable
+      and $calls[$i].links == [{text:$expected[$i].pr_url,href:$expected[$i].pr_url}]
+      and $calls[$i].keys == [$expected[$i].key]
+      and ($calls[$i].options | .[0] == "keep")
+      and ($calls[$i].tags | index("script") == null and index("img") == null))
+  ' >/dev/null || fail "detail, URL, identity, or inert markup was lost: $out"
+  pass "every card type preserves full multiline context and URLs as inert text with one answer identity"
+  out=$(render_board "$home" '[]' '[]' 0 0 '[{"key":"unknown-context","type":"decision","repo":null,"title":"Unknown detail","options":[],"allow_freeform":true}]')
+  printf '%s' "$out" | jq -e '.calls[0].detail | contains("Full context was not supplied")' >/dev/null \
+    || fail "missing detail silently looked complete"
+  pass "missing owner detail is disclosed rather than fabricated"
+}
+
+test_full_context_is_text_for_every_card_type
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

@@ -37,6 +37,26 @@ Note that `lavish-axi <anything> --help` exits 0 for any argument, including a n
 
 The adapter depends on none of this: it uses only the published poll shape above.
 
+## Bearings board session and queued-feedback guard
+
+Re-verified on 2026-09-14 on Ubuntu 26.04 with `lavish-axi` 0.1.67.
+The listing changes from `open` to `feedback` when the browser submits prompts before a receiver collects them; a build checking only `open` refuses to listen even though publishing the preview succeeds.
+`bin/fm-bearings-board.sh` owns the session verifier, and `tests/fm-bearings-board-lavish-live-e2e.test.sh` exercises it against the installed provider, with isolated synthetic sessions and the browser's submission and end routes.
+The test submits three prompts before rebuilding, proves they reach one durable result with intact keyed-answer and multiline comment content, confirms a live receiver, and checks idempotent acknowledgement.
+It also preserves the existing ended-session refusal/reopen guard.
+The portable `tests/fm-bearings-board.test.sh` additionally proves listener-generation preservation and refusal for missing, ended, unknown, wrong-path, and non-queued feedback listings.
+
+```text
+$ bin/fm-test-run.sh tests/fm-bearings-board-lavish-live-e2e.test.sh
+# lavish-axi 0.1.67
+ok - lavish-axi 0.1.67 preserves queued feedback through rebuild, captures all three prompts once, and keeps a live receiver
+ok - lavish-axi 0.1.67 reports a captain-ended session without reopening it and without failing
+ok - the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one
+```
+
+This verifies collection in the exercised path, not source-side losslessness or browser usability from a listing alone; the loss limitation below remains unchanged.
+Full decision-text projection and rendering are covered by `tests/fm-bearings-snapshot.test.sh` and `tests/fm-bearings-board-render.test.sh`, including the explicit-detail path, legacy missing detail, cached provenance, multiline text, untrusted markup, and full URLs.
+
 ## Why an ended Lavish review is terminal
 
 Re-verified on 2026-08-01 against the same installed build.

@@ -15,7 +15,9 @@
 # The captain-ended state is reached through the same server route the browser's
 # End session button calls, so no browser is needed and nothing here depends on
 # a human. The artifact is a scratch page in a temporary directory, and the
-# session it opens is ended again before the guard returns.
+# session it opens is ended again before the guard returns. Queued-feedback
+# coverage submits through the browser's prompts route and proves capture via
+# the real runner, not a destructive conversational poll.
 #
 # Standard CI has no lavish-axi, so this reports a capability skip there. The
 # portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
@@ -38,6 +40,7 @@ cleanup() {
   [ -z "$LAB" ] || {
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
+    fm_test_cleanup
     rm -rf "$LAB"
   }
 }
@@ -50,6 +53,7 @@ note "lavish-axi ${VERSION:-version-unknown}"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-lavish-live.XXXXXX") || fail "cannot create the guard lab"
 LAB=$(cd -P -- "$LAB" && pwd -P)
 mkdir -p "$LAB/state" "$LAB/data"
+fm_test_track_procevent_home "$LAB" "$LAB/procevent-claims"
 
 cat > "$LAB/payload.json" <<'JSON'
 {
@@ -78,6 +82,12 @@ run_board() {
     "$ROOT/bin/fm-bearings-board.sh" "$@"
 }
 
+run_source() {
+  FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
 BOARD="$LAB/.lavish/bearings-board.html"
 run_board build "$LAB/payload.json" >/dev/null 2>&1 || fail "the guard board did not build"
 [ -f "$BOARD" ] || fail "the guard board was not published"
@@ -90,8 +100,54 @@ esac
 key=${url##*/}
 base=${url%/session/*}
 
+# A missing receiver masks the defect until feedback has been submitted. Keep
+# the synthetic session, retire only its listener, and queue three distinct
+# prompts through the same route as Send to Agent. No real board is touched.
+sid=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$BOARD")
+run_source retire "$sid" >/dev/null || fail "cannot retire the synthetic listener"
+jq -n '{prompts:[
+  {uid:"1",tag:"choice",text:"Synthetic: yes",selector:"form",prompt:("Choose yes\n\nContext data:\n" + ({schema:"fm-bearings-answer.v1",question:"sample-live-guard-call",selection:"yes",note:""} | tojson))},
+  {uid:"2",tag:"p",text:"Synthetic second",prompt:"Second comment: preserve (A), <tag>, & punctuation."},
+  {uid:"3",tag:"message",prompt:"Third comment\nwith a second line."}
+]}' > "$LAB/feedback.json"
+queued=$(curl -fsS -H 'Content-Type: application/json' -H "Origin: $base" -X POST \
+  --data-binary "@$LAB/feedback.json" "$base/api/$key/prompts") \
+  || fail "cannot submit synthetic feedback"
+printf '%s' "$queued" | jq -e '.pending_prompts == 3' >/dev/null \
+  || fail "three synthetic comments were not queued: $queued"
+lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',feedback,' \
+  || fail "lavish-axi ${VERSION:-version-unknown} does not list queued feedback as expected"
+out=$(run_board build "$LAB/payload.json" 2>&1) \
+  || fail "queued feedback prevented the real board from listening: $out"
+case "$out" in *"session: live"*) ;; *) fail "feedback did not keep the live session: $out" ;; esac
+case "$out" in *"session: reopened"*) fail "feedback unnecessarily reopened the session" ;; esac
+result="$LAB/state/procevent-inbox/$sid.1.result"
+for _ in $(seq 1 200); do
+  [ ! -s "$result" ] || break
+  sleep 0.1
+done
+[ -s "$result" ] || fail "submitted feedback never reached durable capture"
+readout=$("$ROOT/bin/fm-procevent-lavish.sh" read "$result")
+assert_contains "$readout" 'complete: yes' 'captured feedback was incomplete'
+assert_contains "$readout" 'presented_items: 3' 'not all three submitted prompts reached capture'
+assert_contains "$readout" 'Second comment: preserve (A), <tag>, & punctuation.' 'annotation content was lost'
+assert_contains "$readout" '| with a second line.' 'multiline message was lost'
+answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result")
+[ "$answers" = $'sample-live-guard-call\tyes\tSynthetic: yes' ] \
+  || fail "synthetic answer identity changed: $answers"
+[ "$(run_source list | awk -v id="$sid" '$1 == id {print $3}')" = live ] \
+  || fail "feedback was captured but no receiver remains live"
+# Rebuilding again must neither deliver the same feedback twice nor replace the
+# source identity; handled remains an explicit, idempotent result acknowledgement.
+run_board build "$LAB/payload.json" >/dev/null || fail "post-capture rebuild failed"
+[ "$(find "$LAB/state/procevent-inbox" -name '*.result' | wc -l | tr -d ' ')" = 1 ] \
+  || fail "the same feedback was captured twice"
+[ "$(run_source handled "$sid" 1)" = "handled: $sid 1" ] || fail "first handled acknowledgement failed"
+[ "$(run_source handled "$sid" 1)" = "already-handled: $sid 1" ] || fail "handled replay was not idempotent"
+pass "lavish-axi ${VERSION:-version-unknown} preserves queued feedback through rebuild, captures all three prompts once, and keeps a live receiver"
+
 # End it exactly as the browser's End session button does.
-curl -fsS -X POST "$base/api/$key/end" >/dev/null 2>&1 \
+curl -fsS -H "Origin: $base" -X POST "$base/api/$key/end" >/dev/null 2>&1 \
   || fail "could not end the guard board session as the captain"
 
 # ASSUMPTION UNDER GUARD: this exits 0 while reporting the session is not live.

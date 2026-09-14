@@ -35,6 +35,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 1. **Gather live fleet state with one deterministic command.**
    Run `snapshot=$(bin/fm-bearings-snapshot.sh --json)` at invocation time and read that compact output.
+   For explicit file or lavish mode, add `--fields bodies` to this same invocation so decision context comes from the owner's full task record rather than the compact summary.
    It is the single bounded, deterministic fleet-state source for Bearings.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
@@ -98,7 +99,11 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
-- Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
+- Decision cards carry agent-authored copy: a short noun-phrase title, scannable `about` and `decide` rows, and option labels with hints, with the recommended option marked.
+  Copy the decision row's full `context` verbatim into `detail`; the board exposes it as expandable text for every card type, alongside any supplied `pr_url`.
+  Compose the visible question from that context: what is proposed, why, all questions/options, known consequences and boundaries, and supplied evidence links.
+  Never shorten approval terms or URLs to fit a card, replace full context with the compact `summary`, or infer missing terms from old conversations or reports.
+  When `context` is null or the owner has not recorded enough detail, state exactly what is unavailable, keep any supplied text, and request clarification rather than inventing approval options.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
@@ -112,7 +117,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
-Never bind or arm the board before its session is listed open.
+Never bind or arm the board before its session is verified live for collection by the build's session check.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and both the build and the watcher's ordinary reconcile repair a missing listener, so no conversational turn ever blocks on the board.
 
 ### Handling a board wake

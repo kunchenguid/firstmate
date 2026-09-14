@@ -313,6 +313,7 @@ SH
 
 run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
   local parent=$1 fakebin=$2 epoch=$3
+  shift 3
   # Allow process startup on loaded hosts; the 30-second fake reads still
   # exceed this shared deadline and must be cancelled.
   FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
@@ -321,7 +322,7 @@ run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
     FM_TEST_LEDGER_ACTIVE_DIR="$parent/ledger-active" \
     FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
     FM_SNAPSHOT_BUDGET=15 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
-    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json "$@"
 }
 
 # End-to-end Domain Alpha regression fixture.
@@ -2333,6 +2334,39 @@ EOF
   pass "working captain holds retain main and secondmate bucket surfaces"
 }
 
+test_explicit_decision_context_preserves_owner_text_without_expanding_compact_output() {
+  local home mate fakebin context json expanded
+  home=$(make_home decision-context-parent)
+  mate="$TMP_ROOT/decision-context-mate"
+  make_valid_secondmate_home context-mate "$mate"
+  append_secondmate_registry "$home" context-mate "$mate"
+  fakebin=$(make_fakebin "$home")
+  context=$(printf '%s\n' '- [ ] synthetic-context - Two questions (repo: sample) (kind: ship) (hold: Use A (bounded), or keep B? Why: avoid changing behavior. No deployment.) (hold-kind: captain)'
+    printf '  Proposal and rationale: '; printf 'full approval terms; %.0s' {1..40}
+    printf '\n\n  1. Choose A or B?\n    Nested boundary: preserve punctuation (A), quotes "B", & <script>untrusted</script>.\n  2. Keep rollback?\n  Evidence: https://github.com/example/sample/pull/1234567890?full=1#proof\n  No additional approvals.\n')
+  printf '## In flight\n\n## Queued\n%s\n\n## Done\n' "$context" > "$home/data/backlog.md"
+  cp "$home/data/backlog.md" "$mate/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | length) == 2
+    and all(.decisions_open[]; (.summary | length) <= 91 and (has("context") | not))
+  ' >/dev/null || fail "compact decision projection lost its bounds: $json"
+  expanded=$(run "$home" "$fakebin" --json --fields bodies)
+  printf '%s' "$expanded" | jq -e --arg context "$context" '
+    (.decisions_open | length) == 2 and all(.decisions_open[];
+      .context == ($context + "\n") and .repo == "sample")
+  ' >/dev/null || fail "explicit context lost owner wording on main or secondmate path: $expanded"
+  # --all-decisions uses the queued projection for a deferred secondmate hold.
+  perl -pi -e 's/\(hold-kind: captain\)/(hold-kind: captain) (hold-until: 2099-01-01)/' "$mate/data/backlog.md"
+  expanded=$(run "$home" "$fakebin" --json --fields bodies --all-decisions)
+  printf '%s' "$expanded" | jq -e '
+    ([.decisions_open[] | select(.owner == "context-mate")] | length) == 1
+    and (.decisions_open[] | select(.owner == "context-mate") | .context
+      | contains("No additional approvals.") and contains("(A), quotes \"B\""))
+  ' >/dev/null || fail "deferred queued path lost or duplicated full decision context: $expanded"
+  pass "explicit decision detail preserves full owner rows, blank lines, punctuation, nested boundaries, and URLs across main and secondmate paths"
+}
+
 test_active_children_project_independent_of_home_captain_hold() {
   local home mate fakebin json
   home=$(make_home underway-hold-parent)
@@ -2433,6 +2467,31 @@ test_nameless_legacy_summary_uses_its_durable_identifier() {
       and .name != .doing))
   ' >/dev/null || fail "a blank legacy child name was not replaced by its id: $json"
   pass "blank legacy summary names use their durable identifier"
+}
+
+test_remote_decision_context_and_missing_legacy_detail() {
+  local parent remote_home fakebin json context
+  parent=$(make_home remote-context)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | length) == 1 and (.decisions_open[0] | has("context") and .context == null)
+  ' >/dev/null || fail "legacy excerpts masqueraded as full decision context: $json"
+  context=$(printf 'A remote owner record: '; printf 'full boundary; %.0s' {1..40}; printf '\nQuestion two (unchanged)?\nhttps://github.com/example/sample/pull/999#full-evidence')
+  jq --arg context "$context" '.decisions_open[0].decision_context = $context' \
+    "$remote_home/state/home-summary.json" > "$remote_home/state/new-summary.json"
+  mv "$remote_home/state/new-summary.json" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies)
+  printf '%s' "$json" | jq -e --arg context "$context" '.decisions_open[0].context == $context' >/dev/null \
+    || fail "remote ledger discarded full detail: $json"
+  mv "$remote_home/state/home-summary.json" "$remote_home/state/offline-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies)
+  printf '%s' "$json" | jq -e --arg context "$context" '
+    .decisions_open[0].context == $context and .secondmates[0].provenance == "structured-home-cache"
+  ' >/dev/null || fail "cached owner detail was lost or falsely described as live: $json"
+  pass "remote and cached summaries preserve supplied context while legacy absence stays explicit"
 }
 
 test_newest_filed_gates_are_selected_before_snapshot_bounds() {
@@ -3346,8 +3405,10 @@ test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_working_captain_holds_keep_their_bucket_surfaces
+test_explicit_decision_context_preserves_owner_text_without_expanding_compact_output
 test_active_children_project_independent_of_home_captain_hold
 test_nameless_legacy_summary_uses_its_durable_identifier
+test_remote_decision_context_and_missing_legacy_detail
 test_newest_filed_gates_are_selected_before_snapshot_bounds
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
