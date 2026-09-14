@@ -3035,13 +3035,28 @@ require_owned_task_worktree_slot || exit 1
 # A task branch is durable ownership evidence even when its owner record is not
 # reachable from this home's local registry. Refuse before any cleanup mutation.
 teardown_refuse_if_other_task_branch() {  # <task-id> <worktree>
-  local record_id=$1 worktree=$2 branch holder_id
+  local record_id=$1 worktree=$2 branch holder_id branch_status=0
   [ -d "$worktree" ] || return 0
-  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$branch" ] || return 0
-  [ "$branch" != "fm/$record_id" ] || return 0
+  [ -e "$worktree/.git" ] || return 0
+  branch=$(git -C "$worktree" symbolic-ref --quiet HEAD 2>/dev/null) || branch_status=$?
+  case "$branch_status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "REFUSED: cannot inspect branch ownership for task $record_id's recorded worktree $worktree; refusing teardown because cleanup safety is unproven." >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$branch" ]; then
+    echo "REFUSED: cannot inspect branch ownership for task $record_id's recorded worktree $worktree; refusing teardown because cleanup safety is unproven." >&2
+    return 1
+  fi
+  [ "$branch" != "refs/heads/fm/$record_id" ] || return 0
   case "$branch" in
-    fm/*) holder_id=${branch#fm/} ;;
+    refs/heads/fm/*)
+      holder_id=${branch#refs/heads/fm/}
+      branch=${branch#refs/heads/}
+      ;;
     *) return 0 ;;
   esac
   [ -n "$holder_id" ] && [ "$holder_id" != "$record_id" ] || return 0

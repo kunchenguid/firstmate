@@ -7,6 +7,7 @@ set -u
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
+REAL_GIT=$(command -v git)
 REAL_TMUX=$(command -v tmux || true)
 
 make_case() {  # <name>
@@ -590,6 +591,38 @@ test_other_task_branch_refuses_before_cleanup() {
   [ "$branch" = fm/other-task ] || fail "branch refusal changed the branch to $branch"
   [ ! -s "$dir/runtime.log" ] || fail "branch refusal ran cleanup: $(cat "$dir/runtime.log")"
   pass "fm-teardown refuses a copy checked out on another task's branch before cleanup"
+}
+
+test_branch_inspection_error_refuses_before_cleanup() {
+  local dir id=inspection-failure rc
+
+  dir=$(make_case branch-inspection-failure)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  cat > "$dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${2:-}" = "$dir/worktree" ] && [ "\${3:-}" = symbolic-ref ]; then
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+SH
+  chmod +x "$dir/fakebin/git"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after branch ownership inspection failed"
+  assert_contains "$(cat "$dir/stderr")" "cannot inspect branch ownership" \
+    "branch inspection failure did not explain the safety refusal"
+  assert_present "$dir/home/state/$id.meta" "branch inspection failure removed the task record"
+  assert_present "$dir/worktree/sentinel" "branch inspection failure changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "branch inspection failure ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses before cleanup when branch ownership inspection fails"
 }
 
 test_own_task_branch_still_tears_down() {
@@ -1207,6 +1240,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_other_task_branch_refuses_before_cleanup
+test_branch_inspection_error_refuses_before_cleanup
 test_own_task_branch_still_tears_down
 test_forced_secondmate_refuses_descendant_on_other_task_branch
 test_forced_secondmate_refuses_nonpool_descendant_on_other_task_branch
