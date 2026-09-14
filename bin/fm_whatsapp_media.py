@@ -275,8 +275,8 @@ def transcribe(command, path, timeout=30):
         text = output.decode("utf-8").strip()
     except (BridgeError, OSError, UnicodeError) as error:
         raise MediaError("transcrição não concluiu dentro dos limites locais") from error
-    if not text or len(text) > MAX_TRANSCRIPT or "\x00" in text:
-        raise MediaError("transcrição vazia ou excede o limite")
+    if len(text) > MAX_TRANSCRIPT or "\x00" in text:
+        raise MediaError("transcrição inválida ou excede o limite")
     return text
 
 
@@ -305,8 +305,12 @@ def prepare_local(config, path, kind, mime, transcriber=None):
             elif not config.stt_model:
                 raise MediaError("transcrição não configurada para o áudio do vídeo")
             transcript = value.get("transcript")
-            if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > MAX_TRANSCRIPT or "\x00" in transcript:
+            if not isinstance(transcript, str) or len(transcript) > MAX_TRANSCRIPT or "\x00" in transcript:
+                raise MediaError("transcrição inválida ou excede o limite")
+            value["transcript"] = transcript.strip()
+            if not value["transcript"] and kind == "audio":
                 raise MediaError("transcrição vazia; nenhuma fala foi confirmada")
+            value["speech_detected"] = bool(value["transcript"])
         value.pop("audio_file", None)
         for frame in value.get("frames", []):
             name = frame.pop("file")

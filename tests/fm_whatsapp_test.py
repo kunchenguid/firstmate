@@ -651,6 +651,57 @@ for line in sys.stdin:
         self.assertFalse(self.main(data)["new_event"])
         self.main({**data, "body": "different"}, ok=False)
 
+    def test_terminal_outcomes_retire_decisions_and_preserve_consumed_receipts(self):
+        for outcome in ("completed", "failed"):
+            for state in ("pending", "answered", "consumed"):
+                with self.subTest(outcome=outcome, state=state):
+                    row, _ = self.claim()
+                    task = self.task()
+                    question = self.emit(row, "decision", task=task, action="revisar fixture",
+                                         expires=time.time() + 300)
+                    args = {"op": "consume-decision", "id": question["decision"], "request": row["request"],
+                            "home": str(self.home), "task": "analysis", "revision": "v1", "action": "revisar fixture"}
+                    if state != "pending":
+                        self.receive(self.message("aprovar " + question["decision"]))
+                    if state == "consumed":
+                        self.assertTrue(self.main(args)["new_consumption"])
+                    before = self.store.rows("SELECT * FROM decisions WHERE id=?", (question["decision"],))[0]
+                    event = self.emit(row, outcome, evidence=["fixture result"])
+                    self.assertTrue(event["new_event"])
+                    after = self.store.rows("SELECT * FROM decisions WHERE id=?", (question["decision"],))[0]
+                    if state == "consumed":
+                        self.assertEqual(after, before)
+                        self.assertFalse(self.main(args)["new_consumption"])
+                    else:
+                        self.assertEqual(after, {**before, "state": "superseded"})
+                        self.main(args, ok=False)
+                    answer = self.receive(self.message("sim"))
+                    self.assertEqual(answer["state"], "received")
+                    _, claimed = self.claim(answer)
+                    self.assertEqual(claimed["text"], "sim")
+                    self.receive(self.message("aprovar " + question["decision"]))
+                    self.assertEqual(self.store.rows("SELECT * FROM decisions WHERE id=?",
+                                                     (question["decision"],))[0], after)
+
+    def test_terminal_decision_retirement_rolls_back_with_outcome(self):
+        row, _ = self.claim()
+        self.emit(row, "decision", task=self.task(), action="revisar fixture", expires=time.time() + 300)
+        other, _ = self.claim()
+        self.emit(other, "decision", task=self.task("other"), action="outra revisão", expires=time.time() + 300)
+        self.store.db.execute("""CREATE TRIGGER reject_terminal BEFORE UPDATE OF state ON inbound
+            WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+        data = {"op": "emit", "event": "terminal-rollback", "request": row["request"],
+                "kind": "completed", "body": "Resultado", "evidence": ["fixture result"]}
+        self.main(data, ok=False)
+        self.assertEqual(self.store.request(row["request"])["state"], "decision")
+        self.assertEqual(self.store.rows("SELECT state FROM decisions"), [{"state": "pending"}] * 2)
+        self.assertEqual(self.store.rows("SELECT * FROM responses WHERE event=?", (data["event"],)), [])
+        self.store.db.execute("DROP TRIGGER reject_terminal")
+        self.assertTrue(self.main(data)["new_event"])
+        self.assertFalse(self.main(data)["new_event"])
+        self.assertEqual(self.store.rows("SELECT state FROM decisions WHERE request=?", (other["request"],)),
+                         [{"state": "pending"}])
+
     def test_expired_and_changed_decisions_fail_closed(self):
         row, _ = self.claim()
         task = self.task()
@@ -1318,12 +1369,13 @@ for line in sys.stdin:
         with self.assertRaises(BridgeError):
             Config(self.path)
 
-    def video_bytes(self, audio=False, duration=2):
+    def video_bytes(self, audio=False, duration=2, silent=False):
         destination = self.dir / f"video-{time.time_ns()}.mp4"
         command = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
                    f"color=c=red:s=160x120:r=2:d={duration}"]
         if audio:
-            command += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={duration}"]
+            source = f"anullsrc=r=16000:cl=mono:d={duration}" if silent else f"sine=frequency=440:duration={duration}"
+            command += ["-f", "lavfi", "-i", source]
         command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "2"]
         if audio:
             command += ["-c:a", "aac", "-ac", "1"]
@@ -1380,6 +1432,59 @@ for line in sys.stdin:
         self.assertIsNone(no_stt["note_id"])
 
     @media_tools
+    def test_silent_video_preserves_frames_but_stt_errors_and_empty_audio_fail(self):
+        from PIL import Image
+        video = self.video_bytes(audio=True, silent=True)
+        command = self.dir / "fixture-stt"
+        command.write_text("#!/bin/sh\nprintf '  \\n'\n")
+        command.chmod(0o700)
+        self.enable_media(stt_command=command)
+        row = self.prepared("video", "video/mp4", video, caption="Descreva a cor")
+        self.assertEqual(row["state"], "received")
+        _, claimed = self.claim(row)
+        media = claimed["attachment"]
+        self.assertTrue(media["has_audio"])
+        self.assertFalse(media["speech_detected"])
+        self.assertEqual(media["transcript"], "")
+        self.assertEqual(claimed["text"], "Descreva a cor")
+        self.assertEqual(len(media["frames"]), 2)
+        for frame in media["frames"]:
+            with Image.open(frame["path"]) as picture:
+                red, green, blue = picture.getpixel((10, 10))
+                self.assertGreater(red, 200)
+                self.assertLess(green + blue, 40)
+        audio = self.prepared("audio", "audio/ogg", self.ogg_bytes(), voice=True)
+        self.assertEqual(audio["state"], "failed")
+        self.assertIsNone(audio["note_id"])
+        for script in ("exit 7", "printf 'partial transcript'; exit 7"):
+            with self.subTest(script=script):
+                command.write_text("#!/bin/sh\n" + script + "\n")
+                failed = self.prepared("video", "video/mp4", video)
+                self.assertEqual(failed["state"], "failed")
+                self.assertIsNone(failed["note_id"])
+                error = self.store.rows("SELECT error FROM attachments WHERE request=?", (failed["request"],))[0]["error"]
+                self.assertIn("não concluiu", error)
+
+    @media_tools
+    def test_transparent_png_previews_preserve_dark_shapes_on_white(self):
+        from PIL import Image
+        for mode in ("RGBA", "P"):
+            with self.subTest(mode=mode):
+                picture = Image.new(mode, (80, 80), (0, 0, 0, 0) if mode == "RGBA" else 0)
+                if mode == "P":
+                    picture.putpalette([0, 0, 0] * 256)
+                    picture.info["transparency"] = 0
+                picture.paste((0, 0, 0, 255) if mode == "RGBA" else 1, (20, 20, 60, 60))
+                buffer = io.BytesIO()
+                picture.save(buffer, format="PNG")
+                row = self.prepared("image", "image/png", buffer.getvalue())
+                self.assertEqual(row["state"], "received")
+                _, claimed = self.claim(row)
+                with Image.open(claimed["attachment"]["frames"][0]["path"]) as result:
+                    self.assertTrue(all(channel > 240 for channel in result.getpixel((5, 5))))
+                    self.assertTrue(all(channel < 15 for channel in result.getpixel((40, 40))))
+
+    @media_tools
     def test_video_duration_corruption_and_container_limits(self):
         for data in (b"not a video", self.video_bytes(duration=121), self.ogg_bytes()):
             with self.subTest(size=len(data)):
@@ -1425,10 +1530,23 @@ for line in sys.stdin:
                 archive.writestr(name, body)
         return buffer.getvalue()
 
+    def presentation_files(self, order):
+        p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+        r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        rels = "http://schemas.openxmlformats.org/package/2006/relationships"
+        return {
+            "ppt/presentation.xml": f'<p:presentation xmlns:p="{p}" xmlns:r="{r}"><p:sldIdLst>' +
+                "".join(f'<p:sldId id="{256 + number}" r:id="rId{number}"/>' for number in order) +
+                '</p:sldIdLst></p:presentation>',
+            "ppt/_rels/presentation.xml.rels": f'<Relationships xmlns="{rels}">' +
+                "".join(f'<Relationship Id="rId{number}" Type="{r}/slide" Target="slides/slide{number}.xml"/>'
+                        for number in sorted(order)) + '</Relationships>',
+            **{f"ppt/slides/slide{number}.xml": f"<slide><p><t>Slide {number}</t></p></slide>" for number in order}}
+
     def test_office_files_extract_text_cells_and_slides_without_execution(self):
         cases = [
             ("wordprocessingml.document", {"word/document.xml": "<document><p><t>Contract 37</t></p></document>"}, "Contract 37"),
-            ("presentationml.presentation", {"ppt/slides/slide1.xml": "<slide><p><t>Slide 37</t></p></slide>"}, "Slide 37"),
+            ("presentationml.presentation", self.presentation_files([37]), "Slide 37"),
             ("spreadsheetml.sheet", {"xl/sharedStrings.xml": "<sst><si><t>Paint</t></si></sst>",
              "xl/worksheets/sheet1.xml": '<worksheet><row><c r="A1" t="s"><v>0</v></c><c r="B1"><f>19+18</f><v>37</v></c></row></worksheet>'}, "A1: Paint\nB1: 37")]
         for suffix, files, expected in cases:
@@ -1437,6 +1555,35 @@ for line in sys.stdin:
             _, claimed = self.claim(row)
             self.assertIn(expected, claimed["attachment"]["extracted_text"])
             self.assertIn("no macros", claimed["attachment"]["coverage"])
+
+    def test_presentation_order_uses_slide_relationships_and_positions(self):
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        for order in ([1, 2, 10], [10, 1, 2]):
+            with self.subTest(order=order):
+                files = self.presentation_files(order)
+                files["ppt/slides/slide99.xml"] = "<slide><t>Unused slide</t></slide>"
+                row = self.prepared("document", mime, self.office_bytes(files))
+                _, claimed = self.claim(row)
+                self.assertEqual(claimed["attachment"]["extracted_text"], "\n\n".join(
+                    f"[slide {position}: ppt/slides/slide{number}.xml]\nSlide {number}"
+                    for position, number in enumerate(order, 1)))
+
+    def test_presentation_missing_or_external_slide_relationship_fails(self):
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        for defect in ("missing-order", "missing-target", "external"):
+            with self.subTest(defect=defect):
+                files = self.presentation_files([1])
+                if defect == "missing-order":
+                    del files["ppt/presentation.xml"]
+                elif defect == "missing-target":
+                    del files["ppt/slides/slide1.xml"]
+                else:
+                    rel = "ppt/_rels/presentation.xml.rels"
+                    files[rel] = files[rel].replace('Target="slides/slide1.xml"',
+                                                   'TargetMode="External" Target="https://example.invalid/slide.xml"')
+                row = self.prepared("document", mime, self.office_bytes(files))
+                self.assertEqual(row["state"], "failed")
+                self.assertIsNone(row["note_id"])
 
     def test_office_macros_entities_and_expansion_bombs_are_refused(self):
         mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

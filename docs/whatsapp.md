@@ -67,16 +67,18 @@ Os formatos aceitos e sua cobertura são concretos; aceitar um arquivo não sign
 
 | Entrada | Interpretação disponível |
 | --- | --- |
-| JPEG/PNG | Decodificação e prévia visual; o principal precisa abrir a imagem. |
+| JPEG/PNG | Decodificação e prévia visual, com transparência composta sobre branco; o principal precisa abrir a imagem. |
 | PDF | Texto extraível e prévias de todas as páginas aceitas, inclusive páginas digitalizadas; não há OCR automático nem execução de JavaScript/formulários. |
 | TXT UTF-8 | Texto integral dentro do limite de extração. |
-| DOCX/XLSX/PPTX | Texto de documento/slides e valores armazenados das células; fórmulas não são calculadas, macros não são executadas, imagens incorporadas e layout não são interpretados. |
+| DOCX/XLSX/PPTX | Texto de documento/slides e valores armazenados das células; slides seguem a ordem da apresentação, com posição indicada; fórmulas não são calculadas, macros não são executadas, imagens incorporadas e layout não são interpretados. |
 | Ogg/Opus mono, AAC ADTS, M4A/AAC, MP3, AMR-NB | Decodificação local e transcrição; `audio.voice:true` distingue a nota de voz do anexo de áudio. |
 | MP4/3GPP H.264, com até uma faixa AAC | Prévias amostradas com tempo aproximado e transcrição da faixa de áudio; eventos entre amostras podem ser perdidos. |
 
 Sticker/WebP, reações, Office binário antigo (`.doc`, `.xls`, `.ppt`), arquivos com macros, arquivos compactados genéricos, executáveis, binários genéricos e PDFs criptografados são recusados para interpretação.
-Áudio sem fala reconhecível não produz uma transcrição inventada.
+Áudio isolado sem fala reconhecível falha explicitamente, sem produzir uma transcrição inventada.
 Um vídeo com áudio exige a mesma configuração de transcrição que uma nota de voz; sem ela, o processamento falha explicitamente.
+Quando a transcrição do vídeo conclui com texto vazio, as prévias são preservadas para interpretação visual, com `speech_detected:false` e transcrição vazia; isso indica ausência de fala detectada, não prova de silêncio acústico.
+Falhas de decodificação ou do transcritor continuam recusando o processamento; vídeos sem faixa de áudio dispensam STT e indicam `has_audio:false`.
 O download usa GET autenticado de metadados e em seguida a URL HTTPS devolvida, só no host `lookaside.fbsbx.com`, sem redirect e sem Bearer antes dessa validação.
 Os limites de MIME, bytes, pixels, caption e checksum são mantidos em [fm_whatsapp_media.py](../bin/fm_whatsapp_media.py); o limite em bytes usa MB decimal de forma conservadora.
 Os limites de duração, páginas, quadros e texto extraído são mantidos em [fm_whatsapp_extract.py](../bin/fm_whatsapp_extract.py).
@@ -212,4 +214,5 @@ As referências de tarefa apontam para o home/id/revisão canônicos, inclusive 
 Uma resposta genérica ou uma reação não aprova decisões, e o transporte nunca executa a ação aprovada.
 Enquanto houver uma decisão pendente ainda vigente, confirmações genéricas como “sim” e “ok” recebem um pedido de código.
 Sem decisão pendente vigente, essas confirmações seguem como texto conversacional ao principal no próximo checkpoint, mesmo que existam decisões expiradas ainda registradas como pendentes.
+Eventos `completed` e `failed` invalidam decisões pendentes ou respondidas daquele pedido na mesma transação do encerramento; recibos de decisões já consumidas permanecem idempotentes.
 Uma resposta explícita com código expirado continua recusada, sem aprovar a ação nem encaminhar essa resposta ao principal.

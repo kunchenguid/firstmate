@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import sys
@@ -37,6 +38,10 @@ OFFICE = {
 
 
 def preview(image, name):
+    from PIL import Image
+    if image.mode == "RGBA" or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        image = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba)
     image.thumbnail((1600, 1600))
     image.convert("RGB").save(name, format="JPEG", quality=85)
     return {"file": name, "width": image.width, "height": image.height}
@@ -125,12 +130,37 @@ def office_content(path, mime):
             for item in read_xml("xl/sharedStrings.xml"):
                 shared.append("".join(element.text or "" for element in item.iter()
                                        if element.tag.rsplit("}", 1)[-1] == "t"))
+        ordered_names = sorted(names)
+        if root == "ppt":
+            presentation = read_xml("ppt/presentation.xml")
+            relationships = read_xml("ppt/_rels/presentation.xml.rels")
+            slides = presentation.find("{*}sldIdLst")
+            if slides is None:
+                raise ValueError("presentation slide order missing")
+            targets = {}
+            for relationship in relationships:
+                rid = relationship.get("Id")
+                if not rid or rid in targets:
+                    raise ValueError("invalid presentation relationship")
+                targets[rid] = relationship
+            ordered_names = []
+            for slide in slides:
+                rid = next((value for key, value in slide.attrib.items() if key.endswith("}id")), None)
+                relationship = targets.get(rid)
+                if (relationship is None or relationship.get("TargetMode", "Internal") != "Internal"
+                        or not relationship.get("Type", "").endswith("/slide")):
+                    raise ValueError("invalid slide relationship")
+                target = relationship.get("Target", "")
+                name = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "ppt/" + target)
+                if not name.startswith("ppt/slides/") or not name.endswith(".xml") or name not in names:
+                    raise ValueError("slide target missing or invalid")
+                ordered_names.append(name)
         texts = []
-        for name in sorted(names):
+        for position, name in enumerate(ordered_names, 1):
             if not name.endswith(".xml") or not name.startswith(root + "/"):
                 continue
-            if not (name == "word/document.xml" or re.fullmatch(r"word/(header|footer)\d+.xml", name)
-                    or re.fullmatch(r"ppt/slides/slide\d+.xml", name) or name == "xl/sharedStrings.xml"
+            if not (root == "ppt" or name == "word/document.xml" or re.fullmatch(r"word/(header|footer)\d+.xml", name)
+                    or name == "xl/sharedStrings.xml"
                     or re.fullmatch(r"xl/worksheets/sheet\d+.xml", name)):
                 continue
             document = read_xml(name)
@@ -152,7 +182,8 @@ def office_content(path, mime):
                             raise ValueError("invalid shared string index")
                         value = shared[index]
                     values.append(f"{cell.get('r', '?')}: {value}")
-            texts.append(f"[{name}]\n" + "\n".join(values))
+            label = f"slide {position}: {name}" if root == "ppt" else name
+            texts.append(f"[{label}]\n" + "\n".join(values))
             if sum(map(len, texts)) > MAX_TEXT:
                 raise ValueError("Office text limit")
     if not texts:

@@ -167,5 +167,8 @@ def dispatch(store, data):
             body += f"\nAção: {action}\nRevisão: {binding[2]}\nPara autorizar esta ação, responda: aprovar {decision_id}"
         store.emit(event, request, kind, body, actor, payload)
         next_state = {"progress": "started", "reply": "answered"}.get(kind, kind)
+        if next_state in TERMINAL:
+            store.db.execute("UPDATE decisions SET state='superseded' WHERE request=? AND state IN ('pending','answered')",
+                              (request,))
         store.db.execute("UPDATE inbound SET state=? WHERE request=?", (next_state, request))
     return {"event": event, "new_event": True, "decision": decision_id}

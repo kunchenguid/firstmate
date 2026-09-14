@@ -19,7 +19,7 @@ Casos separados verificam a escolha do timeout com saída ausente, não autoriza
 A autenticação do principal usa [fm-whatsapp-auth.sh](../../bin/fm-whatsapp-auth.sh) e os proprietários existentes de identidade e lock da sessão.
 O transporte e a extração não introduzem um adaptador de harness nem de runtime; a capacidade de abrir imagens precisa ser verificada na sessão instalada.
 Esta integração não amplia o escopo da voz nem reutiliza o transporte X/Discord como se fosse WhatsApp.
-O teste real da API e da sessão principal instalada continua pendente de ativação e autorização exata.
+O teste real da API e da sessão principal instalada continua pendente e pertence ao principal, após a validação local do candidato.
 
 ## Critérios de aceitação
 
@@ -37,9 +37,9 @@ O teste real da API e da sessão principal instalada continua pendente de ativa�
 | 10. Desconhecidos, citações, reações e anexos | Testadas quarentena e ausência de autorização por reação, attachment ou context.from; regressão de consulta citada encaminha ao principal a correlação da tarefa A mesmo com B ativa, incluindo citação desconhecida sem associação inventada. |
 | 11. Shell e credenciais | Testado texto literal com substituições de shell, autenticação local recusada fora do principal, token sintético privado, rejeição de symlink e ausência do sentinela na saída; nenhum token real lido. |
 | 12. Principal indisponível | Testado principal de fixture encerrado, pedido preservado e confirmação sem início falso; disponibilidade anunciada apenas como checkpoint. |
-| 13. Decisões | Testados dois pedidos, "sim" ambíguo, remetente errado, revisão errada, alteração de tarefa, expiração e consumo único; a execução da ação permanece com os proprietários do Firstmate. |
+| 13. Decisões | Testados dois pedidos, "sim" ambíguo, remetente errado, revisão errada, alteração de tarefa, expiração e consumo único; regressões mantidas também exercitam invalidação no encerramento, rollback conjunto e preservação de recibos consumidos; a execução da ação permanece com os proprietários do Firstmate. |
 | 14. Mídia | JPEG/PNG, PDF comprimido/digitalizado, TXT, DOCX/XLSX/PPTX, áudio e MP4: extração local real, transporte simulado, checksum Base64/hex, URL hostil, tamanho, hash errado, expiração, filename sanitizado, transcrição injetada e recusa sem STT; também corrupção, duração, páginas, macros, expansão XML, subprocessos limitados e processamento paralelo a texto/recibos; sem prova contra a API real. |
-| 15. Teste ao vivo | Pendente de conta habilitada, identidade vinculada localmente, token privado e autorização de destino/conteúdo; não realizado. |
+| 15. Teste ao vivo | Não realizado; o principal deve instalar o candidato validado para teste controlado na conta e sessão existentes, registrar interpretação e resposta por modalidade e concluir a aceitação antes da ativação permanente. |
 
 ## Conferência da referência
 
@@ -72,6 +72,26 @@ Buscas públicas pelos termos `WhatsApp Agent Platform` e `whatsapp_agent_platfo
 A implementação de entrada combina texto, imagens, documentos, áudio e vídeo, com respostas somente em texto.
 A prova local de decodificação ou transcrição não demonstra a entrega de mensagens do aplicativo, a interpretação do principal instalado ou o recebimento da resposta pelo destinatário.
 Registros de prova controlada e evidências da conta real pertencem ao relatório privado da tarefa ou ao PR; não transformam esta matriz em atestado automático de produção.
+A validação e publicação do código podem terminar com a aceitação externa explicitamente pendente; isso não dispensa nem satisfaz a exigência de funcionamento completo.
+Agentes dos gates não devem iniciar consumidor real, instalar ou ativar produção para produzir essa evidência.
+As regressões locais incluem AAC silencioso com STT de fixture concluindo vazio, vídeo sem áudio, falha real de processo transcritor, recusa de áudio isolado sem transcrição, pixels RGBA/paleta e ordem reordenada de PPTX por relações internas.
+Esses casos usam decodificadores reais quando disponíveis, mas não comprovam um modelo STT instalado: a prova desse modelo exige áudio representativo e resultado observado separado da transcrição injetada.
+
+### Plano de aceitação na conta instalada
+
+O principal é responsável pela execução controlada e pelos registros privados de cada linha após instalar o candidato validado, preservando conta, sessão, banco, cursor e consumidor único existentes.
+
+| Modalidade | Evidência real ainda pendente |
+| --- | --- |
+| Texto | Entrada do proprietário, pedido/nota vinculados, claim pelo principal instalado, interpretação e resposta textual recebida. |
+| Áudio e nota de voz | Download e decodificação, transcrição pelo STT local autorizado com fala representativa, interpretação e resposta textual. |
+| Imagem | Abertura efetiva da prévia pelo principal, incluindo PNG transparente, interpretação visual e resposta textual. |
+| Vídeo | Abertura dos quadros, fala transcrita quando detectada, interpretação visual sem áudio e com AAC silencioso, resposta textual. |
+| Arquivos | TXT, PDF e Office aceitos pelo guia, leitura do conteúdo e das prévias aplicáveis, ordem de PPTX conferida e resposta textual. |
+
+Cada registro deve correlacionar mensagem de entrada, pedido, resultado do principal, wamid de saída e recibo de entrega, distinguindo aceitação pela API de recebimento pelo destinatário.
+O principal deve preservar também a evidência das recusas esperadas e da continuidade do serviço; nenhum novo destino de modelo ou dados faz parte desse plano.
+A ativação permanente já autorizada após validação só ocorre quando esses testes reais passarem; até lá, a aceitação integral permanece pendente.
 
 | Área | Gate de validação ou limite |
 | --- | --- |
