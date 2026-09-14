@@ -190,6 +190,10 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
+    if [ -f "${FM_TEST_GH_RULES_FAIL_BODY:-}" ]; then
+      cat "$FM_TEST_GH_RULES_FAIL_BODY" >&2
+      exit 1
+    fi
     if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
       exit 1
     fi
@@ -381,6 +385,7 @@ run_pr_merge() {
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
+  FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -831,6 +836,61 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
   assert_no_grep 'retry with:' "$case_dir/stderr" \
     "github-unreadable-queue-rules: retry flags were named from rules nothing could read"
   pass "fm-pr-merge distinguishes unreadable branch rules from a base with no merge queue"
+}
+
+# A repository whose plan does not expose branch rules answers the rules
+# endpoint with a 403 whose body is GitHub's own plan-upgrade message, not a
+# generic auth or rate-limit failure. That repository cannot have a
+# merge_queue rule either, so it must read as no queue rather than unreadable
+# - an attended read still fails the merge here only because the queue-aware
+# outcome read (api graphql) was never set up for this case, exactly like the
+# no-queue-rule case below; the queue read itself is proven by the absence of
+# 'merge-queue' wording in the refusal.
+test_github_plan_gated_403_reads_as_no_queue() {
+  local case_dir rc
+  case_dir=$(make_case github-plan-gated-403)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8989898989898989898989898989898989898989
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-plan-gated-403: an unproved merge must fail"
+  assert_no_grep 'merge queue' "$case_dir/stderr" \
+    "github-plan-gated-403: a plan-gated 403 was read as an unreadable or present queue rule"
+  assert_no_grep 'could not be read' "$case_dir/stderr" \
+    "github-plan-gated-403: a plan-gated 403 was reported as an unreadable rules response"
+  pass "fm-pr-merge reads a plan-gated 403 on branch rules as no merge queue, not unreadable"
+}
+
+# The practical effect of the fix: while away under a standing yolo=on
+# posture (no per-task merge grant), a private repository's plan-gated 403
+# must no longer refuse the merge the way any other unreadable queue response
+# does.
+test_away_plan_gated_403_does_not_block_the_merge() {
+  local case_dir rc url head
+  head=cececececececececececececececececececece
+  url=https://github.com/example/repo/pull/91
+  case_dir=$(make_case away-plan-gated-403)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  printf '\nyolo=on\n' >> "$case_dir/state/task-x1.meta"
+  write_away_record "$case_dir"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-plan-gated-403: a private repo's plan-gated 403 must not block an away merge"
+  assert_logged_gh_merge "$case_dir" 91 example/repo --squash
+  pass "away merge proceeds on a plan-gated 403 because that repository cannot have a merge queue"
 }
 
 test_github_no_queue_rule_says_nothing_about_a_queue() {
@@ -2102,6 +2162,7 @@ test_github_accepted_queue_flags_do_not_echo_back_the_same_command
 test_github_mismatched_queue_flags_still_name_the_retry
 test_github_unrecognised_queue_method_still_names_the_queue
 test_github_unreadable_queue_rules_are_not_reported_as_no_queue
+test_github_plan_gated_403_reads_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
 test_github_unmerged_fallback_cannot_replace_queue_aware_read
 test_github_auto_merge_without_queue_refuses_legibly
@@ -3039,6 +3100,7 @@ test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
 test_away_posture_refuses_asynchronous_merge_paths
+test_away_plan_gated_403_does_not_block_the_merge
 test_away_grant_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
 test_away_record_cannot_change_between_the_authority_read_and_the_merge

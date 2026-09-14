@@ -791,19 +791,35 @@ FM_PR_GITHUB_QUEUE_METHODS=
 FM_PR_GITHUB_QUEUE_STATUS=unreadable
 github_read_queue_method() {
   local methods line candidate method='' count=0 branch_path
-  local unrecognised=false conflicting=false
+  local unrecognised=false conflicting=false api_err api_err_text
   FM_PR_GITHUB_QUEUE_METHOD=
   FM_PR_GITHUB_QUEUE_METHODS=
   FM_PR_GITHUB_QUEUE_STATUS=unreadable
   command -v gh >/dev/null 2>&1 || return 0
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
   branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
+  api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-queue-rules.XXXXXX") || return 0
   if ! methods=$(gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
-    2>/dev/null); then
+    2>"$api_err"); then
+    api_err_text=$(cat "$api_err" 2>/dev/null)
+    rm -f "$api_err"
+    # A plan-gated 403 on this endpoint ("Upgrade to GitHub Pro or make this
+    # repository public") means the repository's plan cannot expose branch
+    # rules at all, on GitHub or GitHub Enterprise Server - not that this
+    # script failed to read them. A repository that cannot have branch rules
+    # cannot have a merge_queue rule either, so that specific 403 resolves to
+    # no queue rather than the generic unreadable status. Any other failure
+    # (auth, rate limit, network, a 404, an unrelated 403) stays unreadable.
+    case "$api_err_text" in
+      *"Upgrade to GitHub Pro or make this repository public"*)
+        FM_PR_GITHUB_QUEUE_STATUS=none
+        ;;
+    esac
     return 0
   fi
+  rm -f "$api_err"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -945,6 +961,18 @@ persist_accepted_merge_authority() {
   return 1
 }
 
+# While away, a merge proceeds only when the base branch's rules prove no
+# merge queue, because a queued merge can land after its away authority
+# lapses; this holds regardless of which away authority (a named merge grant
+# or a standing yolo=on posture) let the merge run at all. A repository whose
+# plan does not expose branch rules at all (GitHub's "Upgrade to GitHub Pro or
+# make this repository public" 403) proves that on its own, since such a
+# repository cannot have a merge_queue rule either; see
+# github_read_queue_method, which resolves that specific 403 to status=none.
+# Every other failure to read the queue state (auth, rate limit, network, a
+# 404, or an unrelated 403) stays unreadable and refuses the merge. The merge
+# stays synchronous (--auto is refused earlier) and every other gate still
+# applies.
 refuse_github_queue_while_away() {
   [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
   # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
