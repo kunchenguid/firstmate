@@ -864,6 +864,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
+  printf 'feedback owned by the new task\n' > "$dir/worktree/VENT.md"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
   # alive in the slot while teardown runs.
@@ -879,6 +880,10 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
+  assert_absent "$dir/home/VENT.md" "reassigned task feedback was imported"
+  assert_absent "$dir/home/data/$id/VENT.md" "reassigned task feedback was copied"
+  [ "$(cat "$dir/worktree/VENT.md")" = 'feedback owned by the new task' ] \
+    || fail "reassigned task feedback was changed"
   assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
     "the warning should name the claimant's home"
   kill "$worker" 2>/dev/null || true

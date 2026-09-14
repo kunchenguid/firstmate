@@ -61,6 +61,8 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Ship and scout briefs include optional workflow-friction feedback in a private
+# worktree-root VENT.md; bin/fm-teardown.sh owns its preservation and aggregation.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -355,6 +357,17 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+IFS= read -r -d '' VENT_SECTION <<'EOF' || true
+# Workflow feedback
+When you encounter real repeated or systemic workflow friction, record it during the work and at its end in `VENT.md` at the worktree root.
+Use `# VENT`, then `Feedback log. Repeated/systemic workflow friction that should become future automation, docs, or workflow fixes.` as the header, with dated entries `## YY-MM-DD HH:MM — slug`, one idea per entry.
+Describe the friction and what future automation, documentation, or workflow fix would prevent it, not FYI progress updates.
+Keep this private feedback file untracked; do not commit it or publish its contents in the PR.
+Firstmate preserves the file and appends new entries to its home's central VENT.md during cleanup (`bin/fm-teardown.sh`), so writing here brings the feedback back to firstmate.
+This is expected only when there is real friction, never a completion gate: do not invent an entry or delay done to fill the log.
+EOF
+VENT_SECTION=${VENT_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -372,7 +385,7 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is the work product, so all investigation findings worth keeping must be in it; private workflow feedback follows the separate section below.
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -412,6 +425,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$VENT_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -503,6 +518,8 @@ $ASK_USER_BLOCK
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$VENT_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
