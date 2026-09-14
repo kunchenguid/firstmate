@@ -111,8 +111,15 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
-# Select from the complete `no-mistakes axi` run inventory, using a read-only
-# same-branch query of NM_HOME/state.sqlite when the overview count is capped.
+# Select from a complete `no-mistakes axi` overview with the existing awk
+# toolchain. A capped overview requires an optional Python 3 sqlite3 reader
+# for a read-only same-branch query of NM_HOME/state.sqlite (default:
+# ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
+# If that reader or inventory is unavailable, report unknown with available
+# candidate ids rather than treating the displayed window as complete.
+# Structural completeness applies to the whole table; semantic validation
+# applies only to the requested branch, after complete identity lookup when
+# capped. Branch names are matched exactly without a character whitelist.
 # Its rows are ordered by creation time descending (not last update), then id.
 # The newest same-branch row is the candidate regardless of outcome: an older
 # live run must not hide a newer failure. If the newest is live and another
@@ -124,7 +131,8 @@ fm_nm_run_status_class() {  # <status_word>
 #
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
 # for this branch), or unavailable (CLI has no overview table). Malformed or
-# truncated tables report unknown, retaining every readable candidate id.
+# structurally truncated tables report unknown, retaining every readable
+# same-branch candidate id.
 fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
   local selection inventory available_ids
   selection=$(printf '%s\n' "$2" | awk -v branch="$1" '
