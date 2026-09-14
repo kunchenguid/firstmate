@@ -186,13 +186,13 @@ PER_SCRIPT_TIMEOUT_SECS=0
 # It is a guard, not a speed control: a HUNG script becomes a bounded failure
 # instead of an unbounded suite, which is the shape that silently outruns a
 # caller's invocation budget.
-# The derivation has narrowed since it was written. The slowest script in a
-# runner-file changed selection remains tests/fm-calm-pi-extension.test.sh at
-# 77s once its Chrome reap terminates, so this bound stays far above that
-# selection. It is no longer true of the suite at large: tests/fm-watch-triage.test.sh
-# was measured at 1191s on 2026-09-10, 1.32x this bound, so a healthy script can
-# now exceed it and the margin should be re-derived before this is relied on
-# outside the --changed path.
+# The slowest script in a runner-file changed selection remains
+# tests/fm-calm-pi-extension.test.sh at 77s once its Chrome reap terminates,
+# so this bound stays far above that selection.
+# The 1191s measurement for tests/fm-watch-triage.test.sh on 2026-09-10
+# comes from the CANCELLED "Behavior portable serial 1" job (102750305543)
+# in run 34439141091:
+# https://github.com/kunchenguid/firstmate/actions/runs/34439141091/job/102750305543
 CHANGED_DEFAULT_TIMEOUT_SECS=900
 
 # How many separate-runner shards the portable serial remainder splits into.
