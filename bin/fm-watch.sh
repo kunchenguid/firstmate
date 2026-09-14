@@ -706,6 +706,70 @@ recorded_windows() {
   done
 }
 
+watch_record_key_from_file() {  # <basename>
+  case "$1" in
+    .stale-since-*) printf '%s' "${1#.stale-since-}" ;;
+    .paused-rechecked-*) printf '%s' "${1#.paused-rechecked-}" ;;
+    .paused-resurfaced-*) printf '%s' "${1#.paused-resurfaced-}" ;;
+    .wedge-escalations-*) printf '%s' "${1#.wedge-escalations-}" ;;
+    .churn-since-*) printf '%s' "${1#.churn-since-}" ;;
+    .writing-since-*) printf '%s' "${1#.writing-since-}" ;;
+    .writing-resurfaced-*) printf '%s' "${1#.writing-resurfaced-}" ;;
+    .hash-*) printf '%s' "${1#.hash-}" ;;
+    .count-*) printf '%s' "${1#.count-}" ;;
+    .stale-*) printf '%s' "${1#.stale-}" ;;
+    .paused-*) printf '%s' "${1#.paused-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+watch_record_past_grace() {
+  local file=$1 mtime now
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  mtime=$(stat_mtime "$file") || return 1
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  [ "$((now - mtime))" -gt 1800 ]
+}
+
+watch_record_window_absent() {
+  local key=$1 w backend meta task verdict
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    task=${meta##*/}
+    task=${task%.meta}
+    (fm_backend_validate_task_endpoint "$meta" "$task") >/dev/null 2>&1 || return 1
+    w=$(fm_backend_target_of_meta "$meta") || return 1
+    [ "$(window_key "$w")" = "$key" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    verdict=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null) || return 1
+    [ "$verdict" = missing ] || return 1
+  done
+  return 0
+}
+
+retire_dead_window_records() {
+  local key file base cursor='' processed=0
+  [ ! -f "$STATE/.watch-record-sweep-cursor" ] \
+    || IFS= read -r cursor < "$STATE/.watch-record-sweep-cursor" \
+    || cursor=''
+  for file in "$STATE"/.*-*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    base=${file##*/}
+    [ -z "$cursor" ] || [[ $base > $cursor ]] || continue
+    key=$(watch_record_key_from_file "$base") || continue
+    if watch_record_past_grace "$file" \
+      && watch_record_window_absent "$key" \
+      && watch_record_past_grace "$file"; then
+      rm -f -- "$file" || return 1
+    fi
+    processed=$((processed + 1))
+    printf '%s\n' "$base" > "$STATE/.watch-record-sweep-cursor" || return 1
+    [ "$processed" -lt 64 ] || return 0
+  done
+  [ "$processed" -ne 0 ] || rm -f -- "$STATE/.watch-record-sweep-cursor"
+}
+
 # Print the oldest structurally valid ACTIONABLE row in a local secondmate's
 # foreign queue. A stale recheck that explicitly identifies itself as a declared
 # external-wait pause is not evidence that the mate's wake loop is stuck: the
@@ -1940,6 +2004,7 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  retire_dead_window_records || exit 1
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

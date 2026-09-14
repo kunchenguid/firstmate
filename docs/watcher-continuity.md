@@ -22,6 +22,19 @@ Only an exhausted failure with no verified watcher commits one last-resort notic
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
+## Retiring window bookkeeping
+
+The watcher alone retires old per-window bookkeeping during its poll loop; teardown and spawn do not delete these records or acquire additional locks for them.
+Each poll considers at most 64 bookkeeping files, resuming through a cursor, and only unlinks regular records whose modification time is more than 30 minutes old.
+Before each unlink it re-reads task metadata and checks any endpoint sharing the canonical window key; a live, uncertain, unverified, or malformed record prevents deletion.
+Keys with no remaining task metadata are eligible after the same grace period.
+The watcher checks the file age again after the endpoint probe to protect bookkeeping refreshed during that probe.
+Missing files are no-ops, and durable task and teardown records are outside this sweep.
+
+This is best-effort cleanup, not atomic coordination with respawn.
+The grace period protects new and recently updated bookkeeping, and the immediate checks narrow the race, but an endpoint or file can still change between the last check and unlink.
+Old bookkeeping for a concurrently revived endpoint can therefore still be retired in that residual interval.
+
 ## Actionable wake ordering
 
 After an actionable Pi, omp, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.

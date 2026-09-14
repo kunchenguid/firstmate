@@ -4790,7 +4790,193 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_watcher_retires_dead_window_records_and_preserves_live_key() {
+  local dir state fakebin marker
+  dir=$(make_case watch-record-sweep); state="$dir/state"; fakebin="$dir/fakebin"
+  fm_write_meta "$state/live.meta" "window=test:fm-live" "worktree=$dir/wt" "project=$dir/project"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then printf 'fm-live\n'; exit 0; fi
+if [ "${1:-}" = display-message ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ] && [ "${2:-}" = test:fm-live ]; then exit 0; fi
+    shift
+  done
+  exit 1
+fi
+if [ "${1:-}" = capture-pane ]; then printf 'live pane\n'; exit 0; fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  for marker in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations churn-since writing-since writing-resurfaced; do
+    : > "$state/.$marker-test_fm-live"
+    : > "$state/.$marker-test_fm-dead"
+    touch -t 200001010000 "$state/.$marker-test_fm-live" "$state/.$marker-test_fm-dead"
+  done
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; retire_dead_window_records' _ "$WATCH" \
+    || fail "watcher record sweep failed"
+  for marker in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations churn-since writing-since writing-resurfaced; do
+    assert_absent "$state/.$marker-test_fm-dead" "watcher left dead-window .$marker state"
+    assert_present "$state/.$marker-test_fm-live" "watcher removed live-window .$marker state"
+  done
+  pass "watcher retires dead-window records and preserves live-window records"
+}
 
+test_watcher_record_sweep_is_bounded_and_idempotent() {
+  local dir state fakebin out pid i remaining
+  dir=$(make_case watch-record-sweep-bound); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  for ((i=1; i<=65; i++)); do
+    printf -v remaining '%02d' "$i"
+    : > "$state/.hash-dead-$remaining"
+    touch -t 200001010000 "$state/.hash-dead-$remaining"
+  done
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=30 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  for ((i=0; i<300; i++)); do
+    remaining=$(find "$state" -maxdepth 1 -name '.hash-dead-*' -type f | wc -l | tr -d '[:space:]')
+    [ "$remaining" = 1 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  reap "$pid"
+  remaining=$(find "$state" -maxdepth 1 -name '.hash-dead-*' -type f | wc -l | tr -d '[:space:]')
+  [ "$remaining" = 1 ] || fail "one watcher poll retired $((65 - remaining)) records instead of the bounded 64"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=30 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  for ((i=0; i<300; i++)); do
+    remaining=$(find "$state" -maxdepth 1 -name '.hash-dead-*' -type f | wc -l | tr -d '[:space:]')
+    [ "$remaining" = 0 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  reap "$pid"
+  [ "$remaining" = 0 ] || fail "the next watcher poll did not retire the remaining dead-window record"
+  rm -f "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=30 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  for ((i=0; i<300; i++)); do
+    [ -e "$state/.last-watcher-beat" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null || fail "an empty watcher-record sweep stopped the watcher"
+  reap "$pid"
+  pass "watcher record retirement is bounded, resumable, and idempotent"
+}
+
+test_watcher_record_sweep_requires_proven_absence() {
+  local dir state fakebin mode marker
+  dir=$(make_case watch-record-proof); state="$dir/state"; fakebin="$dir/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  case "$FM_TEST_INVENTORY" in
+    error) printf 'temporary inventory failure\n' >&2; exit 1 ;;
+    unavailable) exit 127 ;;
+    missing) printf 'fm-someone-else\n'; exit 0 ;;
+    live) printf 'fm-live\n'; exit 0 ;;
+  esac
+fi
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  for mode in error unavailable live missing malformed unknown unverified; do
+    fm_write_meta "$state/live.meta" "window=test:fm-live" "worktree=$dir/wt" "project=$dir/project"
+    case "$mode" in
+      malformed) printf 'window=test:fm-other\n' >> "$state/live.meta" ;;
+      unknown) printf 'backend=unknown\n' >> "$state/live.meta" ;;
+      unverified)
+        fm_write_meta "$state/live.meta" "window=fm-live" "endpoint_task_id=live" \
+          "terminal=test_fm-live" "backend=orca" "orca_worktree_id=wt-live" \
+          "worktree=$dir/wt" "project=$dir/project"
+        ;;
+    esac
+    for marker in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations churn-since writing-since writing-resurfaced; do
+      printf 'preserve-%s\n' "$marker" > "$state/.$marker-test_fm-live"
+      touch -t 200001010000 "$state/.$marker-test_fm-live"
+    done
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_TEST_INVENTORY="$mode" \
+      bash -c '. "$1"; retire_dead_window_records; retire_dead_window_records' _ "$WATCH" \
+      || fail "watcher sweep failed for $mode inventory"
+    for marker in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations churn-since writing-since writing-resurfaced; do
+      if [ "$mode" = missing ]; then
+        assert_absent "$state/.$marker-test_fm-live" "positive absence left .$marker state"
+      else
+        [ "$(cat "$state/.$marker-test_fm-live" 2>/dev/null)" = "preserve-$marker" ] \
+          || fail "$mode inventory changed .$marker state without proof of absence"
+      fi
+    done
+  done
+  pass "watcher preserves uncertain records and retires only proven missing endpoints"
+}
+
+test_watcher_record_sweep_grace_and_recheck() {
+  local dir state fakebin mode
+  dir=$(make_case watch-record-grace); state="$dir/state"; fakebin="$dir/fakebin"
+  : > "$state/.hash-fresh"
+  : > "$state/.count-old"
+  touch -t 200001010000 "$state/.count-old"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; retire_dead_window_records' _ "$WATCH" || fail "grace sweep failed"
+  assert_present "$state/.hash-fresh" "grace period did not protect a new record"
+  assert_absent "$state/.count-old" "grace period kept an old absent record"
+  touch -t 200001010000 "$state/.hash-fresh"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; retire_dead_window_records; retire_dead_window_records' _ "$WATCH" \
+    || fail "expired grace sweep failed"
+  assert_absent "$state/.hash-fresh" "expired grace record did not retire"
+  fm_write_meta "$state/live.meta" "window=test:fm-live" "worktree=$dir/wt" "project=$dir/project"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  n=$(cat "$FM_HOME/probes" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$FM_HOME/probes"
+  if [ "$n" -eq 1 ]; then
+    printf 'fm-other\n'
+  elif [ "$FM_TEST_RECHECK" = refresh ]; then
+    touch "$FM_HOME/state/.hash-test_fm-live"
+    printf 'fm-other\n'
+  else
+    printf 'fm-live\n'
+  fi
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  for mode in live refresh; do
+    : > "$state/.watch-record-sweep-cursor"
+    printf '0\n' > "$dir/probes"
+    : > "$state/.count-test_fm-live"
+    : > "$state/.hash-test_fm-live"
+    touch -t 200001010000 "$state/.count-test_fm-live" "$state/.hash-test_fm-live"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_TEST_RECHECK="$mode" \
+      bash -c '. "$1"; retire_dead_window_records; retire_dead_window_records' _ "$WATCH" \
+      || fail "$mode recheck sweep failed"
+    assert_absent "$state/.count-test_fm-live" "initial proven absence did not retire old record"
+    assert_present "$state/.hash-test_fm-live" "$mode change before unlink did not protect record"
+    [ "$(cat "$dir/probes")" -ge 2 ] || fail "absence was not rechecked for each unlink"
+  done
+  pass "watcher honors grace and rechecks absence and record age before unlink"
+}
+
+if [ "${1:-}" = --watch-record-sweep ]; then
+  test_watcher_retires_dead_window_records_and_preserves_live_key
+  test_watcher_record_sweep_is_bounded_and_idempotent
+  test_watcher_record_sweep_requires_proven_absence
+  test_watcher_record_sweep_grace_and_recheck
+  exit 0
+fi
+
+test_watcher_retires_dead_window_records_and_preserves_live_key
+test_watcher_record_sweep_is_bounded_and_idempotent
+test_watcher_record_sweep_requires_proven_absence
+test_watcher_record_sweep_grace_and_recheck
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
