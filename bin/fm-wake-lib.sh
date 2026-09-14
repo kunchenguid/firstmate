@@ -1285,6 +1285,13 @@ fm_treehouse_collect_local_states() {  # <record-state>
     home=${homes[$i]}
     i=$((i + 1))
     candidate="$home/state"
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      if [ ! -d "$candidate" ] \
+        || ! find "$candidate" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
+        echo "REFUSED: cannot enumerate local Firstmate state at $candidate; nothing was changed" >&2
+        return 1
+      fi
+    fi
     candidate_identity=$(fm_treehouse_state_identity "$candidate")
     known=0
     for existing in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do

@@ -3042,7 +3042,6 @@ require_owned_task_worktree_slot || exit 1
 teardown_refuse_if_other_task_branch() {  # <task-id> <worktree>
   local record_id=$1 worktree=$2 branch holder_id branch_status=0
   [ -d "$worktree" ] || return 0
-  [ -e "$worktree/.git" ] || return 0
   branch=$(git -C "$worktree" symbolic-ref --quiet HEAD 2>/dev/null) || branch_status=$?
   case "$branch_status" in
     0) ;;

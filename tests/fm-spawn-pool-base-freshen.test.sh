@@ -817,6 +817,40 @@ test_unreadable_nested_registry_refuses_pool_allocation() {
   pass "an unreadable nested Firstmate registry refuses pooled allocation"
 }
 
+test_unreadable_nested_state_refuses_pool_allocation() {
+  local rec id out status before child_home
+
+  id='pool-slot-unreadable-nested-state-r1'
+  rec=$(make_case unreadable-nested-state "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/data" "$child_home/state"
+  printf '%s\n' \
+    "- child - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/older-child-task.meta" \
+    "window=firstmate:fm-older-child-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 111 "$child_home/state"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 700 "$child_home/state"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a nested state directory could not be enumerated: $out"
+  assert_contains "$out" "cannot enumerate local Firstmate state at $child_home/state" \
+    "nested state enumeration failure did not refuse the allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "nested state enumeration failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "nested state enumeration failure claimed the retained slot"
+  [ -e "$child_home/state/older-child-task.meta" ] \
+    || fail "nested state enumeration failure removed the holding child record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "nested state enumeration failure changed the held slot"
+  pass "an unreadable nested Firstmate state refuses pooled allocation"
+}
+
 # Fresh allocation must not replace ownership evidence or an older task record
 # when Treehouse returns a slot that is still retained by another task.
 test_pool_slot_refuses_existing_ownership() {
@@ -923,6 +957,7 @@ test_pool_slot_refuses_existing_ownership() {
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_unreadable_nested_registry_refuses_pool_allocation
+test_unreadable_nested_state_refuses_pool_allocation
 test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching

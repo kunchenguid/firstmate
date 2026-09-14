@@ -16,6 +16,7 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   git init -q "$TMP_ROOT/$dir/project"
+  git init -q "$TMP_ROOT/$dir/worktree"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -541,6 +542,40 @@ test_cross_home_pool_slot_collision_refuses() {
   pass "fm-teardown: a pool slot held by another firstmate home is never returned"
 }
 
+test_unreadable_child_state_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task child_home rc
+
+  dir=$(make_case slot-unreadable-child-state)
+  mark_case_as_treehouse_pool "$dir"
+  child_home="$dir/child-home"
+  mkdir -p "$child_home/data" "$child_home/state"
+  printf '%s\n' \
+    "- child - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$child_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 111 "$child_home/state"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 700 "$child_home/state"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after a child state directory could not be enumerated"
+  assert_contains "$(cat "$dir/stderr")" "cannot enumerate local Firstmate state at $child_home/state" \
+    "child state enumeration failure did not explain the safety refusal"
+  assert_present "$dir/home/state/$id.meta" "child state enumeration failure removed stale metadata"
+  assert_present "$child_home/state/$other.meta" "child state enumeration failure removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "child state enumeration failure changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "child state enumeration failure ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when a reachable state directory cannot be enumerated"
+}
+
 test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
@@ -602,6 +637,7 @@ test_branch_inspection_error_refuses_before_cleanup() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mv "$dir/worktree/.git" "$dir/git-marker"
   cat > "$dir/fakebin/git" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = -C ] && [ "\${2:-}" = "$dir/worktree" ] && [ "\${3:-}" = symbolic-ref ]; then
@@ -620,8 +656,10 @@ SH
     "branch inspection failure did not explain the safety refusal"
   assert_present "$dir/home/state/$id.meta" "branch inspection failure removed the task record"
   assert_present "$dir/worktree/sentinel" "branch inspection failure changed the worktree"
+  assert_present "$dir/git-marker" "branch inspection failure changed the hidden Git marker"
   [ ! -s "$dir/runtime.log" ] \
     || fail "branch inspection failure ran cleanup: $(cat "$dir/runtime.log")"
+  mv "$dir/git-marker" "$dir/worktree/.git"
   pass "fm-teardown refuses before cleanup when branch ownership inspection fails"
 }
 
@@ -1258,6 +1296,7 @@ test_isolated_tmux_invalid_and_valid_cleanup
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
+test_unreadable_child_state_refuses_before_cleanup
 test_sole_slot_record_still_tears_down
 test_other_task_branch_refuses_before_cleanup
 test_branch_inspection_error_refuses_before_cleanup
