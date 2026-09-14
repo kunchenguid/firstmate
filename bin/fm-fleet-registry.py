@@ -652,17 +652,11 @@ def command_transfer_state(args: argparse.Namespace) -> None:
     path = Path(args.registry)
     reg = load(path)
     require_valid(reg)
-    found = False
-    for row in reg["transfers"]:
-        if row.get("transaction") == args.transaction:
-            row["state"] = args.state
-            found = True
-    if not found:
-        reg["transfers"].append({
-            "secondmate": args.secondmate,
-            "transaction": args.transaction,
-            "state": args.state,
-        })
+    rows = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
+    if (len(rows) != 1 or rows[0].get("transaction") != args.transaction
+            or rows[0].get("state") not in ("published", "active") or args.state != "active"):
+        raise ValueError(f"transfer {args.transaction} is not the current published transfer for {args.secondmate}")
+    rows[0]["state"] = args.state
     require_valid(reg)
     write_atomic(path, reg)
 

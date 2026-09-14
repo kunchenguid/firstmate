@@ -133,6 +133,12 @@ The registry transaction row is the only source of mutation authority.
 Each SecondMate has one current transfer. A record claim removes every older transfer row for that SecondMate, and the journals keep the audit history.
 `transfer recover` and `transfer rollback` require their transaction to be that SecondMate's only row, in the `records-ready`, `published` or `active` state. They check this before running any endpoint hook. So an unclaimed stale journal, or an older active transaction that a newer claim superseded, is refused even when the generations match.
 `transfer abandon` refuses a claimed or finished transaction.
+A journal is audit and recovery evidence, and it never grants endpoint authority by itself.
+When `transfer abandon` releases a stale journal, the same fleet-lock section checks each stopped flag:
+- It relaunches the source SecondMate only while the assignment generation and the parent binding still match the journal and no claimed transfer for that SecondMate is in progress.
+- It restarts the destination manager only while no other unfinished journal reserves that manager.
+- Any other flag is cleared, and the command reports which transfer now owns the endpoint.
+`transfer-state` changes only the current `published` or `active` row for its exact transaction. It never adds a row, so a slow activation of a superseded transfer fails and cannot restore the old authority.
 If a relaunch fails, `transfer abandon` and the exit trap exit non-zero. The endpoint's stopped flag stays in the journal, and the output names the `transfer abandon --transaction <id>` retry command.
 The journal records `destination_stopped`. So if the owner-record move fails, `transfer rollback` also restarts that destination manager.
 Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.

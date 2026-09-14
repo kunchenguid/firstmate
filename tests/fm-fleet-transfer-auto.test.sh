@@ -333,6 +333,10 @@ grep -q "parent_home=$FROOT/manager-2" "$FROOT/secondmates/paperclip/.fm-secondm
 add_lock "$src_home"; printf 'test:test\n' > "$src_home/state/.fleet-herdr-target"
 hold_registries "$src_home" "$FROOT/manager-2"
 start_claimed_transfer paperclip
+i=0; while [ "$i" -lt 200 ]; do
+  for child in $(pgrep -P "$claim_pid" 2>/dev/null); do case "$(ps -o comm= -p "$child" 2>/dev/null)" in *bash*) break 2 ;; esac; done
+  sleep 0.05; i=$((i + 1))
+done
 kill -TERM "$claim_pid"
 release_registries
 if wait "$claim_pid"; then fail "transfer terminated during record move reported success"; fi
@@ -348,6 +352,7 @@ stale_tx=stale-unclaimed
 stale_journal="$FROOT/transactions/$stale_tx.json"
 python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$FROOT/fleet.json" --secondmate paperclip --manager manager-2 \
   --source-home "$src_home" --transaction "$stale_tx" --journal "$stale_journal" >/dev/null || fail "prepare stale journal fixture"
+python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$stale_journal" --destination-stopped 1 --secondmate-stopped 1 >/dev/null
 for n in 1 3; do [ "$FROOT/manager-$n" = "$src_home" ] || newer=manager-$n; done
 out=$("$FLEET" transfer begin --secondmate paperclip --to "$newer" 2>&1) || fail "newer transfer after stale journal: $out"
 records_digest() {
@@ -365,7 +370,10 @@ if "$FLEET" transfer recover --transaction "$stale_tx" >/dev/null 2>&1; then fai
 [ "$(records_digest)" = "$before" ] || fail "stale journal rewrote owner records"
 [ ! -s "$FM_HOOK_LOG" ] || fail "stale journal ran an endpoint lifecycle action: $(cat "$FM_HOOK_LOG")"
 [ "$(manager_for paperclip)" = "$newer" ] || fail "stale journal changed the newer assignment"
+: > "$FM_HOOK_LOG"
 out=$("$FLEET" transfer abandon --transaction "$stale_tx" 2>&1) || fail "abandon of stale journal: $out"
+! grep -q 'paperclip|start-secondmate' "$FM_HOOK_LOG" || fail "abandon relaunched a SecondMate that a newer transfer owns: $(cat "$FM_HOOK_LOG")"
+case "$out" in *"newer transfer owns SecondMate paperclip"*) ;; *) fail "stale abandon did not report the newer owner: $out" ;; esac
 [ "$(tx_state "$stale_journal")" = abandoned ] || fail "abandon did not retire the stale reservation"
 [ "$(records_digest)" = "$before" ] || fail "abandon rewrote owner records"
 if "$FLEET" transfer abandon --transaction "$claim_tx" >/dev/null 2>&1; then fail "abandon accepted a claimed transfer"; fi
@@ -400,5 +408,36 @@ case "$out" in *"retry transfer abandon --transaction $relaunch_tx"*) ;; *) fail
 [ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" | json_value '(json.load(sys.stdin).get("destination_stopped"))')" = True ] || fail "relaunch failure lost its retry state"
 out=$("$FLEET" transfer abandon --transaction "$relaunch_tx" 2>&1) || fail "abandon retry after relaunch failure: $out"
 [ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" | json_value '(json.load(sys.stdin).get("destination_stopped"))')" = False ] || fail "abandon retry did not clear the restarted destination"
+
+# A slow activation of an older failover cannot recreate its row after a newer recovery claims.
+SLOW_START="$TMP_ROOT/slow-start.sh"
+cat > "$SLOW_START" <<SH
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "\$1" "\$2" "\$3" >> "$FM_HOOK_LOG"
+if [ "\$1" = "$FROOT/manager-1" ]; then : > "$TMP_ROOT/slow.ready"; while [ ! -e "$TMP_ROOT/slow.release" ]; do sleep 0.05; done; fi
+SH
+chmod +x "$SLOW_START"
+rm -f "$TMP_ROOT/slow.ready" "$TMP_ROOT/slow.release"
+add_lock "$FROOT/manager-1"; old_live=$LAST_HOLDER
+FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$SLOW_START "$FLEET" recover --secondmate paperclip > "$TMP_ROOT/old.out" 2>&1 & old_pid=$!
+i=0; while [ ! -e "$TMP_ROOT/slow.ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+[ -e "$TMP_ROOT/slow.ready" ] || fail "older failover never reached activation: $(cat "$TMP_ROOT/old.out")"
+tx_old=$(basename "$(newest_journal paperclip)" .json)
+remove_lock "$FROOT/manager-1" "$old_live"
+add_lock "$FROOT/manager-3"; new_live=$LAST_HOLDER
+out=$(FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$SLOW_START "$FLEET" recover --secondmate paperclip 2>&1) || fail "newer recovery during slow activation: $out"
+tx_new=$(basename "$(newest_journal paperclip)" .json)
+[ "$tx_new" != "$tx_old" ] || fail "fixture: newer recovery wrote no journal"
+: > "$TMP_ROOT/slow.release"
+if wait "$old_pid"; then fail "superseded failover reported activation: $(cat "$TMP_ROOT/old.out")"; fi
+python3 - "$FROOT/fleet.json" "$tx_new" <<'PY' || fail "superseded activation recreated a transfer row"
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+rows = [row for row in reg["transfers"] if row["secondmate"] == "paperclip"]
+assert [(row["transaction"], row["state"]) for row in rows] == [(sys.argv[2], "active")], rows
+PY
+remove_lock "$FROOT/manager-3" "$new_live"
+out=$("$FLEET" transfer rollback --transaction "$tx_new" 2>&1) || fail "newer recovery was wedged after a superseded activation: $out"
+[ "$(manager_for paperclip)" = manager-1 ] || fail "rollback of the newer recovery did not restore its prior assignment"
 
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

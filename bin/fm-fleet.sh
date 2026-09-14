@@ -342,15 +342,48 @@ PY
 }
 
 # Under the fleet lock, abandon a preparing journal only while no registry claim
-# row exists for its transaction; the record claim takes the same lock.
+# row exists for its transaction; the record claim takes the same lock. A stale
+# journal keeps a stopped flag only while the endpoint is still its own: the
+# SecondMate while the assignment generation and parent binding still match
+# the journal and no claimed transfer is in flight, and the destination while no
+# other unfinished journal reserves it. Every other flag is cleared untouched.
 transfer_abandon_unclaimed_locked() {
   case "$(journal_field "$journal" 'j["state"]')" in preparing|abandoned) ;; *) return 3 ;; esac
-  if python3 - "$REG" "$tx" <<'PY'; then return 3; fi
-import json, sys
+  python3 - "$REG" "$journal" <<'PY' || return
+import glob, json, os, sys
 with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
-sys.exit(0 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 1)
+path = sys.argv[2]
+with open(path, encoding="utf-8") as handle: journal = json.load(handle)
+if any(row.get("transaction") == journal["transaction"] for row in reg.get("transfers", [])):
+    sys.exit(3)
+sm = journal["secondmate"]
+if journal.get("secondmate_stopped"):
+    current = next((row for row in reg["assignments"] if row["secondmate"] == sm and row.get("state") == "active"), None)
+    parent = ""
+    try:
+        with open(journal["paths"]["binding"], encoding="utf-8") as handle:
+            parent = next((line.split("=", 1)[1].strip() for line in handle if line.startswith("parent_home=")), "")
+    except OSError:
+        pass
+    if (int((current or {}).get("generation", 0)) != int(journal["expected_generation"])
+            or os.path.normpath(parent or "/") != os.path.normpath(journal["source_home"])
+            or any(row.get("secondmate") == sm and row.get("state") in ("records-ready", "published") for row in reg.get("transfers", []))):
+        journal["secondmate_stopped"] = False
+        print(f"fm-fleet: a newer transfer owns SecondMate {sm}; transfer {journal['transaction']} leaves it untouched", file=sys.stderr)
+if journal.get("destination_stopped"):
+    for other in glob.glob(os.path.join(os.path.dirname(path), "*.json")):
+        if os.path.samefile(other, path):
+            continue
+        with open(other, encoding="utf-8") as handle: row = json.load(handle)
+        if row.get("state") not in ("active", "abandoned", "rolled-back") and row.get("destination_manager") == journal["destination_manager"]:
+            journal["destination_stopped"] = False
+            print(f"fm-fleet: transfer {row.get('transaction')} reserves manager {journal['destination_manager']}; transfer {journal['transaction']} leaves it untouched", file=sys.stderr)
+            break
+journal["state"] = "abandoned"
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle: json.dump(journal, handle, indent=2, sort_keys=True); handle.write("\n")
+os.replace(tmp, path)
 PY
-  python3 "$TRANSFER_BIN" state --journal "$journal" --set abandoned >/dev/null
 }
 
 # Release a journal that never acquired a claim: abandon it, then restart the
@@ -404,7 +437,7 @@ transfer_activate() {  # <secondmate> <manager> <destination-home> <failover> <t
     transfer_hook FM_FLEET_TRANSFER_MANAGER_START_HOOK "$3" "$2" start-manager || die "assignment published; destination manager relaunch failed; recover $5"
   fi
   transfer_hook FM_FLEET_TRANSFER_SECONDMATE_START_HOOK "$3" "$1" start-secondmate || die "assignment published; SecondMate relaunch failed; recover $5"
-  with_lock python3 "$REGISTRY_BIN" "$REG" transfer-state --secondmate "$1" --transaction "$5" --state active >/dev/null
+  with_lock python3 "$REGISTRY_BIN" "$REG" transfer-state --secondmate "$1" --transaction "$5" --state active >/dev/null || die "transfer $5 was superseded by a newer transfer before activation"
   python3 "$TRANSFER_BIN" state --journal "$6" --set active >/dev/null
 }
 
