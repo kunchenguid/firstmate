@@ -14,8 +14,14 @@
 # removal reuses fm_backend_herdr_kill. The recorded herdr target lives in
 # <home>/state/.fleet-herdr-target and is transport, never authority. The live
 # home session lock is the reasoning authority read by fleet status and start.
+# Interactive harnesses such as the Codex TUI do not fire FirstMate's
+# SessionStart hook, so each manager launches with one bounded session-start
+# operational prompt: run bin/fm-session-start.sh exactly once (which takes the
+# home lock) and stay inside this manager's fleet-assigned authority. The launch
+# adds no approval, sandbox, or hook-trust bypass flag.
 # FM_FLEET_HERDR_LAUNCH_HOOK and FM_FLEET_HERDR_CLOSE_HOOK replace only the
-# transport in process tests; they receive the resolved human labels.
+# transport in process tests; they receive the resolved human labels, and the
+# launch hook also receives the exact pane command.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,7 +102,7 @@ case "$SUB" in
   launch)
     [ $# -eq 4 ] || { usage; exit 2; }
     root=$1 mid=$2 home=$3 harness=$4
-    case "$harness" in codex|claude|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;; *)
+    case "$harness" in codex|claude|opencode|pi|pi-signed|grok|cursor|omp) ;; *)
       echo "fm-fleet-herdr: unsupported interactive manager harness '$harness'" >&2
       exit 1
       ;;
@@ -107,9 +113,13 @@ case "$SUB" in
         exit 1
       }
     }
+    body="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions. You are fleet manager $mid for fleet $root with FM_HOME $home: a physical FirstMate is interchangeable capacity, so supervise only the SecondMates the fleet registry assigns to $mid (bin/fm-fleet.sh status), leave manager selection to bin/fm-fleet.sh, and never act for another manager's home."
+    prompt="\"\$($(sq "$FM_ROOT/bin/fm-operational-input.sh") encode session-start <<< $(sq "$body"))\""
+    [ "$harness" = opencode ] && prompt="--prompt $prompt"
+    cmd="cd $(sq "$FM_ROOT") && FM_HOME=$(sq "$home") FM_FLEET_ROOT=$(sq "$root") FM_FLEET_MANAGER_ID=$(sq "$mid") exec $(sq "$harness") $prompt"
     if [ -n "${FM_FLEET_HERDR_LAUNCH_HOOK:-}" ]; then
       "$FM_FLEET_HERDR_LAUNCH_HOOK" "$root" "$mid" "$home" "$harness" \
-        "$(fleet_ws_label "$mid")" "$(fleet_tab_label "$mid")"
+        "$(fleet_ws_label "$mid")" "$(fleet_tab_label "$mid")" "$cmd"
       exit $?
     fi
     need_tools
@@ -124,7 +134,6 @@ case "$SUB" in
     tab=${ids%% *}
     pane=${ids#* }
     [ -n "$tab" ] && [ -n "$pane" ] || { echo "fm-fleet-herdr: no tab/pane for $mid" >&2; exit 1; }
-    cmd="cd $(sq "$FM_ROOT") && FM_HOME=$(sq "$home") FM_FLEET_ROOT=$(sq "$root") FM_FLEET_MANAGER_ID=$(sq "$mid") exec $(sq "$harness")"
     verdict=$(fm_backend_herdr_send_text_submit "$session:$pane" "$cmd" 3 1 0.5 2>/dev/null) || verdict="send-failed"
     if [ "$verdict" = "send-failed" ]; then
       echo "fm-fleet-herdr: command submit for $mid failed; check the tab" >&2
