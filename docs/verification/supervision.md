@@ -236,7 +236,21 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-opencode-retry.test.sh
 ```
+
+## OpenCode retry backoff (usage-cap visibility, 2026-09-08)
+
+A usage-capped OpenCode lane never fails: the vendor holds the session in `session.status` type `retry` with an hours-long backoff while the pane still reads busy, so supervision read `working` for the whole stall (measured 2026-09-07: twelve lanes, ~22h backoff each).
+The detector is structural and reads no banner text.
+The vendor's retry Info is a closed shape `{type: "retry", attempt: NonNegativeInt, message: string, action?: {reason, provider, title, message, label, link?}, next: NonNegativeInt}` (read 2026-09-08 from `packages/schema/src/session-status-event.ts` on the vendor dev branch; installed binary here is opencode 1.18.29).
+`next` is the vendor's own scheduled-retry timestamp in epoch milliseconds, so `next - now` is the backoff horizon with no vendor string involved.
+The retry schedule has no max attempt count and a persistent failure keeps the session in `retry` with neither `session.error` nor `session.idle` following (vendor issue anomalyco/opencode#21960; independently reproduced downstream in openchamber/openchamber#2389).
+The vendor's own transient schedule caps at 30s absent a `Retry-After` header (`packages/opencode/src/session/retry.ts`), which is why a horizon above 600s reads as a quota-scale block while anything shorter keeps the existing working verdict.
+The spawn-installed plugin records `attempt`/`next`/model/session on every retry status and clears on idle; `bin/fm-crew-state.sh` reports `blocked` only while the busy record's own event is still `session-retry`, so a genuinely resumed turn drops the verdict even if a stale sidecar survives (contract: `bin/fm-opencode-retry.sh`).
+A real vendor retry was not triggered live for this change: doing so requires spending quota or forcing provider 429s, so the vendor-shape half rests on the schema read above plus fail-closed validation (non-numeric `attempt`/`next` records nothing, and supervision keeps its old verdict).
+The plugin handler was verified against the exact generated JS with synthetic `session.status` events (busy writes no record, numeric retry records with model and session, idle clears, malformed retry records nothing but still reports busy).
+Deterministic entry points are `tests/fm-opencode-retry.test.sh` and the cap cases in `tests/fm-crew-state.test.sh`.
 
 ## Turn-end guard
 

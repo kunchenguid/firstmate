@@ -294,6 +294,7 @@ family_for_basename() {
     fm-agy-quota-lib.test.sh|fm-agy-survey-suppress.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-opencode-retry.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -751,6 +752,7 @@ tests/fm-no-mistakes-required.test.sh 370
 tests/fm-omp-harness.test.sh 59969
 tests/fm-on.test.sh 34087
 tests/fm-opencode-primary-live-e2e.test.sh 21
+tests/fm-opencode-retry.test.sh 5000
 tests/fm-operational-input.test.sh 231
 tests/fm-peek-remote.test.sh 1018
 tests/fm-pending-reply.test.sh 86711

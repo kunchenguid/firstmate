@@ -59,6 +59,10 @@
 #   (r) a status log older than the task's own record publication is a previous
 #       incarnation's line and is ignored; an unknown semantic state still falls
 #       through to a valid status log.
+#   (s) the USAGE-CAP override: an opencode lane the vendor holds in retry with
+#       a quota-scale backoff horizon reads blocked, not working - while a
+#       transient retry, a genuinely resumed turn, an expired sidecar, and a
+#       non-opencode harness all keep the existing working verdict.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2534,6 +2538,117 @@ test_declared_stop_absorb_predicate_end_to_end() {
   pass "crew_is_declared_stopped: only a bound declaration plus a gone agent absorbs"
 }
 
+# (s) the usage-cap override: a capped opencode lane never fails - the vendor
+# holds the session in retry with an hours-long backoff while the pane still
+# reads busy. The plugin records the vendor's own backoff horizon (see
+# tests/fm-opencode-retry.test.sh), and the helper reads blocked from its own
+# record plus that horizon, never from rendered text.
+test_opencode_cap_backoff_is_blocked() {
+  reset_fakes
+  local d; d=$(new_case cap-blocked)
+  make_repo_on_branch "$d/wt" fm/feat-cap
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap.meta" "window=fm:fm-feat-cap" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-cap)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap busy --gen "$gen" \
+    --source opencode-plugin --event session-retry
+  "$ROOT/bin/fm-opencode-retry.sh" record "$d/state" feat-cap 3 \
+    $(( ($(date +%s) + 79200) * 1000 )) "opencode/muse-spark-1.3-contributor-free" "ses_cap" \
+    || fail "retry record refused the cap fixture"
+  local out; out=$(run_crew_state "$d" feat-cap)
+  assert_contains "$out" "state: blocked" "cap backoff -> blocked"
+  assert_contains "$out" "source: pane" "cap backoff stays pane-sourced"
+  assert_contains "$out" "attempt 3" "cap detail names the attempt"
+  assert_contains "$out" "opencode/muse-spark-1.3-contributor-free" "cap detail names the bound model"
+  assert_not_contains "$out" "state: working" "a capped lane must never read working"
+  pass "an opencode lane held in quota-scale retry reads blocked"
+}
+
+# A transient retry (seconds-long horizon) keeps the existing working verdict.
+test_opencode_transient_retry_stays_working() {
+  reset_fakes
+  local d; d=$(new_case cap-transient)
+  make_repo_on_branch "$d/wt" fm/feat-cap-transient
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap-transient.meta" "window=fm:fm-feat-cap-transient" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-cap-transient)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap-transient busy --gen "$gen" \
+    --source opencode-plugin --event session-retry
+  "$ROOT/bin/fm-opencode-retry.sh" record "$d/state" feat-cap-transient 1 \
+    $(( ($(date +%s) + 8) * 1000 )) || fail "retry record refused the transient fixture"
+  local out; out=$(run_crew_state "$d" feat-cap-transient)
+  assert_contains "$out" "state: working" "transient retry -> working"
+  assert_not_contains "$out" "state: blocked" "a seconds-long backoff must not read blocked"
+  pass "an opencode lane in transient retry stays working"
+}
+
+# A genuinely resumed turn writes session-busy, which drops the blocked
+# verdict even if a stale cap sidecar survives the transition.
+test_opencode_resumed_turn_drops_cap_verdict() {
+  reset_fakes
+  local d; d=$(new_case cap-resumed)
+  make_repo_on_branch "$d/wt" fm/feat-cap-resumed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap-resumed.meta" "window=fm:fm-feat-cap-resumed" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-cap-resumed)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap-resumed busy --gen "$gen" \
+    --source opencode-plugin --event session-retry
+  "$ROOT/bin/fm-opencode-retry.sh" record "$d/state" feat-cap-resumed 3 \
+    $(( ($(date +%s) + 79200) * 1000 )) || fail "retry record refused the stale fixture"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap-resumed busy --gen "$gen" \
+    --source opencode-plugin --event session-busy
+  local out; out=$(run_crew_state "$d" feat-cap-resumed)
+  assert_contains "$out" "state: working" "resumed turn -> working despite a stale sidecar"
+  assert_not_contains "$out" "state: blocked" "session-busy must outrank a stale sidecar"
+  pass "a resumed opencode turn drops the cap verdict"
+}
+
+# An expired sidecar no longer describes the present and must not block.
+test_opencode_expired_sidecar_stays_working() {
+  reset_fakes
+  local d; d=$(new_case cap-expired)
+  make_repo_on_branch "$d/wt" fm/feat-cap-expired
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap-expired.meta" "window=fm:fm-feat-cap-expired" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-cap-expired)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap-expired busy --gen "$gen" \
+    --source opencode-plugin --event session-retry
+  "$ROOT/bin/fm-opencode-retry.sh" record "$d/state" feat-cap-expired 9 \
+    $(( ($(date +%s) - 3600) * 1000 )) || fail "retry record refused the expired fixture"
+  local out; out=$(run_crew_state "$d" feat-cap-expired)
+  assert_contains "$out" "state: working" "expired sidecar -> working"
+  assert_not_contains "$out" "state: blocked" "an expired sidecar must not read blocked"
+  pass "an expired retry sidecar keeps the working verdict"
+}
+
+# A non-opencode harness ignores the sidecar entirely.
+test_non_opencode_harness_ignores_retry_sidecar() {
+  reset_fakes
+  local d; d=$(new_case cap-other-harness)
+  make_repo_on_branch "$d/wt" fm/feat-cap-other
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap-other.meta" "window=fm:fm-feat-cap-other" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-cap-other)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-cap-other busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  "$ROOT/bin/fm-opencode-retry.sh" record "$d/state" feat-cap-other 3 \
+    $(( ($(date +%s) + 79200) * 1000 )) || fail "retry record refused the cross-harness fixture"
+  local out; out=$(run_crew_state "$d" feat-cap-other)
+  assert_contains "$out" "state: working" "other harness -> working despite a sidecar"
+  assert_not_contains "$out" "state: blocked" "the cap verdict is opencode-only"
+  pass "a non-opencode harness ignores the retry sidecar"
+}
+
 # ---------------------------------------------------------------------------
 # (p) The declared-stop RECORD itself (bin/fm-stopped-lib.sh): pure functions
 #     over exact bytes on disk - no agent, no backend, no endpoint. The pairing
@@ -3221,6 +3336,11 @@ test_self_died_worker_still_reports_exited
 test_declared_stop_cannot_silence_a_later_incarnation
 test_declared_stop_never_overrides_a_live_agent
 test_declared_stop_absorb_predicate_end_to_end
+test_opencode_cap_backoff_is_blocked
+test_opencode_transient_retry_stays_working
+test_opencode_resumed_turn_drops_cap_verdict
+test_opencode_expired_sidecar_stays_working
+test_non_opencode_harness_ignores_retry_sidecar
 test_stopped_record_round_trips_reason_and_incarnation
 test_stopped_record_stops_binding_when_the_incarnation_changes
 test_stopped_absent_record_is_never_declared

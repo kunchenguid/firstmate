@@ -86,8 +86,12 @@
 #      published so recently that its harness cannot be expected to have
 #      started yet (the registration grace at within_spawn_grace, below). Then
 #      the recorded backend's pane busy state, then the status log's last line
-#      only when its verb maps to a recognized run-state. Decision-only events
-#      such as `resolved` never become current state or detail.
+#      only when its verb maps to a recognized run-state. A busy opencode lane
+#      whose own record event is still session-retry and whose retry-backoff
+#      horizon is quota-scale reads `blocked`, not working
+#      (fm_crew_opencode_cap_detail, contract in bin/fm-opencode-retry.sh).
+#      Decision-only events such as `resolved` never become current state or
+#      detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -370,6 +374,87 @@ crew_busy_verdict() {  # <target>
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+}
+
+# fm_crew_opencode_cap_detail: the usage-cap override. A capped opencode lane
+# still reports busy - the vendor holds the session in `retry` with an
+# hours-long backoff instead of failing - so a busy verdict alone cannot tell
+# it from a working lane. Prints the blocked detail and returns 0 on either
+# shape: the structural one (all three hold: the task runs on opencode, its
+# semantic record's own event is still the latched `session-retry` - a
+# genuinely resumed turn writes `session-busy` first, which drops this verdict
+# even if a stale sidecar survives - and bin/fm-opencode-retry.sh, contract
+# owned there, classifies the vendor's own backoff horizon as quota-scale),
+# or the idle one (2026-09-14: the record says the turn ended on the plugin's
+# idle event and the pane tail carries the cap verbatim through the same
+# helper's scan-text; a working lane's scrollback never counts). Anything else
+# returns 1, keeping the existing working verdict. Reads only the task's own
+# record, sidecar, and pane tail.
+fm_retry_horizon_human() {  # <seconds>
+  local s=$1 h m
+  case "$s" in ''|*[!0-9]*) printf '~?'; return ;; esac
+  if [ "$s" -ge 3600 ]; then
+    h=$((s / 3600)); m=$(((s % 3600) / 60))
+    printf '~%sh%sm' "$h" "$m"
+  elif [ "$s" -ge 60 ]; then
+    m=$((s / 60)); s=$((s % 60))
+    printf '~%sm%ss' "$m" "$s"
+  else
+    printf '~%ss' "$s"
+  fi
+}
+
+fm_crew_opencode_cap_detail() {
+  local rec rest r_state r_source r_event retry_out f cap_tail
+  local r_status='' r_attempt='' r_horizon='' r_model='' r_match=''
+  case "$HARNESS" in opencode*) ;; *) return 1 ;; esac
+  rec=$(fm_busy_record_read "$STATE" "$ID") || return 1
+  r_state=${rec%% *}; rest=${rec#* }
+  r_source=${rest%% *}; rest=${rest#* }
+  r_event=${rest%% *}
+  [ "$r_source" = opencode-plugin ] || return 1
+  if [ "$r_state" = busy ] && [ "$r_event" = session-retry ]; then
+    retry_out=$("$SCRIPT_DIR/fm-opencode-retry.sh" check "$STATE" "$ID" 2>/dev/null) || return 1
+    for f in $retry_out; do
+      case "$f" in
+        status=*) r_status=${f#status=} ;;
+        attempt=*) r_attempt=${f#attempt=} ;;
+        horizon_s=*) r_horizon=${f#horizon_s=} ;;
+        model=*) r_model=${f#model=} ;;
+      esac
+    done
+    [ "$r_status" = blocked ] || return 1
+    case "$r_attempt" in ''|*[!0-9]*) return 1 ;; esac
+    case "$r_horizon" in ''|*[!0-9]*) return 1 ;; esac
+    if [ -n "$r_model" ]; then
+      r_model=", model $r_model"
+    fi
+    printf 'opencode quota-scale retry backoff (attempt %s, next retry in %s%s): vendor holds the session in retry, no forward progress until then' \
+      "$r_attempt" "$(fm_retry_horizon_human "$r_horizon")" "$r_model"
+    return 0
+  fi
+  # The idle shape: the turn ended on the plugin's idle event with no sidecar
+  # left, and the pane tail still shows the cap verbatim. A busy lane never
+  # reaches here, so old scrollback on a working lane cannot report blocked.
+  [ "$r_state" = idle ] || return 1
+  case "$r_event" in session-idle|session-status-idle) ;; *) return 1 ;; esac
+  case "${TASK_BACKEND:-}" in '' ) return 1 ;; esac
+  case "${BACKEND_TARGET:-}" in '' ) return 1 ;; esac
+  cap_tail=$(mktemp "${TMPDIR:-/tmp}/fm-opencode-cap.XXXXXX") || return 1
+  if ! fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" \
+    "${FM_OPENCODE_CAP_TEXT_LINES:-60}" "$EXPECTED_LABEL" > "$cap_tail" 2>/dev/null; then
+    rm -f "$cap_tail"
+    return 1
+  fi
+  retry_out=$("$SCRIPT_DIR/fm-opencode-retry.sh" scan-text --file "$cap_tail" 2>/dev/null) \
+    || { rm -f "$cap_tail"; return 1; }
+  rm -f "$cap_tail"
+  for f in $retry_out; do
+    case "$f" in match=*) r_match=${f#match=} ;; esac
+  done
+  [ -n "$r_match" ] || return 1
+  printf 'opencode free-tier cap shown in pane (idle after the refusal, %s, no retry horizon on record): vendor parked the session with no forward progress' \
+    "$r_match"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -1050,7 +1135,11 @@ if [ "$KIND" != secondmate ]; then
   fi
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      if CAP_DETAIL=$(fm_crew_opencode_cap_detail); then
+        emit blocked pane "$CAP_DETAIL"
+      fi
+      emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
     *) PANE_UNKNOWN_REASON="harness state unavailable ($BUSY_VERDICT)" ;;
   esac

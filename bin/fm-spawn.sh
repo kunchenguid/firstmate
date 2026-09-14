@@ -507,6 +507,14 @@ if ! declare -f fm_agy_pin_task >/dev/null 2>&1; then
   # shellcheck source=bin/fm-agy-descent-lib.sh
   . "$SCRIPT_DIR/fm-agy-descent-lib.sh"
 fi
+# shellcheck source=bin/fm-opencode-ladder-lib.sh
+. "$SCRIPT_DIR/fm-opencode-ladder-lib.sh"
+if ! declare -f fm_opencode_pin_task >/dev/null 2>&1; then
+  # The per-task ladder pin this file records below; guarded like every other
+  # shared source here.
+  # shellcheck source=bin/fm-opencode-descent-lib.sh
+  . "$SCRIPT_DIR/fm-opencode-descent-lib.sh"
+fi
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -1865,6 +1873,39 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  opencode)
+    # The captain's free-then-Go ladder, enforced rather than remembered
+    # (bin/fm-opencode-ladder-lib.sh owns the rungs, the reactive evidence
+    # rule, and why an absent reading never moves a launch). It runs here
+    # because this case is on the one path every opencode crewmate and scout
+    # launch already takes, so an ordinary dispatch has nowhere to route
+    # around it. It never refuses: a proven free cap rewrites the model to
+    # the Go tier, and anything less than proof keeps the requested model
+    # (free when none was requested), so a broken gate degrades to today's
+    # behavior rather than a stalled fleet. MODEL_SET is left as it was: the
+    # meta record below reads MODEL itself, so the routed tier is what
+    # recovery relaunches on.
+    _FM_OPENCODE_LADDER_NOTE=$(mktemp "${TMPDIR:-/tmp}/fm-opencode-ladder.XXXXXX" 2>/dev/null) || _FM_OPENCODE_LADDER_NOTE=
+    if [ -n "$_FM_OPENCODE_LADDER_NOTE" ]; then
+      _FM_OPENCODE_LADDER_MODEL=$(fm_opencode_ladder_model "${MODEL:-}" "$STATE" 2>"$_FM_OPENCODE_LADDER_NOTE") \
+        || _FM_OPENCODE_LADDER_MODEL=${MODEL:-}
+      [ -n "$_FM_OPENCODE_LADDER_MODEL" ] || _FM_OPENCODE_LADDER_MODEL=${MODEL:-}
+      MODEL=$_FM_OPENCODE_LADDER_MODEL
+      [ -s "$_FM_OPENCODE_LADDER_NOTE" ] && cat "$_FM_OPENCODE_LADDER_NOTE" >&2 || true
+      rm -f "$_FM_OPENCODE_LADDER_NOTE"
+    fi
+    unset _FM_OPENCODE_LADDER_NOTE _FM_OPENCODE_LADDER_MODEL
+    # The descent tick cannot see FM_OPENCODE_LADDER_OVERRIDE where it runs -
+    # the watcher is a long-lived process that predates the instruction - so
+    # a launch held on free on the captain's word is recorded per task where
+    # the tick reads it back, and a launch under the ordinary rules clears
+    # any earlier pin (bin/fm-opencode-descent-lib.sh owns both).
+    if [ -n "${FM_OPENCODE_LADDER_OVERRIDE:-}" ]; then
+      fm_opencode_pin_task "$STATE" "$ID" "$FM_OPENCODE_LADDER_OVERRIDE" || true
+    else
+      fm_opencode_pin_clear "$STATE" "$ID" || true
+    fi
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -3798,6 +3839,11 @@ EOF
 // OpenCode's own event stream are reported. Context percentage and quota
 // are not reported because OpenCode does not expose a context window size
 // and the Go plan has no public usage API.
+//
+// Retry evidence: on session.status retry, records the vendor's own
+// attempt/next backoff horizon via bin/fm-opencode-retry.sh (contract owned
+// there), so supervision can tell a quota-scale block from a transient
+// retry without reading rendered text. Cleared on idle.
 import { execFile } from "node:child_process";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
@@ -3809,11 +3855,27 @@ const busyEvent = (state, event) =>
 const HERDR_PANE = "${HERDR_PANE_ID:-}";
 let lastModel = "";
 const reportModel = (modelID) => {
-  if (!HERDR_PANE || !modelID || modelID === lastModel) return;
+  if (!modelID || modelID === lastModel) return;
   lastModel = modelID;
+  if (!HERDR_PANE) return;
   execFile("$FM_ROOT/bin/fm-herdr-opencode-metadata.sh",
     [HERDR_PANE, modelID], () => {});
 };
+const recordRetry = (status, sessionID) =>
+  new Promise((resolve) => {
+    const attempt = status && status.attempt;
+    const next = status && status.next;
+    if (typeof attempt !== "number" || typeof next !== "number") { resolve(); return; }
+    execFile("$FM_ROOT/bin/fm-opencode-retry.sh", [
+      "record", "$STATE_REAL", "$ID",
+      String(attempt), String(next), lastModel || "-", sessionID || "-",
+    ], () => resolve());
+  });
+const clearRetry = () =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-opencode-retry.sh",
+      ["clear", "$STATE_REAL", "$ID"], () => resolve());
+  });
 export const FmBusyState = async () => {
   let activeSession = null;
   return {
@@ -3828,15 +3890,20 @@ export const FmBusyState = async () => {
       }
       if (event.type === "session.status") {
         const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
+        const status = event.properties.status;
+        const statusType = status && status.type;
         if (statusType === "busy" || statusType === "retry") {
           if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
+          if (sessionID === activeSession) {
+            await busyEvent("busy", "session-" + statusType);
+            if (statusType === "retry") await recordRetry(status, sessionID);
+          }
           return;
         }
         if (statusType === "idle" && sessionID === activeSession) {
           activeSession = null;
           await busyEvent("idle", "session-status-idle");
+          await clearRetry();
         }
         return;
       }
@@ -3844,6 +3911,7 @@ export const FmBusyState = async () => {
         if (event.properties.sessionID === activeSession) {
           activeSession = null;
           await busyEvent("idle", "session-idle");
+          await clearRetry();
         }
         await new Promise((resolve) => {
           execFile("touch", ["$TURNEND"], () => resolve());
