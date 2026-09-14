@@ -131,7 +131,8 @@ ok - codex codex-cli 0.154.0 reached the working row after the verified trust ch
 The fresh repository rendered `Do you trust the contents of this directory?` with `› 1. Yes, continue` above `2. No, quit`.
 After one Enter, the same pane rendered `• Working (4s • esc to interrupt)` while processing the supplied prompt.
 The live guard refuses a missing or changed menu and does not report success until the working row appears.
-The spawn-path regression does not mutate Codex's trust store; it only accepts the isolated task pane's verified preselected choice through the existing backend key primitive.
+The spawn-path gate reads that row through the shared codex busy signature (`esc to interrupt`, `FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT`), so the gate and the supervisor agree on when a Codex turn is running.
+The spawn-path regression does not mutate Codex's trust store; it only accepts the isolated task pane's verified preselected choice through the existing backend key primitive, and it runs on the fresh-worktree launch only - not on a relaunch or a secondmate spawn.
 
 ## tmux
 

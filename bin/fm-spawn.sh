@@ -480,6 +480,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -3195,73 +3197,56 @@ rovo_endpoint_cleanup() {
 # the TUI on the exact directory-trust dialog before Codex reads that brief.
 # Unlike the general approval and sandbox controls, this gate answers only the
 # documented preselected `1. Yes, continue` option for the isolated worktree
-# Firstmate just created, then requires Codex's verified `• Working (...)` row.
-# A different or ambiguous trust surface is never answered, and a pane that
-# never reaches the working row is refused before spawn success is reported.
+# Firstmate just created, then requires positive proof that the brief is being
+# processed - the same codex busy signature the supervisor reads, through the
+# shared fm_busy_lines_match - before the spawn reports success. A trust
+# surface that is not the complete verified menu is never answered, so a
+# changed or ambiguous one is refused by the readiness deadline rather than
+# guessed at. The gate runs on the fresh-worktree launch only: a relaunch
+# adopts an endpoint whose directory Codex already trusts, and a secondmate
+# runs in the project itself, so neither creates the first-run dialog.
 CODEX_TRUST_DIALOG='Do you trust the contents of this directory?'
 CODEX_TRUST_OPTION='› 1. Yes, continue'
 CODEX_TRUST_REJECT_OPTION='2. No, quit'
-CODEX_WORKING_ROW='• Working ('
-CODEX_TRUST_SEEN=0
 CODEX_TRUST_ANSWERED=0
-CODEX_READINESS_FAILURE=
 
 codex_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# The brief travels on the launch command and Codex echoes it into the pane, so
+# the dialog is recognized by the menu SHAPE on its own rows - the preselected
+# safe option and the reject option exactly once each - not by counting how
+# often its prose appears in the scrollback.
 codex_pane_shows_trust_dialog() {  # <plain-pane-capture>
   printf '%s\n' "$1" | awk -v dialog="$CODEX_TRUST_DIALOG" \
     -v option="$CODEX_TRUST_OPTION" -v reject="$CODEX_TRUST_REJECT_OPTION" '
     index($0, dialog) { dialog_count++ }
     index($0, option) && $0 ~ /^[[:space:]]*›[[:space:]]*1[.] Yes, continue[[:space:]]*$/ { option_count++ }
     index($0, reject) && $0 ~ /^[[:space:]]*2[.] No, quit[[:space:]]*$/ { reject_count++ }
-    END { exit !(dialog_count == 1 && option_count == 1 && reject_count == 1) }
+    END { exit !(dialog_count >= 1 && option_count == 1 && reject_count == 1) }
   '
 }
 
-codex_pane_has_trust_surface() {
-  printf '%s\n' "$1" | grep -Fq 'Do you trust the contents' \
-    || printf '%s\n' "$1" | grep -Fq 'Yes, continue' \
-    || printf '%s\n' "$1" | grep -Fq 'No, quit'
-}
-
-codex_pane_is_working() {
-  printf '%s\n' "$1" | grep -Fq "$CODEX_WORKING_ROW" \
-    && printf '%s\n' "$1" | grep -Eq '• Working \([0-9]+s[[:space:]]+•[[:space:]]+esc to interrupt\)'
+codex_pane_is_working() {  # <plain-pane-capture>
+  printf '%s' "$1" | fm_busy_lines_match codex
 }
 
 codex_wait_for_working() {
   local pane i=0 max=${FM_CODEX_READY_POLLS:-60} interval=${FM_CODEX_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(codex_capture)
-    if codex_pane_is_working "$pane"; then
-      if [ "$CODEX_TRUST_SEEN" -eq 1 ] && [ "$CODEX_TRUST_ANSWERED" -ne 1 ]; then
-        :
-      elif [ "$CODEX_TRUST_SEEN" -eq 1 ] || ! codex_pane_has_trust_surface "$pane"; then
-        return 0
-      else
-        CODEX_READINESS_FAILURE='Codex showed a changed or ambiguous directory-trust surface while processing the brief'
-        return 1
-      fi
-    elif codex_pane_shows_trust_dialog "$pane"; then
-      CODEX_TRUST_SEEN=1
+    if codex_pane_shows_trust_dialog "$pane"; then
       if [ "$CODEX_TRUST_ANSWERED" -eq 0 ]; then
         spawn_send_key "$T" Enter
         CODEX_TRUST_ANSWERED=1
       fi
-    elif codex_pane_has_trust_surface "$pane"; then
-      CODEX_READINESS_FAILURE='Codex showed a changed or ambiguous directory-trust surface; refusing to guess its safe choice'
-      return 1
+    elif codex_pane_is_working "$pane"; then
+      return 0
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
-  if [ "$CODEX_TRUST_ANSWERED" -eq 1 ]; then
-    CODEX_READINESS_FAILURE='Codex did not start processing its brief after the directory-trust choice was accepted'
-  else
-    CODEX_READINESS_FAILURE='Codex did not show a verified ready turn for the supplied brief'
-  fi
   return 1
 }
 
@@ -4314,9 +4299,13 @@ if [ "$HARNESS" = rovo ]; then
     exit 1
   fi
 fi
-if [ "$HARNESS" = codex ]; then
+if [ "$HARNESS" = codex ] && [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ]; then
   if ! codex_wait_for_working; then
-    codex_spawn_fail "${CODEX_READINESS_FAILURE:-Codex did not reach a verified ready turn in window $T}"
+    if [ "$CODEX_TRUST_ANSWERED" -eq 1 ]; then
+      codex_spawn_fail "Codex did not start processing its brief after the directory-trust choice was accepted in window $T"
+    else
+      codex_spawn_fail "Codex did not show a verified ready turn for the supplied brief in window $T"
+    fi
     exit 1
   fi
 fi

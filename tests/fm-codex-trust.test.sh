@@ -162,12 +162,27 @@ test_codex_changed_or_unsafe_trust_prompt_refuses_without_guessing() {
     rc=0
     out=$(run_codex_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$mode") || rc=$?
     [ "$rc" -ne 0 ] || fail "Codex $mode trust prompt must refuse the spawn"
-    assert_contains "$out" "changed or ambiguous directory-trust surface" "Codex $mode refusal lacked its concrete reason"
+    assert_contains "$out" "did not show a verified ready turn for the supplied brief" \
+      "Codex $mode refusal lacked its concrete reason"
     assert_not_contains "$out" "spawned $id" "Codex $mode trust prompt reported a successful spawn"
     assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" kill-window "Codex $mode refusal left its endpoint running"
     [ "$(count_bare_enters "$CASE_DIR/tmux-calls.log")" -eq 1 ] || fail "Codex $mode prompt received an unsafe extra Enter"
   done
   pass "fm-spawn: Codex refuses changed and unsafe trust prompts without guessing"
+}
+
+test_codex_already_trusted_directory_starts_without_a_trust_answer() {
+  local id rec out rc
+  id="codex-trust-trusted-$$"
+  rec=$(make_codex_spawn_case trusted "$id")
+  read_codex_spawn_record "$rec"
+  out=$(run_codex_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" trusted)
+  rc=$?
+  expect_code 0 "$rc" "an already-trusted Codex directory should spawn without a trust prompt"
+  assert_contains "$out" "spawned $id harness=codex" "already-trusted Codex spawn did not report success"
+  [ "$(count_bare_enters "$CASE_DIR/tmux-calls.log")" -eq 1 ] || fail "an already-trusted Codex pane received an extra Enter"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" kill-window "already-trusted Codex spawn must keep its endpoint"
+  pass "fm-spawn: an already-trusted Codex directory reaches its working turn with no trust answer"
 }
 
 test_codex_persistent_trust_prompt_refuses_after_one_answer() {
@@ -186,6 +201,7 @@ test_codex_persistent_trust_prompt_refuses_after_one_answer() {
 
 test_codex_fresh_directory_trust_is_answered_and_processing_is_verified
 test_codex_changed_or_unsafe_trust_prompt_refuses_without_guessing
+test_codex_already_trusted_directory_starts_without_a_trust_answer
 test_codex_persistent_trust_prompt_refuses_after_one_answer
 
 printf '# all fm-codex-trust tests passed\n'
