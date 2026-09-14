@@ -657,8 +657,8 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not force the regular TUI while threading the requested model and max thinking level"
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not carry Pi's documented per-run trust override with its regular TUI, model, thinking, and extension semantics"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -679,8 +679,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not carry Pi's documented per-run trust override with its regular TUI, model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -720,13 +720,33 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       if [ "$version" = 0.82.0 ]; then
         assert_not_contains "$launch" "--tui-mode" \
           "$harness $version launch must omit unsupported --tui-mode"
+        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --approve" \
+          "$harness $version launch must retain Pi's supported trust override without --tui-mode"
       else
-        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular" \
-          "$harness $version launch must preserve the regular TUI"
+        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular --approve" \
+          "$harness $version launch must preserve the regular TUI and Pi's supported trust override"
       fi
     done
   done
   pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
+}
+
+test_pi_family_trust_override_reaches_scouts() {
+  local harness rec id out status launch
+  for harness in pi pi-signed; do
+    id="profile-${harness}-trust-scout-z8e"
+    rec=$(make_spawn_case "profile-${harness}-trust-scout" "$harness" "$id")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --scout --harness "$harness")
+    status=$?
+    expect_code 0 "$status" "$harness scout spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular --approve" \
+      "$harness scout launch did not carry Pi's documented per-run trust override"
+  done
+  pass "Pi-family ship and scout launches carry the documented per-run trust override"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
@@ -775,8 +795,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
-    "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not carry Pi's documented per-run trust override with its primary extension launch shape"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# evidence begin: persistent secondmate\n%s\n' "$out"
     printf 'launch command:\n%s\noriginal charter:\n' "$launch"
@@ -1293,7 +1313,8 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex " "codex launch did not run codex"
   assert_not_contains "$launch" "--permission-mode" "the claude permission flag must not leak into a codex launch"
-  pass "config/claude-permission-mode changes claude launches only"
+  assert_not_contains "$launch" "--approve" "Pi's per-run trust override must not leak into a codex launch"
+  pass "Pi trust and Claude permission overrides stay scoped to their own runtimes"
 }
 
 test_worker_launch_delivers_role_scope
@@ -1324,6 +1345,7 @@ test_batch_preserves_native_ultra
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_pi_family_trust_override_reaches_scouts
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
