@@ -1437,6 +1437,7 @@ test_account_pin_preflight_refuses() {
       *) assert_contains "$out" "the Pi account pin $HOME_DIR/accounts/pi cannot authenticate --provider fake (pi auth check: not_ready" \
         "$harness preflight refusal must name the pin, the provider, and the check's answer" ;;
     esac
+    assert_not_contains "$out" "command not found" "$harness refusal before launch must clean up without a shell error"
     [ ! -s "$LAUNCH_LOG" ] || fail "$harness spawn under an unauthenticated pin delivered a launch"
     assert_absent "$HOME_DIR/state/$id.meta" "$harness spawn under an unauthenticated pin published a task"
   done

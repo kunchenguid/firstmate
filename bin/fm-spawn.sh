@@ -1224,12 +1224,13 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if spawn_fresh_commit_rollback; then
-      spawn_return_abort_lease || true
+      [ -z "${SPAWN_LEASE_RETURN_ON_ABORT:-}" ] || spawn_return_abort_lease || true
     else
       status=1
     fi
   else
-    spawn_return_abort_lease || true
+    # An abort before any lease was armed can precede this helper's definition.
+    [ -z "${SPAWN_LEASE_RETURN_ON_ABORT:-}" ] || spawn_return_abort_lease || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
