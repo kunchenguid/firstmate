@@ -3566,4 +3566,28 @@ kill -0 -"$CRASH_PID" 2>/dev/null \
 pass "a group whose leader died to something else is still refused, not signalled"
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
+# --- a symlinked state root names its real regression, not "missing" --------
+#
+# fm-procevent.sh's own top-level guard (`[ -e "$STATE" ] || [ -L "$STATE" ]`)
+# and fm_procevent_state_root_resolve's `cd -P` both treat a state root that
+# is itself a symlink as a supported spelling - a home may legitimately point
+# FM_HOME/state at a directory that lives elsewhere. Regressed to
+# group-writable, that symlinked root must be diagnosed the same as a plain
+# directory would be: the die message's "reason: bad-mode" is what lets
+# fm-bootstrap.sh's detect_procevent_state_root print the actionable "chmod
+# 750" line instead of falling back to its generic catch-all.
+
+HSYMROOT="$TMP_ROOT/symlinked-state-root"
+HSYMROOT_REAL="$TMP_ROOT/symlinked-state-root-real"
+mkdir -p "$HSYMROOT_REAL/state/procevent" "$HSYMROOT"
+ln -s "$HSYMROOT_REAL/state" "$HSYMROOT/state"
+chmod 775 "$HSYMROOT_REAL/state"
+symroot_status=0
+symroot_out=$(pe "$HSYMROOT" list 2>&1) || symroot_status=$?
+chmod 700 "$HSYMROOT_REAL/state"
+[ "$symroot_status" -ne 0 ] || fail "list succeeded against a group-writable symlinked state root"
+assert_contains "$symroot_out" "reason: bad-mode" \
+  "a symlinked state root that regressed to group-writable is diagnosed as bad-mode, not missing"
+pass "a symlinked state root names its bad-mode regression instead of reading as missing"
+
 printf '\nall procevent tests passed\n'

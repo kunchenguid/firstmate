@@ -3851,6 +3851,64 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+# perl's JSON::PP is packaged separately on minimal installs (hit live on a bare
+# Fedora perl), and every task-field read here decodes through it. Without the
+# up-front guard the decode returns an empty string inside a command
+# substitution and the command carries on against silently blank fields, so a
+# perl that cannot load the module must stop the run with the install hint.
+test_missing_json_decoder_fails_with_install_hint() {
+  local home out rc
+  home=$(make_home missing-json-decoder)
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  set +e
+  out=$(run_captain "$home" diverged 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a perl without JSON::PP should fail the run, got success: $out"
+  printf '%s\n' "$out" | grep -F 'perl JSON::PP module is required' >/dev/null \
+    || fail "the failure should name the missing perl JSON::PP module: $out"
+  printf '%s\n' "$out" | grep -F "sudo dnf install perl-JSON-PP" >/dev/null \
+    || fail "the failure should carry the per-platform install hint: $out"
+  pass "a perl without JSON::PP stops the run with an actionable install hint"
+}
+
+# The binding commands write, remove, and read one small key=value file and
+# never decode a task field, so a home that has not installed JSON::PP yet must
+# keep binding its channels - bin/fm-bearings-board.sh binds its board source on
+# every serve and would otherwise abort on exactly the hosts this guard targets.
+test_binding_commands_survive_a_missing_json_decoder() {
+  local home out rc
+  home=$(make_home binding-without-json-decoder)
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  out=$(run_captain "$home" bind sample-board sample-origin 2>&1) \
+    || fail "bind should not need the perl JSON::PP module: $out"
+  out=$(run_captain "$home" binding sample-board 2>&1) \
+    || fail "binding should not need the perl JSON::PP module: $out"
+  [ "$out" = sample-origin ] \
+    || fail "binding should report the recorded origin, got: $out"
+  out=$(run_captain "$home" unbind sample-board 2>&1) \
+    || fail "unbind should not need the perl JSON::PP module: $out"
+
+  set +e
+  run_captain "$home" binding sample-board >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unbound source should not report a binding"
+  pass "bind, binding, and unbind keep working without the perl JSON::PP module"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -3901,3 +3959,5 @@ test_complete_accepts_a_migrated_inventory_on_beads
 test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
+test_missing_json_decoder_fails_with_install_hint
+test_binding_commands_survive_a_missing_json_decoder
