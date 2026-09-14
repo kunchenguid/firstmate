@@ -92,7 +92,10 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then
           printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
           exit "${FM_FAKE_AXI_STATUS_RUN_ERROR:-0}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+        else
+          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+          exit "${FM_FAKE_AXI_STATUS_ERROR:-0}"
+        fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
@@ -276,6 +279,7 @@ reset_fakes() {
   NM_HOME="$TMP_ROOT/no-mistakes-unused"
   export NM_HOME
   FM_FAKE_AXI_STATUS=""
+  FM_FAKE_AXI_STATUS_ERROR=0
   FM_FAKE_AXI_HOME=""
   FM_FAKE_AXI_HOME_ERROR=0
   FM_FAKE_AXI_STATUS_RUN_ERROR=0
@@ -306,7 +310,7 @@ reset_fakes() {
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
-  export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR
+  export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
@@ -3058,6 +3062,158 @@ PY
   [ "$rc" = 0 ] || fail 'capped inventory failures'
 }
 
+make_no_python_toolbin() {
+  local tb=$1/no-python tool real
+  mkdir -p "$tb"
+  for tool in bash git grep sed head cut tail dirname perl awk tr date stat ps uname readlink sleep; do
+    real=$(command -v "$tool") || fail "missing fixture tool: $tool"
+    ln -s "$real" "$tb/$tool"
+  done
+  PATH="$tb" bash -c '! command -v python3 && ! command -v sqlite3' || fail 'fixture exposes optional inventory readers'
+  printf '%s\n' "$tb"
+}
+
+test_complete_inventory_without_python_keeps_gate() {
+  make_competing_runs_case no-python-complete running cancelled
+  local d=$TMP_ROOT/no-python-complete toolbin out
+  toolbin=$(make_no_python_toolbin "$d")
+  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+  assert_contains "$out" 'state: parked' 'R5 complete inventory keeps its gate without Python'
+  assert_contains "$out" 'parked at review: 2 finding(s)' 'optional dependencies do not remove gate detail'
+  assert_contains "$out" '01NEW' 'complete inventory retains the selected id without Python'
+  pass 'R5 complete inventory without Python keeps the replacement gate'
+}
+
+test_complete_ambiguity_without_python_names_both_ids() {
+  make_competing_runs_case no-python-ambiguous running pending
+  local d=$TMP_ROOT/no-python-ambiguous toolbin out
+  toolbin=$(make_no_python_toolbin "$d")
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+  assert_contains "$out" 'state: unknown' 'complete competing runs remain ambiguous without Python'
+  assert_contains "$out" '01NEW' 'R5 complete ambiguity retains the newer id without Python'
+  assert_contains "$out" '01OLD' 'complete ambiguity retains the older id without Python'
+  pass 'R5 complete ambiguity without Python names both ids'
+}
+
+test_capped_without_python_preserves_available_ids() {
+  local placement d toolbin out
+  for placement in visible hidden; do
+    make_capped_runs_case "no-python-capped-$placement" running pending "$placement"
+    d=$TMP_ROOT/no-python-capped-$placement
+    toolbin=$(make_no_python_toolbin "$d")
+    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+    assert_contains "$out" 'state: unknown' 'unreadable complete inventory must fail closed'
+    assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without Python'
+    assert_contains "$out" 'inventory' 'unknown explains that complete inventory could not be read'
+    assert_not_contains "$out" '01FOREIGN' 'unreadable inventory does not invent foreign authority'
+  done
+  pass 'R5 capped lookup without Python preserves available ids'
+}
+
+test_capped_without_sqlite_preserves_available_ids() {
+  make_capped_runs_case no-sqlite-capped running running
+  local d=$TMP_ROOT/no-sqlite-capped out
+  mkdir -p "$d/no-sqlite"
+  printf 'raise ImportError("sqlite support unavailable")\n' > "$d/no-sqlite/sqlite3.py"
+  out=$(PYTHONPATH="$d/no-sqlite" run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'missing SQLite support must fail closed'
+  assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without SQLite support'
+  assert_contains "$out" 'inventory' 'missing SQLite support leaves an explicit inventory diagnostic'
+  pass 'R5 capped lookup without SQLite support preserves available ids'
+}
+
+test_live_to_terminal_inventory_disagreement_is_unknown() {
+  make_competing_runs_case live-to-terminal running cancelled
+  local d=$TMP_ROOT/live-to-terminal out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/; s/failed/cancelled/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'R1 live selection becoming terminal cannot publish a stale failure'
+  assert_contains "$out" 'status disagrees with inventory' 'the selection race is identified'
+  assert_contains "$out" '01NEW' 'the changing run remains identifiable'
+  assert_not_contains "$out" 'state: failed' 'a cancelled stale selection is not a work failure'
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,cancelled,/')
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'terminal-to-live disagreement remains rejected'
+  pass 'R1 both directions of inventory liveness disagreement read unknown'
+}
+
+make_uninitialized_worker_case() {
+  local d=$TMP_ROOT/$1 gen
+  reset_fakes
+  mkdir -p "$d/state"
+  make_repo_on_branch "$d/wt" fm/no-gate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="error: \"repo not initialized (run 'no-mistakes init' first)\""
+  FM_FAKE_AXI_STATUS_ERROR=1
+  FM_FAKE_AXI_HOME_ERROR=1
+  printf 'working: implementation continues\n' > "$d/state/worker.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" worker)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" worker "$2" --gen "$gen" \
+    --source claude-hook --event "${3:-stop}"
+}
+
+test_uninitialized_busy_worker_uses_pane() {
+  make_uninitialized_worker_case uninitialized-busy busy user-prompt-submit
+  local d=$TMP_ROOT/uninitialized-busy out
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: working' 'R2 an uninitialized gate must preserve a busy worker'
+  assert_contains "$out" 'source: pane' 'a busy worker without a gate uses current pane evidence'
+  assert_not_contains "$out" 'source: run-step' 'an initialization error is not a run'
+  FM_FAKE_AXI_STATUS='error: "database locked"'
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: unknown' 'other inventory errors must not be mistaken for no gate'
+  pass 'R2 uninitialized busy workers retain pane reporting'
+}
+
+test_uninitialized_idle_worker_uses_status() {
+  make_uninitialized_worker_case uninitialized-idle idle
+  local d=$TMP_ROOT/uninitialized-idle out
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: working' 'R2 an uninitialized gate must preserve current worker status'
+  assert_contains "$out" 'source: status-log' 'an idle worker without a gate uses its current status'
+  assert_contains "$out" 'implementation continues' 'current worker detail remains available'
+  pass 'R2 uninitialized idle workers retain status reporting'
+}
+
+make_historical_inventory_case() {
+  make_competing_runs_case "$1" completed cancelled
+  local d=$TMP_ROOT/$1 gen
+  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  git -C "$d/wt" commit -q --allow-empty -m 'current work after completed validation'
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation after validation\n' > "$d/state/competing.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" competing)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" competing "$2" --gen "$gen" \
+    --source claude-hook --event "${3:-stop}"
+}
+
+test_historical_inventory_uses_current_pane() {
+  make_historical_inventory_case historical-inventory-busy busy user-prompt-submit
+  local d=$TMP_ROOT/historical-inventory-busy out
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: working' 'R3 a proven historical run must preserve a busy worker'
+  assert_contains "$out" 'source: pane' 'a historical inventory row yields to current pane evidence'
+  assert_not_contains "$out" 'source: run-step' 'historical rows cannot be reattributed through the ledger'
+  pass 'R3 historical inventory yields to the current busy pane'
+}
+
+test_historical_inventory_uses_current_status() {
+  make_historical_inventory_case historical-inventory-idle idle
+  local d=$TMP_ROOT/historical-inventory-idle out
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: working' 'R3 a proven historical run must preserve current worker status'
+  assert_contains "$out" 'source: status-log' 'historical inventory yields to the current status log'
+  assert_contains "$out" 'implementation after validation' 'the current work detail is preserved'
+  pass 'R3 historical inventory yields to current worker status'
+}
+
 test_superseded_cancelled_run_preserves_replacement_gate() {
   make_competing_runs_case superseded-gate running cancelled
   local d=$TMP_ROOT/superseded-gate out
@@ -3247,6 +3403,15 @@ test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
+test_complete_inventory_without_python_keeps_gate
+test_complete_ambiguity_without_python_names_both_ids
+test_capped_without_python_preserves_available_ids
+test_capped_without_sqlite_preserves_available_ids
+test_live_to_terminal_inventory_disagreement_is_unknown
+test_uninitialized_busy_worker_uses_pane
+test_uninitialized_idle_worker_uses_status
+test_historical_inventory_uses_current_pane
+test_historical_inventory_uses_current_status
 test_superseded_cancelled_run_preserves_replacement_gate
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run

@@ -691,6 +691,9 @@ SELECTED_RUN_ID=""
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
+  if [ "$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^error: //p')")" = "repo not initialized (run 'no-mistakes init' first)" ]; then
+    RUN_OUT=""
+  fi
   if [ -n "$RUN_OUT" ]; then
     # The overview includes run ids and creation order, which the plain runs
     # listing omits. Keep the primary empty-call bound above: a nonresponding
@@ -703,7 +706,13 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT")
     [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
     case "$run_choice" in
-      unknown\|*) emit unknown run-step "${run_choice#*|}" ;;
+      unknown\|*)
+        known_run_id=""
+        if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
+          known_run_id=$(strip_quotes "$(nm_field id)")
+        fi
+        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
         RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
@@ -716,23 +725,24 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
           *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
         esac
-        if [ "$(fm_nm_run_status_class "$selected_status")" = terminal ] \
-          && fm_nm_run_is_active "$RUN_OUT"; then
+        if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
+        if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
           HAVE_RUN=1
-        elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ] \
-          && fm_nm_run_is_active "$RUN_OUT" \
-          && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
-          HAVE_RUN=1
-        else
-          emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
+        elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
+          if fm_nm_run_is_active "$RUN_OUT" \
+            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
+            HAVE_RUN=1
+          else
+            emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
+          fi
         fi
         SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$HAVE_RUN" = 0 ]; then
+    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       # Head equality, or the pipeline-owned-active exemption: while the
       # pipeline owns this branch, the daemon's own branch attribution is
