@@ -530,6 +530,30 @@ test_wide_composer_text_is_pending() {
   pass "fm_tmux_composer_state: emoji and CJK text remain pending under the C locale"
 }
 
+test_claude_nbsp_idle_row_is_empty() {
+  local dir fb capture out nbsp
+  dir="$TMP_ROOT/claude-nbsp"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\302\240')
+
+  # Claude's idle bordered composer uses U+276F followed by U+00A0. The tmux
+  # daemon runs under LC_ALL=C, where POSIX whitespace matching alone does not
+  # trim that separator (issue #2483).
+  printf '╭────────────╮\n│ ❯%s         │\n╰────────────╯\n' "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "Claude's bordered U+276F+NBSP idle row should be empty, got '$out'"
+
+  printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "Claude's bordered composer with typed text should be pending, got '$out'"
+  pass "fm_tmux_composer_state: Claude's bordered U+276F+NBSP idle row is empty while typed text stays pending"
+}
+
 test_all_tmux_harness_composers_share_classification() {
   local dir fb capture out harness
   dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
@@ -706,6 +730,7 @@ test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
+test_claude_nbsp_idle_row_is_empty
 test_all_tmux_harness_composers_share_classification
 test_unrecognized_state_defers_input_guard
 test_single_capture_leaves_no_fallback_race
