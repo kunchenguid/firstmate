@@ -9,7 +9,7 @@ Balance hints come from serial runs of the real lanes on `ubuntu-latest`.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
-The retained hints are the slowest completed value each script reached across six CI runs on 2026-09-10: [34459949083](https://github.com/kunchenguid/firstmate/actions/runs/34459949083), [34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), [34462530836](https://github.com/kunchenguid/firstmate/actions/runs/34462530836), [34462758357](https://github.com/kunchenguid/firstmate/actions/runs/34462758357), [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385), and [34470382458](https://github.com/kunchenguid/firstmate/actions/runs/34470382458).
+The parallel-lane hints are the slowest completed value each script reached across six CI runs on 2026-09-10: [34459949083](https://github.com/kunchenguid/firstmate/actions/runs/34459949083), [34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), [34462530836](https://github.com/kunchenguid/firstmate/actions/runs/34462530836), [34462758357](https://github.com/kunchenguid/firstmate/actions/runs/34462758357), [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385), and [34470382458](https://github.com/kunchenguid/firstmate/actions/runs/34470382458).
 Shard 2 completed in all six, so its scripts come from the uploaded `fm-test-timing-portable-parallel-2` artifacts.
 Shard 1 was cancelled at its job cap in five of the six, so its scripts come from the `FM_TEST_END duration_ms=` markers in each cancelled job's log, which record every script that finished before the cancellation, plus the one complete `fm-test-timing-portable-parallel-1` artifact from run 34462758357.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
@@ -64,14 +64,14 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 Balance is still worth keeping current, because drifted hints let one shard carry far more than another shard's real work and reach the job cap while another runner sits idle.
 That is not hypothetical, and it has happened repeatedly.
 By 2026-09-01 the lane had grown from 116 to 139 scripts and from ~42 to ~63 minutes, 17 scripts were still unmeasured, and several hints were low by 2-5x, so shard 3 of 4 ran 17-20 minutes against its 20-minute cap while shard 1 ran 11.5 minutes and run [33574154856](https://github.com/kunchenguid/firstmate/actions/runs/33574154856) timed out seconds after a passing test.
-The lane was cancelled again on 2026-09-08, and again on 2026-09-10 when `Behavior portable serial 1` was [cancelled at 30 min 15 s](https://github.com/kunchenguid/firstmate/actions/runs/34439141091/job/102750305543) with no hang: that shard was passing tests three seconds before the cancellation and simply ran out of budget.
+The lane was cancelled again on 2026-09-08, and again on 2026-09-10 when `Behavior portable serial 1` was [cancelled at 30 min 15 s](https://github.com/kunchenguid/firstmate/actions/runs/34439141091/job/102750305543).
 The existing [coverage guard](#coverage-guard) owns the missing-hint limit.
 Refresh the hints whenever the serial lane gains scripts or measured durations drift, rather than waiting for that bound to trip.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size, shard composition, and balance rather than a copied table.
 Run 34342484144 observed a shard reach about 20 minutes of passing work, so the 30-minute job cap keeps meaningful hang-tripwire margin for job setup and runner-speed spread.
 
-The largest assignment weight, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for the heaviest shard's estimated load at any shard count.
+The largest assignment weight is the floor for the heaviest shard's estimated load at any shard count.
 
 Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
 
