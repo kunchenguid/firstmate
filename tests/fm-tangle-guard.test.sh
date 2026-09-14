@@ -245,9 +245,12 @@ SH
 run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
   fm_test_spawn_brief "$home" "$id" brief
+  # Window construction is harness-independent; claude keeps this case on a
+  # launch path with no post-launch readiness gate, so the recording fake tmux
+  # only has to answer the calls under test.
   FM_TMUX_REC="$rec" \
     fm_test_run_spawn "$home" "$pane" "$fakebin" \
-    "$id" "$proj" codex --mode no-mistakes --yolo off
+    "$id" "$proj" claude --mode no-mistakes --yolo off
 }
 
 test_spawn_tmux_window_construction() {
