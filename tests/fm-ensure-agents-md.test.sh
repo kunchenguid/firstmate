@@ -26,6 +26,50 @@ write_fixture_claude_pointer() {
 EOF
 }
 
+test_opt_out_empty_project_creates_nothing() {
+  local repo out
+  repo="$TMP_ROOT/opt-out-empty-project"
+  mkdir -p "$repo"
+  : > "$repo/.fm-no-agents-md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on an opted-out project"
+  assert_contains "$out" "skipped:" "opted-out project was not reported skipped"
+  assert_absent "$repo/AGENTS.md" "opted-out project gained AGENTS.md"
+  assert_absent "$repo/CLAUDE.md" "opted-out project gained CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: opted-out empty project stays free of both memory files"
+}
+
+test_opt_out_existing_agents_md_left_untouched() {
+  local repo agents out
+  repo="$TMP_ROOT/opt-out-existing-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nDeploy with kubectl.\n' > "$repo/AGENTS.md"
+  : > "$repo/.fm-no-agents-md"
+  agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on an opted-out AGENTS.md project"
+  assert_contains "$out" "skipped:" "opted-out AGENTS.md run was not reported skipped"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "opted-out run injected the self-governance section into AGENTS.md"
+  assert_absent "$repo/CLAUDE.md" "opted-out run recreated the CLAUDE.md pointer"
+  pass "fm-ensure-agents-md.sh: opted-out AGENTS.md gains no section and no pointer"
+}
+
+test_opt_out_wins_over_conflict_checks() {
+  local repo out
+  repo="$TMP_ROOT/opt-out-conflict-project"
+  mkdir -p "$repo"
+  printf '# project memory\n' > "$repo/agents.md"
+  : > "$repo/.fm-no-agents-md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on an opted-out conflict-shaped project"
+  assert_contains "$out" "skipped:" "opted-out conflict-shaped run was not reported skipped"
+  assert_absent "$repo/CLAUDE.md" "opted-out run created CLAUDE.md beside a case-variant file"
+  assert_present "$repo/agents.md" "opted-out run disturbed the existing file"
+  pass "fm-ensure-agents-md.sh: opt-out marker wins over conflict checks"
+}
+
 test_created_agents_md_includes_self_governance() {
   local repo agents
   repo="$TMP_ROOT/new-project"
@@ -433,3 +477,6 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_opt_out_empty_project_creates_nothing
+test_opt_out_existing_agents_md_left_untouched
+test_opt_out_wins_over_conflict_checks

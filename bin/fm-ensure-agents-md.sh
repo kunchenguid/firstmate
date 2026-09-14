@@ -25,6 +25,10 @@
 # link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
+# A project opts out of every behavior below by committing an empty
+# .fm-no-agents-md file at its root to keep the project permanently free of
+# both AGENTS.md and CLAUDE.md; when that marker is present the script prints
+# one skipped: line and changes nothing.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
@@ -37,6 +41,10 @@ canonical section, use this exact first line of AGENTS.md (LF or CRLF):
 <!-- firstmate:maintained-by-project -->
 The mark declares retained guidance, not permission to remove governance.
 Without the first-line mark or exact canonical heading, the helper adds the section.
+
+To keep a project permanently free of both AGENTS.md and CLAUDE.md,
+commit an empty .fm-no-agents-md file at the project root.
+When that marker exists the helper prints one skipped: line and changes nothing.
 EOF
 }
 
@@ -52,6 +60,11 @@ DIR=${1:-.}
 [ -d "$DIR" ] || { echo "error: not a directory: $DIR" >&2; exit 1; }
 DIR=$(cd "$DIR" && pwd -P)
 cd "$DIR"
+
+if [ -e .fm-no-agents-md ]; then
+  echo "skipped: $DIR opts out with .fm-no-agents-md; left AGENTS.md and CLAUDE.md untouched"
+  exit 0
+fi
 
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md
