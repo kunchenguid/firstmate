@@ -135,7 +135,7 @@ If the claim has committed, the trap restarts nothing. It leaves the journal and
 If the fleet lock stays busy, the trap also restarts nothing. It prints `transfer abandon --transaction <id>`, which retries the same conditional release.
 The journal records `destination_stopped` and `secondmate_stopped`, so the trap and `transfer abandon` restart the same endpoints.
 Those flags are honored only while this transaction still holds the SecondMate's current row. The SecondMate flag also requires the assignment generation and the parent binding to still match the journal. Any other flag is cleared, the endpoint is left untouched, and the command says so.
-`transfer recover` requires the transaction's in-flight row to be `records-ready` or `published`. `transfer rollback` also accepts a finished transaction whose publishing transaction is still recorded on the current assignment. Both check this before running any endpoint hook. So an unclaimed stale journal, or an older transaction that a newer transfer replaced, is refused even when the generations match.
+`transfer recover` requires the transaction's in-flight row to be `records-ready` or `published`. `transfer rollback` also accepts a finished transaction whose publishing transaction is still recorded on the current assignment. Both check this before running any endpoint hook. So an unclaimed stale journal, or an older transaction that a newer transfer replaced, is refused even when the generations match. `transfer recover` on a finished transaction still recorded on the current assignment idempotently marks the journal active, reports `already active`, and exits 0.
 `transfer abandon` refuses a claimed or finished transaction.
 `transfer-state` activates only the current `published` row for its exact transaction, removing it. It never adds a row.
 Until that activation, no other transfer or recovery for the SecondMate is admitted, so a late activation can never race a newer transfer. If a published destination dies before activation, finish that transfer with `transfer recover --transaction <id>` or undo it with `transfer rollback --transaction <id>` before starting another.
@@ -161,7 +161,7 @@ bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer rollback \
 Transfer recovery refuses while the source home has a live session lock, and while the destination home is live for a planned transfer or stopped for a failover.
 Rollback refuses while either home has a live session lock.
 Apply and rollback hold both homes' `state/.secondmate-registry.lock`, in sorted home order, while they edit only the transferred SecondMate's route line and endpoint records, so other routes added to either registry after the transfer survive.
-Rollback restores the parent binding and restores the prior assignment only when the published generation still matches the transaction.
+Rollback restores the parent binding and restores the prior assignment only while the transaction still holds the SecondMate's in-flight row or is the publishing transaction recorded on the current assignment.
 Lifecycle hooks named in `bin/fm-fleet.sh` let tests and a controlled pilot replace endpoint operations without weakening the default path.
 
 No transfer copies or removes a SecondMate home, backlog, project checkout, worktree, or completion evidence.

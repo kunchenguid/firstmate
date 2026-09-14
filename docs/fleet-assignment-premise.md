@@ -113,5 +113,5 @@ Status may run one bounded session-lock probe per manager outside the fleet lock
 AutoDev and Paperclip remain available during the pilot.
 Before Harness supervision moves, preserve the original SecondMate parent binding, registry route, endpoint metadata, status channel, and assignment generation in the transaction journal.
 Resolved pending-reply records remain in the original source home and open records block the move.
-Rollback refuses while the fleet manager session remains live, restores `.fm-secondmate-parent`, the original registry route and parent-side records, clears only the matching assignment generation, and relaunches the same Harness SecondMate from the original FirstMate home.
+Rollback refuses while the fleet manager session remains live, restores `.fm-secondmate-parent`, the original registry route and parent-side records, and restores the prior assignment only while the transaction still holds the SecondMate's in-flight row or is the publishing transaction recorded on the current assignment (see `docs/fleet.md`), then relaunches the same Harness SecondMate from the original FirstMate home.
 No SecondMate home, backlog, project checkout, worktree, or completion evidence is copied or deleted during migration.
