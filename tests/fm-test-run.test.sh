@@ -144,6 +144,15 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/tests/fixtures/demo"
   : >"$repo/tests/fixtures/demo/demo-fixture.sh"
   printf '# tests/fixtures/demo\n' >>"$repo/tests/fm-backend-orca.test.sh"
+  # A test asset named by the one suite that reads it, beside an asset nothing
+  # reads. These names are synthetic on purpose: the asset scan reads test
+  # sources, so naming a real tests/assets/ file here would make this suite
+  # answer for that asset in the real repo.
+  mkdir -p "$repo/tests/assets"
+  : >"$repo/tests/assets/probe-render-harness.mjs"
+  : >"$repo/tests/assets/unread-asset.mjs"
+  printf '# tests/assets/probe-render-harness.mjs\n' \
+    >>"$repo/tests/fm-bearings-snapshot.test.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
   # watcher script. This is the shape that made a one-line helper change select
@@ -1377,6 +1386,47 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
+test_changed_asset_selects_its_consumers() {
+  local tmp repo listed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-asset.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/tests/assets/probe-render-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "a changed asset selects the suite that reads it"
+  case "$listed" in
+    *fm-pr-merge.test.sh*)
+      fail "asset selection widened past its consumer: $listed" ;;
+  esac
+  git -C "$repo" add tests/assets/probe-render-harness.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm asset-change
+
+  # An asset no suite names has no consumer to select, so it must refuse loudly
+  # rather than pass as mapped and narrow the run to nothing.
+  printf '\n' >>"$repo/tests/assets/unread-asset.mjs"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "an unread asset must still fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/assets/unread-asset.mjs' "$tmp/err" \
+    || fail "the refusal did not name the unread asset: $(cat "$tmp/err")"
+  git -C "$repo" checkout -q -- tests/assets/unread-asset.mjs
+
+  # A retired asset its consumer still names selects that consumer, the same
+  # rule the bin/ and fixture arms apply, instead of refusing on a mapping the
+  # deletion cannot satisfy.
+  git -C "$repo" rm -q tests/assets/probe-render-harness.mjs
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "a deleted asset still selects the suite that names it"
+
+  rm -rf "$tmp"
+  pass "a changed asset selects its consuming suite while an unread asset still refuses"
+}
+
 # Workers are handed scripts in order, so the slowest script must start first or
 # it runs alone at the tail and throws away most of the concurrency.
 test_concurrent_runs_are_ordered_longest_first() {
@@ -1769,6 +1819,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
+test_changed_asset_selects_its_consumers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
