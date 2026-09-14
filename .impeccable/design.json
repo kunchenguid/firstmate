@@ -1,0 +1,287 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-14T00:00:00.000Z",
+  "title": "Design System: Firstmate",
+  "extensions": {
+    "colorMeta": {
+      "rust-500": {
+        "role": "primary",
+        "displayName": "Hull Rust",
+        "canonical": "#c0452a",
+        "tonalRamp": ["#8f2f17", "#a93a1f", "#c0452a", "#d35f3f", "#e08365", "#f4d8c9", "#fbece3"]
+      },
+      "rust-600": { "role": "primary", "displayName": "Hull Rust Deep", "canonical": "#a93a1f" },
+      "rust-400": { "role": "primary", "displayName": "Rust Light", "canonical": "#d35f3f" },
+      "rust-050": { "role": "primary", "displayName": "Rust Wash", "canonical": "#fbece3" },
+      "gold-500": {
+        "role": "secondary",
+        "displayName": "Brass Gold",
+        "canonical": "#e0a52e",
+        "tonalRamp": ["#b5791c", "#e0a52e", "#f0d38c", "#f8ecc9"]
+      },
+      "gold-600": { "role": "secondary", "displayName": "Brass Deep", "canonical": "#b5791c" },
+      "gold-300": { "role": "secondary", "displayName": "Brass Pale", "canonical": "#f0d38c" },
+      "gold-100": { "role": "secondary", "displayName": "Brass Wash", "canonical": "#f8ecc9" },
+      "ocean-500": {
+        "role": "tertiary",
+        "displayName": "Harbour Ocean",
+        "canonical": "#3c7ea6",
+        "tonalRamp": ["#2f6688", "#3c7ea6", "#b6d4e2", "#e8f1f5"]
+      },
+      "ocean-600": { "role": "tertiary", "displayName": "Ocean Deep", "canonical": "#2f6688" },
+      "ocean-050": { "role": "tertiary", "displayName": "Ocean Wash", "canonical": "#e8f1f5" },
+      "sea-500": {
+        "role": "tertiary",
+        "displayName": "Sea Green",
+        "canonical": "#2f6b4f",
+        "tonalRamp": ["#234e3a", "#2f6b4f", "#b9d4c5", "#e9f2ec"]
+      },
+      "sea-700": { "role": "tertiary", "displayName": "Sea Deep", "canonical": "#234e3a" },
+      "sea-200": { "role": "tertiary", "displayName": "Sea Mist", "canonical": "#b9d4c5" },
+      "sea-050": { "role": "tertiary", "displayName": "Sea Wash", "canonical": "#e9f2ec" },
+      "navy-700": {
+        "role": "tertiary",
+        "displayName": "Deepwater Navy",
+        "canonical": "#1a2238",
+        "tonalRamp": ["#1a2238", "#222c49", "#2a3656", "#6c7796", "#d9deea"]
+      },
+      "paper-100": {
+        "role": "neutral",
+        "displayName": "Chart Paper",
+        "canonical": "#f6ecd3",
+        "tonalRamp": ["#e7d6ae", "#f0e3c4", "#f6ecd3", "#fbf4e2"]
+      },
+      "paper-000": { "role": "neutral", "displayName": "Board Paper", "canonical": "#fbf4e2" },
+      "paper-300": { "role": "neutral", "displayName": "Chart Edge", "canonical": "#e7d6ae" },
+      "cream-line": { "role": "neutral", "displayName": "Cream Line", "canonical": "#ddc89c" },
+      "white": { "role": "neutral", "displayName": "Signal White", "canonical": "#fffdf7" },
+      "ink-900": {
+        "role": "neutral",
+        "displayName": "Log Ink",
+        "canonical": "#241c14",
+        "tonalRamp": ["#241c14", "#3f3224", "#6f5e46", "#9c8a6c"]
+      },
+      "ink-700": { "role": "neutral", "displayName": "Ink Body", "canonical": "#3f3224" },
+      "ink-500": { "role": "neutral", "displayName": "Ink Muted", "canonical": "#6f5e46" },
+      "ink-300": { "role": "neutral", "displayName": "Ink Faint", "canonical": "#9c8a6c" }
+    },
+    "semanticAliases": {
+      "--bg-page": "--paper-100",
+      "--surface-card": "--white",
+      "--surface-card-warm": "--paper-000",
+      "--text-strong": "--ink-900",
+      "--text-body": "--ink-700",
+      "--text-muted": "--ink-500",
+      "--text-faint": "--ink-300",
+      "--border-default": "--cream-line",
+      "--border-soft": "--paper-300",
+      "--status-online": "--sea-500",
+      "--status-online-soft": "--sea-050",
+      "--status-warn": "--gold-600",
+      "--status-warn-soft": "--gold-100",
+      "--status-danger": "--rust-600",
+      "--status-danger-soft": "--rust-050",
+      "--status-info": "--ocean-500",
+      "--status-info-soft": "--ocean-050"
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Chango. The wordmark only, exactly once per page." },
+      "headline": { "displayName": "Metric", "purpose": "Mono numeral in a stat tile, so counts align in a column." },
+      "title": { "displayName": "Title", "purpose": "Decision card heading; the heaviest reading type in the system." },
+      "body": { "displayName": "Body", "purpose": "Document default set on the body element." },
+      "body-compact": { "displayName": "Body Compact", "purpose": "The real working size: card detail, row titles, option labels, inputs." },
+      "sign": { "displayName": "Section Sign", "purpose": "Stencilled section eyebrow at 0.16em tracking, the widest in the system." },
+      "label": { "displayName": "Pin Label", "purpose": "Enamel pin text, stat labels, context keys; 0.07em tracking." },
+      "meta": { "displayName": "Record", "purpose": "Mono for every id, count, timestamp, PR reference and URL." }
+    },
+    "shadows": [
+      {
+        "name": "soft-ambient",
+        "value": "0 1px 2px rgba(36, 28, 20, 0.06), 0 4px 10px rgba(36, 28, 20, 0.06)",
+        "purpose": "Ordinary resting surfaces. Ink-brown at 6%, never black, so it stays warm on paper."
+      },
+      {
+        "name": "hard-offset",
+        "value": "4px 4px 0 var(--ink-900)",
+        "purpose": "Poster cards. Full-weight authority, always paired with a 2px ink border."
+      },
+      {
+        "name": "hard-offset-sm",
+        "value": "3px 3px 0 var(--ink-900)",
+        "purpose": "Working weight: brand disc, primary and gold buttons, each card in the dealt stack."
+      },
+      {
+        "name": "pin-offset",
+        "value": "2px 2px 0 var(--ink-900)",
+        "purpose": "Enamel sign-pins only, scaled to their smaller size."
+      },
+      {
+        "name": "focus-ring",
+        "value": "0 0 0 3px var(--gold-300)",
+        "purpose": "Every focusable control, replacing the UA outline. The one non-action use of gold."
+      },
+      {
+        "name": "selected-inset",
+        "value": "inset 0 0 0 1px var(--rust-500)",
+        "purpose": "Thickens a selected option's rust border inward without shifting layout."
+      }
+    ],
+    "textures": [
+      {
+        "name": "paper-grain",
+        "value": "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E\")",
+        "purpose": "Tiled over the page ground at 4.5% opacity. What stops the warm neutral reading as a flat fill."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "120ms",
+        "purpose": "The single duration in the system, applied to background, border-color, transform and box-shadow."
+      },
+      {
+        "name": "press",
+        "value": "translateY(1px)",
+        "purpose": "The :active state on every button. Depth is physical, so a press moves."
+      }
+    ],
+    "breakpoints": [
+      { "name": "cols-collapse", "value": "900px" }
+    ],
+    "sizes": [
+      { "name": "container-app", "value": "1180px", "purpose": "The single content width, gutter 28px." },
+      { "name": "nav-height", "value": "64px", "purpose": "Sticky nav bar." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The demand action. Hull Rust plate with an ink edge and a hard offset.",
+      "html": "<button class=\"ds-btn ds-btn-primary\">Queue answer</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-weight: 800; font-size: 0.8125rem; line-height: 1; white-space: nowrap; border: 2px solid transparent; border-radius: var(--radius-banner, 7px); cursor: pointer; padding: 8px 16px; transition: background 120ms, border-color 120ms, transform 120ms, box-shadow 120ms; } .ds-btn-primary { background: var(--rust-500, #c0452a); color: var(--white, #fffdf7); border-color: var(--ink-900, #241c14); box-shadow: 3px 3px 0 var(--ink-900, #241c14); } .ds-btn-primary:hover { background: var(--rust-600, #a93a1f); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--gold-300, #f0d38c); } .ds-btn-primary:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Gold Button",
+      "kind": "button",
+      "refersTo": "button-gold",
+      "description": "Action offered rather than demanded. The one button that inverts its text colour on hover.",
+      "html": "<button class=\"ds-btn ds-btn-gold\">Queue dispatch order</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-weight: 800; font-size: 0.8125rem; line-height: 1; white-space: nowrap; border: 2px solid transparent; border-radius: var(--radius-banner, 7px); cursor: pointer; padding: 8px 16px; transition: background 120ms, color 120ms, border-color 120ms, transform 120ms, box-shadow 120ms; } .ds-btn-gold { background: var(--gold-500, #e0a52e); color: var(--navy-700, #1a2238); border-color: var(--ink-900, #241c14); box-shadow: 3px 3px 0 var(--ink-900, #241c14); } .ds-btn-gold:hover { background: var(--gold-600, #b5791c); color: var(--white, #fffdf7); } .ds-btn-gold:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--gold-300, #f0d38c); } .ds-btn-gold:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Enamel Pin",
+      "kind": "chip",
+      "refersTo": "badge-online",
+      "description": "The system's signature small object: an enamel sign nailed to the board. Six semantic variants.",
+      "html": "<span class=\"ds-pin ds-pin-online\">online</span> <span class=\"ds-pin ds-pin-warn\">waiting</span> <span class=\"ds-pin ds-pin-danger\">blocked</span> <span class=\"ds-pin ds-pin-info\">review</span> <span class=\"ds-pin ds-pin-neutral\">idle</span>",
+      "css": ".ds-pin { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.6875rem; font-weight: 800; line-height: 1; padding: 5px 9px 4px; text-transform: uppercase; letter-spacing: 0.07em; border-radius: var(--radius-xs, 6px); border: 1.5px solid var(--ink-900, #241c14); box-shadow: 2px 2px 0 var(--ink-900, #241c14); white-space: nowrap; margin-right: 6px; } .ds-pin-online { background: var(--sea-500, #2f6b4f); color: var(--paper-000, #fbf4e2); } .ds-pin-warn { background: var(--gold-500, #e0a52e); color: var(--navy-700, #1a2238); } .ds-pin-danger { background: var(--rust-600, #a93a1f); color: var(--paper-000, #fbf4e2); } .ds-pin-info { background: var(--ocean-500, #3c7ea6); color: var(--paper-000, #fbf4e2); } .ds-pin-neutral { background: var(--paper-000, #fbf4e2); color: var(--ink-900, #241c14); }"
+    },
+    {
+      "name": "Section Sign",
+      "kind": "nav",
+      "refersTo": null,
+      "description": "The stencilled eyebrow painted above each region of the board. 0.16em tracking is the identity.",
+      "html": "<span class=\"ds-sign ds-sign-eyebrow\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M10.268 21a2 2 0 0 0 3.464 0\"/><path d=\"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326\"/></svg>Captain's Call</span>",
+      "css": ".ds-sign { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-weight: 800; text-transform: uppercase; letter-spacing: 0.16em; font-size: 0.8125rem; line-height: 1; white-space: nowrap; } .ds-sign svg { width: 14px; height: 14px; flex: none; } .ds-sign-eyebrow { color: var(--rust-500, #c0452a); } .ds-sign-muted { color: var(--ink-500, #6f5e46); }"
+    },
+    {
+      "name": "Poster Card",
+      "kind": "card",
+      "refersTo": "card-poster",
+      "description": "The emphatic container: 2px ink edge and a 4px hard offset. Reserved for what must be obeyed or read.",
+      "html": "<div class=\"ds-card-poster\"><div class=\"ds-card-pad\"><h3 class=\"ds-card-title\">Merge authority for PR #4424</h3><p class=\"ds-card-detail\">Checks are green and the change is in scope. This project has yolo off, so the landing waits on you.</p></div></div>",
+      "css": ".ds-card-poster { background: var(--white, #fffdf7); border: 2px solid var(--ink-900, #241c14); border-radius: var(--radius-md, 12px); box-shadow: 4px 4px 0 var(--ink-900, #241c14); overflow: hidden; max-width: 420px; } .ds-card-pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; } .ds-card-title { margin: 0; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 1.15rem; font-weight: 800; line-height: 1.25; color: var(--ink-900, #241c14); } .ds-card-detail { margin: 0; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.9375rem; line-height: 1.45; color: var(--ink-500, #6f5e46); }"
+    },
+    {
+      "name": "Stat Tile",
+      "kind": "card",
+      "refersTo": "stat",
+      "description": "A board metric. The alert variant is the one place a number raises its voice.",
+      "html": "<div class=\"ds-stat\"><span class=\"ds-stat-num\">7</span><span class=\"ds-stat-label\">underway</span></div><div class=\"ds-stat ds-stat-call\"><span class=\"ds-stat-num\">2</span><span class=\"ds-stat-label\">captain's call</span></div>",
+      "css": ".ds-stat { display: inline-flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 150px; background: var(--paper-000, #fbf4e2); border: 1px solid var(--paper-300, #e7d6ae); border-radius: var(--radius-md, 12px); margin-right: 12px; } .ds-stat-call { background: var(--rust-050, #fbece3); border: 2px solid var(--rust-500, #c0452a); } .ds-stat-num { font-family: var(--font-mono, \"JetBrains Mono\", ui-monospace, Menlo, monospace); font-size: 1.4rem; font-weight: 600; line-height: 1; color: var(--ink-900, #241c14); } .ds-stat-call .ds-stat-num { color: var(--rust-600, #a93a1f); } .ds-stat-label { font-family: var(--font-mono, \"JetBrains Mono\", ui-monospace, Menlo, monospace); font-size: 0.6875rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-500, #6f5e46); }"
+    },
+    {
+      "name": "Option Row",
+      "kind": "input",
+      "refersTo": "option",
+      "description": "A radio that behaves like a card. Selection is carried by border, tint and an inset ring - never by layout shift.",
+      "html": "<label class=\"ds-opt\"><input type=\"radio\" name=\"ds-demo\" checked /><span class=\"ds-opt-body\"><span class=\"ds-opt-label\">Merge it</span><span class=\"ds-opt-hint\">Land on main and clean up the branch.</span></span><span class=\"ds-opt-rec\">recommended</span></label><label class=\"ds-opt\"><input type=\"radio\" name=\"ds-demo\" /><span class=\"ds-opt-body\"><span class=\"ds-opt-label\">Hold for review</span><span class=\"ds-opt-hint\">Keep the PR open until you read it.</span></span></label>",
+      "css": ".ds-opt { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; cursor: pointer; background: var(--paper-000, #fbf4e2); border: 1.5px solid var(--cream-line, #ddc89c); border-radius: var(--radius-sm, 9px); transition: border-color 120ms, background 120ms; margin-bottom: 7px; max-width: 420px; } .ds-opt:hover { border-color: var(--ink-300, #9c8a6c); } .ds-opt input { accent-color: var(--rust-500, #c0452a); margin-top: 3px; flex: none; } .ds-opt:has(input:checked) { border-color: var(--rust-500, #c0452a); background: var(--rust-050, #fbece3); box-shadow: inset 0 0 0 1px var(--rust-500, #c0452a); } .ds-opt-body { min-width: 0; flex: 1 1 auto; } .ds-opt-label { display: block; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.9375rem; font-weight: 700; color: var(--ink-900, #241c14); line-height: 1.3; } .ds-opt-hint { display: block; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.8125rem; color: var(--ink-500, #6f5e46); line-height: 1.35; margin-top: 1px; } .ds-opt-rec { flex: none; align-self: center; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.6875rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em; color: var(--navy-700, #1a2238); background: var(--gold-300, #f0d38c); border: 1px solid var(--gold-600, #b5791c); border-radius: var(--radius-xs, 6px); padding: 3px 7px 2px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-freeform",
+      "description": "Focus is carried by both a border shift and the gold ring - neither alone is enough.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Or answer in your own words\" />",
+      "css": ".ds-input { width: 100%; max-width: 420px; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.9375rem; color: var(--ink-900, #241c14); background: var(--white, #fffdf7); border: 1.5px solid var(--cream-line, #ddc89c); border-radius: var(--radius-sm, 9px); padding: 8px 11px; transition: border-color 120ms, box-shadow 120ms; } .ds-input::placeholder { color: var(--ink-300, #9c8a6c); } .ds-input:focus { outline: none; border-color: var(--rust-400, #d35f3f); box-shadow: 0 0 0 3px var(--gold-300, #f0d38c); }"
+    },
+    {
+      "name": "Compact Row",
+      "kind": "custom",
+      "refersTo": "row",
+      "description": "A ledger line inside a card: ruled, ellipsised, with mono metadata and a state square.",
+      "html": "<div class=\"ds-rows\"><div class=\"ds-row\"><span class=\"ds-row-main\"><span class=\"ds-row-title\">Treat plan-gated 403 as no merge queue</span><span class=\"ds-row-sub\">firstmate - direct PR, checks green</span></span><a class=\"ds-row-pr\" href=\"#\">#4424</a><span class=\"ds-row-check\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M20 6 9 17l-5-5\"/></svg></span></div><div class=\"ds-row\"><span class=\"ds-row-main\"><span class=\"ds-row-title\">Bearings board stack navigation</span><span class=\"ds-row-sub\">firstmate - underway</span></span><span class=\"ds-row-id\">t-4e1a</span></div></div>",
+      "css": ".ds-rows { display: flex; flex-direction: column; background: var(--white, #fffdf7); border: 1px solid var(--cream-line, #ddc89c); border-radius: var(--radius-lg, 18px); overflow: hidden; max-width: 480px; } .ds-row { display: flex; align-items: center; gap: 12px; padding: 11px 18px; border-top: 1px solid var(--paper-300, #e7d6ae); min-width: 0; } .ds-row:first-child { border-top: none; } .ds-row-main { min-width: 0; flex: 1 1 auto; } .ds-row-title { display: block; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.9375rem; font-weight: 700; color: var(--ink-900, #241c14); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-row-sub { display: block; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.8125rem; color: var(--ink-500, #6f5e46); line-height: 1.3; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-row-id { font-family: var(--font-mono, \"JetBrains Mono\", ui-monospace, Menlo, monospace); font-size: 0.6875rem; color: var(--ink-300, #9c8a6c); white-space: nowrap; } .ds-row-pr { font-family: var(--font-mono, \"JetBrains Mono\", ui-monospace, Menlo, monospace); font-size: 0.8125rem; font-weight: 600; color: var(--ocean-600, #2f6688); white-space: nowrap; text-decoration: none; } .ds-row-pr:hover { text-decoration: underline; } .ds-row-check { width: 26px; height: 26px; border-radius: var(--radius-sm, 9px); display: grid; place-items: center; flex: none; background: var(--sea-050, #e9f2ec); color: var(--sea-500, #2f6b4f); border: 1.5px solid var(--sea-200, #b9d4c5); } .ds-row-check svg { width: 15px; height: 15px; }"
+    },
+    {
+      "name": "Dealt Decision Stack",
+      "kind": "custom",
+      "refersTo": "card-poster",
+      "description": "The signature geometry. Opaque card faces at opposing rotations behind the active card; the pile thins as decisions are answered, so its depth is the remaining count.",
+      "html": "<div class=\"ds-stack\"><div class=\"ds-stack-card\"><div class=\"ds-card-pad\"><h3 class=\"ds-card-title\">Which delivery mode for the tooling fix?</h3><p class=\"ds-card-detail\">Internal-only surface on a project whose standing posture is the full pipeline.</p></div></div></div>",
+      "css": ".ds-stack { position: relative; display: grid; max-width: 420px; } .ds-stack::before, .ds-stack::after { content: \"\"; position: absolute; inset: 0; z-index: 0; background: var(--white, #fffdf7); border: 2px solid var(--ink-900, #241c14); border-radius: var(--radius-md, 12px); box-shadow: 3px 3px 0 var(--ink-900, #241c14); } .ds-stack::before { transform: rotate(1.3deg) translate(4px, 5px); } .ds-stack::after { transform: rotate(-1.1deg) translate(-3px, 9px); } .ds-stack-card { grid-area: 1 / 1; z-index: 1; background: var(--white, #fffdf7); border: 2px solid var(--ink-900, #241c14); border-radius: var(--radius-md, 12px); box-shadow: 3px 3px 0 var(--ink-900, #241c14); } .ds-card-pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; } .ds-card-title { margin: 0; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 1.15rem; font-weight: 800; line-height: 1.25; color: var(--ink-900, #241c14); } .ds-card-detail { margin: 0; font-family: var(--font-sans, Jost, ui-sans-serif, system-ui, sans-serif); font-size: 0.9375rem; line-height: 1.45; color: var(--ink-500, #6f5e46); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Harbour Noticeboard",
+    "overview": "Firstmate's interface is a board on a harbour wall, not a window into a database. The page is warm chart paper with a faint fractal grain sitting over it; everything of consequence is a physical thing fixed to that paper - an enamel sign-pin, a stencilled section sign, a card dealt onto a squared-up pile. Depth is drawn rather than lit: a solid ink block offset a few pixels behind the object, the way a thick painted sign throws an edge. Nothing floats and nothing glows.\n\nThe density is working-dense, not marketing-airy. One captain scans a whole fleet in a single viewport, so the system spends its space on legibility and its personality on edges: 2px ink borders, hard offsets, uppercase tracked labels, and a monospace voice for every id, count, timestamp and URL. Colour is reserved for meaning. Hull Rust is the only voice that says \"you, now\"; Sea Green, Brass Gold, and Harbour Ocean carry landed, waiting, and reference. The large warm neutral field is what makes those four legible at a glance.\n\nThe display face - Chango, a fat rounded poster serif - appears exactly once, as the wordmark. It sets the register for everything else without being asked to do any other work. Jost carries the interface and JetBrains Mono carries the record. The anti-reference is the generic SaaS dashboard: cool grey-blue on white, translucent floating panels, soft diffuse elevation, and a rounded-everything shape language. This system is warm, edged, and printed.",
+    "keyCharacteristics": [
+      "Warm chart-paper ground (#f6ecd3) with a 4.5%-opacity fractal-noise grain, never plain white",
+      "Two distinct shadow languages: soft ambient for resting surfaces, hard ink offset for authority",
+      "A single display face used once, as the wordmark only",
+      "Monospace as the system's record voice - every id, count, timestamp and link",
+      "Four semantic accents on a large neutral field; rust is rationed",
+      "One breakpoint (900px) and one container width (1180px)",
+      "All state transitions 120ms; :active presses 1px down"
+    ],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "Hull Rust means \"the captain must act.\" It is not a brand wash. If rust appears on more than one demand per region of the board, it has stopped meaning anything.", "section": "colors" },
+      { "name": "The Warm Neutral Rule", "body": "There is no #000, no #fff, and no cool grey in this system. Text is brown-black, white is #fffdf7, and every surface carries a paper cast. A cool neutral entering the palette breaks the world.", "section": "colors" },
+      { "name": "The Reference-Not-Action Rule", "body": "Ocean is a pointer, never a button. Anything the captain can do is rust or gold; anything that takes them elsewhere is ocean.", "section": "colors" },
+      { "name": "The Display-Once Rule", "body": "Chango appears exactly once per page, as the wordmark. Any second use of the display face - a section heading, a hero number, a callout - devalues it and costs the whole board its register.", "section": "typography" },
+      { "name": "The Record-Is-Mono Rule", "body": "If a string is a machine fact - an id, a count, a timestamp, a URL, a PR number - it is set in JetBrains Mono. If it is something a human wrote, it is Jost. The captain should be able to tell the two apart without reading them.", "section": "typography" },
+      { "name": "The Heavy-Structure Rule", "body": "Structural sans type is 700 or 800. There is no 500 or 600 Jost in the system; a label that needs de-emphasis changes colour (--text-muted, --text-faint), not weight.", "section": "typography" },
+      { "name": "The One Breakpoint Rule", "body": "This board has a single media query at 900px, and it does one thing: two columns become one. Intrinsic sizing (auto-fit, minmax(0,1fr), fit-content) handles everything else. Reach for minmax before reaching for a second breakpoint.", "section": "layout" },
+      { "name": "The Shared Baseline Rule", "body": "Within a row of cards, one element owns the rhythm and the rest follow it. The decision card's form is a flex column at the same 12px gap as its pad, and its footer rides margin-top: auto, so every answer button across the row lands on the same baseline with identical breathing room.", "section": "layout" },
+      { "name": "The Two Shadows Rule", "body": "Soft ambient (0 1px 2px + 0 4px 10px at 6% ink) is for ordinary resting surfaces. Hard ink offset (3-4px 3-4px 0 var(--ink-900)) is for anything that claims authority - poster cards, sign-pins, primary and gold buttons, the brand disc. Never put both on one element, and never use a hard offset without a matching ink border.", "section": "elevation" },
+      { "name": "The Ink-Shadow Rule", "body": "Hard shadows are always var(--ink-900) at full opacity, always a positive x and y offset, always 0 blur. A blurred, tinted, or single-axis hard shadow is out of the system.", "section": "elevation" },
+      { "name": "The Gold Focus Rule", "body": "Focus is always 0 0 0 3px var(--gold-300) with outline: none. It is the one place gold appears without meaning \"action,\" and it must never be removed without a replacement of equal visibility.", "section": "elevation" },
+      { "name": "The Solid Pile Rule", "body": "Stacked-card edges are opaque card faces at real rotations, never translucent offset rectangles. A paper pile is made of paper; faking it with opacity reads as a loading skeleton.", "section": "shapes" },
+      { "name": "The Radius-By-Scale Rule", "body": "Radius tracks the object's physical size, not its position in the DOM. A 6px pin inside an 18px card is correct; a nested container inheriting its parent's 18px is not.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do put every new colour through the semantic alias layer (--status-*, --text-*, --border-*, --surface-*) instead of letting a component reference a ramp step directly.",
+      "Do pair every hard ink shadow with a matching ink border. 3px 3px 0 var(--ink-900) with a 1.5-2px var(--ink-900) edge is the unit; neither half works alone.",
+      "Do set every machine fact - ids, counts, timestamps, PR numbers, URLs, provenance - in JetBrains Mono.",
+      "Do use minmax(0, 1fr) on any grid track that holds ellipsised single-line text, and min-width: 0 on any flex child that does.",
+      "Do keep all state transitions at 120ms over background, border-color, transform, box-shadow, and press :active down by exactly 1px.",
+      "Do replace a removed outline with box-shadow: var(--focus-ring) in the same rule. Every focusable control in this system has a visible gold ring.",
+      "Do reach for intrinsic sizing (auto-fit, minmax, fit-content) before adding a second breakpoint.",
+      "Do vary border weight (1px to 1.5px to 2px) to signal emphasis, rather than varying radius or shadow blur."
+    ],
+    "donts": [
+      "Don't introduce #000, #ffffff, or any cool grey. Text is --ink-900 (#241c14), white is --white (#fffdf7), and every surface carries a paper cast.",
+      "Don't use Chango anywhere but the wordmark, and don't add a fourth typeface.",
+      "Don't put a soft ambient shadow and a hard ink offset on the same element.",
+      "Don't blur, tint, or single-axis a hard shadow. It is always positive x and y, zero blur, full-opacity --ink-900.",
+      "Don't set structural sans type at 500 or 600. Structure is 700-800; de-emphasis is a colour change to --text-muted or --text-faint, not a weight change.",
+      "Don't spend Hull Rust on decoration. It marks what the captain must act on, and rationing it is what makes it work.",
+      "Don't give Harbour Ocean an action. Ocean points elsewhere; rust and gold are the only colours a control may wear.",
+      "Don't fake a stacked pile with translucent offset rectangles - stack edges are opaque card faces at real rotations.",
+      "Don't add a --spacing-* custom property scale without migrating the existing literals; a half-migrated scale is worse than the current consistent literals."
+    ]
+  }
+}
