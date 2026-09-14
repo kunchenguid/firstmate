@@ -193,6 +193,26 @@ grep -q '^- paperclip ' "$FROOT/homes/manager-1/data/secondmates.md" || fail "a 
 [ -f "$FROOT/homes/manager-1/state/paperclip.meta" ] && [ ! -f "$FROOT/homes/manager-2/state/paperclip.meta" ] || fail "recovery did not move endpoint metadata"
 grep -q "$FROOT/homes/manager-1|paperclip|start-secondmate" "$TMP_ROOT/recover-hooks.log" || fail "recovery did not relaunch the SecondMate under the new parent"
 
+# Duplicate recovery: a slow loser that prepared at the same generation must not move records after the winner relaunched.
+DUP_STOP="$TMP_ROOT/dup-stop.sh"; DUP_START="$TMP_ROOT/dup-start.sh"
+printf '#!/usr/bin/env bash\n[ "${FM_DUP_SLOW:-0}" = 1 ] && sleep 3\nexit 0\n' > "$DUP_STOP"
+printf '#!/usr/bin/env bash\nprintf "kind=secondmate\\nwindow=NEW-LIVE-PANE\\n" > "$1/state/$2.meta"\n' > "$DUP_START"
+chmod +x "$DUP_STOP" "$DUP_START"
+dup_hooks() { FM_FLEET_TRANSFER_STOP_HOOK=$DUP_STOP FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$DUP_START "$@"; }
+remove_lock "$FROOT/homes/manager-1" "$holder_1"
+FM_DUP_SLOW=1 dup_hooks "$FLEET" recover --secondmate paperclip >/dev/null 2>&1 & dup_slow=$!
+sleep 1
+dup_hooks "$FLEET" recover --secondmate paperclip >/dev/null || fail "winning duplicate recovery failed"
+dup_manager=$(manager_for paperclip)
+if wait "$dup_slow"; then fail "losing duplicate recovery succeeded"; fi
+[ "$(generation_for paperclip)" = 3 ] || fail "duplicate recovery did not publish exactly one generation"
+grep -q 'window=NEW-LIVE-PANE' "$FROOT/homes/$dup_manager/state/paperclip.meta" || fail "losing recovery overwrote the relaunched SecondMate metadata"
+[ "$(grep -c '^- paperclip ' "$FROOT/homes/$dup_manager/data/secondmates.md")" = 1 ] || fail "duplicate recovery duplicated the route"
+grep -q "parent_home=$FROOT/homes/$dup_manager" "$PCHOME/.fm-secondmate-parent" || fail "losing recovery moved the parent binding"
+dup_states=$(for j in "$FROOT"/transactions/*-paperclip-*.json; do python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$j"; done | sort | tr '\n' ' ')
+case "$dup_states" in *abandoned*) ;; *) fail "losing recovery journal was not abandoned: $dup_states" ;; esac
+add_lock "$FROOT/homes/manager-1"; holder_1=$LAST_HOLDER
+
 # A crashed lock holder never wedges the registry; a live one makes route fail without claiming triage.
 python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); print("locked",flush=True); time.sleep(300)' "$FROOT/.fleet.lock" > "$TMP_ROOT/lock-holder.out" & lock_holder=$!
 HOLDERS="$HOLDERS $lock_holder"

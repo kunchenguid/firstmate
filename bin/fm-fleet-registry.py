@@ -592,16 +592,37 @@ def command_dep(args: argparse.Namespace) -> None:
     write_atomic(path, reg)
 
 
-def command_transfer_publish(args: argparse.Namespace) -> None:
-    path = Path(args.registry)
-    reg = load(path)
-    require_valid(reg)
+def require_expected_generation(reg: dict, args: argparse.Namespace) -> None:
     current = assignment_map(reg).get(args.secondmate)
     if args.expected_generation == 0:
         if current:
             raise ValueError("assignment appeared during transfer")
     elif not current or current["generation"] != args.expected_generation:
         raise ValueError("assignment generation changed during transfer")
+
+
+def command_transfer_claim(args: argparse.Namespace) -> None:
+    """Claim the record move for one transaction before any owner record changes."""
+    path = Path(args.registry)
+    reg = load(path)
+    require_valid(reg)
+    require_expected_generation(reg, args)
+    for row in reg["transfers"]:
+        if (row.get("secondmate") == args.secondmate and row.get("transaction") != args.transaction
+                and row.get("state") == "records-ready"):
+            raise ValueError(f"transfer {row.get('transaction')} is already moving {args.secondmate}")
+    reg["transfers"] = [
+        row for row in reg["transfers"] if row.get("transaction") != args.transaction
+    ] + [{"secondmate": args.secondmate, "transaction": args.transaction, "state": "records-ready"}]
+    require_valid(reg)
+    write_atomic(path, reg)
+
+
+def command_transfer_publish(args: argparse.Namespace) -> None:
+    path = Path(args.registry)
+    reg = load(path)
+    require_valid(reg)
+    require_expected_generation(reg, args)
     row = {
         "secondmate": args.secondmate,
         "manager": args.manager,
@@ -729,6 +750,11 @@ def parser() -> argparse.ArgumentParser:
     publish.add_argument("--transaction", required=True)
     publish.add_argument("--reason", required=True)
     publish.set_defaults(function=command_transfer_publish)
+    claim = commands.add_parser("transfer-claim")
+    claim.add_argument("--secondmate", required=True)
+    claim.add_argument("--expected-generation", type=int, required=True)
+    claim.add_argument("--transaction", required=True)
+    claim.set_defaults(function=command_transfer_claim)
     transfer_state = commands.add_parser("transfer-state")
     transfer_state.add_argument("--secondmate", required=True)
     transfer_state.add_argument("--transaction", required=True)
