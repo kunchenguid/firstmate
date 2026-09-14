@@ -4,8 +4,11 @@
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
 #   - The running firstmate repo (on its default branch) fast-forwards from
-#     origin; a leased secondmate home (detached HEAD on the default branch)
-#     fast-forwards the same way.
+#     its tracked upstream; a leased secondmate home (detached HEAD on the
+#     default branch) fast-forwards the same way.
+#   - A firstmate home that is ITSELF a leased linked worktree fast-forwards its
+#     detached HEAD, because such a home can never hold the default branch; a
+#     standalone clone stranded on a detached HEAD is still refused.
 #   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
@@ -111,6 +114,17 @@ add_sm() {
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
+# Lease a firstmate HOME as a detached linked worktree of the firstmate repo -
+# the shape bin/fm-home-seed.sh produces, and the shape a treehouse lane runs in.
+# Such a home can never be on the default branch, because the checkout it is
+# leased from already holds it and git refuses the same branch twice. Echoes the
+# leased home path. Args: world name.
+lease_home() {
+  local w=$1 name=$2
+  git -C "$w/main" worktree add -q --detach "$w/$name" main
+  printf '%s\n' "$w/$name"
+}
+
 # Advance origin by one commit. mode=instr changes the whole instruction surface
 # (AGENTS.md, bin, .agents/skills) plus README; mode=bin changes only bin/, which
 # a running agent re-executes rather than holding; mode=readme changes only README.
@@ -136,6 +150,15 @@ run_update() {
   PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+}
+
+# Same, but for a firstmate repo root that is not the world's own $w/main - used
+# to run the self-update from inside a leased home. Args: world root.
+run_update_in() {
+  local w=$1 root=$2
+  PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -433,7 +456,12 @@ test_firstmate_wrong_branch_skipped() {
   pass "T9 firstmate off its default branch is skipped, not forced"
 }
 
-test_firstmate_detached_head_skipped() {
+# --- T10: a STANDALONE clone on a detached HEAD is still refused -----------
+# $w/main owns its own git directory, so nothing forces it off the default
+# branch: a detached HEAD there means a stranded checkout - mid-bisect,
+# mid-rebase, or holding unique commits - and advancing it silently could bury
+# work. This refusal is the safety property T13 must not cost us.
+test_standalone_firstmate_detached_head_skipped() {
   local w out before
   w=$(new_world t10)
   bump_origin "$w" instr
@@ -446,7 +474,68 @@ test_firstmate_detached_head_skipped() {
   assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
-  pass "T10 firstmate detached HEAD is skipped"
+  pass "T10 standalone firstmate clone on a detached HEAD is skipped"
+}
+
+# --- T13: a LEASED firstmate home fast-forwards its detached HEAD ----------
+# A home that is a linked worktree of another checkout is detached BY DESIGN and
+# can never be on the default branch, so refusing it for a detached HEAD skips
+# that entire class of home forever and /updatefirstmate silently never updates
+# it. It must advance - and advance HEAD ONLY, leaving the checkout it is leased
+# from exactly where it was.
+test_leased_firstmate_home_fast_forwards() {
+  local w home out parent_before
+  w=$(new_world t13)
+  home=$(lease_home "$w" leased)
+  bump_origin "$w" instr
+  parent_before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update_in "$w" "$home")
+
+  assert_not_contains "$out" "skipped: detached HEAD" "leased home refused for being detached"
+  assert_contains "$out" "firstmate: updated " "leased firstmate home fast-forwarded"
+  assert_contains "$out" "reread-firstmate: yes" "instruction change in a leased home triggers reread"
+  [ "$(git -C "$home" rev-parse HEAD)" = "$(git -C "$home" rev-parse origin/main)" ] \
+    || fail "leased home HEAD not at origin/main"
+  # HEAD-only: the checkout it is leased from, and the shared default branch,
+  # must both be untouched.
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$parent_before" ] \
+    || fail "leasing checkout HEAD moved"
+  [ "$(git -C "$w/main" rev-parse refs/heads/main)" = "$parent_before" ] \
+    || fail "shared default branch moved"
+  git -C "$home" symbolic-ref -q HEAD >/dev/null \
+    && fail "leased home is no longer detached"
+  # A fast-forwarded tip has exactly one parent; a merge commit would have two.
+  [ "$(git -C "$home" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
+    || fail "leased home tip is not a single-parent fast-forward"
+  pass "T13 leased firstmate home fast-forwards its detached HEAD, parent untouched"
+}
+
+# --- T14: the other guards still fire on a leased home ---------------------
+# Allowing a detached HEAD relaxes exactly one check. Dirty and diverged must
+# still refuse, or the fix would have traded a silent skip for silent data loss.
+test_leased_firstmate_home_keeps_other_guards() {
+  local w dirty diverged out before
+  w=$(new_world t14)
+  dirty=$(lease_home "$w" leased-dirty)
+  diverged=$(lease_home "$w" leased-diverged)
+  printf 'uncommitted local edit\n' >> "$dirty/AGENTS.md"
+  printf 'fork work\n' > "$diverged/AGENTS.md"
+  git -C "$diverged" add -A
+  git -C "$diverged" commit -qm local-work
+  before=$(git -C "$diverged" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  out=$(run_update_in "$w" "$dirty")
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "dirty leased home skipped"
+  grep -q 'uncommitted local edit' "$dirty/AGENTS.md" \
+    || fail "dirty edit was discarded"
+
+  out=$(run_update_in "$w" "$diverged")
+  assert_contains "$out" "firstmate: skipped: diverged from origin/main" "diverged leased home skipped"
+  [ "$(git -C "$diverged" rev-parse HEAD)" = "$before" ] \
+    || fail "diverged leased home HEAD moved (unlanded work at risk)"
+  pass "T14 leased home still refuses a dirty or diverged tree"
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
@@ -519,7 +608,9 @@ test_already_current_secondmate_still_restarts
 test_already_current_unprovable_mate_is_nudged
 test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
-test_firstmate_detached_head_skipped
+test_standalone_firstmate_detached_head_skipped
+test_leased_firstmate_home_fast_forwards
+test_leased_firstmate_home_keeps_other_guards
 test_unsafe_secondmate_home_skipped_before_git_update
 test_primary_update_rebinds_local_watch
 

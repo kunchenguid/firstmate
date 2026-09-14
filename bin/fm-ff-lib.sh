@@ -5,7 +5,8 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) pulls from the tracked upstream:
+#     base_mode "upstream".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
@@ -67,6 +68,38 @@ primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
+}
+
+# Is this checkout a LINKED git worktree - one that borrows another checkout's
+# git directory - rather than a repository's own main worktree?
+#
+# This is the discriminator that separates a legitimately detached home from a
+# stranded one. A linked worktree CANNOT hold the default branch while the
+# checkout it is leased from already has it: git refuses the same branch in two
+# worktrees. A leased home is therefore detached BY DESIGN, permanently, and a
+# detached HEAD there carries no information about whether something went wrong.
+# A repository's own main worktree has no such constraint, so a detached HEAD
+# there is an anomaly - mid-bisect, mid-rebase, or a stale checkout holding
+# unique commits - and must never be silently advanced.
+#
+# The test is structural: a linked worktree's --git-dir is a per-worktree
+# subdirectory of the shared --git-common-dir, while a main worktree's two are
+# the same directory. That is preferred over `git worktree list` identity, which
+# would compare recorded paths against caller-supplied ones and so depends on
+# symlink and canonicalisation luck. Both values are canonicalised through the
+# checkout itself, because git reports either one relative to its own working
+# directory or absolute depending on the shape and the git version.
+# Returns 0 for a linked worktree, 1 for anything else INCLUDING an unreadable
+# repo, so an indeterminate answer keeps the stricter detached-HEAD refusal.
+is_linked_worktree() {
+  local dir=$1 git_dir common_dir
+  git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$git_dir" ] && [ -n "$common_dir" ] || return 1
+  git_dir=$( cd "$dir" && cd "$git_dir" 2>/dev/null && pwd -P ) || return 1
+  common_dir=$( cd "$dir" && cd "$common_dir" 2>/dev/null && pwd -P ) || return 1
+  [ -n "$git_dir" ] && [ -n "$common_dir" ] || return 1
+  [ "$git_dir" != "$common_dir" ]
 }
 
 resolve_path() {
@@ -199,19 +232,19 @@ validate_secondmate_home() {
 }
 
 # A single fetch refreshes every worktree that shares an object store, so fetch
-# each distinct git-common-dir at most once. Used ONLY by the origin base mode;
-# the local-HEAD sync never fetches.
+# each distinct git-common-dir at most once per remote. Used ONLY by the origin
+# and upstream base modes; the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
-  local dir=$1 common
+  local dir=$1 remote=${2:-origin} common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
     case " $FETCHED " in
-      *" $common "*) return 0 ;;
+      *" $common:$remote "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $common"
+  if git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+    [ -n "$common" ] && FETCHED="$FETCHED $common:$remote"
     return 0
   fi
   return 1
@@ -281,8 +314,11 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
+#   origin       - fetch origin and advance to origin/<default> (legacy); requires
+#                  an origin remote and network reachability.
+#   upstream     - fetch the tracked remote and advance to the default branch's
+#                  tracked upstream (the /updatefirstmate path); requires a
+#                  tracking remote and network reachability.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
@@ -318,11 +354,31 @@ ff_target() {
       echo "$label: skipped: no origin remote"
       return 0
     fi
-    if ! fetch_once "$dir"; then
+    if ! fetch_once "$dir" origin; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
     base="origin/$default"
+  elif [ "$base_mode" = upstream ]; then
+    local remote
+    remote=$(git -C "$dir" config "branch.$default.remote" 2>/dev/null || true)
+    if [ -z "$remote" ]; then
+      echo "$label: skipped: no tracking remote for $default"
+      return 0
+    fi
+    if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
+      echo "$label: skipped: no $remote remote"
+      return 0
+    fi
+    if ! fetch_once "$dir" "$remote"; then
+      echo "$label: skipped: fetch failed"
+      return 0
+    fi
+    base=$(git -C "$dir" rev-parse --abbrev-ref "$default@{upstream}" 2>/dev/null || true)
+    if [ -z "$base" ]; then
+      echo "$label: skipped: no upstream branch for $default"
+      return 0
+    fi
   else
     base="$base_mode"
   fi

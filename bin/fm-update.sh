@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Self-update a running firstmate and its secondmates to the latest origin.
+# Self-update a running firstmate and its secondmates to the latest tracked upstream.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
+# firstmate repo from its tracked upstream, then fast-forwards every
 # registered secondmate home. Local homes are treehouse worktrees or standalone
 # clones; remote routes update their configured code root on that host and then
 # fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
@@ -16,7 +16,7 @@
 # default branch, so a fast-forward there advances HEAD only and never touches
 # any other worktree's checkout or the shared `main` branch.
 #
-# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
+# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "upstream" here);
 # the same library drives local and remote parent-targeted secondmate sync, so
 # there is one ff implementation, not several.
 #
@@ -26,7 +26,7 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
-#     on origin's tip - advanced OR already there - whose recorded runtime can
+#     on the tracked upstream's tip - advanced OR already there - whose recorded runtime can
 #     prove a restart)
 #   - nudge-secondmates: fm-<id>...|none   (the residual: live secondmates on
 #     that same tip whose runtime CANNOT prove a restart, so the older re-read
@@ -85,7 +85,19 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+# A firstmate home that is a LINKED worktree of another checkout is detached by
+# design and can never be on the default branch (git refuses the same branch in
+# two worktrees), so refusing it for a detached HEAD would skip that whole class
+# of home forever. A repository's own main worktree gets no such allowance: a
+# detached HEAD there means a stranded checkout - mid-bisect, mid-rebase, or
+# holding unique commits - and is still refused. That distinction is the safety
+# boundary; every other guard in ff_target is unchanged, so a dirty, diverged,
+# or non-ancestor target is still skipped rather than forced.
+firstmate_allow_detached=no
+if is_linked_worktree "$FM_ROOT"; then
+  firstmate_allow_detached=yes
+fi
+ff_target "$FM_ROOT" "firstmate" upstream "$firstmate_allow_detached" no
 if [ "$FF_STATUS" = "updated" ]; then
   if [ -n "$FF_INSTR" ]; then
     reread_firstmate="yes"
@@ -102,7 +114,7 @@ if [ "$FF_STATUS" = "updated" ]; then
 fi
 
 # --- secondmates -----------------------------------------------------------
-# Every live secondmate this pass leaves on origin's tip is restarted, whether it
+# Every live secondmate this pass leaves on the tracked upstream's tip is restarted, whether it
 # advanced or was already there. The header above owns why the git diff does not
 # gate that, and which two conditions - a skipped home, an unprovable runtime -
 # are the only ways a live mate stays out of the restart set.
@@ -170,7 +182,7 @@ fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin yes
+sweep_live_secondmate_metas "$STATE" upstream yes
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -227,7 +239,7 @@ if [ -f "$SECONDMATES_MD" ]; then
         echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
       fi
     else
-      process_secondmate "$id" "$home" "" origin yes
+      process_secondmate "$id" "$home" "" upstream yes
     fi
   done < "$SECONDMATES_MD"
 fi
