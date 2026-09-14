@@ -912,6 +912,25 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A promoted scout records kind=ship and a custom ship branch in its meta, but
+# its brief is the scout scaffold: it never gained a Ship branch line, and a
+# relaunch cannot regenerate the brief (--branch-prefix is refused there). The
+# recorded branch is authoritative, so the relaunch must proceed on it.
+test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
+  local dir out
+  dir=$(new_case promotebranch rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'branch=fix/rl42\n' >> "$dir/home/state/rl42.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl42 --relaunch)
+  assert_contains "$out" "spawned rl42" "the relaunch should complete on the recorded branch"
+  assert_contains "$out" "records no ship branch" "the brief gap should be reported, not silent"
+  assert_contains "$out" "recorded branch fix/rl42" "the relaunch should name the branch it adopted"
+  [ "$(meta_field "$dir" rl42 branch)" = "fix/rl42" ] \
+    || fail "the recorded branch must survive the relaunch"
+  pass "fm-spawn --relaunch: a promoted scout with a recorded custom branch relaunches on it instead of being refused"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1582,6 +1601,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
