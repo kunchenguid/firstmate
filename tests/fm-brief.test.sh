@@ -326,13 +326,17 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
-  local home id brief
+  local home id brief spelling
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
+    assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
+  done
+  assert_grep '[captain]' "$brief" "rendered intent contract must explain the neutral legacy provenance marker"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal

@@ -13,7 +13,8 @@
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
-#   placeholders, an empty Task, or an incomplete pair of Task subsections.
+#   placeholders, an empty Task, an incomplete pair of Task subsections, or a
+#   `## Captain's intent` line opening with a Captain label or address.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -2377,6 +2378,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
+  if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
+    echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
+    exit 1
+  fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
       CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
@@ -2384,7 +2389,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
       CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
       if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
     fi

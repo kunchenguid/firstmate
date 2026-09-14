@@ -493,7 +493,7 @@ EOF
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-Captain: Fix the legacy dispatch boundary.
+[captain] Fix the legacy dispatch boundary.
 Do not copy this Firstmate-authored constraint into intent.
 
 # Definition of done
@@ -570,6 +570,9 @@ EOF
   [ "$status" -ne 0 ] || fail "unmarked legacy no-mistakes spawn should require provenance"
   assert_contains "$out" "has no provenance-marked captain words" \
     "unmarked legacy no-mistakes spawn did not explain the missing intent provenance"
+  assert_contains "$out" "[captain]" "missing-provenance refusal did not name the replacement marker"
+  assert_not_contains "$out" "Captain:" "missing-provenance refusal still prescribes operator address"
+  assert_absent "$home/data/$id/launch-brief.md" "unmarked legacy no-mistakes spawn serialized unauthorized intent"
   assert_absent "$home/state/$id.meta" "unmarked legacy no-mistakes spawn wrote task metadata"
 
   id=delivery-unfilled-scout
@@ -716,8 +719,8 @@ EOF
 You are a crewmate.
 
 # Task
-Captain's words: Investigate the fold's session-floor refusal.
-Captain: Preserve the existing successful session behavior.
+[captain] Investigate the fold's session-floor refusal.
+[captain] Preserve the existing successful session behavior.
 
 Reproduce the refusal before changing code.
 Ship the narrow session-floor fix with a regression test.
@@ -746,6 +749,85 @@ EOF
   assert_not_contains "$spec_body" "This is a SCOUT task" \
     "legacy promotion copied the scout Setup section into Firstmate spec"
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
+}
+
+# Exercise the serialized input a worker is told to pass to no-mistakes, not
+# just the presence of words somewhere in its much larger launch brief.
+# No live model or pipeline is needed: spawn publishes this exact input before
+# the fixture backend refuses to create an endpoint.
+test_authorized_intent_keeps_words_without_composed_address() {
+  local rec home proj fakebin id words authorized out status marker n=0
+  rec=$(make_home intent-emission)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id='intent-plain'
+  words=$(printf '%s\n' 'Keep the original request intact.' '' "Preserve its provenance, punctuation, and \`literal code\`.")
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "intent brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "$words" 'This build constraint must not become intent.'
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_present "$home/data/$id/launch-brief.md" "plain intent was not serialized"
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+  [ "$authorized" = "$words" ] || fail "authorized --intent must contain exactly the request, without headings, address, or contract prose: $authorized"
+
+  # The request itself may discuss an address spelling. It is data, not an
+  # invitation to scrub the user's words or synthesize a different request.
+  words=$(printf '%s\n' "Keep the literal example \`Captain, hello\` in the documentation." \
+    "Stop composing Captain:, Captain's words:, Captain's ask:, and Captain's intent: into PR bodies.")
+  write_brief "$home" intent-literal no-mistakes
+  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/intent-literal/brief.md"
+  out=$(run_spawn "$home" "$fakebin" intent-literal "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "operator-address line" "labels mentioned mid-line were refused as address"
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/intent-literal/launch-brief.md")
+  [ "$authorized" = "$words" ] || fail "literal words in the request were scrubbed"
+
+  # A body line that opens with operator address is refused, never rewritten.
+  for marker in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
+    n=$((n + 1))
+    id="intent-addressed-$n"
+    write_brief "$home" "$id" no-mistakes
+    printf '# Task\n## Captain'"'"'s intent\nKeep the original request intact.\n  %s preserve its provenance.\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+      "$marker" > "$home/data/$id/brief.md"
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$marker: addressed intent should be refused"
+    assert_contains "$out" "operator-address line:   $marker preserve its provenance." \
+      "$marker: refusal did not name the offending line"
+    assert_contains "$out" "write the captain's actual words without a Captain label or address" \
+      "$marker: refusal did not say what to write instead"
+    assert_absent "$home/data/$id/launch-brief.md" "$marker: addressed intent was serialized"
+    assert_absent "$home/state/$id.meta" "$marker: addressed intent spawn wrote task metadata"
+    assert_grep "  $marker preserve its provenance." "$home/data/$id/brief.md" "$marker: refusal rewrote the brief"
+  done
+
+  id='intent-addressed-promote'
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  write_brief "$home" "$id"
+  printf '# Task\n## Captain'"'"'s intent\nCaptain: investigate the refusal.\n\n## Firstmate spec\nReproduce it first.\n' > "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion of addressed intent should be refused"
+  assert_contains "$out" "operator-address line: Captain: investigate the refusal." \
+    "promotion refusal did not name the offending line"
+  assert_absent "$home/data/$id/ship-instructions.md" "promotion published addressed intent"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "refused promotion changed the task record"
+
+  # New legacy briefs use neutral provenance. Previously stored labels remain
+  # readable without encouraging their use in newly composed pipeline input.
+  for marker in '[captain]' 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:"; do
+    n=$((n + 1))
+    id="intent-marked-$n"
+    write_brief "$home" "$id" no-mistakes
+    printf '# Task\n%s %s\nDo not include this build constraint.\n%s %s\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+      "$marker" 'Keep the original request intact.' "$marker" 'Preserve its provenance.' > "$home/data/$id/brief.md"
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+    assert_present "$home/data/$id/launch-brief.md" "$marker: provenance was not accepted"
+    authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+    words=$(printf '%s\n' 'Keep the original request intact.' 'Preserve its provenance.')
+    [ "$authorized" = "$words" ] || fail "$marker: legacy intent changed words or included provenance/build prose"
+  done
+  pass "fm-spawn/fm-promote: authorized intent preserves exact words and refuses operator-address lines"
 }
 
 test_spawn_refreshes_legacy_worker_roles() {
@@ -790,6 +872,7 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
