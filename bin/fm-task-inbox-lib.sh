@@ -31,7 +31,6 @@
 #                              "<msg>\t<count>\t<epoch>\t<input-blocked-streak>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
-#   <task>.inbox/.attempts     bounded sanitized delivery-attempt journal
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -77,7 +76,6 @@
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
-#   FM_TASK_INBOX_ATTEMPTS_MAX default 200; retained delivery-journal lines
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -91,7 +89,6 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
-FM_TASK_INBOX_ATTEMPTS_MAX_DEFAULT=200
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
 
 fm_task_inbox_grace_secs() {
@@ -103,13 +100,6 @@ fm_task_inbox_grace_secs() {
 fm_task_inbox_ring_max() {
   local m=${FM_TASK_INBOX_RING_MAX:-$FM_TASK_INBOX_RING_MAX_DEFAULT}
   case "$m" in ''|*[!0-9]*) m=$FM_TASK_INBOX_RING_MAX_DEFAULT ;; esac
-  printf '%s' "$m"
-}
-
-fm_task_inbox_attempts_max() {
-  local m=${FM_TASK_INBOX_ATTEMPTS_MAX:-$FM_TASK_INBOX_ATTEMPTS_MAX_DEFAULT}
-  case "$m" in ''|*[!0-9]*) m=$FM_TASK_INBOX_ATTEMPTS_MAX_DEFAULT ;; esac
-  [ "$m" -gt 0 ] || m=$FM_TASK_INBOX_ATTEMPTS_MAX_DEFAULT
   printf '%s' "$m"
 }
 
@@ -286,34 +276,6 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# One sanitized line per delivery attempt, appended to the inbox's own bounded
-# journal. Every caller of fm_task_inbox_ring contributes, so the FIRST attempt
-# - the enqueuing sender's, which no watcher log ever saw - is diagnosable
-# alongside the ladder's later ones instead of being reconstructed afterwards.
-# The line carries only the UTC time, the record's name, the ring return code,
-# and the backend's own verdict word: never the message body, the doorbell
-# line, a path outside this inbox, or any captured pane content, so the journal
-# holds no payload and no credential. Best-effort by construction - a journal
-# that cannot be written or trimmed never changes a delivery outcome.
-fm_task_inbox_record_attempt() {  # <record-path> <rc> [verdict]
-  local dir=${1%/*} log max kept tmp
-  [ -d "$dir" ] || return 0
-  log=$dir/.attempts
-  printf '%s\t%s\t%s\t%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1##*/}" "$2" "${3:-none}" >> "$log" 2>/dev/null || return 0
-  max=$(fm_task_inbox_attempts_max)
-  kept=$(wc -l < "$log" 2>/dev/null | tr -d '[:space:]') || return 0
-  case "$kept" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$kept" -gt "$((max * 2))" ] || return 0
-  tmp=$log.$$
-  if tail -n "$max" "$log" > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$log" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
-  else
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-  return 0
-}
-
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with an Enter-retry
 # budget, verifying that our own text actually left the input line.
@@ -345,32 +307,29 @@ fm_task_inbox_record_attempt() {  # <record-path> <rc> [verdict]
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
-    dead|missing) fm_task_inbox_record_attempt "$rec" 3 agent-gone; return 3 ;;
+    dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
-    fm_task_inbox_record_attempt "$rec" 2 no-doorbell-line
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) fm_task_inbox_record_attempt "$rec" 1 "pre-check:$cstate"; return 1 ;;
+    pending) return 1 ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
-    fm_task_inbox_record_attempt "$rec" 2 send-error
     return 2
   fi
   # Exact `pending` is the backend's proof that our text is still sitting in
   # the composer after its Enter retries; every other value (empty, unknown,
   # pending-unproven, ...) stays advisory and never blocks a ring.
   case "$verdict" in
-    send-failed) fm_task_inbox_record_attempt "$rec" 2 "$verdict"; return 2 ;;
-    pending) fm_task_inbox_record_attempt "$rec" 4 "$verdict"; return 4 ;;
+    send-failed) return 2 ;;
+    pending) return 4 ;;
   esac
-  fm_task_inbox_record_attempt "$rec" 0 "$verdict"
   return 0
 }
 
