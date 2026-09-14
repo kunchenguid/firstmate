@@ -485,6 +485,22 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/fixtures/fm-progress-report/backlog.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-progress-report/expected-report.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-progress-report/quarantine.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/secondmates-b59-scopes.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "tests/fixtures/fm-skill-bench/skills/bad-body-long/SKILL.md",
       "audience": "maintainer-verification"
     },

@@ -1,0 +1,33 @@
+{
+  "generatedAt": "2026-09-13T10:59:30Z",
+  "schemaVersion": 5,
+  "providers": [
+    {
+      "provider": "codex",
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {"scope": "all_models", "status": "known", "effectivePercentRemaining": 87, "runway": {"status": "through_reset"}}
+        ]
+      }
+    },
+    {
+      "provider": "cursor",
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {"scope": "all_models", "status": "known", "effectivePercentRemaining": 44, "runway": {"status": "through_reset"}}
+        ]
+      }
+    },
+    {
+      "provider": "kimi",
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {"scope": "all_models", "status": "known", "effectivePercentRemaining": 61, "runway": {"status": "through_reset"}}
+        ]
+      }
+    }
+  ]
+}

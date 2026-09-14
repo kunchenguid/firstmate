@@ -1,0 +1,14 @@
+<@U0A7XV408AD> *Firstmate fork stabilization, 13 Sep 11:00*  ⚪ health unknown
+*Waiting on you:* nothing
+```
+Fix classes landed   █████░░░░░░░░░  1 / 3   (fixed; verification window unknown)
+Fix seats in flight                  unknown
+Smoke on main                        unknown / 1
+Quiet clock                          unknown / 24 h without a new silent failure
+Quota (remaining)    Codex ████████████░░ 87% · Cursor ██████░░░░░░░░ 44% · Kimi █████████░░░░░ 61%
+Ledger               3 classes: 1 fixed · 2 owned · 1 scouts · 1 watch
+```
+*Since last report:* merged https://github.com/pedromuller-del/firstmate/pull/368 unknown min · new flaw classes unknown · seats started/retired 0/0
+*Focus now and why:* unknown (no typed focus record). Ready queue: fm-followup-b48 (Wrong route dispatch) leads 2 queued item(s).
+*Next steps, in order:* 1. fm-followup-b48 (ship, firstmate) · 2. fm-followup-b60 (scout, firstmate)
+*Parked until then:* none

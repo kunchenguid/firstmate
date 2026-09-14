@@ -705,6 +705,7 @@ tests/fm-daily.test.sh 366
 tests/fm-decision-hold-lifecycle.test.sh 719
 tests/fm-decision-hold.test.sh 27
 tests/fm-diagnostic-report.test.sh 347
+tests/fm-progress-report.test.sh 347
 tests/fm-doc-audience-check.test.sh 43
 tests/fm-documentation-audiences.test.sh 269
 tests/fm-ensure-agents-md.test.sh 371
@@ -1477,6 +1478,11 @@ families_for_changed_path() {
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
+      ;;
+    bin/fm-progress-report.sh|bin/fm-progress-report-lib.sh|bin/fm-progress-report.jq|\
+    bin/fm-progress-report-render.jq|bin/fm-toon-decode.mjs|\
+    tests/fixtures/fm-progress-report/*)
+      printf '%s\n' __script__:fm-progress-report.test.sh
       ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family

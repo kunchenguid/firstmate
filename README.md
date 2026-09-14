@@ -206,6 +206,12 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/updatefirstmate` | Fast-forward the running firstmate and its secondmates, then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
+### Hourly progress report
+
+`bin/fm-progress-report.sh` renders the private hourly status template from five allowed sources only: `data/quarantine.md`, the tasks-axi backlog, `data/telemetry/lifecycle.jsonl`, quota-axi, and merged pull requests for `pedromuller-del/firstmate`. Tool output is decoded through the official TOON codec bundled with the installed axi tools (`bin/fm-toon-decode.mjs`); truncated, malformed, or incomplete coverage fails before `state/progress-report.last` is replaced. Metrics the sources cannot prove render as `unknown`; unchanged material output with no delta activity prints nothing. One shared end-to-end deadline bounds every probe and source call.
+After merge, wire the private hourly check to the repo executable and operational home, for example: `FM_HOME=/path/to/firstmate-home /path/to/firstmate/bin/fm-progress-report.sh`.
+Run `bin/fm-progress-report.sh -h` for the source contract, suppression semantics, and test seams.
+
 Bearings invocation examples:
 
 - `/bearings` returns the fresh four-section digest in chat only.
