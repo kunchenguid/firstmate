@@ -1,6 +1,6 @@
 # Codex
 
-Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer version.
+Verified on 2026-09-14 with codex-cli 0.154.0 unless a fact gives a newer version.
 
 ## Operating facts
 
@@ -16,9 +16,10 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model discovery | Open the current interactive session's `/model` picker. |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+A fresh repository root can show the exact directory-trust dialog: "Do you trust the contents of this directory?", with `› 1. Yes, continue` preselected above `2. No, quit`.
+`../../../bin/fm-spawn.sh` answers that choice only when the complete verified menu is present, then requires the `• Working (... • esc to interrupt)` row before reporting spawn success.
+A changed, ambiguous, persistent, or failed trust/readiness surface is refused without guessing or repeated key presses.
+The decision persists for the repository, so later worktrees of the same project may skip the dialog; the readiness gate still requires a working turn.
 
 ## Skill popup
 

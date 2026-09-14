@@ -107,6 +107,32 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+## Codex fresh-directory startup
+
+The Codex startup gate was verified on 2026-09-14 with codex-cli 0.154.0 on macOS, against a new git repository in a throwaway home and an isolated tmux socket.
+The portable public-interface regression covers the exact menu, the changed and unsafe menu refusals, and the one-answer persistent-menu refusal:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-trust.test.sh
+```
+
+The live vendor-surface guard is opt-in because it submits a real prompt:
+
+```sh
+FM_CODEX_TRUST_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-trust-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - codex codex-cli 0.154.0 reached the working row after the verified trust choice
+```
+
+The fresh repository rendered `Do you trust the contents of this directory?` with `› 1. Yes, continue` above `2. No, quit`.
+After one Enter, the same pane rendered `• Working (4s • esc to interrupt)` while processing the supplied prompt.
+The live guard refuses a missing or changed menu and does not report success until the working row appears.
+The spawn-path regression does not mutate Codex's trust store; it only accepts the isolated task pane's verified preselected choice through the existing backend key primitive.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
