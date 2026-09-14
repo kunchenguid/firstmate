@@ -3812,22 +3812,25 @@ test_composer_state_unknown_when_no_composer_row_found() {
   pass "fm_backend_herdr_composer_state: reports unknown for bare shell prompts with no composer row"
 }
 
-# Real Pi 0.80.7 on Herdr 0.7.3 renders no prompt glyph and no side border.
+# Pi renders no prompt glyph and no side border.
 # Its content is the row(s) between two blue horizontal separators; the idle row
-# carries only a reverse-video cursor. This exact shape was `unknown` for 4555s
-# during the 2026-07-14 incident, so the safe injector never attempted submit.
+# carries only a reverse-video cursor. pi-vimmode may also draw its
+# `─ INSERT 1:1 ─` status row inside that pair. That status row made the
+# structural scan claim pending even while native Pi reported idle (#3819).
 test_composer_state_pi_separator_idle_is_empty() {
-  local dir log resp fb out calls
-  dir="$TMP_ROOT/composer-pi-separated-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '│ stale bordered transcript row │\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;102;102;102m~/synthetic-primary (main)\x1b[0m\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
-  [ "$out" = empty ] || fail "an idle native Pi separator composer should read empty, got '$out'"
-  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
-  [ "$calls" -eq 1 ] || fail "Pi separator recognition must corroborate identity exactly once, made $calls agent calls"
-  pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
+  local dir log resp fb out calls native_status
+  for native_status in idle 'done'; do
+    dir="$TMP_ROOT/composer-pi-separated-$native_status"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '│ stale bordered transcript row │\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n─ INSERT 1:1 ─\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;102;102;102m~/synthetic-primary (main)\x1b[0m\n' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$native_status" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "a native $native_status Pi separator composer should read empty, got '$out'"
+    calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+    [ "$calls" -eq 1 ] || fail "Pi separator recognition must corroborate identity exactly once, made $calls agent calls"
+  done
+  pass "fm_backend_herdr_composer_state: native idle/done Pi ignores the pi-vimmode status row"
 }
 
 # A pi worker parked on an interactive prompt (permission dialog, question
@@ -3855,7 +3858,7 @@ test_composer_state_pi_parked_prompt_is_not_empty() {
 test_composer_state_pi_separator_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pi-separated-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nprivacy safe human draft\x1b[7m \x1b[0m\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
+  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nprivacy safe human draft\x1b[7m \x1b[0m\n─ INSERT 1:24 ─\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"done"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \

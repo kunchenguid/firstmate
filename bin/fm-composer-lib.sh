@@ -1412,6 +1412,27 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
+# pi-vimmode draws this mode/cursor-position row inside Pi's separator pair.
+# It is interface furniture, not submitted composer text (issue #3819).
+_fm_composer_pi_rows_are_idle_furniture() {  # <screen> <styled>
+  local screen=$1 styled=$2 row raw content furniture_seen=0
+  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    fm_composer_normalize_trim_var content
+    if [ -n "$content" ]; then
+      if [[ "$content" =~ ^─[[:space:]]+INSERT[[:space:]]+[0-9]+:[0-9]+[[:space:]]+─$ ]]; then
+        furniture_seen=1
+      else
+        return 1
+      fi
+    fi
+    row=$((row + 1))
+  done
+  [ "$furniture_seen" = 1 ]
+}
+
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
   if [ "$has_identity" != 1 ]; then
@@ -1465,6 +1486,11 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
   if [ "$state" = pending ]; then
+    if { [ "$agent_status" = idle ] || [ "$agent_status" = 'done' ]; } \
+       && _fm_composer_pi_rows_are_idle_furniture "$screen" "$styled"; then
+      printf 'empty'
+      return 0
+    fi
     printf 'pending'
     return 0
   fi
