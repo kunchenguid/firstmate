@@ -1591,6 +1591,30 @@ for line in sys.stdin:
                 self.assertEqual(claimed["attachment"]["extracted_text"].split("\n", 1)[1],
                                  "ABC123\n1234\t total \nnext\n\nlast")
 
+    def test_docx_nested_textbox_paragraphs_preserve_runs_once_in_document_order(self):
+        textbox = ('<w:r><w:pict><v:shape><v:textbox><w:txbxContent>'
+                   '<w:p><w:r><w:t xml:space="preserve">Total: </w:t></w:r>'
+                   '<w:r><w:t>1</w:t></w:r><w:r><w:t>00</w:t></w:r></w:p>'
+                   '<w:p><w:r><w:t>ABC</w:t></w:r><w:r><w:t>123</w:t></w:r></w:p>'
+                   '<w:p/>'
+                   '</w:txbxContent></v:textbox></v:shape></w:pict></w:r>')
+        for surrounding in (False, True):
+            with self.subTest(surrounding=surrounding):
+                before = '<w:r><w:t>Before</w:t></w:r>' if surrounding else ''
+                after = '<w:r><w:t>Af</w:t></w:r><w:r><w:t>ter</w:t></w:r>' if surrounding else ''
+                word = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                        'xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p>' + before + textbox + after +
+                        '</w:p><w:p><w:r><w:t>Next paragraph</w:t></w:r></w:p></w:body></w:document>')
+                mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                row = self.prepared("document", mime, self.office_bytes({"word/document.xml": word}))
+                _, claimed = self.claim(row)
+                expected = ["Total: 100", "ABC123", ""]
+                if surrounding:
+                    expected = ["Before", *expected, "After"]
+                expected.append("Next paragraph")
+                self.assertEqual(claimed["attachment"]["extracted_text"],
+                                 "[word/document.xml]\n" + "\n".join(expected))
+
     def test_workbook_rich_strings_match_inline_and_preserve_cached_numbers(self):
         files = self.workbook_files([(1, "Codes")])
         files["xl/sharedStrings.xml"] = '<sst><si><r><t>ABC</t></r><r><t>123</t></r></si></sst>'

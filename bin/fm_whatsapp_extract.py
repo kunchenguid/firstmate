@@ -125,10 +125,12 @@ def office_content(path, mime):
                 raise ValueError("Office entities refused")
             return ET.fromstring(data)
 
+        def text_piece(node):
+            tag = node.tag.rsplit("}", 1)[-1]
+            return (node.text or "") if tag == "t" else {"br": "\n", "cr": "\n", "tab": "\t"}.get(tag, "")
+
         def text_runs(element):
-            return "".join((node.text or "") if node.tag.rsplit("}", 1)[-1] == "t"
-                           else {"br": "\n", "cr": "\n", "tab": "\t"}.get(node.tag.rsplit("}", 1)[-1], "")
-                           for node in element.iter())
+            return "".join(text_piece(node) for node in element.iter())
 
         def ordered_parts(index, list_tag, member_kind, folder):
             document = read_xml(f"{root}/{index}.xml")
@@ -193,8 +195,24 @@ def office_content(path, mime):
                         value = shared[index]
                     values.append(f"{cell.get('r', '?')}: {value}")
             else:
-                values = [text_runs(element) for element in document.iter()
-                          if element.tag.rsplit("}", 1)[-1] == "p"]
+                segments, containers = [], set()
+                pending = [(document, None)]
+                while pending:
+                    node, paragraph = pending.pop()
+                    if node.tag.rsplit("}", 1)[-1] == "p":
+                        if paragraph is not None:
+                            containers.add(paragraph)
+                        paragraph = node
+                        segments.append((paragraph, []))
+                    elif paragraph is not None:
+                        piece = text_piece(node)
+                        if piece:
+                            if segments[-1][0] is not paragraph:
+                                segments.append((paragraph, []))
+                            segments[-1][1].append(piece)
+                    pending.extend((child, paragraph) for child in reversed(node))
+                values = ["".join(chunks) for paragraph, chunks in segments
+                          if chunks or paragraph not in containers]
             texts.append(f"[{label}]\n" + "\n".join(values))
             if sum(map(len, texts)) > MAX_TEXT:
                 raise ValueError("Office text limit")
