@@ -892,9 +892,14 @@ case "${plan[$i]}" in
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
   stream)
-    printf 'x%.0s' {1..32768}
+    # A first chunk that alone exceeds the declared ceiling and is held until the
+    # source is released: a bound above the ceiling keeps it in memory, so no byte
+    # reaches stdout while the source is still open, while any real bound streams
+    # it immediately.
+    printf 'x%.0s' {1..16763}
     printf 'ready\n' > "$LAVISH_STREAM_READY"
     while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
+    printf 'x%.0s' {1..16005}
     printf '\n' ;;
 esac
 SH
@@ -1051,8 +1056,11 @@ printf '<h1>stream</h1>\n' > "$STREAM_ART"
 # hold-back bound move the expectation with it and stay green. The adapter
 # advertises a bound derived from the longest artifact path the OS can name, 378
 # fixed bytes plus the artifact path four times, so no POSIX PATH_MAX of 4096 can
-# push it above 16762; the 32768-byte nonmatch the `stream` fixture writes stands
-# in for a real payload well past that worst case.
+# push it above 16762. The `stream` fixture's first chunk alone is 16763 bytes and
+# is held until the source is released, so a bound at or below the ceiling
+# streams it while the source is open and any wider bound pockets it, which makes
+# this assertion sensitive to a widened bound rather than only to one at or above
+# the whole payload.
 stream_hold_max=16762
 LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
@@ -1079,6 +1087,50 @@ fi
 : > "$LAVISH_STREAM_RELEASE"
 wait "$STREAM_POLL_PID" || fail "the streaming poll did not exit cleanly"
 pass "a large nonmatch streams past the hold-back ceiling while its source is still open"
+
+# The deliberate break for that ceiling's sensitivity: the same gated fixture
+# against a copy of the adapter whose bound is widened to 20000 - above the
+# first chunk but below the whole payload - must stream nothing while the source
+# is open, which is exactly the red state the assertion above exists to catch.
+# Only a bound at or above the entire 32768-byte payload would have been caught
+# by the ungated fixture.
+STREAM_MUT_ROOT="$TMP_ROOT/lavish-stream-mutant"
+mkdir -p "$STREAM_MUT_ROOT/bin"
+for mutant_lib in fm-procevent.sh fm-pr-lib.sh fm-wake-lib.sh fm-procevent-lib.sh; do
+  ln -s "$ROOT/bin/$mutant_lib" "$STREAM_MUT_ROOT/bin/$mutant_lib"
+done
+perl -0777 -pe 's/^POLL_HOLD_LIMIT_BYTES=.*$/POLL_HOLD_LIMIT_BYTES=20000/m;' \
+  "$ROOT/bin/fm-procevent-lavish.sh" > "$STREAM_MUT_ROOT/bin/fm-procevent-lavish.sh"
+chmod +x "$STREAM_MUT_ROOT/bin/fm-procevent-lavish.sh"
+cmp -s "$ROOT/bin/fm-procevent-lavish.sh" "$STREAM_MUT_ROOT/bin/fm-procevent-lavish.sh" \
+  && fail "test fixture error: the deliberate-break stream-bound mutation changed nothing"
+STREAM_MUT_OUT="$TMP_ROOT/stream-mutant-out"
+STREAM_MUT_READY="$TMP_ROOT/stream-mutant-ready"
+STREAM_MUT_RELEASE="$TMP_ROOT/stream-mutant-release"
+rm -f "$STREAM_MUT_READY" "$STREAM_MUT_RELEASE"
+LAVISH_COUNT="$TMP_ROOT/stream-mutant-count"; LAVISH_SCRIPT="stream"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
+  LAVISH_STREAM_READY="$STREAM_MUT_READY" LAVISH_STREAM_RELEASE="$STREAM_MUT_RELEASE" \
+  "$STREAM_MUT_ROOT/bin/fm-procevent-lavish.sh" poll "$STREAM_ART" > "$STREAM_MUT_OUT" 2>/dev/null &
+STREAM_MUT_PID=$!
+wait_for "$STREAM_MUT_READY" || { kill "$STREAM_MUT_PID" 2>/dev/null || true;
+  fail "the widened-bound mutant's poll never started on its scripted response"; }
+stream_mut_bytes=0
+for _ in $(seq 1 50); do
+  stream_mut_bytes=$(wc -c < "$STREAM_MUT_OUT" 2>/dev/null | tr -d ' ')
+  case "$stream_mut_bytes" in ''|*[!0-9]*) stream_mut_bytes=0 ;; esac
+  [ "$stream_mut_bytes" -gt "$stream_hold_max" ] && break
+  sleep 0.1
+done
+if [ "$stream_mut_bytes" -gt "$stream_hold_max" ]; then
+  kill "$STREAM_MUT_PID" 2>/dev/null || true
+  fail "a bound widened to 20000 still streamed past the ceiling while the source was open, so the stream assertion cannot catch a widened bound"
+fi
+: > "$STREAM_MUT_RELEASE"
+wait "$STREAM_MUT_PID" || fail "the widened-bound mutant's poll did not exit cleanly"
+[ "$(wc -c < "$STREAM_MUT_OUT" | tr -d ' ')" -gt "$stream_hold_max" ] \
+  || fail "the widened-bound mutant never delivered its gated payload, so its early silence proves nothing"
+pass "a hold-back bound widened to 20000 is caught by the stream ceiling assertion"
 
 # --- regression: a quiet absence larger than the old fixed bound -------------
 # The largest quiet absence is a path, and the ended-session envelope repeats the
