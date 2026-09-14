@@ -10,6 +10,8 @@
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
+# Each non-empty drain labels the presented batch as ROUTINE or ATTENTION while
+# preserving every raw queue row and the existing acknowledgement cutoff.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -609,6 +611,57 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   return "$rc"
 }
 
+# Classify only the presentation of one already-durable row.
+# This never changes wake eligibility, queue contents, or acknowledgement.
+# A row is routine only when its structured kind proves that no newly unread
+# captain-relevant status is attached; every unknown or unsafe read fails toward
+# ATTENTION. Repeated inactive-outcome receipts and heartbeats are inherently
+# supervision work, while a signal or stale row is routine only after its status
+# span has no actionable event or newly declared captain hold.
+wake_row_needs_attention() {  # <kind> <key>
+  local kind=$1 key=$2 status task offset record needs=0 rc
+  case "$kind" in
+    heartbeat) return 1 ;;
+    check)
+      case "$key" in inactive-outcome:*|inactive-reconcile:*) return 1 ;; esac
+      return 0
+      ;;
+    signal)
+      fm_wake_status_key_map "$key" || return 0
+      status="$STATE/$FM_WAKE_STATUS_KEY"
+      ;;
+    stale)
+      task=$(window_to_task "$key" "$STATE")
+      case "$task" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+      status="$STATE/$task.status"
+      ;;
+    *) return 0 ;;
+  esac
+
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 0
+  offset=$(status_presentation_cursor_offset "$status" 2>/dev/null) || return 0
+  record=
+  status_span_first_actionable_record "$status" "$offset" record needs
+  rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 0
+  if [ "$rc" -eq 1 ] && [ "$needs" -eq 0 ]; then return 1; fi
+  return 0
+}
+
+print_wake_presentation_class() {  # <deduped-raw-rows>
+  local rows=$1 epoch seq kind key payload
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ -n "$kind" ] || continue
+    if wake_row_needs_attention "$kind" "$key"; then
+      printf 'WAKE CLASS: ATTENTION - at least one queued record carries a new captain-relevant event or could not be safely classified.\n'
+      return 0
+    fi
+  done <<EOF
+$rows
+EOF
+  printf 'WAKE CLASS: ROUTINE - queued records declare no new captain-relevant event; supervisor handling only.\n'
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -847,6 +900,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
+  print_wake_presentation_class "$RAW_ROWS" || exit "$?"
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1

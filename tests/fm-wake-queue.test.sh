@@ -40,7 +40,7 @@ test_concurrent_append_and_drain() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
-  malformed=$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
+  malformed=$(awk -F '\t' 'NF && NF != 5 && $0 !~ /^WAKE CLASS: / { bad++ } END { print bad + 0 }' "$out2")
   [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
   unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
@@ -220,7 +220,7 @@ test_drain_dedupes_obvious_duplicates() {
   append_wake "$state" heartbeat heartbeat heartbeat || fail "second heartbeat append failed"
   append_wake "$state" signal task.status "signal: $state/task.status $state/task.turn-ended" || fail "second signal append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "dedupe drain failed"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
@@ -695,6 +695,42 @@ SH
     fail "drain trusted a payload path or followed an out-of-state status symlink"
   fi
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
+}
+
+test_drain_labels_routine_and_attention_wakes_distinctly() {
+  local routine_dir routine_state routine_out attention_dir attention_state attention_out
+  routine_dir=$(make_case routine-presentation)
+  routine_state="$routine_dir/state"
+  routine_out="$routine_dir/drain.out"
+  printf 'paused: waiting for an external release\n' > "$routine_state/routine.status"
+  append_wake "$routine_state" signal routine.status "signal: routine.status" \
+    || fail "routine signal wake append failed"
+
+  FM_STATE_OVERRIDE="$routine_state" "$DRAIN" > "$routine_out" 2>/dev/null \
+    || fail "routine signal drain failed"
+  grep -Fx 'WAKE CLASS: ROUTINE - queued records declare no new captain-relevant event; supervisor handling only.' "$routine_out" >/dev/null \
+    || fail "routine wake did not carry the routine presentation label: $(cat "$routine_out")"
+  grep "$(printf '\tsignal\troutine.status\t')" "$routine_out" >/dev/null \
+    || fail "routine presentation hid the durable raw row"
+
+  attention_dir=$(make_case attention-presentation)
+  attention_state="$attention_dir/state"
+  attention_out="$attention_dir/drain.out"
+  printf 'blocked: release credentials required\n' > "$attention_state/attention.status"
+  append_wake "$attention_state" signal attention.status "signal: attention.status" \
+    || fail "attention signal wake append failed"
+
+  FM_STATE_OVERRIDE="$attention_state" "$DRAIN" > "$attention_out" 2>/dev/null \
+    || fail "attention signal drain failed"
+  grep -Fx 'WAKE CLASS: ATTENTION - at least one queued record carries a new captain-relevant event or could not be safely classified.' "$attention_out" >/dev/null \
+    || fail "actionable wake did not carry the attention presentation label: $(cat "$attention_out")"
+  grep "$(printf '\tsignal\tattention.status\t')" "$attention_out" >/dev/null \
+    || fail "attention presentation hid the durable raw row"
+  if grep -F 'WAKE CLASS: ATTENTION' "$routine_out" >/dev/null \
+    || grep -F 'WAKE CLASS: ROUTINE' "$attention_out" >/dev/null; then
+    fail "routine and actionable wake presentations were not distinct"
+  fi
+  pass "drain labels routine supervision wakes distinctly from attention wakes without hiding raw rows"
 }
 
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
@@ -1930,6 +1966,7 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
+test_drain_labels_routine_and_attention_wakes_distinctly
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
