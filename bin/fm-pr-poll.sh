@@ -5,7 +5,9 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# for GitLab. Azure uses python3 and az/azure-devops via the trusted code-root
+# helper bin/fm-azure-pr.py; the watcher invokes this file in that code root,
+# never the non-executable copy in state.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +106,10 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  azuredevops)
+    [ "$url" = "https://$host/$path/pullrequest/$number" ] || exit 0
+    python3 "$(dirname "$0")/fm-azure-pr.py" merged "$url" 2>/dev/null || exit 0
     ;;
   *) exit 0 ;;
 esac

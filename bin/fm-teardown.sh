@@ -1246,6 +1246,21 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
+# Azure tasks require an actual completed PR, even when their commits are on a
+# remote feature branch. An abandoned/unreadable PR never reaches the generic
+# content fallback. bin/fm-azure-pr.py owns the provider proof.
+azure_work_is_landed() {
+  local head current
+  head=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" landed "$PR_URL") || return 1
+  [ -d "$WT" ] || return 0
+  if ! git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null; then
+    git -C "$WT" fetch --quiet origin "$head" >/dev/null 2>&1 || return 1
+  fi
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
+    || unpushed_patches_are_in_pr_head "$head" all || content_in_default
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -1304,7 +1319,11 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  if [ "${2:-}" = all ]; then
+    unpushed=$(git -C "$WT" log --format=%H "$base..$current" -- 2>/dev/null) || return 1
+  else
+    unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  fi
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1388,6 +1407,7 @@ content_in_default() {
 # only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
+  [ "${TEARDOWN_AZURE_LANDED:-0}" != 1 ] || return 0
   pr_is_merged "$branch" && return 0
   content_in_default
 }
@@ -1656,12 +1676,33 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+  # An Azure feature branch being pushed is not proof of completion. Without
+  # the registered PR identity, preserve it rather than using the generic
+  # remote-reachability shortcut. SSH clone URLs identify Azure here as well.
+  if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
+    origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
+    case "$origin_url" in
+      https://dev.azure.com/*|https://*@dev.azure.com/*|https://*.visualstudio.com/*|git@ssh.dev.azure.com:*|ssh://git@ssh.dev.azure.com/*)
+        echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
+        return 1
+        ;;
+    esac
+  fi
+  case "$PR_URL" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      if ! azure_work_is_landed; then
+        echo "REFUSED: Azure PR completion and containment of local work are not confirmed; preserving work." >&2
+        return 1
+      fi
+      TEARDOWN_AZURE_LANDED=1
+      ;;
+  esac
+  [ -d "$WT" ] || return 0
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then

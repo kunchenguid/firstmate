@@ -32,6 +32,7 @@ If the owning second mate cannot accept the route, report that concrete blocker 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
+For Azure DevOps Services projects, follow [the Azure setup and supported-limits owner](../../../docs/azure-devops.md), including the explicit project branch convention at task intake.
 
 ## Delivery posture
 

@@ -822,6 +822,52 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+test_azure_requires_completed_pr_and_local_containment() {
+  local case_dir state head rc expected api_state
+  for state in active abandoned completed unreadable dirty later unregistered; do
+    case_dir=$(make_case "azure-$state")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    if [ "$state" != unregistered ]; then
+      printf '%s\n' 'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' >> "$case_dir/state/task-x1.meta"
+    fi
+    api_state=$state
+    case "$state" in dirty|later) api_state=completed ;; esac
+    cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"status":"$api_state","mergeStatus":"succeeded","closedDate":"2026-01-01T00:00:00Z","lastMergeSourceCommit":{"commitId":"$head"},"lastMergeCommit":{"commitId":"$head"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+SH
+    chmod +x "$case_dir/fakebin/az"
+    case "$state" in
+      unreadable) printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/az" ;;
+      dirty|later)
+        # API says completed, but later local work must survive cleanup.
+        if [ "$state" = dirty ]; then
+          printf 'uncommitted\n' >> "$case_dir/wt/feature.txt"
+        else
+          wt_commit_file "$case_dir" extra.txt unlanded
+        fi
+        ;;
+    esac
+    # Reaching a remote feature branch is not evidence of Azure completion.
+    add_fork_with_pushed_branch "$case_dir"
+    if [ "$state" = unregistered ]; then
+      git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+    fi
+    expected=1
+    [ "$state" != completed ] || expected=0
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code "$expected" "$rc" "Azure $state teardown"
+    if [ "$expected" = 1 ]; then
+      [ -f "$case_dir/state/task-x1.meta" ] || fail "Azure $state lost task record"
+      [ -d "$case_dir/wt" ] || fail "Azure $state lost local work"
+    fi
+  done
+  pass "Azure cleanup requires completed PR and contained clean local work, even after push"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -3673,6 +3719,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_azure_requires_completed_pr_and_local_containment
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses

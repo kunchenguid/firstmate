@@ -5,7 +5,9 @@
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
+# arbitrarily nested group/subgroup/project namespace on GitLab. Azure Services
+# uses organization/project/_git/repository (or the legacy collection route);
+# bin/fm-azure-pr.py owns its strict URL and REST contract. A GitLab
 # project can sit at any depth, so no owner/repository pair can address one and
 # the sidecar carries the whole path instead. GitLab also runs on self-hosted
 # instances, so the host is part of that identity rather than a constant. Every
@@ -166,7 +168,7 @@ fm_pr_gitlab_path_valid() {
 # them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
 # instead, so a merge request on any instance resolves without a hardcoded host.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path azure
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -191,6 +193,18 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  case "$raw" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      azure=$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-azure-pr.py" parse "$raw" 2>/dev/null) || return 1
+      FM_PR_PROVIDER=azuredevops
+      FM_PR_URL=$raw
+      FM_PR_HOST=${azure%%$'\n'*}
+      azure=${azure#*$'\n'}
+      FM_PR_PATH=${azure%%$'\n'*}
+      FM_PR_NUMBER=${azure#*$'\n'}
+      return 0
+      ;;
+  esac
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.

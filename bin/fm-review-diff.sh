@@ -5,8 +5,9 @@
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
-# side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
-# current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
+# side for GitHub is a freshly fetched refs/pull/<n>/head; Azure uses the live
+# source SHA supplied by bin/fm-azure-pr.py, fetching its object when needed.
+# This keeps review current after no-mistakes fixes. A recorded pr_head= is
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
 # the local branch with a warning. Without pr=, compare the local branch.
@@ -67,12 +68,13 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
-BRANCH="fm/$ID"
-if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
-  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
-  git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
-fi
+# The task's actual branch wins over the default naming convention: a project
+# may select users/<name>/<id> through fm-brief/fm-promote --branch-prefix.
+BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$BRANCH" ] || BRANCH="fm/$ID"
+git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || {
+  echo "error: task branch is unavailable in $WT" >&2; exit 1;
+}
 
 pr_number_from_target() {
   local target=$1 n
@@ -105,6 +107,17 @@ fetch_pull_head() {
 
 resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 n resolved
+  case "$pr_url" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      if resolved=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" head "$pr_url" 2>/dev/null); then
+        if git -C "$WT" cat-file -e "$resolved^{commit}" 2>/dev/null \
+          || git -C "$WT" fetch --quiet origin "$resolved" >/dev/null 2>&1; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
     if resolved=$(fetch_pull_head "$n"); then

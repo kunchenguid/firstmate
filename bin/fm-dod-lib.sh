@@ -204,8 +204,23 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+# Select a task branch without changing repository or global configuration.
+# fm-brief/fm-promote --branch-prefix is the project-specific intake choice;
+# fm remains the default. Restricted bytes also make generated shell safe.
+fm_task_branch() {  # <task-id> [prefix]
+  local id=$1 prefix=${2-fm} branch
+  branch="$prefix/$id"
+  case "$branch" in
+    *[!A-Za-z0-9._/-]*|/*|-*|refs/*) echo "error: invalid task branch prefix" >&2; return 1 ;;
+  esac
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || {
+    echo "error: invalid task branch prefix" >&2; return 1;
+  }
+  printf '%s\n' "$branch"
+}
+
+fm_dod_block() {  # <mode> <task-id> [branch]
+  local mode=$1 id=$2 branch=${3:-fm/$2}
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -213,7 +228,7 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with the forge's CLI (\`gh-axi\` for GitHub, \`az repos pr\` for Azure DevOps), then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -222,9 +237,9 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;

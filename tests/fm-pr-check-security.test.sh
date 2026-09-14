@@ -2128,21 +2128,33 @@ test_retirement_queue_failure_and_receipt_tampering() {
 }
 
 test_gitlab_merged_poll_retires() {
-  local dir state url rc
-  dir=$(make_case gitlab-merged-retirement)
-  state="$dir/home/state"
-  url=https://gitlab.example/group/subgroup/project/-/merge_requests/17
-  write_poll_meta "$state" task-a "$url"
-  seed_canonical_poll "$dir" task-a "$url"
-  set +e
-  FM_TEST_GLAB_STATE=merged run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "GitLab merged retirement watcher failed: $(cat "$dir/watch.err")"
-  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "GitLab merged wake was missing" ;; esac
-  assert_poll_absent "$state" task-a
-  grep -qxF "pr=$url" "$state/task-a.meta" || fail "GitLab retirement removed canonical metadata"
-  pass "GitHub and GitLab exact merged results share one retirement path"
+  local dir state url rc provider python
+  python=$(command -v python3) || fail "Azure polls require python3"
+  for provider in gitlab azuredevops; do
+    dir=$(make_case "$provider-merged-retirement")
+    state="$dir/home/state"
+    url=https://gitlab.example/group/subgroup/project/-/merge_requests/17
+    if [ "$provider" = azuredevops ]; then
+      url=https://example.visualstudio.com/DefaultCollection/Project/_git/repo/pullrequest/17
+      ln -s "$python" "$dir/fakebin/python3"
+      cat > "$dir/fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"continuation_token":null,"pullRequestId":17,"status":"completed","mergeStatus":"succeeded","closedDate":"2026-01-01T00:00:00Z","lastMergeSourceCommit":{"commitId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"lastMergeCommit":{"commitId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+SH
+      chmod +x "$dir/fakebin/az"
+    fi
+    write_poll_meta "$state" task-a "$url"
+    seed_canonical_poll "$dir" task-a "$url"
+    set +e
+    FM_TEST_GLAB_STATE=merged run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$provider merged retirement watcher failed: $(cat "$dir/watch.err")"
+    case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "$provider merged wake was missing" ;; esac
+    assert_poll_absent "$state" task-a
+    grep -qxF "pr=$url" "$state/task-a.meta" || fail "$provider retirement removed canonical metadata"
+  done
+  pass "GitHub, GitLab and Azure exact merged results share one retirement path"
 }
 
 # --- poll-path merge authority ----------------------------------------------

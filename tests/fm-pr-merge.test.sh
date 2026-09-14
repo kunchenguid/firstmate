@@ -3107,3 +3107,5 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_grant_revoked_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+python3 "$ROOT/tests/azure-pr-contract.py" || fail "Azure PR contract regression"
+pass "Azure identities, exact-revision policies, guarded completion and merge polls"

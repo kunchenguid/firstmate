@@ -4,7 +4,10 @@
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# including a merge request on a self-hosted GitLab instance. Azure DevOps
+# Services URLs use bin/fm-azure-pr.py and require python3 and az/azure-devops;
+# a failed live identity/head read refuses registration rather than arming an
+# unusable Azure poll.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -78,6 +81,13 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+
+if [ "$PROVIDER" = azuredevops ]; then
+  PR_HEAD=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" head "$URL") || {
+    echo "error: Azure PR identity/head unavailable; registration refused" >&2
+    exit 1
+  }
 fi
 
 META_TMP=
