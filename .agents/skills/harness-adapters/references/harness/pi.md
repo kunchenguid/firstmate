@@ -13,7 +13,6 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
 | Model flag | `--model <model>`. |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
-| Worker trust | Firstmate-launched ship, scout, and managed secondmate Pi-family sessions pass `--approve`, Pi's documented per-run override for trusting project-local files. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
@@ -32,12 +31,13 @@ Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
 A project trust dialog can appear on an interactive Pi run in any not-yet-trusted directory, including a clean worktree.
-Firstmate-managed launches pass `--approve`, so they begin processing without changing the captain's persisted interactive trust posture.
+Canonical `fm-spawn.sh` launches for Pi and Pi-signed ships, scouts, and persistent secondmates pass `--approve`, Pi's per-run override for trusting project-local files, so they begin processing without changing persisted interactive trust decisions.
+Raw launch commands and normal interactive Pi retain their existing trust behavior.
 Do not answer this dialog with keys when it appears outside that managed launch path.
 
 ## Worker turn-end extension
 
-`../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
+`../../../bin/fm-spawn.sh` owns the worker turn-end extension's placement and cleanup rationale beside its generator.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.

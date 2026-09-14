@@ -270,7 +270,7 @@
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#                  written by this script; placement rationale beside its generator)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
@@ -3615,9 +3615,9 @@ EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
     pi|pi-signed)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+      # Keep generated task hooks out of project files and in state/ for teardown.
+      # An explicit external -e path also loads without granting project trust
+      # (verified live); the canonical launch's trust override is separate.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
