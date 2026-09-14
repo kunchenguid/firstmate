@@ -156,3 +156,6 @@ Exemplo de resultado, enviado por stdin ao subcomando `main` pela sessão princi
 O pedido precisa ter sido reivindicado com seu `note_id` exato, e o principal precisa verificar o resultado antes desse evento.
 As referências de tarefa apontam para o home/id/revisão canônicos, inclusive quando o trabalho pertence a um secondmate.
 Uma resposta genérica ou uma reação não aprova decisões, e o transporte nunca executa a ação aprovada.
+Enquanto houver uma decisão pendente ainda vigente, confirmações genéricas como “sim” e “ok” recebem um pedido de código.
+Sem decisão pendente vigente, essas confirmações seguem como texto conversacional ao principal no próximo checkpoint, mesmo que existam decisões expiradas ainda registradas como pendentes.
+Uma resposta explícita com código expirado continua recusada, sem aprovar a ação nem encaminhar essa resposta ao principal.
