@@ -1,10 +1,12 @@
 # Verificação WhatsApp
 
-## Evidência atual
+## Execução registrada e cobertura
 
 Em 2026-09-13, a suíte offline foi executada em Darwin/arm64 com Python 3.14.7 e SQLite da biblioteca padrão.
 Comando de reprodução: `bash tests/fm-whatsapp.test.sh`.
 Resultado observado: `Ran 36 tests in 27.124s` e `OK`.
+Esse resultado pertence à execução datada acima; não atesta a execução das regressões acrescentadas posteriormente.
+A cobertura descrita abaixo acompanha a suíte mantida em [fm_whatsapp_test.py](../../tests/fm_whatsapp_test.py); resultados de validação da revisão atual pertencem às evidências do gate ou do PR.
 Os testes executam interfaces públicas Python e CLI, o `fm-inbox.sh` real, SQLite real, processos locais de fixture e, no Darwin, `plutil -lint` da plist gerada.
 Nenhum teste usa conta WhatsApp, credencial real, modelo, instalação de serviço ou ciclo de vida Herdr.
 O processo com identidade de harness é uma fixture estrutural para a biblioteca de sessão existente; não é uma execução de Codex ou prova de comportamento de UI do fornecedor.
@@ -66,6 +68,9 @@ Buscas públicas pelos termos `WhatsApp Agent Platform` e `whatsapp_agent_platfo
 | 8.13 Cotas | Página 28 | Cotas de texto testadas em janela móvel; cotas das futuras operações de mídia separadas na configuração; nenhum limite oficial inventado para bytes. |
 
 ## Backlog explícito
+
+A sequência de entrega é texto primeiro, seguido de recebimento de imagens, documentos e áudio com respostas textuais.
+Os demais recursos abaixo permanecem no backlog posterior; a entrega do texto não ativa produção nem inclui processamento de anexos.
 
 | Etapa | Trabalho pendente | Gate de validação |
 | --- | --- | --- |

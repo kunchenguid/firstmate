@@ -139,7 +139,7 @@ bash tests/fm-whatsapp.test.sh
 
 A suíte cria seus próprios `FM_HOME`, metadados de tarefa, processos de principal de fixture, script de API e saídas locais.
 Ela usa o `fm-inbox.sh` real, autentica o comando do principal pelo contrato de sessão existente e verifica um resultado real de análise de arquivo com envio simulado.
-Não chama modelos, API WhatsApp, Herdr ou `launchctl`, e não lê tokens.
+Não chama modelos, API WhatsApp, Herdr ou `launchctl`, e não lê tokens reais.
 Para uma simulação persistente personalizada, configure modo `simulated`, habilite a ponte e saídas simuladas, e execute `run --fixture ARQUIVO.json`.
 O formato do script é propriedade de [fm_whatsapp_transport.py](../bin/fm_whatsapp_transport.py); `run --once` executa um ciclo.
 
