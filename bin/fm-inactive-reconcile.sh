@@ -627,6 +627,27 @@ acknowledge_notice() { # <fingerprint>
   record_field_set "$pending" notice_emitted 1
 }
 
+# Presentation-only bookkeeping for fm-wake-drain.sh's captain-facing wake
+# classification: a queued inactive-outcome/inactive-reconcile row stays in the
+# durable queue, and is re-classified on every plain drain, until it is
+# acknowledged. The first classification of a given fingerprint must still
+# reach the captain as ATTENTION; only a later re-presentation of the SAME
+# still-unacknowledged fingerprint is routine repeat noise. Returns 1 only when
+# this exact fingerprint was already marked surfaced by an earlier call; every
+# other outcome (first surfacing, missing record, invalid input) returns 0 or 2
+# so the caller fails toward ATTENTION rather than ever misreading an error as
+# "already surfaced".
+mark_captain_surfaced() { # <fingerprint>
+  local fingerprint=$1 pending already
+  case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 2
+  pending=$(record_path "$fingerprint" pending)
+  [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
+  already=$(record_value "$pending" captain_surfaced)
+  [ "$already" != 1 ] || return 1
+  record_field_set "$pending" captain_surfaced 1 || return 2
+}
+
 mode=${1:-scan}
 case "$mode" in
   scan)
@@ -670,6 +691,19 @@ case "$mode" in
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge_notice "$2"
+    ;;
+  captain-surfaced)
+    # A caller may hold fm-wake-drain.sh's own queue lock while classifying a
+    # still-queued row (docs: wake_row_needs_attention), and a live scan can
+    # itself wait on that same queue lock to publish a new check wake while
+    # holding SCAN_LOCK. Blocking here on SCAN_LOCK would risk the two waiting
+    # on each other, so this never waits: a momentarily busy lock exits 3,
+    # distinct from mark_captain_surfaced's own "already surfaced" 1, and the
+    # caller fails toward ATTENTION on anything but exactly 1.
+    [ "$#" -eq 2 ] || exit 2
+    fm_lock_try_acquire "$SCAN_LOCK" || exit 3
+    trap 'fm_lock_release "$SCAN_LOCK"' EXIT
+    mark_captain_surfaced "$2"
     ;;
   -h|--help)
     sed -n '2,40{s/^# \{0,1\}//;p;}' "$0"

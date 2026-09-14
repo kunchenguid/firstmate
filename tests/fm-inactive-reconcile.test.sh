@@ -164,6 +164,43 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
+# A captain-facing inactive terminal outcome is exactly the kind of finished-or-
+# failed child notice done/failed status lines are always captain-relevant for,
+# so its first presentation must be ATTENTION. Once the captain has seen it, the
+# wake stays durably queued (nothing was acknowledged), and re-presenting the
+# very same still-unhandled receipt on a later plain drain is routine repeat
+# noise, not a fresh alarm - the raw row itself is never hidden either way.
+test_inactive_outcome_wake_is_attention_once_then_routine() {
+  local out1 out2 err seq generation
+  make_world attention-then-routine
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "reconcile did not queue the terminal outcome wake"
+
+  out1="$WORLD/drain-first.out"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$out1" 2>/dev/null
+  grep -Fxq 'WAKE CLASS: ATTENTION - at least one queued record carries a new captain-relevant event or could not be safely classified.' "$out1" \
+    || fail "first presentation of a terminal outcome was not ATTENTION: $(cat "$out1")"
+  grep "$(printf '\tcheck\tinactive-outcome:')" "$out1" >/dev/null \
+    || fail "attention presentation hid the durable raw row"
+
+  out2="$WORLD/drain-second.out"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$out2" 2>/dev/null
+  grep -Fxq 'WAKE CLASS: ROUTINE - queued records declare no new captain-relevant event; supervisor handling only.' "$out2" \
+    || fail "repeated presentation of the same unacknowledged outcome was not ROUTINE: $(cat "$out2")"
+  grep "$(printf '\tcheck\tinactive-outcome:')" "$out2" >/dev/null \
+    || fail "routine repeat presentation hid the durable raw row"
+
+  err="$WORLD/drain.err"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$generation" ] || fail "repeated presentation lost the acknowledgement boundary"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "repeatedly presented outcome wake could not be acknowledged"
+  pass "an inactive terminal outcome is ATTENTION once and ROUTINE on every unacknowledged repeat"
+}
+
 # A secondmate delivers a child's terminal ledger line to the parent on the
 # very next poll, from the ledger alone: no current-state read, no inactive
 # cadence, and no line appended by the mate model. The delivery carries the
@@ -819,6 +856,7 @@ test_reconciliation_never_calls_forge() {
 }
 
 test_main_direct_terminal_presentation_receipt
+test_inactive_outcome_wake_is_attention_once_then_routine
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure

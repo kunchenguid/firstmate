@@ -612,18 +612,29 @@ print_status_presentation() {  # [<deduped-raw-rows>]
 }
 
 # Classify only the presentation of one already-durable row.
-# This never changes wake eligibility, queue contents, or acknowledgement.
+# This never changes wake eligibility, queue contents, or acknowledgement; it
+# may record presentation-only bookkeeping (which fingerprint the captain has
+# already been shown) through fm-inactive-reconcile.sh's captain-surfaced.
 # A row is routine only when its structured kind proves that no newly unread
 # captain-relevant status is attached; every unknown or unsafe read fails toward
-# ATTENTION. Repeated inactive-outcome receipts and heartbeats are inherently
-# supervision work, while a signal or stale row is routine only after its status
-# span has no actionable event or newly declared captain hold.
+# ATTENTION. A first-time inactive-outcome/inactive-reconcile receipt is
+# always ATTENTION, consistent with done/failed being captain-relevant; only a
+# REPEAT presentation of an already-surfaced fingerprint (still queued, not
+# yet acknowledged) is routine. A signal or stale row is routine only after
+# its status span has no actionable event or newly declared captain hold.
 wake_row_needs_attention() {  # <kind> <key>
   local kind=$1 key=$2 status task offset record needs=0 rc
   case "$kind" in
     heartbeat) return 1 ;;
     check)
-      case "$key" in inactive-outcome:*|inactive-reconcile:*) return 1 ;; esac
+      case "$key" in
+        inactive-outcome:*|inactive-reconcile:*)
+          "$SCRIPT_DIR/fm-inactive-reconcile.sh" captain-surfaced "${key#*:}"
+          rc=$?
+          [ "$rc" -eq 1 ] && return 1
+          return 0
+          ;;
+      esac
       return 0
       ;;
     signal)
