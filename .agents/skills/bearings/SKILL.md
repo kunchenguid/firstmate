@@ -54,6 +54,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The `(main-inventory)` gate is an action-free integrity warning rather than queued work.
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
    The same holds for a secondmate home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, landed, or live work.
+   The `(return-catchup)` gate is the same shape: an action-free notice that an away-return catch-up is still open, naming the blockers left to clear or the reason the catch-up was retained.
+   Render it under Charted Next like any other warning row: reporting is not ordinary work, while acting on the fleet still waits for `bin/fm-afk-return.sh check` (`/afk`).
 
 2. **Record a later reconcile notification for any home whose own books disagree.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
@@ -99,8 +101,13 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
-- A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
+- A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
 - `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
+- Every Underway row copies the task-identifying `in_flight.name` from the snapshot into an explicit `name` field, which the board leads with while keeping the run status on its second line.
+  The snapshot command's header owns its durable-title-or-id normalization; never replace the projected label with run status or invent another label.
+- Every Charted Next row copies the snapshot gate's durable filed date into `filed`, and the board orders the section by it, newest filed first.
+  Follow `bin/fm-bearings-board.sh`'s payload contract for the accepted format.
+  Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable secondmate home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.

@@ -153,6 +153,18 @@ case "${1:-}" in
         fi
         printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
         exit 0 ;;
+      process-info)
+        # The process-level view a registration is verified against (#4115):
+        # `agent` puts a live claude in the foreground, `shell` a bare zsh whose
+        # pid is the test script itself (a real, long-lived process with no
+        # harness descendant, so the adapter's real process-table walk finds
+        # it), and anything else answers nothing (unreadable).
+        pane=""; args=("$@"); for ((i=0; i<${#args[@]}; i++)); do [ "${args[$i]}" = --pane ] && pane=${args[$((i+1))]:-}; done
+        case "${FM_FAKE_HERDR_PROCESS:-agent}" in
+          agent) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":424242,"foreground_processes":[{"pid":424242,"name":"claude","argv0":"claude"}]}}}\n' "$pane" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" ;;
+          shell) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"]}]}}}\n' "$pane" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" ;;
+        esac
+        exit 0 ;;
     esac ;;
   agent)
     case "${2:-}" in
@@ -218,10 +230,12 @@ reset_fakes() {
   FM_FAKE_HERDR_READ_FAIL=0
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_PROCESS=agent
+  FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
 }
 
@@ -1507,6 +1521,53 @@ test_no_run_herdr_alive_with_failed_read_stays_live() {
   pass "an alive endpoint whose scrollback read failed stays working"
 }
 
+# Issue #4115: a registration Herdr kept after its Pi exited to a plain shell is
+# not an agent. The recovery-grade read proves the process level, so the
+# shell-only pane reads as positive agent-gone evidence, never as a live agent
+# or as unreachable.
+test_no_run_herdr_stale_registration_over_shell_reads_agent_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr stale-registration test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-stale-reg)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-stale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-stale.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_READ_FAIL=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_PROCESS=shell
+  local out; out=$(run_crew_state "$d" feat-herdr-stale)
+  assert_contains "$out" "state: unknown" "a stale registration over a shell-only pane is not a live state"
+  assert_contains "$out" "backend target gone" "a stale registration over a shell-only pane must read as positive agent-gone evidence"
+  assert_contains "$out" "agent gone, pane shell remains" "the agent-gone reason must name the remaining shell"
+  assert_not_contains "$out" "backend unreachable" "a readable shell-only pane is not unreachable"
+  pass "herdr stale registration over a shell-only pane reads agent gone, not alive"
+}
+
+# The busy half of the same defect: a `working` record Herdr kept after the
+# agent was killed mid-turn must never make a shell-only pane read as working.
+test_no_run_herdr_stale_working_record_is_never_busy() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr stale-working test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-stale-working)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-stale-working
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-stale-working.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_PROCESS=shell
+  local out; out=$(run_crew_state "$d" feat-herdr-stale-working)
+  assert_not_contains "$out" "state: working" "a stale working record over a shell-only pane must never read busy"
+  assert_not_contains "$out" "herdr-native" "the native busy verdict must not be trusted for a shell-only pane"
+  # The control: the same record with a live harness in the foreground is busy.
+  FM_FAKE_HERDR_PROCESS=agent
+  out=$(run_crew_state "$d" feat-herdr-stale-working)
+  assert_contains "$out" "state: working" "the same working record with a live harness process must still read working"
+  pass "herdr stale working record never reports a shell-only pane busy"
+}
+
 # Decision follow-up (2026-09-05 review): a husk pane (pane present,
 # agent_not_found) is authoritative death evidence - it keeps the gone-class
 # text so the stale sweep may still reclaim it, never unknown/unreachable.
@@ -2506,5 +2567,7 @@ test_active_fix_round_unfetched_pipeline_head_reports_current
 test_unanchored_unfetched_active_row_does_not_match
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
+test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
+test_no_run_herdr_stale_working_record_is_never_busy
 
 echo "all fm-crew-state tests passed"

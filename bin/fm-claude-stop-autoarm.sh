@@ -53,7 +53,8 @@
 #     until the synchronous guard has consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
-# generation and outcome so the synchronous Stop guard
+# generation and outcome, and binds rewake outcomes to the session-lock pid and
+# watcher recovery generation, so the synchronous Stop guard
 # (bin/fm-turnend-guard.sh --claude) can allow a stop whose recovery this hook
 # already owns, instead of forcing a duplicate continuation for the same event
 # epoch. The failure marker
@@ -183,10 +184,20 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
-  if [ -n "${2:-}" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2"
+  local outcome=$1 marker=${2:-} session_pid recovery
+  if [ "$outcome" = rewake ]; then
+    fm_session_lock_owned_by_self "$STATE" || return 2
+    session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+    fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 2
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+      *) return 2 ;;
+    esac
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery"
+  elif [ -n "$marker" ]; then
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker"
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome"
   fi
 }
 

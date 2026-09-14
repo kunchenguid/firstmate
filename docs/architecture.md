@@ -178,7 +178,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, omp through its extension's `agent_start` and `agent_end` without `willContinue`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
-Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
+Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok, Rovo, and AGY each keep one clearly isolated rendered-tail fallback that can only ever classify their own task.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
@@ -254,7 +254,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, and omp while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy while preserving the requested profile for later audit.
 
 ## Optional secondmates
 
@@ -276,10 +276,9 @@ Secondmates are idle by default: after startup recovery reconciles only work alr
 When called with `FM_HOME=<this-firstmate-home>` or when `FM_HOME` is already set to the active firstmate home, metadata-routed `fm-send.sh` requests to a live `kind=secondmate` use the live-charter-compatible `from-firstmate` carrier owned by `bin/fm-operational-input.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
 The parent guards every reply-bearing marked request against a missing correlated report without reading the secondmate conversation; `bin/fm-pending-reply-lib.sh` owns the correlation, recovery, escalation, and retention contract, while `bin/fm-send.sh` owns the explicit fire-and-forget exception.
 Explicit backend-target sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
-After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, atomically delegates already-judged in-scope queued item moves to `tasks-axi mv`, and then sends a marked routed-work wake through the receiver's recorded endpoint.
-A durable move with a missing, failed, or unresolved wake is reported as failure rather than success; rerunning the same handoff recovers known-undelivered wake intent without moving the item again, while an unresolved delivery is never blindly resent.
-Remote routes move that dependency-closed set into a non-dispatchable backlog-format outbox before transfer, then use an idempotent remote receive under the destination backlog's own lock and retain the outbox until the receiver wake is confirmed.
-The script header owns the wake correlation and recovery mechanics; `tests/fm-backlog-handoff.test.sh` and `tests/fm-remote-backlog-handoff.test.sh` pin the local and remote delivery boundaries.
+After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, atomically delegates already-judged in-scope queued item moves to `tasks-axi mv`, and then attempts a marked routed-work wake through the receiver's recorded endpoint.
+The [`fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) header owns route-specific wake outcomes, remote outbox release after receipt, and stable wake-correlation retry behavior.
+`tests/fm-backlog-handoff.test.sh` and `tests/fm-remote-backlog-handoff.test.sh` pin the local and remote delivery boundaries.
 An unreachable remote host is unknown rather than dead, preserves its route and durable work, and is never failed over or relaunched locally.
 Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
@@ -314,19 +313,33 @@ Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-v
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the forge CLI.
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
-A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
+A `https://github.com/<owner>/<repo>/pull/<n>` URL requires `gh` and `jq`, is merged only after one live read confirms the pull request is open, not a draft, mergeable, conflict-free, and every unwaived check is green at the current head, then `gh pr merge` binds that verified head with `--match-head-commit`.
+A check run is green when its current run is green, because GitHub leaves a cancelled run in the rollup beside the passing re-run it triggered when the base branch advanced; `bin/fm-pr-merge.sh`'s `github_checks_not_green` owns the rule, which uses `startedAt` to clear only an older completed check run that a passing run with the same name provably replaced, while unfinished check runs and non-green status contexts stay red.
+`--auto`, `--admin`, and branch-deletion flags are refused unless `--attended-override` is passed for an explicit captain instruction; that override never skips the live green check, the away-grant check, or a captain hold.
+An attended `--allow-red <check-name>` may appear once, waives only GitHub checks with that exact name, and is refused while the away-posture record exists.
+Because away merge authority is read from that record and then acted on by the forge, the authority read and synchronous forge command share the record's cross-subsystem lock, closing the common live-owner TOCTOU.
+A lock that cannot be taken refuses the merge.
+While the record exists, GitHub auto-merge and any base whose rules cannot prove the absence of a merge queue are refused before submission, and GitLab auto-merge flags or scheduled state are refused while an immediate merge is forced with a final `--auto-merge=false`.
+This is deliberately confused-agent-grade, as `bin/fm-lease-lib.sh` defines that grade, rather than fully atomic.
+A GitHub queue-rule or PR-base change after the queue-free preflight can still enqueue a merge that lands after its away grant lapses, and killing the lock-owning shell while its forge child survives lets stale-owner recovery admit archive or replacement before that child completes.
+These are accepted limitations, not oversights; durable authority, landing re-verification, and child-lock handoff are outside this boundary.
+`bin/fm-afk-contract.sh` owns the lock contract, while `tests/fm-afk-contract.test.sh` and `tests/fm-pr-merge.test.sh` pin the serialization and fail-closed merge behavior.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
 After either forge command returns, the script confirms the PR or MR actually landed, and only a confirmed landing records a landed outcome; a queued or unconfirmed request records none and leaves its poll armed.
 On GitLab an auto-merge-queued or unconfirmed request is reported without failing the run.
-On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and a base branch that requires the merge queue is refused with the concrete retry flags its configured method requires rather than having a merge method chosen on the caller's behalf.
+On GitHub an outcome that is neither merged nor queued is refused loudly and non-zero, naming the observed state, and in attended posture a base branch that requires the merge queue is refused with the concrete `--attended-override -- --auto --<method>` retry flags its configured method requires rather than having a merge method chosen on the caller's behalf.
 When the forge already accepted exactly those flags and the pull request still has not entered the queue, that refusal points at the queue state to re-check instead of echoing back the flags the caller just ran.
 An auto-merge request is held to the same standard: `--auto` that leaves the pull request neither merged nor queued is refused rather than reported as success.
 Every GitHub refusal states what it could not observe as plainly as what it did, so an unreadable branch-rule response, an unrecognised queue method, and a merge queue no available read can see are each named rather than left to look like a base branch with no queue at all.
 A confirmed merge leaves a durable role-routed outcome instead of living only in the merging agent's memory, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns its destination, shape, identity, normal-case deduplication, and at-least-once recovery.
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
+After the forge accepts firstmate's merge request, the merge path persists the resolved yolo, away-grant, or attended authority bound to the task's canonical PR identity.
+A later merged poll consumes only that matching persisted value; with no match it records the landing as external rather than consulting a live away-posture record that may have been archived or replaced.
+[`bin/fm-merge-authority-lib.sh`](../bin/fm-merge-authority-lib.sh)'s header owns resolution, private atomic persistence, identity-checked consumption, and retirement, while only the merge path gates on the answer.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-A pool worktree is only returned after teardown passes the slot-ownership proof: a contradictory task record or supported live endpoint refuses without touching either task, and no discard authority relaxes that.
+A pool worktree is only returned after teardown passes the slot-ownership proof: a contradictory task record or a supported live endpoint refuses without touching either task, and no discard authority relaxes that.
+A slot's own owner claim, written by the spawn that takes it under the allocation lock and owned by [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh), covers a slot reassigned to a task that left no record the scan could reach: a claim naming a different task releases nothing - teardown warns, names the claimant, and finishes only the task's own cleanup - because Treehouse's own live process lease cannot answer ownership once the worker's exit releases it.
 Allocation and return serialize on one project lock per machine-local Firstmate tree: every home reachable through local parent links shares that lock, and a home seeded from another machine anchors its own, because a lock taken on this filesystem is neither held nor observable across that boundary.
 Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, slot-ownership proof, PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure; [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) and [`tests/fm-secondmate-safety.test.sh`](../tests/fm-secondmate-safety.test.sh) pin the slot-collision boundary.
@@ -390,7 +403,7 @@ Home-domain captain preferences go to `data/captain.md`, cross-domain shared cap
 Memory writes use inspect-then-update rather than blind append; the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns tier markers, decay, cold archival, and offload.
 The same pass also persists open-work record state the session is holding - filing a thread that was never recorded and correcting one the session knows went stale - bounded to the open work that session is actually holding.
 It is deliberately not a reconciliation of durable records against repository or PR reality: its input is the volatile context, so it can only preserve what the session still knows, and no reconciliation that outlives a session exists today.
-Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
+Task-scoped notes use `bin/fm-tasks-axi.sh show <id> --full` followed by `bin/fm-tasks-axi.sh update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 The stow pass never writes a skill, but a separately executed, captain-approved migration may move conditional knowledge into a user-owned local skill excluded from the Firstmate clone; changes to Firstmate's tracked skills remain deliberate repository work through the normal PR pipeline.
 Invoked in a primary home, `/stow` then cascades the same sweep to every registered secondmate, enumerated through `bin/fm-stow-cascade.sh`: each home is accounted and curated against its own startup-memory allowance, a live secondmate sweeps its own session, and a slow or unreachable home is reported as an exception rather than blocking the primary.
 

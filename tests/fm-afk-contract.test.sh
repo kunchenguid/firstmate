@@ -525,6 +525,157 @@ test_inputs_are_validated() {
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 
+test_merge_grants_round_trip_and_read_back() {
+  local home out
+  home=$(make_home grants-roundtrip)
+  out=$(contract "$home" propose --grant task-x1 --grant task-y2 --words 'merge those two when green') || fail "grant proposal failed: $out"
+  assert_contains "$out" 'merge when green (task ids): task-x1, task-y2' 'read-back did not list the granted ids'
+  [ "$(contract "$home" grants --proposal)" = "$(printf 'task-x1\ntask-y2')" ] \
+    || fail "proposal grants subcommand: $(contract "$home" grants --proposal)"
+  contract "$home" confirm >/dev/null || fail "grant confirm failed"
+  [ "$(contract "$home" grants)" = "$(printf 'task-x1\ntask-y2')" ] \
+    || fail "confirmed grants subcommand: $(contract "$home" grants)"
+  grep -q '^merge_grants:$' "$home/state/.afk-contract" || fail "confirmed record lacks merge_grants list"
+  grep -q '  - task-x1' "$home/state/.afk-contract" || fail "confirmed record dropped task-x1"
+  pass "merge grants round-trip through propose, confirm, read-back, and grants"
+}
+
+test_merge_grants_empty_form_and_usage_errors() {
+  local home out rc
+  home=$(make_home grants-empty)
+  contract "$home" propose >/dev/null || fail "empty grant proposal failed"
+  grep -qxF 'merge_grants: -' "$home/state/.afk-contract.proposed" \
+    || fail "empty grants did not write merge_grants: -"
+  [ -z "$(contract "$home" grants --proposal)" ] || fail "empty grants subcommand was not empty"
+  set +e
+  out=$(contract "$home" propose --grant 'bad id' 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "invalid grant id should be usage error (rc=$rc): $out"
+  set +e
+  out=$(contract "$home" propose --grant task-x1 --grant task-x1 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "duplicate grant id should be usage error (rc=$rc): $out"
+  pass "empty grants write the scalar form, and invalid or duplicate ids are usage errors"
+}
+
+test_legacy_record_without_merge_grants_reads_empty() {
+  local home record
+  home=$(make_home grants-legacy)
+  contract "$home" propose >/dev/null || fail "legacy proposal failed"
+  contract "$home" confirm >/dev/null || fail "legacy confirm failed"
+  record="$home/state/.afk-contract"
+  awk '!/^merge_grants/' "$record" > "$home/legacy" || fail "could not strip merge_grants"
+  mv "$home/legacy" "$record"
+  contract "$home" validate >/dev/null || fail "a pre-field v1 record must still validate"
+  [ -z "$(contract "$home" grants)" ] || fail "a missing merge_grants field must read as an empty list"
+  pass "a pre-field v1 record reads as empty grants rather than skipping the field"
+}
+
+test_malformed_merge_grants_refuse_validation() {
+  local home record out rc
+  home=$(make_home grants-malformed-scalar)
+  contract "$home" propose >/dev/null || fail "malformed scalar proposal failed"
+  contract "$home" confirm >/dev/null || fail "malformed scalar confirm failed"
+  record="$home/state/.afk-contract"
+  awk '{ print; if ($0 == "merge_grants: -") print "  - task-x1" }' "$record" > "$home/malformed"
+  mv "$home/malformed" "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "indented data attached to scalar merge_grants validated"
+  assert_contains "$out" 'invalid merge_grants field' 'attached scalar data refusal wording'
+
+  home=$(make_home grants-malformed-duplicate)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "duplicate field proposal failed"
+  contract "$home" confirm >/dev/null || fail "duplicate field confirm failed"
+  record="$home/state/.afk-contract"
+  printf 'merge_grants: -\n' >> "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "duplicate merge_grants fields validated"
+  assert_contains "$out" 'invalid merge_grants field' 'duplicate field refusal wording'
+  pass "malformed and duplicate merge-grant fields fail record validation"
+}
+
+test_archive_drops_live_grants() {
+  local home rc
+  home=$(make_home grants-archive)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "archive grant proposal failed"
+  contract "$home" confirm >/dev/null || fail "archive grant confirm failed"
+  contract "$home" archive >/dev/null || fail "archive failed"
+  [ ! -f "$home/state/.afk-contract" ] || fail "archive left the live record"
+  set +e
+  contract "$home" grants >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "grants on the live path succeeded after archive"
+  pass "archive removes live grants so archived copies are not consulted"
+}
+
+# The record-mutating commands share one lock with the subsystems that read this
+# record's authority and then act on it (bin/fm-pr-merge.sh reads the grants and
+# merges). While a reader holds that lock, confirm and archive must refuse and
+# change nothing, so no publication, replacement, or archive can land inside the
+# window between that read and the action it authorized.
+test_record_changes_refuse_while_a_reader_holds_the_lock() {
+  local home lock holder_pid i rc out before
+  home=$(make_home lock-contended)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "lock-contended: proposal failed"
+  contract "$home" confirm >/dev/null || fail "lock-contended: confirm failed"
+  before=$(cat "$home/state/.afk-contract")
+  lock="$home/state/.afk-contract.lock"
+
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/holder.ready" "$home/release" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$home/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$home/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the fixture never took the lock"; }
+
+  set +e
+  out=$(FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 contract "$home" archive 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: archive ran while the record was locked"; }
+  assert_contains "$out" 'locked by live process' "lock-contended: the archive refusal did not name the live holder"
+  [ -f "$home/state/.afk-contract" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the refused archive still moved the record"; }
+
+  contract "$home" propose --grant task-other >/dev/null || fail "lock-contended: replacement proposal failed"
+  set +e
+  out=$(FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 contract "$home" confirm 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: confirm replaced the record while it was locked"; }
+  assert_contains "$out" 'locked by live process' "lock-contended: the confirm refusal did not name the live holder"
+  [ "$(cat "$home/state/.afk-contract")" = "$before" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the refused confirm changed the standing record"; }
+  [ "$(contract "$home" grants)" = task-x1 ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: a read subcommand did not see the unchanged grants"; }
+
+  : > "$home/release"
+  wait "$holder_pid" || fail "lock-contended: the fixture holder did not release cleanly"
+  contract "$home" confirm >/dev/null 2>&1 || fail "lock-contended: confirm failed once the lock cleared"
+  [ "$(contract "$home" grants)" = task-other ] \
+    || fail "lock-contended: the released replacement did not take effect"
+  contract "$home" archive >/dev/null || fail "lock-contended: archive failed once the lock cleared"
+  pass "confirm and archive refuse while the record is locked, and proceed once it clears"
+}
+
 test_fields_refuse_each_missing_part_by_name
 test_omitted_stop_confirms_as_no_stop
 test_never_set_flags_without_refusing_and_never_over_matches
@@ -544,3 +695,10 @@ test_validation_rejects_blank_stop_and_refused_text
 test_validation_rejects_damaged_words_blocks
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated
+test_merge_grants_round_trip_and_read_back
+test_merge_grants_empty_form_and_usage_errors
+test_legacy_record_without_merge_grants_reads_empty
+test_malformed_merge_grants_refuse_validation
+test_archive_drops_live_grants
+test_record_changes_refuse_while_a_reader_holds_the_lock
+
