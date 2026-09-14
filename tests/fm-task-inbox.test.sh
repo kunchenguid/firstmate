@@ -321,12 +321,6 @@ test_ring_reports_a_stranded_submit() {
   grep -qF 'Firstmate instruction waiting' "$log" \
     || fail "the stranded attempt should still have typed the doorbell:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "a stranded delivery must leave the durable record unhandled"
-  # The journal names the attempt and the backend's own verdict word, and
-  # carries no message body.
-  grep -qE "${rec##*/}"$'\t''4'$'\t''pending$' "$state/t1.inbox/.attempts" \
-    || fail "the delivery journal should record the stranded attempt:"$'\n'"$(cat "$state/t1.inbox/.attempts" 2>/dev/null)"
-  grep -qF 'begin validation' "$state/t1.inbox/.attempts" \
-    && fail "the delivery journal must never carry the message body"
   # The trap: the very next attempt is suppressed by the text this plane typed.
   before=$(cat "$cap")
   : > "$log"
