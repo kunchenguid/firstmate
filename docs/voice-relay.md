@@ -86,7 +86,7 @@ virtual environment of its own:
 
 ```
 python3 -m venv ~/.fm-voice-venv
-~/.fm-voice-venv/bin/pip install aws-sdk-bedrock-runtime
+~/.fm-voice-venv/bin/pip install aws-sdk-bedrock-runtime awscrt
 ```
 
 Then tell this home which account and model to use.
@@ -134,8 +134,8 @@ scp <desktop>:<firstmate home>/bin/fm_voice_frame.py .
 python3 -m pip install sounddevice
 ```
 
-`sounddevice` needs PortAudio, which on macOS is `brew install portaudio`. macOS
-will ask for microphone permission for whichever terminal you run this from, once.
+`sounddevice` needs PortAudio: install it with `brew install portaudio` on macOS or `sudo apt install libportaudio2` on Debian and Ubuntu.
+macOS will ask for microphone permission for whichever terminal you run this from, once.
 
 Then talk:
 
