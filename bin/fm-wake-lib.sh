@@ -1400,7 +1400,8 @@ fm_treehouse_pool_status() { # <project>
     type == "array" and all(.[];
       (.path | type == "string" and startswith("/") and (explode | all(. != 9 and . != 10 and . != 13))) and
       (.name | type == "string" and length > 0) and
-      (.status == "leased" or .status == "in-use" or .status == "available") and
+      (.status == "leased" or .status == "in-use" or .status == "available" or
+       .status == "dirty" or .status == "damaged" or .status == "you\u0027re here") and
       ((.leased // false) | type == "boolean")) and
     ([.[].path] | length == (unique | length))
   ' >/dev/null || {
@@ -1604,19 +1605,18 @@ fm_treehouse_require_owned_slot() { # <worktree> <task-id> [home]
 }
 
 fm_treehouse_return_snapshot() {
-  local slot=$1 id=$2 home=$3 marker state gitdir
+  local slot=$1 id=$2 home=$3 marker entry gitdir
   slot=$(fm_treehouse_real_dir "$slot") || return 1
   home=$(fm_treehouse_real_dir "$home") || return 1
   marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
-  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
   fm_pr_regular_destination_or_absent "$marker" && [ -f "$marker" ] || return 1
-  fm_treehouse_slot_entry "$slot" >/dev/null || return 1
+  entry=$(fm_treehouse_slot_entry "$slot") || return 1
   gitdir=$(git -C "$slot" rev-parse --absolute-git-dir) || return 1
   jq -nc --arg slot "$slot" --arg task "$id" --arg home "$home" \
     --arg slot_identity "$(fm_pr_file_identity "$slot")" --arg git_identity "$(fm_pr_file_identity "$gitdir")" \
-    --arg state_identity "$(fm_pr_file_identity "$state")" --arg state_hash "$(fm_pr_sha256 "$state")" \
+    --argjson entry "$entry" \
     --arg claim_hash "$(fm_pr_sha256 "$marker")" \
-    '{slot:$slot,task:$task,home:$home,slot_identity:$slot_identity,git_identity:$git_identity,state_identity:$state_identity,state_hash:$state_hash,claim_hash:$claim_hash} | select(all(.[]; length > 0))'
+    '{slot:$slot,task:$task,home:$home,slot_identity:$slot_identity,git_identity:$git_identity,entry:$entry,claim_hash:$claim_hash} | select(all(.[]; length > 0))'
 }
 
 fm_treehouse_return_receipt_valid() {
@@ -1644,8 +1644,11 @@ fm_treehouse_guarded_return() {
     if [ -n "$before" ]; then
       after=$(fm_treehouse_return_snapshot "$slot" "$id" "$home") || return 1
       jq -en --argjson a "$before" --argjson b "$after" \
-        '($a | del(.state_identity,.state_hash)) == ($b | del(.state_identity,.state_hash))' >/dev/null || return 1
-      fm_treehouse_slot_entry "$slot" | jq -e '(.leased // false) == false and (.lease_id // "") == ""' >/dev/null || return 1
+        '[$a,$b] | map(del(.entry.leased,.entry.lease_id,.entry.lease_holder,.entry.leased_at,
+          .entry.owner_pid,.entry.owner_started_at)) | .[0] == .[1]' >/dev/null || return 1
+      printf '%s\n' "$after" | jq -e '.entry | (.leased // false) == false and
+        (.lease_id // "") == "" and (.lease_holder // "") == "" and
+        (.owner_pid // 0) == 0 and (.destroying // false) == false' >/dev/null || return 1
       tmp=$(mktemp "$receipt.tmp.XXXXXX") || return 1
       printf '%s\n' "$after" > "$tmp" && mv "$tmp" "$receipt" || return 1
     fi

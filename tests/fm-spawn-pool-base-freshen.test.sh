@@ -944,6 +944,7 @@ HOLD
 test_pinned_pool_identity_and_recovery() (
   set -eu
   local native=${FM_TREEHOUSE_TEST_BIN:-} lab="$TMP_ROOT/pinned-review" project a b c pool_a slot_a state_a before head_a meta_a json out id expected root pool slot marker state returned
+  local staged_a unstaged_a status_a dirty_slot damaged_slot other_slot other_lease state_identity gitdir
   [ -n "$native" ] && [ -x "$native" ] || fail 'FM_TREEHOUSE_TEST_BIN must name the isolated pinned build'
   mkdir -p "$lab/user" "$lab/home/state" "$lab/home/config" "$lab/home/data" "$lab/fakebin"
   export HOME="$lab/user" FM_HOME="$lab/home" FM_STATE_OVERRIDE="$lab/home/state" TREEHOUSE_NO_UPDATE_CHECK=1
@@ -982,6 +983,17 @@ TERMINAL
   git -C "$slot_a" add result.txt
   git -C "$slot_a" -c user.name=test -c user.email=test@example.invalid commit -qm preserved
   head_a=$(git -C "$slot_a" rev-parse HEAD)
+  printf 'staged result\n' >> "$slot_a/result.txt"
+  git -C "$slot_a" add result.txt
+  printf 'unstaged result\n' >> "$slot_a/result.txt"
+  printf 'untracked notes\n' > "$slot_a/notes.txt"
+  staged_a=$(git -C "$slot_a" diff --cached --binary)
+  unstaged_a=$(git -C "$slot_a" diff --binary)
+  status_a=$(git -C "$slot_a" status --porcelain)
+  [ -n "$staged_a" ] && [ -n "$unstaged_a" ] || fail 'dirty preservation fixture lacks staged or unstaged work'
+  json=$(cd "$project" && treehouse --root "$a" status --json)
+  printf '%s\n' "$json" | jq -e --arg p "$slot_a" 'any(.[]; .path == $p and .status == "dirty")' >/dev/null \
+    || fail 'native status did not expose dirty retained work'
   pool_a=$(dirname "$(dirname "$slot_a")"); state_a="$pool_a/treehouse-state.json"
   fm_write_meta "$FM_HOME/state/preserved.meta" "window=isolated:fm-preserved" "endpoint_task_id=preserved" \
     "kind=ship" "harness=codex" "project=$project" "worktree=$slot_a"
@@ -1010,15 +1022,68 @@ TERMINAL
     [ ! -e "$FM_HOME/state/$id.treehouse-acquisition" ] || fail 'published spawn retained its pending acquisition receipt'
     assert_grep "$a" "$FM_BACKEND_ROOT_LOG" 'backend root conflict was not exercised'
     [ "$(cat "$state_a")" = "$before" ] && [ "$(cat "$FM_HOME/state/preserved.meta")" = "$meta_a" ] || fail 'separate-root spawn changed preserved state'
-    [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] && [ "$(cat "$slot_a/result.txt")" = 'preserved result' ] || fail 'separate-root spawn reset retained work'
+    [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] &&
+      [ "$(git -C "$slot_a" diff --cached --binary)" = "$staged_a" ] &&
+      [ "$(git -C "$slot_a" diff --binary)" = "$unstaged_a" ] &&
+      [ "$(git -C "$slot_a" status --porcelain)" = "$status_a" ] &&
+      [ "$(cat "$slot_a/notes.txt")" = 'untracked notes' ] || fail 'separate-root spawn reset retained work'
   done
   export TREEHOUSE_ROOT="$c"
   out=$("$ROOT/bin/fm-control.sh" preserved reserve 2>&1) || fail "exact-copy adoption followed ambient root: $out"
-  [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] && [ "$(cat "$slot_a/result.txt")" = 'preserved result' ] || fail 'native in-place adoption reset the copy'
+  [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] &&
+    [ "$(git -C "$slot_a" diff --cached --binary)" = "$staged_a" ] &&
+    [ "$(git -C "$slot_a" diff --binary)" = "$unstaged_a" ] &&
+    [ "$(git -C "$slot_a" status --porcelain)" = "$status_a" ] &&
+    [ "$(cat "$slot_a/notes.txt")" = 'untracked notes' ] || fail 'native in-place adoption reset the copy'
+  jq -e --arg p "$slot_a" --arg h "$(fm_treehouse_lease_holder preserved "$FM_HOME")" \
+    'any(.worktrees[]; .path == $p and .leased and .lease_holder == $h)' "$state_a" >/dev/null \
+    || fail 'dirty adoption did not durably reserve the exact copy'
   before=$(cat "$state_a")
   "$ROOT/bin/fm-control.sh" preserved reserve >/dev/null || fail 'adoption retry failed'
   [ "$(cat "$state_a")" = "$before" ] || fail 'adoption retry replaced lease'
-  pass 'pinned native adoption preserves content; explicit B/C spawns preserve pool A and its records'
+  pass 'pinned native dirty adoption preserves staged, unstaged and untracked work; B/C spawns preserve pool A'
+
+  export TREEHOUSE_ROOT="$a"
+  for id in dirty damaged; do
+    json=$(cd "$project" && treehouse --root "$a" get --lease --json --lease-holder setup)
+    slot=$(printf '%s\n' "$json" | jq -r .path)
+    treehouse return --force --if-lease-id "$(printf '%s\n' "$json" | jq -r .lease_id)" "$slot"
+    if [ "$id" = dirty ]; then
+      dirty_slot=$slot
+      printf 'keep dirty spare\n' >> "$slot/README.md"
+    else
+      damaged_slot=$slot
+      mv "$slot/.git" "$lab/damaged.git"
+    fi
+  done
+  json=$(cd "$project" && treehouse --root "$a" status --json)
+  printf '%s\n' "$json" | jq -e --arg d "$dirty_slot" --arg broken "$damaged_slot" \
+    'any(.[]; .path == $d and .status == "dirty") and any(.[]; .path == $broken and .status == "damaged")' >/dev/null \
+    || fail 'native pool did not report dirty and damaged spares'
+  before=$(cat "$state_a")
+  "$ROOT/bin/fm-control.sh" preserved reserve >/dev/null || fail 'unrelated dirty or damaged slot prevented reserve'
+  [ "$(cat "$state_a")" = "$before" ] || fail 'reserve with unavailable spares changed native ownership'
+  fm_treehouse_select_pool "$project"
+  (cd "$dirty_slot" && fm_treehouse_pool_status "$dirty_slot" &&
+    printf '%s\n' "$FM_TREEHOUSE_POOL" | jq -e --arg p "$dirty_slot" \
+      'any(.[]; .path == $p and .status == "you\u0027re here" and .leased == false)' >/dev/null) \
+    || fail 'native current-directory status was not accepted as unleased'
+  fm_test_spawn_brief "$FM_HOME" status-spares
+  expected="$pool_a/4/project"
+  export FM_FAKE_PANE_PATH="$expected"
+  out=$("$ROOT/bin/fm-spawn.sh" status-spares "$project" --scout --harness codex 2>&1) || fail "spares prevented safe allocation: $out"
+  assert_grep "worktree=$expected" "$FM_HOME/state/status-spares.meta" 'dirty or damaged spare was reused'
+  assert_grep 'keep dirty spare' "$dirty_slot/README.md" 'dirty spare content was reset'
+  [ ! -e "$damaged_slot/.git" ] || fail 'damaged spare was repaired or reset'
+  for slot in "$dirty_slot" "$damaged_slot"; do
+    fm_write_meta "$FM_HOME/state/retained-spare.meta" 'kind=ship' "project=$project" "worktree=$slot"
+    before=$(cat "$state_a")
+    if fm_treehouse_acquire_preflight "$project" retained-spare-next > "$lab/spare.out" 2>&1; then fail 'retained unleased spare allowed acquisition'; fi
+    assert_contains "$(cat "$lab/spare.out")" 'without a durable lease' 'spare retention refusal was bypassed'
+    [ "$(cat "$state_a")" = "$before" ] || fail 'retained spare refusal changed native state'
+    rm "$FM_HOME/state/retained-spare.meta"
+  done
+  pass 'native status accepts current-directory, dirty and damaged slots while allocation preserves unavailable and retained copies'
 
   unset TREEHOUSE_ROOT
   fm_treehouse_acquire_preflight "$project" default
@@ -1055,7 +1120,7 @@ TERMINAL
   rm "$FM_HOME/state/missing.meta"
   pass 'default/configured pools agree with native allocation; interrupted acquisitions and missing homes refuse safely'
 
-  for id in returned uncertain replaced foreign state-replaced; do
+  for id in returned status-refreshed other-returned uncertain replaced git-replaced foreign entry-replaced re-leased same-holder; do
     export TREEHOUSE_ROOT="$lab/$id"
     fm_treehouse_acquire_preflight "$project" "$id"
     fm_treehouse_acquisition_begin "$id"
@@ -1064,29 +1129,74 @@ TERMINAL
     fm_treehouse_slot_owner_claim "$slot" "$id" "$FM_HOME"
     marker=$(fm_treehouse_slot_owner_marker "$slot")
     state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+    if [ "$id" = other-returned ]; then
+      out=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json --lease-holder other)
+      other_slot=$(printf '%s\n' "$out" | jq -r .path)
+      other_lease=$(printf '%s\n' "$out" | jq -r .lease_id)
+      [ "$other_slot" != "$slot" ] || fail 'unrelated return fixture reused leased copy'
+    fi
     if [ "$id" = uncertain ]; then
-      treehouse return --force --if-lease-id "$(printf '%s\n' "$json" | jq -r .lease_id)" "$slot"
+      treehouse() {
+        command treehouse "$@" || return $?
+        [ "$1" != return ] || return 17
+      }
+      if fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME"; then fail 'lost native return response reported success'; fi
+      unset -f treehouse
+      [ ! -e "$marker.returned" ] || fail 'uncertain return published success evidence'
+      fm_treehouse_slot_entry "$slot" | jq -e '(.leased // false) == false' >/dev/null \
+        || fail 'uncertain return fixture did not clear the native lease'
     else
       fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" || fail 'guarded return failed'
       [ -f "$marker.returned" ] || fail 'native success was not recorded'
     fi
     before=$(cat "$state")
     case "$id" in
-      returned)
+      status-refreshed)
+        state_identity=$(fm_pr_file_identity "$state")
+        (cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" status --json) > "$lab/status-refreshed.json"
+        [ "$(fm_pr_file_identity "$state")" != "$state_identity" ] || fail 'native status did not republish pool state'
+        [ "$(cat "$state")" = "$before" ] || fail 'status republication changed native state semantics'
+        ;;
+      other-returned)
+        treehouse return --force --if-lease-id "$other_lease" "$other_slot"
+        [ "$(cat "$state")" != "$before" ] || fail 'unrelated return did not change pool state'
+        ;;
+    esac
+    case "$id" in
+      returned|status-refreshed|other-returned)
+        before=$(cat "$state")
         fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" || fail 'successful return replay refused'
         [ "$(cat "$state")" = "$before" ] || fail 'return replay called native cleanup twice'
         if fm_treehouse_require_owned_slot "$slot" "$id" "$FM_HOME" >/dev/null 2>&1; then fail 'returned success authorized relaunch'; fi
         fm_treehouse_slot_owner_release "$slot" "$id" "$FM_HOME"
-        [ ! -e "$marker" ] && [ ! -e "$FM_HOME/state/$id.treehouse-acquisition" ] || fail 'completed cleanup left operation ownership'
+        [ ! -e "$marker" ] && [ ! -e "$marker.returned" ] && [ ! -e "$FM_HOME/state/$id.treehouse-acquisition" ] || fail 'completed cleanup left operation ownership'
         continue ;;
       replaced) mv "$slot" "$slot.previous"; mkdir "$slot"; cp "$slot.previous/.git" "$slot/.git" ;;
+      git-replaced)
+        gitdir=$(git -C "$slot" rev-parse --absolute-git-dir)
+        mv "$gitdir" "$gitdir.previous"
+        mkdir "$gitdir"
+        cp -R "$gitdir.previous/." "$gitdir/"
+        ;;
       foreign) printf 'task=other\nhome=%s\nlease_id=other\n' "$FM_HOME" > "$marker" ;;
-      state-replaced) cp "$state" "$state.next"; mv "$state.next" "$state" ;;
+      entry-replaced)
+        jq --arg p "$slot" '(.worktrees[] | select(.path == $p)).created_at = "2000-01-01T00:00:00Z"' "$state" > "$state.next"
+        mv "$state.next" "$state"
+        ;;
+      re-leased|same-holder)
+        returned=other
+        [ "$id" != same-holder ] || returned=$(fm_treehouse_lease_holder "$id" "$FM_HOME")
+        out=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" lease "$(basename "$(dirname "$slot")")" --lease-holder "$returned" --json)
+        [ "$(printf '%s\n' "$out" | jq -r .lease_id)" != "$(printf '%s\n' "$json" | jq -r .lease_id)" ] || fail 're-lease retained old identity'
+        ;;
     esac
+    before=$(cat "$state")
+    returned=$(cat "$marker")
     if fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" > "$lab/$id.out" 2>&1; then fail "$id incorrectly reused return evidence"; fi
     [ "$(cat "$state")" = "$before" ] || fail "$id refusal changed native state"
+    [ "$(cat "$marker")" = "$returned" ] || fail "$id refusal changed the owner claim"
   done
-  pass 'return replay requires exact success evidence and refuses uncertainty, replaced slots/state, and foreign claims'
+  pass 'exact-slot return replay survives status republication and unrelated returns; uncertainty, replacement, re-lease and foreign claims refuse'
 
   export TREEHOUSE_ROOT="$lab/seed"
   mkdir -p "$FM_HOME/data/mate"

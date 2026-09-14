@@ -47,16 +47,18 @@ The installer requires Go 1.25.5 or newer and writes only to its supplied destin
 Observed native output, with exit status 0:
 
 ```text
-ok - pinned native adoption preserves content; explicit B/C spawns preserve pool A and its records
+ok - pinned native dirty adoption preserves staged, unstaged and untracked work; B/C spawns preserve pool A
+ok - native status accepts current-directory, dirty and damaged slots while allocation preserves unavailable and retained copies
 ok - default/configured pools agree with native allocation; interrupted acquisitions and missing homes refuse safely
-ok - return replay requires exact success evidence and refuses uncertainty, replaced slots/state, and foreign claims
+ok - exact-slot return replay survives status republication and unrelated returns; uncertainty, replacement, re-lease and foreign claims refuse
 ok - native seeding and return share canonical identity; legacy and interrupted seeds preserve ownership
 ok - unexpected native response pool refuses before refresh or publication
 ```
 
 The seven focused secondmate cases also passed, covering acquisition, rollback, unsafe home targets, ordinary retirement, and nested return failures.
 The portable spawn and teardown suites passed through `bash tests/fm-spawn-pool-base-freshen.test.sh` and `bash tests/fm-teardown-endpoint-safety.test.sh`.
-A receipt is deliberately invalidated by any subsequent write or replacement of its native pool state; recovery then requires inspection.
+Return receipts bind native success to the exact slot record, checkout and Git directory identities, and owner claim.
+Native status republication and changes to other slots preserve recovery; a changed slot record, replaced checkout or Git directory, new lease, foreign claim, or uncertain return requires inspection.
 No live migration, existing-copy cleanup, or global installation is implied by these fixture results.
 
 | Integration surface | Scope of this evidence |
