@@ -245,6 +245,51 @@ JSON
 # checkout silent external-file inclusion the human declined. The whole
 # registration refuses instead, and the store - including the worktree entry,
 # which is never reached - must come back byte-for-byte unchanged.
+# A project entry carrying hasClaudeMdExternalIncludesApproved===false WITHOUT
+# the warning ever shown is the vendor's initial default for a project it has
+# never asked about, not a human's "No, disable". Registration must succeed,
+# and must leave the default exactly as undecided as it found it:
+# trust registers on both entries, but neither import flag is manufactured
+# into consent. This is the input that fails against the pre-discriminator
+# guard, which refused every approved===false entry.
+test_project_root_entry_unshown_default_is_not_a_decline() {
+  local rec store out
+  rec=$(make_case project-default)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":false,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false,"allowedTools":["Read"]}}}
+JSON
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a project carrying only the unshown default must be trusted: $out"
+  assert_trusted "$store" "$WT" "the worktree was not recorded as trusted"
+  assert_trusted "$store" "$PROJ" "the project root was not recorded as trusted"
+  assert_store_value "$store" false "the unshown default was flipped into import consent" projects "$PROJ" hasClaudeMdExternalIncludesApproved
+  assert_store_value "$store" false "the unshown warning was flipped into a shown one" projects "$PROJ" hasClaudeMdExternalIncludesWarningShown
+  assert_store_value "$store" '["Read"]' "the project entry's unrelated settings were lost" projects "$PROJ" allowedTools
+  pass "fm-claude-trust.sh: trusts a project carrying only the unshown external-imports default"
+}
+
+# The mirror discriminator pin: approved===true with the warning never shown
+# is still standing consent - the carry-forward reads the approval, not the
+# warning - so registration succeeds and refreshes both flags onto both
+# entries. Together with the default case above and the decline case below,
+# this covers all four flag combinations plus the absent-key fresh case.
+test_project_root_entry_approved_without_warning_carries_consent() {
+  local rec store out
+  rec=$(make_case project-approved-unshown)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":false}}}
+JSON
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a project that already approved external imports must be trusted: $out"
+  assert_all_flags "$store" "$WT" "the worktree entry did not carry the refreshed import consent"
+  assert_all_flags "$store" "$PROJ" "the project-root entry did not keep its already-granted import consent"
+  pass "fm-claude-trust.sh: carries forward approval even when the warning flag was never shown"
+}
+
 test_project_root_entry_declined_external_imports_is_not_overridden() {
   local rec store out before after
   rec=$(make_case project-decline)
@@ -601,6 +646,77 @@ test_refused_spawn_leaves_no_task_state() {
   pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state behind"
 }
 
+# A consent-refused spawn must hand back what it already holds: the endpoint
+# it created and the treehouse slot it leased. No task record exists yet, so
+# no teardown can find either, and without the handoff a few declined spawns
+# in a row silently consume the pool. The worktree here is laid out as a real
+# pool slot (pool state plus the project's own common dir) so the return path
+# is exercised rather than skipped; the tmux and treehouse stubs log every
+# kill and return instead of performing them. This fails against a spawn that
+# just exits: no kill-window is issued and no return is attempted.
+test_declined_consent_refusal_hands_back_endpoint_and_slot() {
+  local case_dir home proj pool wt config fakebin out id kill_log tree_log proj_real
+  case_dir="$TMP_ROOT/declined-handoff"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  pool="$case_dir/pool"
+  wt="$pool/s1/repo"
+  config="$case_dir/claude-config"
+  id="declinedhandoff$$"
+  kill_log="$case_dir/kill.log"
+  tree_log="$case_dir/treehouse.log"
+  mkdir -p "$config" "$pool/s1"
+  printf '{"slots":{}}\n' > "$pool/treehouse-state.json"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
+  kill-window) printf '%s\n' "\$*" >> "\${FM_TMUX_KILL_LOG:-/dev/null}"; exit 0 ;;
+  send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TREEHOUSE_LOG:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-declined
+  fm_test_spawn_brief "$home" "$id"
+  proj_real=$(cd -P "$proj" && pwd -P)
+  # A genuine decline: the warning WAS shown and approval WAS refused.
+  cat > "$config/.claude.json" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$proj_real":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true}}}
+JSON
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_TMUX_KILL_LOG="$kill_log" FM_TREEHOUSE_LOG="$tree_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 1 $? "a spawn against a genuine import decline must fail: $out"
+  assert_contains "$out" "declined external CLAUDE.md imports" "the refusal did not name the declined-consent reason"
+  assert_contains "$out" "closed endpoint" "the refusal did not report handing its endpoint back"
+  assert_contains "$out" "returned worktree slot" "the refusal did not report handing its slot back"
+  [ ! -e "$home/state/$id.meta" ] && [ ! -L "$home/state/$id.meta" ] \
+    || fail "a refused spawn published a task record no worker backs"
+  grep -Fq "kill-window" "$kill_log" \
+    || fail "a refused spawn left its endpoint open: no kill-window was issued"
+  grep -Fq "return" "$tree_log" \
+    || fail "a refused spawn left its slot leased: no treehouse return was issued"
+  [ ! -e "$pool/s1/.fm-slot-owner" ] \
+    || fail "a refused spawn left a slot claim naming a task no record describes"
+  pass "fm-spawn.sh: a consent-refused claude spawn hands back its endpoint and slot"
+}
+
 # The spawn half: a real fm-spawn of a claude worker must pre-register the
 # worktree AND deliver the launch command carrying the brief, with no dialog to
 # answer and no human in the loop.
@@ -796,6 +912,8 @@ test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
 test_project_root_entry_declined_external_imports_is_not_overridden
+test_project_root_entry_unshown_default_is_not_a_decline
+test_project_root_entry_approved_without_warning_carries_consent
 test_registration_is_idempotent
 test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal
@@ -816,6 +934,7 @@ test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_refused_spawn_leaves_no_task_state
+test_declined_consent_refusal_hands_back_endpoint_and_slot
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted
 test_secondmate_home_trust_refuses_everything_unseeded

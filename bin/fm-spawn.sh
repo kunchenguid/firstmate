@@ -3624,9 +3624,10 @@ fi
 # seeded secondmate home marked for this id; a refusal blocks the spawn rather
 # than launching a worker that would wedge. Refusing here rather than beside the
 # arm keeps this in the same class as the two worktree refusals just above: no
-# temp root, no retired relaunch wiring and no busy record exists yet to strand,
-# so the refusal names the endpoint the same way they do and leaves nothing else
-# behind.
+# temp root, no retired relaunch wiring and no busy record exists yet to strand.
+# The owned endpoint and worktree slot the spawn already holds are handed back
+# inline below, so the refusal still leaves nothing behind; an adopted relaunch
+# endpoint stays for its owner and keeps the inspectable-window message.
 # agy gates a fresh worktree behind its own folder-trust dialog, but firstmate
 # deliberately does NOT pre-register the worktree in agy's trust store
 # (bin/fm-agy-trust.sh is not called): this home trusts its worktree root
@@ -3664,7 +3665,43 @@ case "$HARNESS" in
       spawn_trust_args=("$WT" "$PROJ_ABS")
     fi
     if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
-      echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+      echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog" >&2
+      if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_ENDPOINT_MISSING" -eq 0 ]; then
+        # An adopted relaunch endpoint belongs to the previous incarnation, so
+        # it stays for its owner to handle, and there is no fresh lease to
+        # return either; the window is still live, so it stays inspectable.
+        echo "inspect window $T" >&2
+        exit 1
+      fi
+      # A fresh endpoint and (for a fresh treehouse lease) a worktree slot
+      # already exist here while no task record does, so the refusal hands both
+      # back rather than orphaning them: a refused spawn that kept them would
+      # strand a live window and a leased slot no teardown can find, and a few
+      # failures in a row would silently consume the pool. A secondmate home is
+      # not a lease to return, and orca's own abort path already owns its
+      # terminal plus the recovery record through the EXIT trap, so both are
+      # left out of the handoff below.
+      if [ "$BACKEND" != orca ] && [ -n "${T:-}" ]; then
+        trust_refusal_tab=
+        [ "$BACKEND" = zellij ] && trust_refusal_tab=${ZELLIJ_TAB_ID:-}
+        if fm_backend_kill "$BACKEND" "$T" "$trust_refusal_tab" "fm-$ID" 2>/dev/null; then
+          echo "closed endpoint $T" >&2
+        fi
+      fi
+      if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+        && [ -n "${WT:-}" ] && [ -n "${PROJ_ABS:-}" ] \
+        && fm_treehouse_pool_slot "$PROJ_ABS" "$WT" 2>/dev/null; then
+        # Drop this spawn's own claim before the return: the EXIT trap below
+        # releases it only while the slot still reads as a pool slot, which the
+        # return itself may undo, and it never removes another task's claim.
+        if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
+          SPAWN_SLOT_CLAIMED=0
+          fm_treehouse_slot_owner_release "$WT" "$ID" || true
+        fi
+        if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+          echo "returned worktree slot $WT" >&2
+        fi
+      fi
       exit 1
     fi
     ;;
