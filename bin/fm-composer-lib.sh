@@ -977,12 +977,13 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
   local row raw content plain state unknown_seen=0 empty_seen=0
   local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
+  local furniture_re="^(${idle_re})$"
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
-    if [ -n "$content" ] && fm_composer_idle_matches "$content" "$idle_re" insensitive; then
+    if [ -n "$content" ] && fm_composer_idle_matches "$content" "$furniture_re" insensitive; then
       row=$((row + 1))
       continue
     fi

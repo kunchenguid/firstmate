@@ -589,6 +589,15 @@ test_bright_furniture_row_does_not_poison_idle_verdict() {
     fm_tmux_composer_state "fakepane")
   [ "$out" = pending ] \
     || fail "real typed text on a second composer row should stay pending, got '$out'"
+
+  # A draft that merely starts with a known placeholder must not be swallowed
+  # as furniture when another row independently proves the box empty.
+  printf '╭────────────────────╮\n│ ❯%s                 │\n│ Ask anything... x  │\n╰────────────────────╯\n' \
+    "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "a draft extending an idle-placeholder prefix should stay pending, got '$out'"
   pass "fm_tmux_composer_state: a bright idle-placeholder furniture row does not poison an empty composer, real text still pending"
 }
 
