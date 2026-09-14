@@ -28,8 +28,12 @@ For a REMOTE secondmate, `fm-crew-state` and `fm-peek` read the actual remote en
 Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secondmate`, never raw herdr pane close/kill surgery, which strands the endpoint binding.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
-Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
-A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
+For every stale notification, resolve the exact task and read `bin/fm-crew-state.sh <id>` before trusting its status log or deciding whether to absorb the stale pane.
+An authoritative `state: working` from `source: run-step` or `source: pane` means the worker is genuinely in progress: do not ask the captain for action; continue supervision.
+A declared `paused` state remains the existing bounded external-wait path; it is intentional waiting and must not be mislabeled a wedge.
+Any other current state, including `parked`, `done`, `blocked`, `failed`, `unknown`, or an unreadable result, does not support absorption as routine progress.
+Surface a concrete recovery decision instead: inspect the recorded endpoint and worktree, then choose the normal lifecycle action only after ownership and preserved work are reconciled.
+When the pane cannot be mapped to an exact task, identify it from the recorded backend inventory without label-based guessing; leave it untouched and surface the decision to inspect the unidentified pane before any relaunch.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.

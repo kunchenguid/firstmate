@@ -408,9 +408,11 @@ EOF
     || fail "repeated missing-status handling became a classification failure"
   [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 2 ] \
     || fail "a missing-status stale wake was not acknowledged"
-  [ ! -s "$state/.subsuper-escalations" ] \
-    || fail "a missing status file produced an unreadable-span escalation"
-  pass "missing-status stale wakes remain ordinary and acknowledgeable"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "an unidentified stale pane did not produce a recovery decision"
+  grep -F "recovery decision" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unidentified stale recovery decision was not concrete"
+  pass "missing-status stale wakes surface an unidentified-pane recovery decision"
 }
 
 test_transient_unreadable_signal_recovers_without_advancing() {
@@ -607,17 +609,38 @@ test_classify_check_and_unknown_escalate() {
 
 test_stale_transient_self_records_marker() {
   local dir state out key
-  dir=$(make_supercase stale-transient)
+  dir=$(make_case stale-transient)
   state="$dir/state"
+  printf 'window=sess:fm-qux-w4\nkind=ship\n' > "$state/qux-w4.meta"
   printf 'working: building\n' > "$state/qux-w4.status"
+  FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   stale_marker_record "sess:fm-qux-w4" "$state"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-qux-w4" "$state")
-  case "$out" in self\|*) ;; *) fail "transient stale did not self-handle: $out" ;; esac
   key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
   [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "transient stale self-handles and records a persistence marker"
 }
 
+test_stale_current_state_controls_classification() {
+  local dir state fakebin out
+  dir=$(make_case stale-current-state)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  printf 'window=sess:fm-current-w1\nkind=ship\n' > "$state/current-w1.meta"
+  printf 'working: last recorded progress\n' > "$state/current-w1.status"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
+  case "$out" in self\|*working*) ;; *) fail "active current state did not absorb stale: $out" ;; esac
+  FM_FAKE_CREW_STATE='state: unknown · source: none · endpoint unreadable'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
+  case "$out" in escalate\|*"recovery decision"*) ;; *) fail "unknown current state did not surface recovery decision: $out" ;; esac
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
+  pass "stale classification reconciles current worker state before status-log handling"
+}
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   local case_name dir state fakebin key task win pane reason status_line action_log
   for case_name in working prior-terminal paused; do
@@ -2793,6 +2816,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
+test_stale_current_state_controls_classification
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker

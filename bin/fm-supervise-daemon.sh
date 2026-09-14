@@ -402,20 +402,32 @@ classify_signal() {  # <reason-after-colon> <state>
   fi
 }
 
-# classify_stale decides the WAKE itself (one-shot per distinct hash). On a
-# first sight of a non-terminal stale it returns "self" and the caller records a
-# timestamp marker; persistence is escalated by housekeeping's recheck, not here.
+# classify_stale decides the WAKE itself (one-shot per distinct hash). Reconcile
+# the exact worker's current state before consulting its append-only status log:
+# an active worker is routine, while an unresolved worker gets a recovery decision
+# instead of disappearing as a transient stale.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest
+  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest current_class has_meta=0
   task=$(window_to_task "$win" "$state")
+  [ -f "$state/$task.meta" ] && has_meta=1
+  if [ "$has_meta" -eq 1 ]; then
+    current_class=$(crew_absorb_class "$task")
+    if [ "$current_class" = working ]; then
+      printf 'self|stale + current worker state is working; continue supervision: %s' "$win"
+      return
+    fi
+  fi
   if [ -z "$rc" ]; then
-    record=$(status_span_first_actionable_record "$state/$task.status" \
-      "$(status_seen_offset "$state" "$task")")
+    record=$(status_span_first_actionable_record "$state/$task.status" "$(status_seen_offset "$state" "$task")")
     rc=$?
   fi
   last=$(last_status_line "$state/$task.status")
   if [ "$rc" -eq 2 ]; then
-    printf 'escalate|unreadable status span for %s' "$task"
+    if [ ! -e "$state/$task.status" ]; then
+      printf 'self|stale + missing status for %s' "$task"
+    else
+      printf 'escalate|unreadable status span for %s' "$task"
+    fi
     return
   fi
   if [ "$rc" -eq 0 ]; then
@@ -425,37 +437,39 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     return
   fi
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
-    # A DECLARED external-wait pause or a verified captain-held transfer
-    # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
-    # EXPECTED, so this is not a wedge. The caller records a pause marker (long
-    # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
-    # reuses the status line already read, no fm-crew-state.sh call, mirroring the
-    # daemon's existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
+  if [ "$has_meta" -eq 1 ] && [ "$current_class" != paused ]; then
+    printf 'escalate|stale + current worker state is unresolved for %s; recovery decision: inspect the recorded endpoint and worktree before relaunching' "$task"
+    return
+  fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-    # Independent of free-text captain-relevant matching: a nonterminal progress
-    # verb (working:) must never take the terminal stale path. Seen-status dedupe
-    # must not permanently suppress or clear possible-wedge aging merely because
-    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
-    # captain lines without those verbs keep the terminal escalate/dedupe path.
     if ! status_is_terminal_verb "$last"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
+          if [ "$has_meta" -eq 1 ]; then
+            printf 'escalate|stale + current worker state is unresolved for %s; recovery decision: inspect the recorded endpoint and worktree before relaunching' "$task"
+          else
+            printf 'self|transient stale (%s): %s' "$win" "$last"
+          fi
           return
           ;;
       esac
     fi
-    printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    if [ "$has_meta" -eq 1 ]; then
+      printf 'escalate|stale + terminal status requires recovery review: %s' "$last"
+    else
+      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    fi
     return
   fi
-  # Non-terminal (or no status): defer to the persistence recheck. The caller
-  # records/refreshes the stale marker so housekeeping can age it.
+  if [ "$has_meta" -eq 0 ] && [ -z "$last" ]; then
+    printf 'escalate|stale pane is not associated with a recorded worker; recovery decision: inspect the unidentified pane before relaunching'
+    return
+  fi
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
 }
-
 classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
   printf 'escalate|%s' "$1"
 }
@@ -1354,9 +1368,8 @@ handle_wake() {  # <reason> <state>
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               task=$(window_to_task "$arg" "$state")
-              if [ -n "$task" ]; then
-                span_record=$(status_span_first_actionable_record "$state/$task.status" \
-                  "$(status_seen_offset "$state" "$task")")
+              if [ -n "$task" ] && [ -e "$state/$task.status" ]; then
+                span_record=$(status_span_first_actionable_record "$state/$task.status" "$(status_seen_offset "$state" "$task")")
                 span_rc=$?
                 case "$span_rc" in
                   0|1)
@@ -1365,19 +1378,16 @@ handle_wake() {  # <reason> <state>
                   *)
                     sig=$(status_observed_signature "$state/$task.status")
                     marker=$(_seen_status_path "$state" "$task")
-                    if status_presentation_marker_reported_matches "$marker" "$sig"; then
-                      span_failure_repeat=1
-                    else
-                      printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"
-                    fi
+                    if status_presentation_marker_reported_matches "$marker" "$sig"; then span_failure_repeat=1; else printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"; fi
                     ;;
                 esac
               else
-                span_rc=2
-                printf 'ERROR\t%s\n' "$arg" > "$capture"
+                span_rc=1
               fi
               if [ "$span_failure_repeat" -eq 1 ]; then
                 decision="self|unreadable status span already reported for $task"
+              elif [ -z "$task" ]; then
+                decision="escalate|stale pane is not associated with a recorded worker; recovery decision: inspect the unidentified pane before relaunching"
               else
                 decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
               fi

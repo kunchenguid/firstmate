@@ -165,16 +165,14 @@ Classify each wake this way:
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
   The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
-- `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
-  Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
-  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
-  Healthy crewmates are autonomous and do not wait on firstmate mid-task.
+- `stale` with a task association -> the stuck-worker recovery skill first reconciles the associated worker's current state before trusting the status log.
+  Current `working` evidence means the worker is still in progress and the stale notification is absorbed without asking the captain for action.
+  Any other or unreadable current state surfaces a concrete recovery decision, and an unidentified pane is surfaced for inspection before relaunch.
+- `check` -> always escalate.
+  Check scripts print only when firstmate should wake.
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
 - An unknown wake reason escalates fail-safe, while status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
-
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
 immediate) and flushed as one single-line digest prefixed with the current
 operational prefix, carrying pre-read status summaries and a recommended action.
