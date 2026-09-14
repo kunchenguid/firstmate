@@ -746,6 +746,42 @@ test_supervision_protocol_follows_corrected_verdict() {
   pass "session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE"
 }
 
+# The real Codex SessionStart path adds enough shell and timeout processes that
+# the native Codex process is the ninth ancestor of fm-harness.sh. Keep this
+# executable regression separate from the synthetic marker precedence cases:
+# the failure is the bounded walk ending one process before a valid Codex owner.
+test_codex_sessionstart_hook_depth_reaches_codex() {
+  local dir codex next stage i got command
+  dir="$TMP_ROOT/codex-hook-depth"
+  codex=$(named_bin "$dir/codex-tree" codex)
+  next="$HARNESS"
+  i=7
+  while [ "$i" -ge 1 ]; do
+    stage="$dir/hook-stage-$i.sh"
+    cat > "$stage" <<SH
+#!/usr/bin/env bash
+"$next" &
+child=\$!
+wait "\$child"
+SH
+    chmod +x "$stage"
+    next="$stage"
+    i=$((i - 1))
+  done
+  command="\"$next\" & child=\$!; wait \"\$child\""
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$codex" -c "$command")
+  [ "$got" = codex ] \
+    || fail "a Codex process nine ancestors above the hook probe resolved '$got', expected codex"
+
+  got=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$codex" -c "$command")
+  [ "$got" = codex ] \
+    || fail "a retained CLAUDECODE renamed a Codex process nine ancestors above the hook probe to '$got'"
+  pass "the executable harness probe reaches Codex through the real SessionStart depth"
+}
+
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
@@ -759,3 +795,4 @@ test_descent_probe_ignores_a_sibling_branch_the_walk_cannot_reach
 test_descent_probe_tolerates_an_args_only_foreign_verdict_at_the_deepest_vantage
 test_descent_probe_prefers_comm_strength_when_deepest_leaves_tie
 test_supervision_protocol_follows_corrected_verdict
+test_codex_sessionstart_hook_depth_reaches_codex

@@ -145,12 +145,12 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
+# True when an exact `omp` process sits within sixteen parents of this one. The
 # same anchored match as the ancestry walk below, kept separate so the marker
 # precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
   local pid=$$ comm
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -250,7 +250,10 @@ harness_process_verdict() {  # <pid>
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
   local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  # Codex SessionStart hooks add a bash hook shell, the run wrapper, and the
+  # bounded session-start timeout before this probe reaches the native process.
+  # Keep this aligned with fm-session-lock-lib.sh's bounded sixteen-parent walk.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -270,7 +273,7 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
+# is eligible. Bounded to the same sixteen levels harness_ancestry climbs, so a deep
 # or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
@@ -283,7 +286,7 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
   best=$root
   frontier=$root
-  while [ -n "$frontier" ] && [ "$depth" -lt 8 ]; do
+  while [ -n "$frontier" ] && [ "$depth" -lt 16 ]; do
     next=
     for pid in $frontier; do
       while read -r child parent; do
@@ -325,7 +328,7 @@ EOF
   done
 
   pid=$best
-  while [ -n "$pid" ] && [ "$hops" -le 8 ]; do
+  while [ -n "$pid" ] && [ "$hops" -le 16 ]; do
     printf '%s\n' "$pid"
     [ "$pid" != "$root" ] || break
     parent=
