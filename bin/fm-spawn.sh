@@ -263,6 +263,7 @@
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CODEXBIN__ quoted concrete Codex executable path resolved from PATH
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -493,6 +494,10 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-version-lib.sh
+. "$SCRIPT_DIR/fm-version-lib.sh"
+# shellcheck source=bin/fm-codex-lib.sh
+. "$SCRIPT_DIR/fm-codex-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1429,7 +1434,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1561,9 +1566,9 @@ launch_template() {
       ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXBIN__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXBIN__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1802,8 +1807,14 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 case "$HARNESS" in
+  codex)
+    CODEX_BIN=$(resolve_executable codex) || {
+      echo "error: codex executable not found on PATH; install Codex CLI or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -1831,7 +1842,7 @@ case "$HARNESS" in
     fi
     ;;
   omp)
-    OMP_BIN=$(resolve_pi_executable omp) || {
+    OMP_BIN=$(resolve_executable omp) || {
       echo "error: omp executable not found on PATH; install Oh My Pi or select a different verified harness" >&2
       exit 1
     }
@@ -1842,7 +1853,7 @@ case "$HARNESS" in
     }
     ;;
   agy)
-    AGY_BIN=$(resolve_pi_executable agy) || {
+    AGY_BIN=$(resolve_executable agy) || {
       echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
       exit 1
     }
@@ -2004,7 +2015,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2 model=${3:-}
+  local harness=$1 effort=$2 model=${3:-} executable=${4:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -2013,11 +2024,13 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          if [ -n "$executable" ] && fm_codex_supports_max_effort "$executable"; then
+            printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+          fi
+          ;;
       esac
       ;;
     grok)
@@ -4051,7 +4064,7 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "${CODEX_BIN:-}") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
@@ -4071,6 +4084,7 @@ LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
+  codex) LAUNCH=${LAUNCH//__CODEXBIN__/"$(shell_quote "$CODEX_BIN")"} ;;
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;

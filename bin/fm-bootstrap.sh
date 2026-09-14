@@ -191,6 +191,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-version-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-version-lib.sh"
+# shellcheck source=bin/fm-codex-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-codex-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -921,27 +925,6 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-# Shared semantic-version floor for the tool gates below. A version string that
-# cannot be parsed into exactly one major.minor.patch triple is incompatible,
-# never assumed current, so a development or vendored build cannot pass a floor
-# it was never checked against.
-tool_version_at_least() {  # <tool> <min-version>
-  local tool=$1 min=$2 output parts major minor patch extra
-  local min_major min_minor min_patch min_extra
-  command -v "$tool" >/dev/null 2>&1 || return 1
-  output=$("$tool" --version 2>/dev/null) || return 1
-  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
-  [ "$major" -gt "$min_major" ] && return 0
-  [ "$major" -eq "$min_major" ] || return 1
-  [ "$minor" -gt "$min_minor" ] && return 0
-  [ "$minor" -eq "$min_minor" ] || return 1
-  [ "$patch" -ge "$min_patch" ]
-}
-
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -1102,7 +1085,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err
+  local file err codex_max_effort_supported=false
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1113,14 +1096,17 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
+  if fm_codex_supports_max_effort codex; then
+    codex_max_effort_supported=true
+  fi
+  err=$(jq -r --argjson codex_max_effort_supported "$codex_max_effort_supported" '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"] | index($h);
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $codex_max_effort_supported))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))

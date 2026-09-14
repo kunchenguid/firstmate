@@ -44,6 +44,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  fm_fake_version_tool "$fakebin" codex FM_FAKE_CODEX_VERSION 0.151.0
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
@@ -1100,7 +1101,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
-  while IFS='^' read -r label body mode expect; do
+  while IFS='^' read -r label body mode expect version; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/dispatch-$n"
@@ -1110,7 +1111,7 @@ test_crew_dispatch_validation() {
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CODEX_VERSION="${version:-0.151.0}" "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -1122,7 +1123,8 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
-unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+codex max effort is accepted on 0.151.0^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^empty^
+codex max effort is flagged before 0.151.0^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max^0.150.0
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 native pi ultra is accepted^{"rules":[],"default":{"harness":"pi","model":"codex-native/gpt-6-astra","effort":"ultra"}}^empty^
@@ -1153,7 +1155,8 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
-array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+array profile codex max is accepted on 0.151.0^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^empty^
+array profile codex max is flagged before 0.151.0^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max^0.150.0
 empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
