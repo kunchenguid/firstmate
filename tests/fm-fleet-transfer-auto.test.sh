@@ -219,4 +219,56 @@ pair=$(printf '%s\n' "$(manager_for harness)" "$(manager_for paperclip)" | sort 
 [ "$pair" = "manager-1 manager-3 " ] || fail "concurrent automatic transfers shared a destination: $pair"
 [ "$(grep -c '^close|' "$FM_HOOK_LOG")" = 2 ] && [ "$(grep -c '^close|manager-1$' "$FM_HOOK_LOG")" = 1 ] || fail "concurrent transfers stopped a manager twice: $(cat "$FM_HOOK_LOG")"
 
+# Every later failure after reserving manager-2 retires that reservation and restarts manager-2.
+pc_home="$FROOT/$(manager_for paperclip)"
+arm_manager_2() { add_lock "$FROOT/manager-2"; printf 'test:test\n' > "$FROOT/manager-2/state/.fleet-herdr-target"; : > "$FM_HOOK_LOG"; }
+assert_released() {  # <label> <journal>
+  [ "$(tx_state "$2")" = abandoned ] || fail "$1 leaked its reservation"
+  grep -q "$FROOT/manager-2|manager-2|start-manager" "$FM_HOOK_LOG" || fail "$1 left the stopped destination down"
+  [ "$(manager_for paperclip)" = "$(basename "$pc_home")" ] || fail "$1 changed the assignment"
+  grep -q "parent_home=$pc_home" "$FROOT/secondmates/paperclip/.fm-secondmate-parent" || fail "$1 moved the parent binding"
+}
+
+# Fleet-lock timeout at the record claim.
+LOCK_STOP="$TMP_ROOT/lock-stop.sh"
+cat > "$LOCK_STOP" <<SH
+#!/usr/bin/env bash
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(60)' "$FROOT/.fleet.lock" "$TMP_ROOT/held" >/dev/null 2>&1 < /dev/null &
+printf '%s\n' "\$!" > "$TMP_ROOT/lock-holder.pid"
+while [ ! -e "$TMP_ROOT/held" ]; do sleep 0.05; done
+SH
+chmod +x "$LOCK_STOP"
+arm_manager_2
+out=$(FM_FLEET_TRANSFER_STOP_HOOK=$LOCK_STOP "$FLEET" transfer begin --secondmate paperclip 2>&1); status=$?
+kill "$(cat "$TMP_ROOT/lock-holder.pid")" >/dev/null 2>&1 || true; rm -f "$TMP_ROOT/held"
+[ "$status" -ne 0 ] || fail "transfer ignored a fleet-lock timeout: $out"
+case "$out" in *"registry is locked"*"abandoned before moving records"*) ;; *) fail "lock timeout was not released: $out" ;; esac
+assert_released "fleet-lock timeout" "$(newest_journal paperclip)"
+grep -q "$pc_home|paperclip|start-secondmate" "$FM_HOOK_LOG" || fail "fleet-lock timeout left the source SecondMate stopped"
+
+# SIGTERM while the SecondMate stop hook runs.
+TERM_STOP="$TMP_ROOT/term-stop.sh"
+printf '#!/usr/bin/env bash\n: > "%s"\nsleep 1\n' "$TMP_ROOT/term.ready" > "$TERM_STOP"; chmod +x "$TERM_STOP"
+arm_manager_2; rm -f "$TMP_ROOT/term.ready"
+FM_FLEET_TRANSFER_STOP_HOOK=$TERM_STOP "$FLEET" transfer begin --secondmate paperclip > "$TMP_ROOT/term.out" 2>&1 & term_pid=$!
+i=0; while [ ! -e "$TMP_ROOT/term.ready" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+kill -TERM "$term_pid"
+if wait "$term_pid"; then fail "terminated transfer reported success"; fi
+assert_released "terminated transfer" "$(newest_journal paperclip)"
+
+# An owner-record move failure keeps the journal for rollback, which restarts the stopped destination.
+BREAK_STOP="$TMP_ROOT/break-stop.sh"
+printf '#!/usr/bin/env bash\nmkdir -p "%s"\n' "$FROOT/manager-2/state/paperclip.meta" > "$BREAK_STOP"; chmod +x "$BREAK_STOP"
+arm_manager_2
+out=$(FM_FLEET_TRANSFER_STOP_HOOK=$BREAK_STOP "$FLEET" transfer begin --secondmate paperclip 2>&1); status=$?
+[ "$status" -ne 0 ] || fail "transfer hid an owner-record move failure"
+broken=$(newest_journal paperclip)
+[ "$(tx_state "$broken")" = preparing ] || fail "record-move failure abandoned a transfer whose records may have moved"
+rmdir "$FROOT/manager-2/state/paperclip.meta"
+: > "$FM_HOOK_LOG"
+out=$("$FLEET" transfer rollback --transaction "$(basename "$broken" .json)" 2>&1) || fail "rollback of failed record move: $out"
+grep -q "$FROOT/manager-2|manager-2|start-manager" "$FM_HOOK_LOG" || fail "rollback left the destination stopped by the transfer down"
+[ "$(manager_for paperclip)" = "$(basename "$pc_home")" ] || fail "rollback changed the assignment"
+! grep -q '^- paperclip ' "$FROOT/manager-2/data/secondmates.md" 2>/dev/null || fail "rollback left the destination route"
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"
