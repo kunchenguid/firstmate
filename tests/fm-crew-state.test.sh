@@ -224,6 +224,8 @@ arm_idle_record() {  # <state-dir> <id>
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).
 reset_fakes() {
+  NM_HOME="$TMP_ROOT/no-mistakes-unused"
+  export NM_HOME
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_HOME=""
   FM_FAKE_AXI_HOME_ERROR=0
@@ -2500,6 +2502,118 @@ runs[2]{id,branch,status,head,pr}:
   $3 fm/competing $short 2026-09-14 12:00"
 }
 
+make_capped_runs_case() {
+  make_competing_runs_case "$1" "$2" "$3"
+  local d=$TMP_ROOT/$1
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$2" "$3" "$FM_FAKE_RUN_HEAD" "${4:-visible}" <<'PY'
+import csv
+import json
+import sqlite3
+import sys
+
+database, worktree, newest, oldest, head, placement = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.executemany("INSERT INTO repos VALUES (?, ?)", [("repo", worktree), ("other-repo", worktree + "-other")])
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
+        ("01NEW", "repo", "fm/competing", newest, head, 12 if placement == "visible" else 1),
+        ("01OLD", "repo", "fm/competing", oldest, head, 0),
+        ("01FOREIGN", "other-repo", "fm/competing", "running", head, 20),
+    ] + [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i + 2)
+         for i in range(9 if placement == "visible" else 10)])
+    rows = db.execute("SELECT id, branch, status, head_sha FROM runs WHERE repo_id = 'repo' "
+                      "ORDER BY created_at DESC, id DESC").fetchall()
+print("repo: " + json.dumps(worktree))
+print("count: 10 of %d total" % len(rows))
+print("runs[10]{id,branch,status,head,pr}:")
+for row in rows[:10]:
+    sys.stdout.write("  ")
+    csv.writer(sys.stdout, lineterminator="\n").writerow([*row, ""])
+PY
+  ) || fail 'could not create the persisted run inventory fixture'
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+}
+
+test_capped_competing_live_runs_report_both_ids() {
+  make_capped_runs_case capped-competing running running
+  local d=$TMP_ROOT/capped-competing out
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'a capped overview must not hide the competing live run'
+  assert_contains "$out" '01NEW' 'capped ambiguity names the visible run'
+  assert_contains "$out" '01OLD' 'capped ambiguity names the run beyond nine other branches'
+  assert_not_contains "$out" '01FOREIGN' 'another repository cannot claim this branch'
+  pass 'capped overview retains both competing same-branch run ids'
+}
+
+test_capped_overview_without_branch_rows_reports_both_ids() {
+  make_capped_runs_case capped-absent running pending hidden
+  local d=$TMP_ROOT/capped-absent out
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'no visible branch rows cannot establish absence'
+  assert_contains "$out" '01NEW' 'the newer hidden run is identified'
+  assert_contains "$out" '01OLD' 'the older hidden pending run is identified'
+  pass 'same-branch identity survives both runs falling outside the overview'
+}
+
+test_capped_replacement_keeps_gate_and_inventory_unchanged() {
+  make_capped_runs_case "capped reviewer's replacement" running cancelled
+  local d="$TMP_ROOT/capped reviewer's replacement" out before after
+  before=$(git hash-object "$NM_HOME/state.sqlite")
+  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')"
+  out=$(run_crew_state "$d" competing)
+  after=$(git hash-object "$NM_HOME/state.sqlite")
+  assert_contains "$out" 'state: parked' 'the live replacement keeps its review gate beyond the history cap'
+  assert_contains "$out" 'parked at review: 2 finding(s)' 'full replacement gate details survive inventory selection'
+  assert_contains "$out" '01NEW' 'the replacement run is identified'
+  assert_not_contains "$out" '01FOREIGN' 'same-branch runs in another repository do not make authority ambiguous'
+  [ "$after" = "$before" ] || fail 'current-state reporting modified the persisted inventory'
+  NM_HOME=../nm
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: parked' 'relative NM_HOME resolves from the queried worktree'
+  pass 'complete inventory preserves the replacement gate without writes'
+}
+
+test_capped_inventory_failures_report_unknown() {
+  local mode rc=0
+  for mode in missing corrupt schema repo count; do
+    (
+      make_capped_runs_case "capped-unreadable-$mode" running running
+      d=$TMP_ROOT/capped-unreadable-$mode
+      case "$mode" in
+        missing) rm "$NM_HOME/state.sqlite" ;;
+        corrupt) printf 'invalid database\n' > "$NM_HOME/state.sqlite" ;;
+        schema|repo)
+          python3 - "$NM_HOME/state.sqlite" "$mode" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    if sys.argv[2] == "schema":
+        db.execute("DROP TABLE runs")
+    else:
+        db.execute("DELETE FROM repos WHERE id = 'repo'")
+PY
+          ;;
+        count) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/^count:/d') ;;
+      esac
+      out=$(run_crew_state "$d" competing)
+      assert_contains "$out" 'state: unknown' "$mode cannot fall back to a confident verdict from capped rows"
+      assert_contains "$out" '01NEW' "$mode preserves the available run identity"
+      if [ "$mode" = missing ]; then
+        [ ! -e "$NM_HOME/state.sqlite" ] || fail 'the read-only lookup created a missing inventory'
+      fi
+      pass "$mode complete-inventory failure reports unknown"
+    ) || rc=1
+  done
+  [ "$rc" = 0 ] || fail 'capped inventory failures'
+}
+
 test_superseded_cancelled_run_preserves_replacement_gate() {
   make_competing_runs_case superseded-gate running cancelled
   local d=$TMP_ROOT/superseded-gate out
@@ -2671,6 +2785,10 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_capped_competing_live_runs_report_both_ids
+test_capped_overview_without_branch_rows_reports_both_ids
+test_capped_replacement_keeps_gate_and_inventory_unchanged
+test_capped_inventory_failures_report_unknown
 test_superseded_cancelled_run_preserves_replacement_gate
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run

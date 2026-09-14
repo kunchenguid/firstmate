@@ -111,11 +111,12 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
-# Select from `no-mistakes axi`'s runs[N]{id,branch,status,head,pr} overview.
+# Select from the complete `no-mistakes axi` run inventory, using a read-only
+# same-branch query of NM_HOME/state.sqlite when the overview count is capped.
 # Its rows are ordered by creation time descending (not last update), then id.
 # The newest same-branch row is the candidate regardless of outcome: an older
 # live run must not hide a newer failure. If the newest is live and another
-# same-branch live run is visible, neither has exclusive authority: report all
+# same-branch live run exists, neither has exclusive authority: report all
 # candidate ids as unknown. A newer live row can replace cancelled history,
 # but the caller must fetch its full status BY ID and prove branch/head or
 # active pipeline custody before using its steps. Never reuse another run's
@@ -124,49 +125,97 @@ fm_nm_run_status_class() {  # <status_word>
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
 # for this branch), or unavailable (CLI has no overview table). Malformed or
 # truncated tables report unknown, retaining every readable candidate id.
-# The CLI's bounded recent-history window is not an exhaustive run inventory.
-fm_nm_select_run() {  # <branch> <axi-overview>
-  printf '%s\n' "$2" | awk -v branch="$1" '
-    function scalar(s) {
-      sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
-      if (s ~ /^".*"$/) { s = substr(s, 2, length(s)-2) }
-      return s
-    }
-    /^runs\[[0-9]+\]\{id,branch,status,head,pr\}:$/ {
-      if (found++) bad = 1
-      expected = $0; sub(/^runs\[/, "", expected); sub(/\].*$/, "", expected)
-      inrows = 1; next
-    }
-    /^runs\[/ { bad = 1; found = 1 }
-    inrows && /^[ \t]+/ {
-      seen++
-      n = split($0, f, ",")
-      id = scalar(f[1]); br = scalar(f[2]); st = scalar(f[3]); head = scalar(f[4])
-      if (br == branch && id ~ /^[A-Za-z0-9_-]+$/) {
-        ids = ids (ids == "" ? "" : ", ") id
-        if (known[id]++) bad = 1
-      }
-      if (n != 5 || id !~ /^[A-Za-z0-9_-]+$/ || br !~ /^[A-Za-z0-9._\/-]+$/ ||
-          st !~ /^[a-z_-]+$/ || head !~ /^[a-fA-F0-9]+$/ || length(head) < 7 || length(head) > 40) {
-        bad = 1; next
-      }
-      if (br != branch) next
-      if (first == "") { first = id; first_status = st }
-      if (st == "running" || st == "pending") live++
-      next
-    }
-    inrows { inrows = 0 }
-    END {
-      if (!found) print "unavailable"
-      else if (bad || seen != expected) print "unknown|unreadable runs table; run ids: " ids
-      else if (first == "") print "absent"
-      else if ((first_status == "running" || first_status == "pending") && live > 1)
-        print "unknown|competing live runs; run ids: " ids
-      else if (first_status !~ /^(pending|running|completed|failed|cancelled)$/)
-        print "unknown|unrecognized run status; run ids: " ids
-      else print "selected|" first "|" first_status "|" ids
-    }
-  '
+fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
+  python3 - "$1" "$2" "$3" <<'PY' || printf 'unknown|run inventory reader unavailable\n'
+import csv
+import json
+import os
+import re
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+branch, overview, worktree = sys.argv[1:]
+ids = []
+reason = "unreadable runs table"
+
+def remember(rows):
+    for row in rows:
+        if len(row) >= 2 and row[1] == branch and isinstance(row[0], str) and re.fullmatch(r"[A-Za-z0-9_-]+", row[0]):
+            if row[0] not in ids:
+                ids.append(row[0])
+
+try:
+    lines = overview.splitlines()
+    headers = [i for i, line in enumerate(lines) if line.startswith("runs[")]
+    if not headers:
+        print("unavailable")
+        sys.exit(0)
+    rows = []
+    for line in lines[headers[0] + 1:]:
+        if not line.startswith((" ", "\t")):
+            break
+        rows.append(next(csv.reader([line.strip()], skipinitialspace=True, strict=True)))
+    remember(rows)
+    header = re.fullmatch(r"runs\[(\d+)\]\{id,branch,status,head,pr\}:", lines[headers[0]])
+    counts = [line[7:].strip('"') for line in lines if line.startswith("count: ")]
+    count = re.fullmatch(r"(\d+) of (\d+) total", counts[0]) if len(counts) == 1 else None
+    if len(headers) != 1 or not header or not count:
+        raise ValueError
+    shown, total = map(int, count.groups())
+    if len(rows) != int(header[1]) or shown != len(rows) or total < shown:
+        raise ValueError
+    for row in rows:
+        if (len(row) != 5 or not re.fullmatch(r"[A-Za-z0-9_-]+", row[0])
+                or not re.fullmatch(r"[A-Za-z0-9._/-]+", row[1])
+                or not re.fullmatch(r"[a-z_-]+", row[2])
+                or not re.fullmatch(r"[a-fA-F0-9]{7,40}", row[3])):
+            raise ValueError
+    rows = [row[:4] for row in rows if row[1] == branch]
+    if shown < total:
+        reason = "complete same-branch run inventory unreadable"
+        repos = [line[6:].strip() for line in lines if line.startswith("repo: ")]
+        if len(repos) != 1:
+            raise ValueError
+        repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+        if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
+            raise ValueError
+        root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
+        if not root.is_absolute():
+            root = Path(worktree) / root
+        with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            db.execute("BEGIN")
+            repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
+            if len(repo) != 1:
+                raise ValueError
+            rows = db.execute(
+                "SELECT id, branch, status, head_sha FROM runs WHERE repo_id = ? AND branch = ? "
+                "ORDER BY created_at DESC, id DESC", (repo[0][0], branch)
+            ).fetchall()
+        displayed_ids = set(ids)
+        remember(rows)
+        if not displayed_ids.issubset(row[0] for row in rows):
+            raise ValueError
+    if len({row[0] for row in rows}) != len(rows):
+        raise ValueError
+    for row in rows:
+        if (not all(isinstance(value, str) for value in row)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", row[0])
+                or row[1] != branch or not re.fullmatch(r"[a-fA-F0-9]{7,40}", row[3])):
+            raise ValueError
+    if any(row[2] not in ("pending", "running", "completed", "failed", "cancelled") for row in rows):
+        reason = "unrecognized run status"
+        raise ValueError
+    if not rows:
+        print("absent")
+    elif rows[0][2] in ("pending", "running") and sum(row[2] in ("pending", "running") for row in rows) > 1:
+        print("unknown|competing live runs; run ids: " + ", ".join(ids))
+    else:
+        print("selected|" + rows[0][0] + "|" + rows[0][2] + "|" + ", ".join(ids))
+except (ValueError, OSError, sqlite3.Error, csv.Error):
+    print("unknown|" + reason + "; run ids: " + ", ".join(ids))
+PY
 }
 
 # branch_sync.state from captured `axi status` TOON $1: the scalar directly
