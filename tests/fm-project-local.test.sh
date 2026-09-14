@@ -98,15 +98,20 @@ test_staged_material_is_readable_and_cannot_be_committed() {
   printf 'the fuller operational context\n' >"$world/material-src/CLAUDE.md"
   mkdir -p "$world/material-src/notes"
   printf 'a finding nobody committed\n' >"$world/material-src/notes/audit.md"
+  # A README the captain never committed is ordinary knowledge material, so the
+  # staged copy has to carry his file rather than anything of firstmate's own.
+  printf 'CLIENT NOTES that must reach the worker\n' >"$world/material-src/README.md"
   local_cmd "$world" add demo "$world/material-src/CLAUDE.md" >/dev/null || fail "add failed"
-  local_cmd "$world" add demo "$world/material-src/notes" --as notes >/dev/null || fail "add of a directory failed"
+  local_cmd "$world" add demo "$world/material-src/README.md" >/dev/null || fail "add of a README failed"
+  local_cmd "$world" add demo "$world/material-src/notes" >/dev/null || fail "add of a directory failed"
   out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
 
   staged="$world/copy/.fm-local"
   assert_present "$staged/CLAUDE.md" "staged material is missing from the task copy"
   assert_present "$staged/notes/audit.md" "staged directory material is missing from the task copy"
   assert_grep "the fuller operational context" "$staged/CLAUDE.md" "staged material is not readable"
-  assert_present "$staged/README.md" "the staged material carries no explanation for the worker"
+  assert_grep "CLIENT NOTES that must reach the worker" "$staged/README.md" \
+    "the staged copy lost the captain's own README"
 
   out=$(git_q -C "$world/copy" status --porcelain --untracked-files=all)
   [ -z "$out" ] || fail "git can see the staged material: $out"
@@ -206,7 +211,7 @@ test_a_nested_symlink_is_refused_before_it_poisons_the_store() {
   printf 'tool\n' >"$world/material-src/tools/replay.py"
   printf 'interp\n' >"$world/material-src/tools/venv/bin/python3"
   ln -s python3 "$world/material-src/tools/venv/bin/python"
-  out=$(local_cmd "$world" add demo "$world/material-src/tools" --as tools) && rc=0 || rc=$?
+  out=$(local_cmd "$world" add demo "$world/material-src/tools") && rc=0 || rc=$?
   expect_code 1 "$rc" "a directory holding a nested symlink was accepted into the store"
   assert_contains "$out" "symlink" "the refusal did not name the symlink"
   [ -z "$(find "$world/home/data/project-local" -type l 2>/dev/null)" ] ||

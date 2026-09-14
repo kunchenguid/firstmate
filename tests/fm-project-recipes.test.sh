@@ -253,7 +253,7 @@ EOF
 # entries carry long gives:/notes: still fits the digest, and check must agree
 # with digest about that.
 test_check_reports_a_catalog_that_outgrew_its_budget() {
-  local world out rc
+  local world out rc tokens
   world=$(make_project overbudget)
   mkdir -p "$world/project/.agents"
   printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
@@ -266,7 +266,31 @@ test_check_reports_a_catalog_that_outgrew_its_budget() {
   assert_contains "$out" "OVER_BUDGET" "the over-budget catalog was not reported"
   assert_contains "$out" "digest_shown: 1 of 3" "the check did not report how many entries the digest carries"
   assert_contains "$out" "consolidate" "the report did not say what to do about it"
+  # The figure beside that count is the digest's own cost, so a digest the
+  # budget already cut down can never be reported as costing more than it.
+  tokens=$(printf '%s\n' "$out" | sed -n 's/^digest_estimated_tokens: //p')
+  [ -n "$tokens" ] || fail "check did not report the digest's estimated size"
+  [ "$tokens" -le 40 ] ||
+    fail "check reported the whole catalog's cost ($tokens tokens) as the digest's, against a budget of 40"
   pass "fm-project-recipes.sh: check reports a catalog whose digest cannot carry every entry"
+}
+
+# A catalog nobody has written a recipe into yet has no capabilities to
+# announce: the skeleton's example is a format sample, and every worker's
+# launch brief carries this digest, so a placeholder there would be a
+# capability the project does not have.
+test_a_fresh_catalog_announces_no_capabilities() {
+  local world out rc
+  world=$(make_project fresh)
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed: $out"
+  assert_present "$world/project/.agents/recipes.md" "init did not create the catalog"
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
+  [ -z "$out" ] || fail "a catalog with no real recipe still announced a capability: $out"
+  out=$(recipes_cmd "$world/home" check "$world/project") && rc=0 || rc=$?
+  expect_code 0 "$rc" "a freshly created catalog failed the check: $out"
+  assert_contains "$out" "entries: 0" "the skeleton's format sample was counted as a capability"
+  assert_contains "$out" "stale: 0" "the skeleton's format sample was counted as a lapsed entry"
+  pass "fm-project-recipes.sh: a freshly created catalog announces no capabilities"
 }
 
 test_check_agrees_with_digest_when_only_the_full_entries_are_long() {
@@ -423,6 +447,7 @@ test_an_absent_catalog_costs_nothing
 test_check_names_an_entry_nobody_reverified
 test_check_names_an_undated_entry
 test_check_reports_a_catalog_that_outgrew_its_budget
+test_a_fresh_catalog_announces_no_capabilities
 test_check_agrees_with_digest_when_only_the_full_entries_are_long
 test_init_never_writes_through_a_symlinked_claude_md
 test_init_never_writes_through_a_symlinked_agents_md

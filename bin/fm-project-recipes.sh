@@ -192,12 +192,16 @@ every session that finds an entry wrong rewrites or deletes it.
 The format, the digest budget, and the re-verification horizon are owned by
 \`fm-project-recipes.sh --help\`.
 
-## Example - replace this with the first real capability
-- when: the situation that calls for this capability
-- ask: the exact command or the shape of the request that starts it
-- gives: what comes back
-- notes: the sharp edges, credentials, or preconditions
-<!--r:$(date -u +%Y-%m-%d)-->
+The shape of an entry, indented here so this catalog starts empty rather than
+announcing a capability nobody has. Write the first real one below it, flush
+left, starting with its own \`##\` heading:
+
+    ## Find the production bug behind one conversation
+    - when: a lead reports the assistant misbehaved and you have the lead id
+    - ask: \`synthetic-evals replay --lead <id>\`, then read the scored turns
+    - gives: the reproduced turn and the rule that fired
+    - notes: needs CLOSEBOT_TOKEN in .env
+    <!--r:$(date -u +%Y-%m-%d)-->
 EOF
 }
 
@@ -268,8 +272,9 @@ unverified_notes() {  # <recipes file> <out file>
 }
 
 # Pack the digest blocks into the budget: whole entries, in catalog order, and
-# always at least the first one. Prints the body, then one FM_RECIPE_SHOWN=<n>
-# line, so `digest` renders and `check` measures the very same packing.
+# always at least the first one. Prints the body, then the size and count of
+# what it let through, so `digest` renders and `check` measures the very same
+# packing.
 pack_blocks() {  # <blocks file> <limit bytes>
   local LC_ALL=C
   local used=0 shown=0 block= block_bytes=0 line
@@ -295,19 +300,17 @@ $line"
     fi
     block_bytes=$((block_bytes + ${#line} + 1))
   done <"$1"
-  printf '%s\n' "FM_RECIPE_SHOWN=$shown"
+  printf 'FM_RECIPE_BYTES=%s\nFM_RECIPE_SHOWN=%s\n' "$used" "$shown"
 }
 
 # What the digest carries for every entry of the catalog, before the budget
-# cuts it: the same blocks `digest` packs, with the unverified marks, so the
-# figure `check` reports is the digest's own size and not the catalog file's.
-render_digest_blocks() {  # <recipes file> <blocks out> ; sets DIGEST_BYTES
+# cuts it: the same blocks `digest` packs, with the unverified marks.
+render_digest_blocks() {  # <recipes file> <blocks out>
   local notes
   notes=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes-notes.XXXXXX") || die "could not create a scratch file"
   unverified_notes "$1" "$notes"
   recipe_blocks "$1" "$notes" >"$2"
   rm -f -- "$notes"
-  DIGEST_BYTES=$(grep -vxF "$RECIPE_BREAK" "$2" | LC_ALL=C wc -c | tr -d '[:space:]')
 }
 
 recipe_dates() {  # <recipes file>; prints "<heading>\t<date-or-empty>"
@@ -412,7 +415,7 @@ case "$CMD" in
     OUT=$(pack_blocks "$TMP" "$LIMIT_BYTES")
     rm -f -- "$TMP"
     SHOWN=${OUT##*FM_RECIPE_SHOWN=}
-    BODY=${OUT%FM_RECIPE_SHOWN=*}
+    BODY=${OUT%FM_RECIPE_BYTES=*}
     printf '# Project capabilities\n'
     # shellcheck disable=SC2016 # Markdown backticks in the digest text, not a command substitution.
     printf 'What this project is known to do and how each capability is asked for. The full entry for any of them, with its preconditions and sharp edges, is in `%s`.\n\n' "$CATALOG_REF"
@@ -440,7 +443,9 @@ case "$CMD" in
       OUT=$(pack_blocks "$TMP" "$LIMIT_BYTES")
       rm -f -- "$TMP"
       SHOWN=${OUT##*FM_RECIPE_SHOWN=}
-      TOKENS=$(fm_startup_memory_estimated_tokens_for_bytes "$DIGEST_BYTES") || die "could not estimate the digest size"
+      BYTES=${OUT##*FM_RECIPE_BYTES=}
+      BYTES=${BYTES%%$'\n'*}
+      TOKENS=$(fm_startup_memory_estimated_tokens_for_bytes "$BYTES") || die "could not estimate the digest size"
     fi
     printf 'recipes: %s\n' "$RECIPES"
     printf 'entries: %s\n' "$TOTAL"

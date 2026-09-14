@@ -21,7 +21,7 @@
 #
 # Usage:
 #   fm-project-local.sh list <project>
-#   fm-project-local.sh add <project> <file-or-dir> [--as <relative-path>]
+#   fm-project-local.sh add <project> <file-or-dir>
 #   fm-project-local.sh remove <project> <relative-path>
 #   fm-project-local.sh sync <project>
 #   fm-project-local.sh stage <project> <worktree>
@@ -47,6 +47,9 @@
 # because a worker cannot be told not to commit something git is offering it.
 # The destination is added to the repository's exclude file, the same mechanism
 # fm-spawn already uses for the per-task harness files it writes into a copy.
+# What lands there is the store and nothing else, so material named like
+# anything firstmate might write is never shadowed; the launch brief is what
+# tells the worker what the directory is and that it never becomes a commit.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,7 +86,7 @@ valid_project_name() {  # <name>
 }
 
 # A store-relative path must stay inside the store and inside the task copy it
-# is later written into, so the same test gates `add --as`, `remove`, and every
+# is later written into, so the same test gates `add`, `remove`, and every
 # manifest line.
 valid_relative_path() {  # <path>
   case "$1" in
@@ -147,25 +150,6 @@ note_home_activity() {  # <home-dir>
 # The note that travels with the material into every task copy. It is the
 # worker-facing half of the contract; the exclude entry and the post-stage
 # verification below are the half that does not depend on the worker reading it.
-stage_readme() {  # <project>
-  cat <<EOF
-# Local material - $1
-
-Firstmate placed this directory here at spawn time. It carries project knowledge
-that is deliberately NOT in the repository: material that belongs to someone
-else, holds real client data, is machine-specific, or lives only in the checkout
-this project is actually worked in.
-
-Read it. Never commit it, never copy its contents into a tracked file, and never
-quote its raw contents into a PR, an issue, or any other outward-facing surface.
-It is excluded from this repository, and this whole directory disappears with the
-task copy.
-
-If something in here should become part of the project, say so in your report or
-status line and let firstmate take the decision to the captain.
-EOF
-}
-
 stage_material() {  # <project> <worktree>
   local project=$1 wt=$2 material dest excl seen empty=0
   material=$(material_dir "$project")
@@ -215,7 +199,6 @@ stage_material() {  # <project> <worktree>
   dest="$wt/$STAGE_DIR_NAME"
   mkdir -p "$dest"
   (cd "$material" && tar cf - .) | (cd "$dest" && tar xf -) || die "could not stage local material into $dest"
-  stage_readme "$project" >"$dest/README.md"
   find "$dest" -type f -exec chmod 0444 {} + 2>/dev/null || true
 
   # The mechanism, not the instruction: if git can still see anything under the
@@ -262,23 +245,13 @@ case "$CMD" in
   add)
     NAME=${1:-}
     SRC=${2:-}
-    [ -n "$NAME" ] && [ -n "$SRC" ] || die "usage: add <project> <file-or-dir> [--as <relative-path>]"
+    [ -n "$NAME" ] && [ -n "$SRC" ] || die "usage: add <project> <file-or-dir>"
     require_project "$NAME"
     shift 2
-    AS=
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --as)
-          [ "$#" -gt 1 ] || die "--as requires a relative path"
-          AS=$2
-          shift 2
-          ;;
-        *) die "unknown option: $1" ;;
-      esac
-    done
+    [ "$#" -eq 0 ] || die "unknown option: $1"
     [ -e "$SRC" ] || die "no such file or directory: $SRC"
     [ -L "$SRC" ] && die "refusing to add a symlink: $SRC"
-    [ -z "$AS" ] && AS=$(basename "$SRC")
+    AS=$(basename "$SRC")
     valid_relative_path "$AS" || die "invalid destination path: $AS"
     [ -d "$SRC" ] && refuse_symlinks "$SRC" "$SRC"
     MATERIAL=$(material_dir "$NAME")
