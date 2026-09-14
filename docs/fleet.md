@@ -134,7 +134,7 @@ bin/fm-fleet.sh --fleet-root "$HOME/.fm-fleet" transfer rollback \
 
 Transfer recovery refuses while the source home has a live session lock, and while the destination home is live for a planned transfer or stopped for a failover.
 Rollback refuses while either home has a live session lock.
-Apply and rollback edit only the transferred SecondMate's route line and endpoint records, so other routes added to either registry after the transfer survive.
+Apply and rollback hold both homes' `state/.secondmate-registry.lock`, in sorted home order, while they edit only the transferred SecondMate's route line and endpoint records, so other routes added to either registry after the transfer survive.
 Rollback restores the parent binding and restores the prior assignment only when the published generation still matches the transaction.
 Lifecycle hooks named in `bin/fm-fleet.sh` let tests and a controlled pilot replace endpoint operations without weakening the default path.
 

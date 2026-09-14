@@ -155,13 +155,40 @@ printf '%s\n' '# SecondMates' '- paperclip - Paperclip (home: '"$PCHOME"'; scope
 printf '%s\n' '# SecondMates' '- other - Other (home: /tmp/other; scope: other; projects: other; added 2026-09-13)' > "$FROOT/homes/manager-1/data/secondmates.md"
 printf 'kind=secondmate\nhome=%s\n' "$PCHOME" > "$FROOT/homes/manager-2/state/paperclip.meta"
 printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$FROOT/homes/manager-2" > "$PCHOME/.fm-secondmate-parent"
-recover_hooks() { FM_HOOK_LOG="$TMP_ROOT/recover-hooks.log" FM_FLEET_TRANSFER_STOP_HOOK=$HOOK FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$HOOK "$@"; }
+# The stop hook starts a live in-home teardown of "other" that holds manager-1's registry lock across apply.
+RACE_HOLDER="$TMP_ROOT/race-holder.sh"
+cat > "$RACE_HOLDER" <<'SH'
+#!/usr/bin/env bash
+STATE="$FM_RACE_HOME/state"
+. "$FM_RACE_ROOT/bin/fm-wake-lib.sh"
+lock="$STATE/.secondmate-registry.lock"; reg="$FM_RACE_HOME/data/secondmates.md"
+fm_lock_acquire_wait "$lock"
+content=$(grep -v '^- other ' "$reg")
+: > "$FM_RACE_READY"
+sleep 2
+printf '%s\n' "$content" > "$reg.tmp" && mv "$reg.tmp" "$reg"
+fm_lock_release "$lock"
+: > "$FM_RACE_DONE"
+SH
+RACE_HOOK="$TMP_ROOT/race-hook.sh"
+cat > "$RACE_HOOK" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$FM_HOOK_LOG"
+"$FM_RACE_HOLDER" >/dev/null 2>&1 < /dev/null &
+while [ ! -e "$FM_RACE_READY" ]; do sleep 0.05; done
+SH
+chmod +x "$RACE_HOLDER" "$RACE_HOOK"
+recover_hooks() { FM_HOOK_LOG="$TMP_ROOT/recover-hooks.log" FM_FLEET_TRANSFER_STOP_HOOK=$RACE_HOOK FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$HOOK \
+  FM_RACE_HOLDER=$RACE_HOLDER FM_RACE_HOME="$FROOT/homes/manager-1" FM_RACE_ROOT=$ROOT FM_RACE_READY="$TMP_ROOT/race.ready" FM_RACE_DONE="$TMP_ROOT/race.done" "$@"; }
 if recover_hooks "$FLEET" recover --secondmate paperclip >/dev/null 2>&1; then fail "recovery replaced a live reasoning manager"; fi
 remove_lock "$FROOT/homes/manager-2" "$holder_2"
 recover_hooks "$FLEET" recover --secondmate paperclip >/dev/null || fail "recover paperclip after manager death"
+i=0; while [ ! -e "$TMP_ROOT/race.done" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$TMP_ROOT/race.done" ] || fail "concurrent in-home teardown did not finish"
+! grep -q '^- other ' "$FROOT/homes/manager-1/data/secondmates.md" || fail "recovery resurrected a route removed by a concurrent in-home teardown"
 [ "$(manager_for paperclip):$(generation_for paperclip)" = manager-1:2 ] || fail "recovery was not deterministic or generation-safe"
 grep -q "parent_home=$FROOT/homes/manager-1" "$PCHOME/.fm-secondmate-parent" || fail "recovery did not move the parent binding"
-grep -q '^- paperclip ' "$FROOT/homes/manager-1/data/secondmates.md" && grep -q '^- other ' "$FROOT/homes/manager-1/data/secondmates.md" || fail "recovery did not install the route beside existing routes"
+grep -q '^- paperclip ' "$FROOT/homes/manager-1/data/secondmates.md" || fail "a concurrent in-home registry write lost the recovered route"
 ! grep -q '^- paperclip ' "$FROOT/homes/manager-2/data/secondmates.md" || fail "recovery left the dead manager's route"
 [ -f "$FROOT/homes/manager-1/state/paperclip.meta" ] && [ ! -f "$FROOT/homes/manager-2/state/paperclip.meta" ] || fail "recovery did not move endpoint metadata"
 grep -q "$FROOT/homes/manager-1|paperclip|start-secondmate" "$TMP_ROOT/recover-hooks.log" || fail "recovery did not relaunch the SecondMate under the new parent"

@@ -351,7 +351,7 @@ transfer_begin() {  # <secondmate> <manager> <source-home or empty> <failover> <
   transfer_endpoints_check "$source" "$dest_home" "$failover" "$tx"
   transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || die "SecondMate stop hook failed; recover $tx"
   transfer_endpoints_check "$source" "$dest_home" "$failover" "$tx" " after endpoint stop"
-  with_lock python3 "$TRANSFER_BIN" apply --journal "$journal" || die "owner-record move failed; recover or rollback $tx"
+  with_lock with_home_registry_locks "$journal" python3 "$TRANSFER_BIN" apply --journal "$journal" || die "owner-record move failed; recover or rollback $tx"
   expected=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])')
   with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "$reason" >/dev/null || { echo "fm-fleet: records moved but assignment publication failed; recover $tx" >&2; exit 1; }
   python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null
@@ -359,9 +359,30 @@ transfer_begin() {  # <secondmate> <manager> <source-home or empty> <failover> <
   echo "transfer $tx active: $sm -> $dest"
 }
 
+with_home_registry_locks() {  # <journal> <command...>
+  local journal=$1; shift
+  (
+    homes=$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print("\n".join(sorted({j["source_home"], j["destination_home"]})))' "$journal") || exit 1
+    first=${homes%%$'\n'*}; second=${homes#*$'\n'}; [ "$second" != "$homes" ] || second=""
+    mkdir -p "$first/state" || exit 1
+    STATE="$first/state"
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+    first_lock=$(secondmate_registry_lock_path "$first/state"); second_lock=""
+    trap 'fm_lock_release "$first_lock"; [ -z "$second_lock" ] || fm_lock_release "$second_lock"' EXIT
+    fm_lock_acquire_wait "$first_lock" || exit 1
+    if [ -n "$second" ]; then
+      mkdir -p "$second/state" || exit 1
+      fm_lock_acquire_wait "$(secondmate_registry_lock_path "$second/state")" || exit 1
+      second_lock=$(secondmate_registry_lock_path "$second/state")
+    fi
+    "$@"
+  )
+}
+
 transfer_rollback_locked() {
   python3 "$REGISTRY_BIN" "$REG" transfer-rollback-check --secondmate "$ROLLBACK_SM" --transaction "$ROLLBACK_TX" || return 1
-  python3 "$TRANSFER_BIN" rollback --journal "$ROLLBACK_JOURNAL" || return 1
+  with_home_registry_locks "$ROLLBACK_JOURNAL" python3 "$TRANSFER_BIN" rollback --journal "$ROLLBACK_JOURNAL" || return 1
   python3 "$REGISTRY_BIN" "$REG" transfer-rollback --secondmate "$ROLLBACK_SM" --transaction "$ROLLBACK_TX" --prior-assignment "$ROLLBACK_PRIOR"
 }
 
@@ -497,7 +518,7 @@ PY
       sm=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secondmate"])'); dest=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_manager"])'); source=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_home"])'); dest_home=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["destination_home"])')
       failover=$(printf '%s' "$data" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("failover") else 0)')
       reasoning_live "$source" && die "source home has a live lock; recovery refused"; destination_ready "$dest_home" "$failover" || die "destination home session state blocks recovery"; state=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
-      if [ "$state" = preparing ]; then transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || die "SecondMate stop hook failed"; with_lock python3 "$TRANSFER_BIN" apply --journal "$journal" || exit 1; state=records-ready; fi
+      if [ "$state" = preparing ]; then transfer_hook FM_FLEET_TRANSFER_STOP_HOOK "$source" "$sm" stop-secondmate || die "SecondMate stop hook failed"; with_lock with_home_registry_locks "$journal" python3 "$TRANSFER_BIN" apply --journal "$journal" || exit 1; state=records-ready; fi
       if [ "$state" = records-ready ]; then expected=$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_generation"])'); with_lock python3 "$REGISTRY_BIN" "$REG" transfer-publish --secondmate "$sm" --manager "$dest" --expected-generation "$expected" --transaction "$tx" --reason "recovered supervision transfer" >/dev/null || exit 1; python3 "$TRANSFER_BIN" state --journal "$journal" --set published >/dev/null || exit 1; fi
       transfer_activate "$sm" "$dest" "$dest_home" "$failover" "$tx" "$journal"; echo "transfer $tx recovered"
     elif [ "$sub" = rollback ]; then
