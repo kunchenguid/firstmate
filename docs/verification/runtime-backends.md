@@ -1301,7 +1301,7 @@ The registration is still present after the wait, and Herdr's own `pane report-a
 Two vendor facts the fix rests on, both read from the outputs above and from `fm_backend_herdr_pane_process_state`'s `pane process-info` parse:
 
 - Pi's process presents with kernel name `node` and argv0 `pi` (its foreground group also carries Pi's child `node` helpers with argv0 such as `npm view ... version`), so a running Pi is attributed by argv[0] exactly as the tmux probe attributes it; a symlink named `claude` to `sleep` presents as name `sleep`, argv0 `claude`.
-- Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; that transient reads `unknown` in the pane classifier as it always did, and only a lifecycle status is subject to the process-level proof.
+- Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; a matching-pane placeholder over a shell-only process is now subject to the process-level proof, while any other process verdict keeps recovery closed.
 
 Subcommand presence below the 0.9.0 measurement, checked 2026-09-10 on macOS aarch64 against the pinned upstream release clients fetched from `https://github.com/ogulcancelik/herdr/releases/download/v<version>/herdr-macos-aarch64`:
 
@@ -1337,8 +1337,27 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 
 `tests/fm-control-herdr-smoke.test.sh` proves the same shape through the control plane with no harness launched (the two `stale` lines under "Agent lifecycle control" above): a registration over a real agent-named process reads `alive`, stopping that process makes the pane read `stale-agent` and recover as `dead` while `agent get` still reports the record, `exit` then reports `already-stopped`, and `--relaunch` reuses the same endpoint with the local copy intact.
 `tests/fm-backend-herdr.test.sh` pins the logic portably with canned `process-info` bodies over real processes, driving the signals apart: the identical shell-only foreground reads `stale-agent` for a childless shell and `live` when an agent-named process is still a descendant of that shell, a `working`, `done`, or `blocked` record over a shell-only pane reads the same as `idle`, an unreadable process view reads `unknown` and refuses husk closing, a transient prompt helper beside the shell settles into `stale-agent` on the next shell-only sample while a foreground that never settles within the bound still reads `live`, and `busy_state` verifies a `working` record before reporting busy.
+`tests/fm-backend-herdr.test.sh` also pins the `unknown` registration boundary through the public recovery read: exact pane id plus shell-only processes yields `dead`, while a running agent, other foreground, failed process read, or contradictory pane id yields `unreadable`; every case refuses husk closing.
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
+
+Measured 2026-09-14 on Linux x86_64 with Herdr 0.8.2 and Codex CLI 0.153.4 in a named `fm-herdr-lab.sh` session.
+The opt-in guard starts real Codex without a prompt, sends SIGTERM to the exact process reported by that lab pane, then relaunches through `fm-control.sh` in a disposable committed git worktree.
+The helper's teardown confirmed the default session's fleet-state tripwire after the run.
+
+```sh
+FM_HERDR_CODEX_UNKNOWN_LIVE_E2E=1 HERDR_LAB_HELPER=/home/umer/firstmate/bin/fm-herdr-lab.sh PATH="$PWD/state/tools:$PATH" bin/fm-test-run.sh tests/fm-herdr-codex-unknown-live-e2e.test.sh
+```
+
+```text
+running_registration=unknown running_pid=4029072
+shell_only=[{"name":"bash","pid":4028593}] stale_registration=unknown
+pane_state=stale-agent recovery_state=dead husk=no
+control_rc=0
+candidate_head_before=ceda5d84540a64b5d68c8ab313e24c79d204b5cb candidate_head_after=ceda5d84540a64b5d68c8ab313e24c79d204b5cb endpoint=fm-lab-fm-herdr-unknown-4028339-4056:w1:p1
+ok - herdr 0.8.2 + codex-cli 0.153.4: shell-only unknown registration relaunches Codex in the same pane and committed worktree
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
 
 ### Away-mode transport
 

@@ -2224,7 +2224,7 @@ EOF
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
-#                 done, or blocked) but fm_backend_herdr_pane_process_state
+#                 done, blocked, or an exact-pane unknown) and the process state
 #                 proves the pane is shell-only: the registered agent's process
 #                 has exited and Herdr kept its registration (issue #4115;
 #                 Herdr does not release a Pi registration on TUI shutdown when
@@ -2246,7 +2246,9 @@ EOF
 #                 response shape change as "the pane exists"), or a registered
 #                 agent whose process-level view is unreadable - the
 #                 registration alone is no longer trusted, and its absence is
-#                 not claimed either. The caller must fail safe toward refusal
+#                 not claimed either. An unknown registration is recoverable
+#                 only when its echoed pane id agrees and the process view
+#                 positively proves a shell-only pane. The caller must refuse
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
@@ -2268,6 +2270,16 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
+    unknown)
+      printf '%s' "$out" | jq -e --arg pane "$pane_id" '
+        .result.type == "agent_info"
+        and .result.agent.pane_id == $pane
+        and (.result.agent.agent | type == "string" and length > 0)
+      ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+      [ "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" = shell ] \
+        && printf 'stale-agent' || printf 'unknown'
+      return 0
+      ;;
     *) printf 'unknown'; return 0 ;;
   esac
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
