@@ -43,8 +43,6 @@ const [chrome, board] = process.argv.slice(2);
 const browser = spawn(chrome, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
   "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
-  // Exercise fallback fonts deterministically, without a CDN dependency.
-  "--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND, MAP fonts.gstatic.com ~NOTFOUND",
   `--user-data-dir=${join(dirname(board), "chrome-profile")}`,
   "--remote-debugging-pipe", "about:blank",
 ], {stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"]});
@@ -95,6 +93,13 @@ try {
   };
   await call("Emulation.setDeviceMetricsOverride", {
     width: 1080, height: 1250, deviceScaleFactor: 1, mobile: false,
+  }, sessionId);
+  // Block font requests before navigation: DNS failure can leave the imported
+  // stylesheet pending and prevent the board script and fonts.ready completing.
+  // Request blocking exercises fallback fonts without consulting the network.
+  await call("Network.enable", {}, sessionId);
+  await call("Network.setBlockedURLs", {
+    urls: ["https://fonts.googleapis.com/*", "https://fonts.gstatic.com/*"],
   }, sessionId);
   await call("Page.navigate", {url: pathToFileURL(board).href}, sessionId);
   for (let tries = 0; tries < 100; tries++) {
