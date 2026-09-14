@@ -1400,7 +1400,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
 # claimant as evidence.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id> <home>
-  local worktree=$1 id=$2 home=$3 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 home=$3 marker line owner_id='' owner_home='' owner_home_real home_real
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1421,7 +1421,13 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id> <home>
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ] && [ "$owner_home" = "$home" ]; then
+  if [ "$owner_id" != "$id" ]; then
+    FM_TREEHOUSE_SLOT_OWNER=other
+    return 0
+  fi
+  owner_home_real=$(CDPATH='' cd -- "$owner_home" 2>/dev/null && pwd -P) || return 0
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 0
+  if [ "$owner_home_real" = "$home_real" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other

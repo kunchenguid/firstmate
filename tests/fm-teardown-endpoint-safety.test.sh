@@ -597,7 +597,7 @@ test_own_task_branch_still_tears_down() {
 
   dir=$(make_case own-branch)
   mark_case_as_treehouse_pool "$dir"
-  git -C "$dir/worktree" checkout -q -b fm/$id
+  git -C "$dir/worktree" checkout -q -b "fm/$id"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -963,6 +963,23 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
+  dir=$(make_case slot-reassigned-same-id-other-home)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/other-home"
+  claim_pool_slot "$dir" "$id" "$dir/other-home"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown refused a same-named claim from a different physical home: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$id" "same task ID in a different physical home"
+  assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
+    "the same-ID reassignment warning should name the foreign home"
+
   # The same reassignment on a CLEAN slot: a landed ship task torn down without
   # --force, which is the shape of the real incident. A clean, fully landed copy
   # passes every unlanded-work check, so only the ownership determination can
@@ -1020,7 +1037,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
-  local dir id=owned-task
+  local dir id=owned-task home_link
 
   dir=$(make_case slot-claim-own)
   mark_case_as_treehouse_pool "$dir"
@@ -1036,6 +1053,23 @@ test_own_and_absent_slot_claims_still_tear_down() {
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "own-claim teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
 
+  dir=$(make_case slot-claim-home-alias)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b "fm/$id"
+  home_link="$dir/home-link"
+  ln -s "$dir/home" "$home_link"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id" "$home_link"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown through the physical home refused its symlink-spelled own claim: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "home-alias teardown left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "home-alias teardown left its own slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "home-alias teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
   dir=$(make_case slot-claim-absent)
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -1048,7 +1082,7 @@ test_own_and_absent_slot_claims_still_tear_down() {
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "unclaimed-slot teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
-  pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
+  pass "fm-teardown: physical own-home identity and an unclaimed slot both still tear down"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation

@@ -815,6 +815,7 @@ test_pool_slot_refuses_existing_ownership() {
   rec=$(make_case same-id-foreign-claim "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
+  mkdir -p "$CASE_DIR/other-home"
   printf 'task=%s\nhome=%s\n' "$id" "$CASE_DIR/other-home" > "$SLOT_CLAIM"
   before=$(cat "$SLOT_CLAIM")
 
