@@ -1043,6 +1043,116 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# fm-spawn's final pre-launch gate (bin/fm-candidate-availability-lib.sh) is
+# exercised for real here, end to end, through the same crewmate and
+# secondmate spawn paths every other case in this file drives. A fresh,
+# structurally valid FM_COPILOT_QUOTA_SNAPSHOT never triggers a live refresh
+# (bin/fm-copilot-quota-lib.sh fm_copilot_snapshot_fresh), so these cases need
+# no fake Copilot CLI/SDK/node at all.
+write_fresh_copilot_snapshot() {
+  local path=$1 has_quota=$2 remaining=$3
+  jq -n --arg retrieved "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson has "$has_quota" --argjson remaining "$remaining" '{
+    provider: "copilot", quotaType: "premium_interactions", entitlement: 1500,
+    used: (1500 - $remaining), remaining: $remaining,
+    percentRemaining: (($remaining / 1500) * 100), hasQuota: $has,
+    usageAllowedWithExhaustedQuota: false, retrievedAt: $retrieved,
+    source: "live account.getQuota", resetReliable: false
+  }' > "$path"
+}
+
+test_final_gate_blocks_exhausted_copilot_model() {
+  local rec id out status
+  id=profile-copilot-exhausted-z24
+  rec=$(make_spawn_case profile-copilot-exhausted claude "$id")
+  read_case_record "$rec"
+  write_fresh_copilot_snapshot "$CASE_DIR/copilot-quota.json" false 0
+
+  out=$(FM_COPILOT_QUOTA_SNAPSHOT="$CASE_DIR/copilot-quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/kimi-k3)
+  status=$?
+  expect_code 1 "$status" "spawn with exhausted Copilot premium quota should refuse before launch"
+  assert_contains "$out" "Copilot premium quota unavailable or exhausted for github-copilot/kimi-k3" \
+    "refusal did not name the unavailable Copilot model"
+  [ -s "$LAUNCH_LOG" ] && fail "final gate refusal must not reach harness launch construction"
+  [ -f "$HOME_DIR/state/$id.meta" ] && fail "final gate refusal must not record task metadata"
+  pass "final pre-launch gate blocks a Copilot-exhausted model before launch or metadata"
+}
+
+test_final_gate_allows_available_copilot_model() {
+  local rec id out status
+  id=profile-copilot-available-z24
+  rec=$(make_spawn_case profile-copilot-available claude "$id")
+  read_case_record "$rec"
+  write_fresh_copilot_snapshot "$CASE_DIR/copilot-quota.json" true 1500
+
+  out=$(FM_COPILOT_QUOTA_SNAPSHOT="$CASE_DIR/copilot-quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/kimi-k3)
+  status=$?
+  expect_code 0 "$status" "spawn with available Copilot premium quota should proceed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude github-copilot/kimi-k3 default
+  [ -s "$LAUNCH_LOG" ] || fail "available Copilot model did not reach harness launch construction"
+  pass "final pre-launch gate allows an available Copilot model through to launch"
+}
+
+test_final_gate_never_blocks_local_qwen_regardless_of_copilot_quota() {
+  local rec id out status
+  id=profile-local-qwen-z24
+  rec=$(make_spawn_case profile-local-qwen claude "$id")
+  read_case_record "$rec"
+  # An exhausted Copilot snapshot is present, proving the local candidate is
+  # never routed through the Copilot check at all (it is not a
+  # github-copilot/ model), only that any premium Copilot model would be.
+  write_fresh_copilot_snapshot "$CASE_DIR/copilot-quota.json" false 0
+
+  out=$(FM_COPILOT_QUOTA_SNAPSHOT="$CASE_DIR/copilot-quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model ollama/qwen3:8b)
+  status=$?
+  expect_code 0 "$status" "a local (non-Copilot) model must never be blocked by the Copilot gate"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude ollama/qwen3:8b default
+  [ -s "$LAUNCH_LOG" ] || fail "local Qwen candidate did not reach harness launch construction"
+  pass "final pre-launch gate never blocks a local (no-paid-quota) candidate"
+}
+
+test_final_gate_never_blocks_the_default_pi_local_qwen_lane() {
+  local rec id out status
+  id=profile-pi-local-qwen-z24
+  rec=$(make_spawn_case profile-pi-local-qwen pi "$id")
+  read_case_record "$rec"
+  # The REQUIRED default local Qwen lane is harness=pi with model
+  # gx10-vllm/qwen3.8-27b-fp8 (Pi's own catalog name for its self-hosted
+  # lane), not only omp's ollama/ prefix. An exhausted Copilot snapshot is
+  # present to prove this candidate is never routed through the Copilot
+  # check at all (it is not a github-copilot/ model).
+  write_fresh_copilot_snapshot "$CASE_DIR/copilot-quota.json" false 0
+
+  out=$(FM_COPILOT_QUOTA_SNAPSHOT="$CASE_DIR/copilot-quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gx10-vllm/qwen3.8-27b-fp8)
+  status=$?
+  expect_code 0 "$status" "the default Pi local Qwen lane must never be blocked by the Copilot gate"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi gx10-vllm/qwen3.8-27b-fp8 default
+  [ -s "$LAUNCH_LOG" ] || fail "Pi local Qwen candidate did not reach harness launch construction"
+  pass "final pre-launch gate never blocks the default Pi local Qwen lane (gx10-vllm/qwen3.8-27b-fp8)"
+}
+
+test_final_gate_applies_identically_in_secondmate_worker_context() {
+  local rec id sm out status
+  id=profile-secondmate-copilot-z24
+  rec=$(make_spawn_case profile-secondmate-copilot claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  write_fresh_copilot_snapshot "$CASE_DIR/copilot-quota.json" false 0
+
+  out=$(FM_COPILOT_QUOTA_SNAPSHOT="$CASE_DIR/copilot-quota.json" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --model github-copilot/kimi-k3)
+  status=$?
+  expect_code 1 "$status" "a secondmate/worker-context spawn must use the identical final gate"
+  assert_contains "$out" "Copilot premium quota unavailable or exhausted for github-copilot/kimi-k3" \
+    "secondmate refusal did not name the unavailable Copilot model"
+  [ -s "$LAUNCH_LOG" ] && fail "secondmate final gate refusal must not reach launch construction"
+  pass "final pre-launch gate applies identically in the secondmate/worker-context spawn path"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1485,5 +1595,10 @@ test_claude_long_launch_is_delivered_intact
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_final_gate_blocks_exhausted_copilot_model
+test_final_gate_allows_available_copilot_model
+test_final_gate_never_blocks_local_qwen_regardless_of_copilot_quota
+test_final_gate_never_blocks_the_default_pi_local_qwen_lane
+test_final_gate_applies_identically_in_secondmate_worker_context
 
 echo "# all fm-spawn-dispatch-profile tests passed"
