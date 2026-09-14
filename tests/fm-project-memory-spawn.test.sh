@@ -129,6 +129,31 @@ test_spawn_names_an_unreachable_live_home_without_refusing_the_launch() {
   pass "fm-spawn.sh: an unreachable live home is named as unverified and the launch goes ahead"
 }
 
+# A source record someone edited by hand into an unreadable state answers
+# nothing, and a spawn that quietly falls back looks exactly like a project
+# that never had a record: no digest, no live-home overlay, and a scaffold
+# pointing the worker at a repository that may not be where this project's
+# knowledge lands. The launch still goes ahead, but it has to say why.
+test_spawn_says_why_it_could_not_resolve_the_knowledge_home() {
+  local id=capbroken-a1 out rc brief project
+  read_world "$(make_world capbroken "$id")"
+  project=$(basename "$PROJ_DIR")
+  write_catalog "$PROJ_DIR" "A capability only the clone carries"
+  mkdir -p "$HOME_DIR/config/project-sources"
+  printf 'path=%s\ncanonical=Source\n' "$TMP_ROOT/capbroken/canonical" \
+    >"$HOME_DIR/config/project-sources/$project"
+  out=$(run_spawn "$id") && rc=0 || rc=$?
+  expect_code 0 "$rc" "spawn refused the launch over an unreadable source record: $out"
+  assert_contains "$out" "could not resolve the knowledge home" "spawn lost the digest without saying why"
+  assert_contains "$out" "$project" "the warning did not name the project"
+  assert_contains "$out" "canonical" "the warning did not carry the reason the record could not be read"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  assert_present "$brief" "no launch brief was rendered"
+  assert_no_grep "A capability only the clone carries" "$brief" \
+    "a digest was rendered from a home that never resolved"
+  pass "fm-spawn.sh: a knowledge home it cannot resolve is named instead of silently dropped"
+}
+
 test_spawn_stages_local_material_where_git_cannot_see_it() {
   local id=material-a1 out rc project
   read_world "$(make_world material "$id")"
@@ -161,5 +186,6 @@ test_a_project_with_neither_costs_nothing() {
 test_spawn_renders_the_project_capability_digest_into_the_launch_brief
 test_spawn_reads_the_catalog_from_a_source_canonical_home
 test_spawn_names_an_unreachable_live_home_without_refusing_the_launch
+test_spawn_says_why_it_could_not_resolve_the_knowledge_home
 test_spawn_stages_local_material_where_git_cannot_see_it
 test_a_project_with_neither_costs_nothing

@@ -25,7 +25,7 @@
 #
 # Usage (continued):
 #   fm-project-memory.sh home <project> [--clone <dir>]
-#   fm-project-memory.sh activity [<project>] [--home <dir>] [--window <seconds>] [--git-only]
+#   fm-project-memory.sh activity [<project>] [--home <dir>] [--git-only]
 #
 # Each project may record a source checkout in config/project-sources/<project>,
 # a two-key record:
@@ -639,22 +639,42 @@ scan_project() {  # <project> <limit>
   LC_ALL=C sort -u "$tmp/ignored_roots" >"$tmp/ignored_roots_uniq"
 
   : >"$tmp/ignored_material"
+  : >"$tmp/ignored_knowledge"
   local count
   while IFS= read -r root; do
     [ -n "$root" ] || continue
-    case $root in
-      */) ;;
-      *) continue ;;
-    esac
     grep -qxF "${root%/}" "$tmp/agentmem_paths" 2>/dev/null && continue
     looks_like_scratch "$root" && continue
-    [ -d "$source/$root" ] || continue
-    count=$(bounded_file_count "$source/$root" 500)
-    case $count in
-      0) continue ;;
+    case $root in
+      */)
+        [ -d "$source/$root" ] || continue
+        count=$(bounded_file_count "$source/$root" 500)
+        case $count in
+          0) continue ;;
+        esac
+        printf '%s (%s files)\n' "$root" "$count" >>"$tmp/ignored_material"
+        ;;
+      # A document the project's own ignore rules keep out of every clone is
+      # the same leak as an uncommitted one, and no other pass sees it:
+      # porcelain without --ignored never lists it, and the agent-memory scan
+      # only knows a fixed set of names. The fold above is what keeps this to
+      # the files the project singles out rather than every file under an
+      # ignored tree.
+      *)
+        looks_like_knowledge "$root" || continue
+        printf '%s\n' "$root" >>"$tmp/ignored_knowledge"
+        ;;
     esac
-    printf '%s (%s files)\n' "$root" "$count" >>"$tmp/ignored_material"
   done <"$tmp/ignored_roots_uniq"
+  local ignored_knowledge
+  ignored_knowledge=$(wc -l <"$tmp/ignored_knowledge" | tr -d ' ')
+  if [ "$ignored_knowledge" -gt 0 ]; then
+    printf 'IGNORED_KNOWLEDGE_FILES: %s\n' "$ignored_knowledge"
+    print_capped_list "$limit" <"$tmp/ignored_knowledge"
+    gap=$((gap + ignored_knowledge))
+  else
+    printf 'IGNORED_KNOWLEDGE_FILES: none\n'
+  fi
   local ignored_material
   ignored_material=$(wc -l <"$tmp/ignored_material" | tr -d ' ')
   if [ "$ignored_material" -gt 0 ]; then
@@ -835,11 +855,6 @@ case "$CMD" in
           ACT_HOME=$2
           shift 2
           ;;
-        --window)
-          [ "$#" -gt 1 ] || die "--window requires a number of seconds"
-          WINDOW=$2
-          shift 2
-          ;;
         --git-only)
           GIT_ONLY=1
           shift
@@ -847,12 +862,8 @@ case "$CMD" in
         *) die "unknown option: $1" ;;
       esac
     done
-    [ -n "$NAME" ] || [ -n "$ACT_HOME" ] || die "usage: activity <project> [--home <dir>] [--window <seconds>] [--git-only]"
+    [ -n "$NAME" ] || [ -n "$ACT_HOME" ] || die "usage: activity <project> [--home <dir>] [--git-only]"
     [ -z "$NAME" ] || valid_project_name "$NAME" || die "invalid project name: $NAME"
-    case "$WINDOW" in
-      '' | *[!0-9]*) die "--window requires a whole number of seconds" ;;
-    esac
-    [ "$WINDOW" -gt 0 ] || die "--window requires a positive number of seconds"
     if [ -z "$ACT_HOME" ]; then
       ACT_HOME=$(resolve_knowledge_home "$NAME" "$PROJECTS_DIR/$NAME") || exit 1
     fi

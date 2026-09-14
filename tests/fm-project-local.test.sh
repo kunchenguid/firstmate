@@ -319,6 +319,53 @@ test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified() {
   pass "fm-project-local.sh: a path sync could not refresh reaches the worker marked unverified"
 }
 
+# The date is the whole point of the mark: it says since when this copy stopped
+# being confirmable. Why it cannot be refreshed can change - the folder comes
+# back but now carries a venv, or `find` names a different symlink after a `pip
+# install` - while the copy stays the one taken on day zero, and the worker
+# must not be told it went stale today.
+test_the_unverified_date_survives_a_change_of_reason() {
+  local world out record note
+  world=$(make_world stalereason)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas"
+  printf 'tool v1\n' >"$world/canonical/herramientas/replay.py"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\n' >"$world/home/data/project-local/demo/manifest"
+  local_cmd "$world" sync demo >/dev/null || fail "the first sync failed"
+
+  # Day zero: the captain renames the folder away.
+  mv "$world/canonical/herramientas" "$world/canonical/herramientas-old"
+  local_cmd "$world" sync demo >/dev/null || fail "the sync over an absent path failed"
+  # The store's own record is what carries that date forward; age it, since one
+  # test run cannot span two days.
+  record="$world/home/data/project-local/demo/unverified"
+  assert_present "$record" "the sync recorded nothing about the path it could not refresh"
+  awk -F'\t' -v OFS='\t' '{ $2 = "2026-01-05"; print }' "$record" >"$record.aged" &&
+    mv "$record.aged" "$record" || fail "could not age the record"
+
+  # Later: the folder is back, but now a venv lives inside it, so the reason
+  # changes while the store still holds the copy from day zero.
+  mv "$world/canonical/herramientas-old" "$world/canonical/herramientas"
+  mkdir -p "$world/canonical/herramientas/venv/bin"
+  printf 'interp\n' >"$world/canonical/herramientas/venv/bin/python3"
+  ln -s python3 "$world/canonical/herramientas/venv/bin/python"
+  out=$(local_cmd "$world" sync demo) || fail "the third sync failed: $out"
+  assert_contains "$out" "not transportable" "the run did not report the new reason"
+
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  note="$world/copy/.fm-local/.fm-unverified.md"
+  assert_grep "UNVERIFIED since 2026-01-05" "$note" \
+    "the mark restarted its date because the reason changed, over a copy that never got any newer"
+  assert_grep "not transportable" "$note" "the mark did not carry the reason from this run"
+  pass "fm-project-local.sh: the unverified date survives a change of reason"
+}
+
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
   local world out rc
   world=$(make_world visible)
@@ -368,6 +415,7 @@ test_a_symlink_never_enters_the_store
 test_a_nested_symlink_is_refused_before_it_poisons_the_store
 test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest
 test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified
+test_the_unverified_date_survives_a_change_of_reason
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

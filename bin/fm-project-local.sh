@@ -130,10 +130,15 @@ unverified_file() {  # <project>
   printf '%s\n' "$STORE_ROOT/$1/unverified"
 }
 
-unverified_since() {  # <record file> <rel> <reason>; prints the date already recorded
+# Matched on the path alone: the date says since when this copy stopped being
+# confirmable, and that does not restart because the reason it cannot be
+# refreshed changed - or because `find` named a different symlink this time. A
+# sync that does refresh the path drops the record, so a real restart still
+# starts over.
+unverified_since() {  # <record file> <rel>; prints the date already recorded
   [ -f "$1" ] || return 1
-  awk -F'\t' -v rel="$2" -v reason="$3" '
-    $1 == rel && $3 == reason { print $2; found = 1; exit }
+  awk -F'\t' -v rel="$2" '
+    $1 == rel { print $2; found = 1; exit }
     END { exit found ? 0 : 1 }
   ' "$1"
 }
@@ -350,7 +355,7 @@ case "$CMD" in
     not_updated() {  # <rel> <reason>
       local since
       if [ -e "$MATERIAL/$1" ]; then
-        since=$(unverified_since "$RECORD" "$1" "$2") || since=$TODAY
+        since=$(unverified_since "$RECORD" "$1") || since=$TODAY
         printf '%s\t%s\t%s\n' "$1" "$since" "$2" >>"$RECORD_NEW"
         KEPT=$((KEPT + 1))
         echo "project-local: $1 was not updated ($2); the copy from an earlier sync stays in the store and reaches every worker marked UNVERIFIED since $since" >&2

@@ -92,7 +92,7 @@ test_activity_reports_a_folder_nobody_is_touching_as_quiet() {
   local world out rc
   world=$(make_world quiet)
   age_tree "$world/source"
-  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 2>&1) && rc=0 || rc=$?
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" 2>&1) && rc=0 || rc=$?
   expect_code 0 "$rc" "a folder nobody touched did not read as quiet"
   assert_contains "$out" "ACTIVITY: quiet" "the report did not say the folder was quiet"
   assert_contains "$out" "GIT_OPERATION: none" "the report did not clear the git signal"
@@ -117,11 +117,11 @@ test_activity_reports_a_git_operation_in_flight() {
   world=$(make_world inflight)
   gitdir=$(git -C "$world/source" rev-parse --absolute-git-dir)
   : >"$gitdir/index.lock"
-  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 --git-only 2>&1) && rc=0 || rc=$?
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --git-only 2>&1) && rc=0 || rc=$?
   expect_code 3 "$rc" "a git operation in flight did not read as active"
   assert_contains "$out" "GIT_OPERATION: index-lock" "the in-flight git operation was not named"
   rm -f "$gitdir/index.lock"
-  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 --git-only 2>&1) && rc=0 || rc=$?
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --git-only 2>&1) && rc=0 || rc=$?
   expect_code 0 "$rc" "the git-only signal stayed active after the operation ended"
   pass "fm-project-memory.sh: an in-flight git operation reads as active on its own"
 }
@@ -181,6 +181,54 @@ test_scan_reports_a_clean_project_as_parity() {
   assert_contains "$out" "VERDICT: parity" "a project whose knowledge travelled did not read as parity"
   assert_contains "$out" "media/" "ignored working material was not listed for context"
   pass "fm-project-memory.sh: working material alone reads as parity, not as a gap"
+}
+
+# A knowledge document the project's own ignore rules single out reaches no
+# clone at all, and it is the one case no other pass sees: porcelain without
+# --ignored never lists it, and the agent-memory scan only knows a fixed set of
+# names. Reading that as parity is the worst answer this command can give -
+# parity is the signal the intake uses to decide there is nothing to recover.
+test_scan_reports_a_knowledge_file_the_project_ignores() {
+  local world out
+  world=$(make_world ignoredknowledge)
+  mkdir -p "$world/source/docs"
+  printf 'docs/*-internal.md\n' >"$world/source/.gitignore"
+  printf 'the public readme\n' >"$world/source/docs/public.md"
+  git_q -C "$world/source" add .gitignore docs/public.md
+  git_q -C "$world/source" commit -qm docs
+  publish "$world"
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit-internal.md"
+  printf 'the production bug findings\n' >"$world/source/docs/bugs-internal.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "IGNORED_KNOWLEDGE_FILES: 2" "the ignored knowledge documents were not reported"
+  assert_contains "$out" "docs/audit-internal.md" "the report did not name the production audit"
+  assert_contains "$out" "docs/bugs-internal.md" "the report did not name the bug findings"
+  assert_not_contains "$out" "VERDICT: parity" "knowledge that stayed behind still read as parity"
+  assert_contains "$out" "VERDICT: divergent" "the verdict did not call the leak what it is"
+  assert_not_contains "$out" "KNOWLEDGE_GAP: 0" "the ignored knowledge documents did not count in the gap"
+  pass "fm-project-memory.sh: a knowledge file the project ignores is reported and counts in the gap"
+}
+
+# The fold that keeps one ignored tree to one line has to keep holding: a
+# node_modules/ that git expands into individual entries must not arrive as
+# hundreds of ignored knowledge files.
+test_documents_inside_an_ignored_tree_stay_folded_into_one_line() {
+  local world out
+  world=$(make_world foldedtree)
+  mkdir -p "$world/source/vendor/pkg/docs"
+  printf 'vendor/\n' >"$world/source/.gitignore"
+  printf 'third-party readme\n' >"$world/source/vendor/pkg/README.md"
+  printf 'third-party guide\n' >"$world/source/vendor/pkg/docs/guide.md"
+  git_q -C "$world/source" add .gitignore
+  git_q -C "$world/source" commit -qm ignore
+  publish "$world"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "IGNORED_KNOWLEDGE_FILES: none" "a vendored tree was reported file by file as knowledge"
+  assert_contains "$out" "vendor/" "the ignored tree was not listed for context"
+  assert_contains "$out" "VERDICT: parity" "a vendored tree alone turned the verdict into a leak"
+  pass "fm-project-memory.sh: documents inside an ignored tree stay folded into one line"
 }
 
 test_scratch_is_counted_but_never_listed() {
@@ -314,6 +362,8 @@ test_scan_is_bounded_by_limit() {
 test_scan_never_writes_to_the_source_checkout
 test_scan_reports_uncommitted_knowledge_and_excluded_agent_memory
 test_scan_reports_a_clean_project_as_parity
+test_scan_reports_a_knowledge_file_the_project_ignores
+test_documents_inside_an_ignored_tree_stay_folded_into_one_line
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak

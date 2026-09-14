@@ -36,7 +36,7 @@ bin/fm-project-memory.sh scan <project>
 bin/fm-project-memory.sh scan --all
 ```
 
-The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, and ignored directories that actually hold material.
+The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, knowledge documents the project's own ignore rules keep out of every clone (`IGNORED_KNOWLEDGE_FILES` - a `docs/*-internal.md` rule over a production audit is the ordinary case, and no other category sees it), and ignored directories that actually hold material.
 Working material and modified source are counted separately from knowledge and never drive the verdict, so a project whose only divergence is media assets or build output reads as parity rather than as a problem.
 Scratch is counted and not listed at all.
 
@@ -59,7 +59,7 @@ That is why every command here only ever reads it, and why the one command that 
 
 ```sh
 bin/fm-project-memory.sh activity <project>
-bin/fm-project-memory.sh activity --home /path/to/the/folder --window 300
+bin/fm-project-memory.sh activity --home /path/to/the/folder
 ```
 
 It reports two independent signals, either of which alone means the folder is in use: a file changed inside the window, and a git operation in flight (an index lock, a merge, a rebase, a cherry-pick, a revert, a bisect).

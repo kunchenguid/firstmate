@@ -2393,7 +2393,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   SPAWN_RECIPE_DIGEST=
   SPAWN_RECIPE_LIVE_HOME=
   SPAWN_RECIPE_HOME_STATE=reachable
-  SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>/dev/null) && SPAWN_RECIPE_HOME_RC=0 || SPAWN_RECIPE_HOME_RC=$?
+  SPAWN_RECIPE_HOME_ERR="$DATA/$ID/.recipe-home-err.${BASHPID:-$$}"
+  SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>"$SPAWN_RECIPE_HOME_ERR") && SPAWN_RECIPE_HOME_RC=0 || SPAWN_RECIPE_HOME_RC=$?
   case $SPAWN_RECIPE_HOME_RC in
     0)
       if [ "$(cd "$SPAWN_RECIPE_HOME" && pwd -P)" != "$(cd "$PROJ_ABS" && pwd -P)" ]; then
@@ -2408,7 +2409,18 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       SPAWN_RECIPE_HOME_STATE=unreachable
       echo "warning: the knowledge home of $(basename "$PROJ_ABS") is $SPAWN_RECIPE_HOME and it is not reachable from this host; launching without its capability digest and telling the worker the home was not verified" >&2
       ;;
+    # Anything else means the question could not be answered at all - a source
+    # record someone edited by hand into an unreadable state is the ordinary
+    # case - and that is indistinguishable from "this project has no record"
+    # unless it says so. A project whose real home is the captain's checkout
+    # would otherwise launch with the default scaffold pointing at a
+    # repository that is not where its knowledge lands.
+    *)
+      echo "warning: could not resolve the knowledge home of $(basename "$PROJ_ABS") (fm-project-memory.sh home exited $SPAWN_RECIPE_HOME_RC: $(tr '\n' ' ' <"$SPAWN_RECIPE_HOME_ERR" 2>/dev/null)); launching without its capability digest and without a live-home overlay" >&2
+      SPAWN_RECIPE_HOME=
+      ;;
   esac
+  rm -f -- "$SPAWN_RECIPE_HOME_ERR"
 
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
