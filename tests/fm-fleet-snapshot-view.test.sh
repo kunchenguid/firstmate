@@ -521,7 +521,27 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
-- [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-note - Done Note - local-landing:main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-named - Done Named - local-landing:develop (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
+  local-landing:feature/custom
+- [x] released-legacy-local - Released Legacy Local (repo: delta, done 2026-07-11) (kind: ship)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: released-legacy-local
+  Resolution mode: released
+  Captain decision:
+  local main
+- [x] released-local-landing - Released Local Landing (repo: delta, done 2026-07-11) (kind: ship)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: released-local-landing
+  Resolution mode: released
+  Captain decision:
+  Land the local change.
+  local-landing:release/v1.2
+- [x] done-title-main - Investigate local main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-title-prose - Investigate local develop (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-title-suffix - Investigate local develop - local branch (repo: delta, done 2026-07-11) (kind: ship)
+- [ ] queued-local-prose - Investigate local develop (repo: sample, kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -621,6 +641,49 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-named")
+    | .repo == "delta"
+      and .title == "Done Named"
+      and .local_note == "local develop"
+      and .done == "2026-07-11"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "named-base local note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-body-note")
+    | .title == "Done Body Note"
+      and .local_note == "local feature/custom"
+      and .done == "2026-07-11"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "body local-landing note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "released-legacy-local")
+    | .title == "Released Legacy Local"
+      and .local_note == null
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "released legacy local note was misclassified as a local landing"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "released-local-landing")
+    | .title == "Released Local Landing"
+      and .local_note == "local release/v1.2"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "released local landing note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-title-main")
+    | .title == "Investigate local main" and .local_note == null
+  ' >/dev/null || fail "ordinary local main title was misclassified as a local landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-title-prose")
+    | .title == "Investigate local develop" and .local_note == null
+  ' >/dev/null || fail "completed prose was misclassified as a local landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-title-suffix")
+    | .title == "Investigate local develop - local branch" and .local_note == null
+  ' >/dev/null || fail "completed local-looking title was misclassified as a local landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "queued-local-prose")
+    | .title == "Investigate local develop" and .local_note == null
+  ' >/dev/null || fail "queued prose was misclassified as a local landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -636,6 +699,8 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
+  assert_contains "$view" "| done-named | Done Named | delta | ship | - | local develop |" \
+    "view should render a named-base local-only done artifact outside the title"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

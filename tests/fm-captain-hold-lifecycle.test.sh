@@ -3705,7 +3705,10 @@ SH
   local_release="$local_home/local-validation-release"
   cat > "$local_home/fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short main" ]; then
+if [ "${1:-}" = "-C" ] && [ "${2:-}" = "${FM_TEST_RACE_REPO:-}" ] \
+    && [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "--short" ] \
+    && [ "${5:-}" = "${FM_TEST_RACE_TARGET_SHA:-}" ] \
+    && [ ! -e "${FM_TEST_RACE_READY:-}" ]; then
   output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
   : > "$FM_TEST_RACE_READY"
   while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
@@ -3718,6 +3721,7 @@ SH
   before=$(git -C "$local_repo" rev-parse main)
   PATH="$local_home/fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
     FM_TEST_RACE_REPO="$local_repo" FM_TEST_RACE_READY="$local_ready" \
+    FM_TEST_RACE_TARGET_SHA="$before" \
     FM_TEST_RACE_RELEASE="$local_release" FM_ROOT_OVERRIDE="$ROOT" \
     FM_HOME="$local_home" FM_STATE_OVERRIDE="$local_home/state" \
     FM_DATA_OVERRIDE="$local_home/data" FM_CONFIG_OVERRIDE="$local_home/config" \

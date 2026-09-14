@@ -5,9 +5,13 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [crew-branch] [base-branch]
+# prints the block on stdout with no trailing blank line. The caller validates
+# the mode; an unknown mode is refused rather than silently rendered as the
+# pipeline contract. An omitted crew-branch keeps `fm/<task-id>`. An omitted
+# base-branch keeps the historical default-branch wording; a named base changes
+# the direct-PR create command, the local-only landing target, and the
+# no-mistakes `axi run --base-branch` step.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -190,31 +194,62 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
+fm_dod_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+fm_dod_block() {  # <mode> <task-id> [crew-branch] [base-branch]
   local mode=$1 id=$2
+  local crew_branch=${3:-}
+  local base_branch=${4:-}
+  local base_command direct_pr_command local_rebase_target local_advanced_target
+  local local_landing no_mistakes_base_steps
+  [ -n "$crew_branch" ] || crew_branch="fm/$id"
+  if [ -n "$base_branch" ]; then
+    base_command=$(fm_dod_shell_quote "$base_branch")
+  fi
   case "$mode" in
     direct-PR)
+      direct_pr_command=gh-axi
+      [ -z "$base_branch" ] || direct_pr_command="gh-axi pr create --base $base_command"
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`$direct_pr_command\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
     local-only)
+      if [ -n "$base_branch" ]; then
+        local_rebase_target="\`$base_branch\`"
+        local_advanced_target='that base'
+        local_landing=$base_branch
+      else
+        local_rebase_target='the current default branch'
+        local_advanced_target="\`main\`"
+        local_landing=main
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The task is complete only when committed on your branch \`$crew_branch\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto $local_rebase_target - if $local_advanced_target has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch $crew_branch\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`$local_landing\` through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes)
+      no_mistakes_base_steps=
+      if [ -n "$base_branch" ]; then
+        no_mistakes_base_steps="When starting no-mistakes, pass \`axi run --base-branch $base_command\` so the pipeline opens the PR against that named integration branch for this run only.
+Do not open against the repo default and retarget later, and do not change repo \`pr.base_branch\` settings.
+"
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -245,7 +280,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+${no_mistakes_base_steps}After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)
