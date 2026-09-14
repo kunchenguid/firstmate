@@ -54,6 +54,12 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
+For Herdr task launches, Firstmate asks Herdr to show ship workers as `crewmate-<task-id>` and scouts as `scout-<task-id>` after their agents register.
+This changes only Herdr's optional agent display name: the agent type, terminal title, `fm-<task-id>` tab, pane id, metadata, and lifecycle identity stay unchanged.
+Secondmates, primary sessions, and Pi sessions not launched as Herdr task workers are never renamed.
+The display-name operation is retried briefly because registration is asynchronous, then warns and lets an otherwise valid spawn continue when the installed Herdr lacks or refuses the rename surface.
+No lookup, recovery, send, or cleanup path reads the display name.
+
 Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
 

@@ -4186,6 +4186,21 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# Herdr's agent name is a separate presentation field from the registered agent
+# type, pane, terminal title, and task tab. Apply it only to task workers on the
+# Herdr backend; every operational path continues to use the recorded endpoint.
+# Registration races launch, so the adapter retries briefly. A missing or older
+# rename surface is visual degradation only and must not invalidate the spawn.
+if [ "$BACKEND" = herdr ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  if [ "$KIND" = scout ]; then
+    HERDR_WORKER_NAME="scout-$ID"
+  else
+    HERDR_WORKER_NAME="crewmate-$ID"
+  fi
+  if ! fm_backend_herdr_agent_rename_best_effort "${T%%:*}" "${T#*:}" "$HERDR_WORKER_NAME"; then
+    echo "warning: herdr could not set presentation name '$HERDR_WORKER_NAME' for $W; spawn continues with endpoint $T unchanged" >&2
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

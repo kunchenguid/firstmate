@@ -274,6 +274,43 @@ test_version_check_refuses_missing_herdr() {
   pass "fm_backend_herdr_version_check: refuses loudly when herdr is not installed"
 }
 
+# --- presentation-only worker agent names -----------------------------------
+
+test_agent_rename_best_effort_uses_role_name_without_changing_identity() {
+  local dir log resp fb status call
+  dir="$TMP_ROOT/agent-rename-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_rename_best_effort fmtest "w1:p2" "crewmate-task-a"' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "agent presentation rename should succeed when Herdr accepts it"
+  call=$(cat "$log")
+  assert_contains "$call" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p2'$'\x1f''crewmate-task-a'$'\x1f''--session'$'\x1f''fmtest' \
+    "agent presentation rename did not address the exact pane and role name in the exact session"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
+    || fail "a successful agent presentation rename should make exactly one CLI call"
+  pass "fm_backend_herdr_agent_rename_best_effort: assigns the requested display name to the exact pane"
+}
+
+test_agent_rename_best_effort_is_bounded_and_non_authoritative() {
+  local dir log resp fb status n
+  dir="$TMP_ROOT/agent-rename-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for n in 1 2 3; do printf '7\n' > "$resp/$n.exit"; done
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_AGENT_RENAME_POLLS=3 FM_BACKEND_HERDR_AGENT_RENAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_rename_best_effort fmtest "w1:p2" "scout-task-b"' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "agent presentation rename should report exhaustion when Herdr refuses it"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 3 ] \
+    || fail "agent presentation rename should stop after its bounded retry count"
+  while IFS= read -r call; do
+    assert_contains "$call" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p2'$'\x1f''scout-task-b' \
+      "an agent presentation rename retry changed the exact pane or requested role name"
+  done < "$log"
+  pass "fm_backend_herdr_agent_rename_best_effort: rename failure is bounded and leaves authority to its caller"
+}
+
 # --- workspace_label: per-firstmate-HOME resolution (P3, herdr-sm-spaces-k4) -
 
 test_workspace_label_primary_home_no_marker() {
@@ -5173,6 +5210,8 @@ test_wait_transition_clean_timeout_returns_1() {
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
+test_agent_rename_best_effort_uses_role_name_without_changing_identity
+test_agent_rename_best_effort_is_bounded_and_non_authoritative
 test_workspace_label_primary_home_no_marker
 test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace

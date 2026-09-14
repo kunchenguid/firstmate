@@ -143,7 +143,13 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+# Force the optional display operation to fail after logging it. Every spawn in
+# this suite must still succeed, proving that presentation naming never becomes
+# endpoint or lifecycle authority.
+if [ "${1:-} ${2:-}" = "agent rename" ]; then
+  out=
+  status=73
+elif out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
@@ -408,8 +414,16 @@ EOF
 
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_AGENT_RENAME_POLLS=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --mode no-mistakes --yolo off --backend herdr
+}
+
+spawn_scout_task() {  # <id> <home> <project>
+  local id=$1 home=$2 project=$3
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_AGENT_RENAME_POLLS=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --scout --backend herdr
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -561,6 +575,10 @@ OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CA
 if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^(api\tschema|session\tlist)' >/dev/null 2>&1; then
   fail "opted-out spawn added presentation-ordering capability or socket calls"
 fi
+OFF_PANE=$(grep '^herdr_pane_id=' "$OFF_META" | cut -d= -f2-)
+printf '%s\n' "$OFF_HERDR_CALLS" | grep -F $'agent\trename\t'"$OFF_PANE"$'\tcrewmate-shape' >/dev/null 2>&1 \
+  || fail "Herdr ship spawn did not request the role-appropriate crewmate-shape agent display name"
+pass "real Herdr lab: a Herdr ship spawn requests its crewmate display name without changing the task tab"
 pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
@@ -582,10 +600,16 @@ FLOOR_VERDICT=$(bash -c '
 ' "$ROOT" "$FLOOR_PROTOCOL" "$FLOOR_VERSION")
 [ "$FLOOR_VERDICT" = 0 ] || [ "$FLOOR_VERDICT" = 1 ] \
   || fail "herdr $FLOOR_VERSION protocol $FLOOR_PROTOCOL could not be classified against the presentation floor"
-spawn_task default-on "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/default-on.out" 2> "$TMP_ROOT/default-on.err" \
-  || fail "default-on spawn failed: $(cat "$TMP_ROOT/default-on.err")"
+DEFAULT_ON_RENAME_START=$(log_line_count)
+spawn_scout_task default-on "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/default-on.out" 2> "$TMP_ROOT/default-on.err" \
+  || fail "default-on scout spawn failed: $(cat "$TMP_ROOT/default-on.err")"
 DEFAULT_ON_META="$HOME_DIR/state/default-on.meta"
 remember_meta_worktree "$DEFAULT_ON_META" >/dev/null
+DEFAULT_ON_PANE=$(grep '^herdr_pane_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
+sed -n "$((DEFAULT_ON_RENAME_START + 1)),\$p" "$HERDR_CALL_LOG" \
+  | grep -F $'agent\trename\t'"$DEFAULT_ON_PANE"$'\tscout-default-on' >/dev/null 2>&1 \
+  || fail "Herdr scout spawn did not request the role-appropriate scout-default-on agent display name"
+pass "real Herdr lab: a Herdr scout spawn requests its scout display name without changing endpoint identity"
 DEFAULT_ON_JOURNAL="$HOME_DIR/state/default-on.herdr-presentation"
 DEFAULT_ON_WSID=$(grep '^herdr_workspace_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
 if [ "$FLOOR_VERDICT" = 0 ]; then
@@ -1016,6 +1040,11 @@ if sed -n "$((SECOND_SPAWN_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
   | grep -E $'^(workspace\tmove|session\tlist)' >/dev/null 2>&1; then
   fail "secondmate spawn attempted presentation ordering"
 fi
+if sed -n "$((SECOND_SPAWN_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
+  | grep -F $'agent\trename\t' >/dev/null 2>&1; then
+  fail "secondmate spawn attempted to assign a crewmate or scout display name"
+fi
+pass "real Herdr lab: secondmate presentation identity is not renamed as a task worker"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" \

@@ -417,6 +417,24 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   return "$rc"
 }
 
+# fm_backend_herdr_agent_rename_best_effort: apply Herdr's presentation-only
+# agent name after a worker starts. Herdr registers agents asynchronously, so
+# retry the rename itself for a short bounded window. The name is never read
+# back or used for routing, recovery, cleanup, or any other authority.
+fm_backend_herdr_agent_rename_best_effort() {  # <session> <pane-id> <name>
+  local session=$1 pane=$2 name=$3 attempt=1
+  local polls=${FM_BACKEND_HERDR_AGENT_RENAME_POLLS:-10}
+  local interval=${FM_BACKEND_HERDR_AGENT_RENAME_INTERVAL:-0.1}
+  while [ "$attempt" -le "$polls" ]; do
+    if fm_backend_herdr_cli "$session" agent rename "$pane" "$name" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$attempt" -ge "$polls" ] || sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 # --- client selection --------------------------------------------------------
 #
 # Every operation routed through fm_backend_herdr_cli starts with the first
