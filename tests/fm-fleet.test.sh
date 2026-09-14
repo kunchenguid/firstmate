@@ -327,9 +327,11 @@ txfile=$(find "$TROOT/transactions" -type f -name '*.json' | head -1); tx=$(base
 [ -n "$tx" ] || fail "interrupted transfer has no journal"
 grep -q "parent_home=$TROOT/manager-2" "$SMHOME/.fm-secondmate-parent" || fail "parent binding did not move"
 [ -f "$TROOT/manager-2/state/harness.meta" ] && [ ! -f "$TROOT/manager-1/state/harness.meta" ] || fail "parent metadata was not transferred"
-[ "$(FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev | sed -n 's/.*-> \(manager-[0-9]*\).*/\1/p')" = manager-2 ] || fail "transfer assignment was not published"
+python3 "$ROOT/bin/fm-fleet-registry.py" "$TROOT/fleet.json" get assignment harness | grep -q '"manager": "manager-2"' || fail "transfer assignment was not published"
+FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev 2>&1 | grep -q '"state": "transfer-in-progress"' || fail "route resolved a SecondMate whose transfer is still activating"
 export FM_FLEET_TRANSFER_MANAGER_START_HOOK=$HOOK
 FM_FLEET_ROOT=$TROOT "$FLEET" transfer recover --transaction "$tx" >/dev/null || fail "recover interrupted transfer"
+[ "$(FM_FLEET_ROOT=$TROOT "$FLEET" route --project AutoDev | sed -n 's/.*-> \(manager-[0-9]*\).*/\1/p')" = manager-2 ] || fail "route after recovery did not resolve manager-2"
 grep -q "$TROOT/manager-2|harness|start-secondmate" "$FM_HOOK_LOG" || fail "SecondMate relaunch did not use destination parent"
 
 printf '%s\n' '- later - Later (home: /tmp/later; scope: later; projects: later; added 2026-09-13)' >> "$TROOT/manager-2/data/secondmates.md"

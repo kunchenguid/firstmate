@@ -453,6 +453,10 @@ def command_get(args: argparse.Namespace) -> None:
     print(json.dumps(rows[0] if args.kind in {"manager", "owner", "assignment"} else rows))
 
 
+def in_flight_transfer(reg: dict, secondmate: str) -> dict | None:
+    return next((row for row in reg["transfers"] if row.get("secondmate") == secondmate), None)
+
+
 def upsert_triage(reg: dict, dimensions: dict[str, str], reason: str) -> dict:
     parts = [f"{key}:{dimensions[key]}" for key in sorted(dimensions) if dimensions[key]]
     key = "|".join(parts)
@@ -520,6 +524,11 @@ def command_route(args: argparse.Namespace) -> None:
         print(json.dumps({"state": "unassigned", "claims": claims, "triage": row}, sort_keys=True))
         raise SystemExit(3)
     secondmate = next(iter(claims.values()))
+    transfer = in_flight_transfer(reg, secondmate)
+    if transfer:
+        print(json.dumps({"state": "transfer-in-progress", "secondmate": secondmate,
+                          "transaction": transfer.get("transaction"), "by": sorted(claims)}, sort_keys=True))
+        raise SystemExit(4)
     assignment = assignment_map(reg).get(secondmate)
     print(json.dumps({
         "state": "assigned" if assignment else "needs-assignment",
@@ -536,6 +545,9 @@ def command_assign(args: argparse.Namespace) -> None:
     require_valid(reg)
     if args.secondmate not in owner_map(reg):
         raise ValueError(f"unknown SecondMate owner: {args.secondmate}")
+    transfer = in_flight_transfer(reg, args.secondmate)
+    if transfer:
+        raise ValueError(f"transfer {transfer.get('transaction')} is in flight for {args.secondmate}")
     assignments = assignment_map(reg)
     prior = assignments.get(args.secondmate)
     if prior:
@@ -633,9 +645,9 @@ def command_transfer_reserve(args: argparse.Namespace) -> None:
     require_valid(reg)
     if args.manager not in {row["id"] for row in reg["managers"]}:
         raise ValueError(f"unknown destination manager {args.manager}")
-    for row in reg["transfers"]:
-        if row.get("secondmate") == args.secondmate:
-            raise ValueError(f"transfer {row.get('transaction')} is already in flight for {args.secondmate}")
+    transfer = in_flight_transfer(reg, args.secondmate)
+    if transfer:
+        raise ValueError(f"transfer {transfer.get('transaction')} is already in flight for {args.secondmate}")
     if args.manager in reserved_managers(reg, bool(args.failover)):
         raise ValueError(f"destination manager {args.manager} is reserved by an unfinished transfer")
     reg["transfers"].append({"secondmate": args.secondmate, "transaction": args.transaction, "state": "preparing",

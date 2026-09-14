@@ -74,6 +74,8 @@ A SecondMate without a valid source binding and route cannot be recovered.
 
 Unknown or disagreeing semantic keys create one idempotent unassigned record.
 Repeated intake increments that record's attempt count and never fabricates a SecondMate or asks the operator to choose a physical manager.
+While a known SecondMate has an in-flight transfer row, `route` prints a `transfer-in-progress` result, exits 4, and writes neither an assignment nor a triage record; `assign` refuses the same SecondMate.
+After activation removes the row, the same route resolves to the published assignment.
 
 ## Status
 

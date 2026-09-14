@@ -463,4 +463,37 @@ wait "$first_pid" || fail "first same-SecondMate transfer failed: $(cat "$TMP_RO
 [ "$(grep -c 'paperclip|stop-secondmate' "$FM_HOOK_LOG")" = 1 ] || fail "refused same-SecondMate transfer stopped an endpoint: $(cat "$FM_HOOK_LOG")"
 [ "$(manager_for paperclip)" = manager-2 ] || fail "admitted same-SecondMate transfer did not publish manager-2"
 
+# An initial transfer from the original FirstMate blocks concurrent intake for its projects until activation.
+ORIG="$TMP_ROOT/original-firstmate"
+"$FLEET" owner register --secondmate legacy --home "$FROOT/secondmates/legacy" --projects legacy-app --domains legacy >/dev/null || fail "register legacy owner"
+mkdir -p "$ORIG/data" "$ORIG/state" "$FROOT/secondmates/legacy"
+printf '%s\n' '# SecondMates' "- legacy - S (home: $FROOT/secondmates/legacy; scope: s; projects: p; added 2026-09-13)" > "$ORIG/data/secondmates.md"
+printf 'kind=secondmate\nhome=%s\nwindow=fake\n' "$FROOT/secondmates/legacy" > "$ORIG/state/legacy.meta"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$ORIG" > "$FROOT/secondmates/legacy/.fm-secondmate-parent"
+GATED_STOP="$TMP_ROOT/gated-stop.sh"
+cat > "$GATED_STOP" <<SH
+#!/usr/bin/env bash
+: > "$TMP_ROOT/gated.ready"; while [ ! -e "$TMP_ROOT/gated.release" ]; do sleep 0.05; done
+SH
+chmod +x "$GATED_STOP"
+FM_FLEET_TRANSFER_STOP_HOOK=$GATED_STOP "$FLEET" transfer begin --secondmate legacy --to manager-3 --source-home "$ORIG" > "$TMP_ROOT/initial.out" 2>&1 & initial_pid=$!
+i=0; while [ ! -e "$TMP_ROOT/gated.ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+[ -e "$TMP_ROOT/gated.ready" ] || fail "initial transfer never stopped the SecondMate: $(cat "$TMP_ROOT/initial.out")"
+add_lock "$FROOT/manager-1"; intake_live=$LAST_HOLDER
+out=$("$FLEET" route --project legacy-app --issue MIX-901 2>&1); rc=$?
+[ "$rc" = 4 ] || fail "route during an initial transfer exited $rc: $out"
+case "$out" in *'"state": "transfer-in-progress"'*) ;; *) fail "route during an initial transfer was not transfer-in-progress: $out" ;; esac
+if "$FLEET" assign --secondmate legacy >/dev/null 2>&1; then fail "assign was admitted during an in-flight transfer"; fi
+python3 - "$FROOT/fleet.json" <<'PY' || fail "intake during an initial transfer wrote an assignment or triage record"
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+assert not [row for row in reg["assignments"] if row["secondmate"] == "legacy"], reg["assignments"]
+assert not [row for row in reg["unassigned"] if "legacy" in row["key"]], reg["unassigned"]
+PY
+remove_lock "$FROOT/manager-1" "$intake_live"
+: > "$TMP_ROOT/gated.release"
+wait "$initial_pid" || fail "initial transfer failed after refused intake: $(cat "$TMP_ROOT/initial.out")"
+out=$("$FLEET" route --project legacy-app --issue MIX-901 2>&1) || fail "route after initial transfer activation: $out"
+case "$out" in *"-> legacy -> manager-3 (generation 1)"*) ;; *) fail "route after activation did not resolve to manager-3: $out" ;; esac
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"
