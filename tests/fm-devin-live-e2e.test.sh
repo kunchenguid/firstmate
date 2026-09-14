@@ -13,6 +13,15 @@ fi
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-devin-lib.sh
 . "$ROOT/bin/fm-devin-lib.sh"
+
+# Nested inside a Devin session, the live guard wedges at the final exit: the lab
+# launch starts a Devin pane from inside Devin and teardown never sees it finish.
+# Same false negative as in the harness regression (wiki-layer-swe2-v2). From a
+# non-Devin session the guard passes, so skip loudly rather than report a failure.
+if [ "$(sh "$ROOT/bin/fm-harness.sh" 2>/dev/null)" = devin ]; then
+  echo 'skip - this session is Devin; run the live guard from a non-Devin session.'
+  exit 0
+fi
 BIN=$(fm_devin_resolve_binary) || fail 'Devin is absent; no live verification performed'
 command -v herdr >/dev/null || fail 'Herdr is absent; no live verification performed'
 VERSION=$("$BIN" --version)

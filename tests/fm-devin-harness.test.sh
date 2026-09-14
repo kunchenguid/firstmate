@@ -9,6 +9,15 @@ set -eu
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$ROOT/bin/fm-composer-lib.sh"
+
+# A red herring this test cannot see on its own: run inside a Devin session, the
+# lookalike detector walks an outer Devin process tree and the regression fails
+# for a reason that has nothing to do with the adapter. That cost one verifier a
+# false negative (wiki-layer-swe2-v2, 2026-09-14). Skip loudly instead.
+if [ "$(sh "$ROOT/bin/fm-harness.sh" 2>/dev/null)" = devin ]; then
+  echo 'skip - this session is Devin; the nested process tree breaks lookalike detection. Run from a non-Devin session.'
+  exit 0
+fi
 TMP_ROOT=$(fm_test_tmproot fm-devin-harness)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 mkdir -p "$TMP_ROOT/bin"
