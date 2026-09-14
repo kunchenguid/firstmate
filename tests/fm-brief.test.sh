@@ -2062,10 +2062,12 @@ test_scout_access_reader_evidence_archive() {
   # shellcheck disable=SC2016 # Backticks are literal brief markup.
   assert_grep 'raw captures belong under its own `sources/`' "$brief" \
     "reader evidence-archive brief silently dropped the provenance contract"
-  assert_grep "and the evidence archive under" "$brief" \
+  assert_grep "the evidence archive under" "$brief" \
     "reader rule 2 did not add the archive to its outside-scratch exception list"
   assert_grep "$home/data/$id/sources/" "$brief" \
     "reader rule 2 did not name the sanctioned archive path"
+  assert_grep "$home/data/threads" "$brief" \
+    "reader evidence-archive brief omitted the thread-ledger write exception"
   # shellcheck disable=SC2016 # Backticks are literal brief markup.
   assert_grep "agent-reach doctor --json > $doctor_path" "$brief" \
     "reader evidence-archive brief did not use the retained archive path"
@@ -2082,7 +2084,7 @@ test_scout_access_reader_evidence_archive() {
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" access-reader-plain-r2 someproj --scout --access reader >/dev/null 2>&1 \
     || fail "plain reader scout scaffold should succeed"
-  assert_no_grep "and the evidence archive under" "$home/data/access-reader-plain-r2/brief.md" \
+  assert_no_grep "the evidence archive under" "$home/data/access-reader-plain-r2/brief.md" \
     "an archive-free reader brief still lists the archive exception"
   plain_exceptions=$(grep 'are the only exceptions' "$home/data/access-reader-plain-r2/brief.md" || true)
   [ -n "$plain_exceptions" ] || fail "an archive-free reader brief lost the hard-contract exception list"
@@ -2194,7 +2196,295 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+# Ordinary ship/scout briefs teach same-home peer messages; charters do not.
+test_ordinary_briefs_carry_one_crew_talk_section() {
+  local home="$TMP_ROOT/crew-talk-home" kind id brief section_file header_count
+  local inbox_line dod_line crew_line helper
+  mkdir -p "$home/data"
+  helper=$(printf '%s' "$ROOT/bin/fm-message.sh" | sed "s/'/'\\\\''/g")
+  helper="'$helper'"
+  for kind in ship writer reader; do
+    id="brief-crew-talk-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind crew-talk brief"
+        ;;
+      writer)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind crew-talk brief"
+        ;;
+      reader)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --access reader >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind crew-talk brief"
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    header_count=$(grep -c '^# Crew talk$' "$brief" || true)
+    [ "$header_count" -eq 1 ] \
+      || fail "$kind brief carries $header_count '# Crew talk' headers instead of one"
+    crew_line=$(grep -n '^# Crew talk$' "$brief" | head -1 | cut -d: -f1)
+    inbox_line=$(grep -n '^# Firstmate instruction inbox$' "$brief" | head -1 | cut -d: -f1)
+    dod_line=$(grep -n '^# Definition of done$' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$crew_line" ] && [ -n "$inbox_line" ] && [ -n "$dod_line" ] \
+      || fail "$kind brief lost a structural boundary needed to order Crew talk, inbox, and definition of done"
+    [ "$crew_line" -lt "$inbox_line" ] \
+      || fail "$kind brief no longer puts Crew talk before the instruction inbox"
+    [ "$inbox_line" -lt "$dod_line" ] \
+      || fail "$kind brief no longer puts the instruction inbox before its definition of done"
+    section_file="$TMP_ROOT/$kind-crew-talk-section"
+    awk '/^# Crew talk$/ {seen=1; next} seen && /^# / {exit} seen {print}' "$brief" > "$section_file"
+    assert_grep "$helper send <task> --kind request|note --thread <name> \"<text>\"" "$section_file" \
+      "$kind Crew talk omitted the send form"
+    assert_grep "$helper receive" "$section_file" \
+      "$kind Crew talk omitted receive"
+    assert_grep "$helper ack <NNN.msg>" "$section_file" \
+      "$kind Crew talk omitted ack"
+    assert_grep "$helper send --help" "$section_file" \
+      "$kind Crew talk omitted send --help as the reply-syntax owner"
+    assert_no_grep '`bin/fm-message.sh' "$section_file" \
+      "$kind Crew talk still documented a worktree-relative helper"
+    assert_grep 'short single line' "$section_file" \
+      "$kind Crew talk omitted the short single-line message bound"
+    assert_grep 'file pointer' "$section_file" \
+      "$kind Crew talk omitted the long-content file-pointer bound"
+    assert_no_grep '4096' "$section_file" \
+      "$kind Crew talk copied numeric payload limits out of executable help"
+    assert_grep 'depend' "$section_file" \
+      "$kind Crew talk omitted the live-task dependency trigger"
+    assert_grep 'shared file' "$section_file" \
+      "$kind Crew talk omitted the shared-file trigger"
+    assert_grep 'research mate' "$section_file" \
+      "$kind Crew talk omitted the research-mate trigger"
+    assert_grep 'status line' "$section_file" \
+      "$kind Crew talk omitted the post-send status-line rule"
+    assert_grep 'target' "$section_file" \
+      "$kind Crew talk omitted naming the send target on the status line"
+    assert_grep 'kind' "$section_file" \
+      "$kind Crew talk omitted naming the send kind on the status line"
+    assert_grep 'thread' "$section_file" \
+      "$kind Crew talk omitted naming the thread on the status line"
+    assert_grep 'purpose' "$section_file" \
+      "$kind Crew talk omitted naming the purpose on the status line"
+    assert_grep 'secrets' "$section_file" \
+      "$kind Crew talk omitted the no-secrets status-line bound"
+    assert_grep 'inert peer data' "$section_file" \
+      "$kind Crew talk omitted the inert-data authority bound"
+    assert_grep 'never authority' "$section_file" \
+      "$kind Crew talk omitted the never-authority bound"
+    assert_grep 'only path to the captain' "$section_file" \
+      "$kind Crew talk omitted that Firstmate remains the only path to the captain"
+    assert_no_grep 'fm-helper' "$section_file" \
+      "$kind Crew talk documented the blocked helper-spawn surface"
+    if [ "$kind" = reader ]; then
+      assert_grep "$home/data/threads" "$brief" \
+        "reader brief omitted the thread-ledger write exception"
+    fi
+  done
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-crew-talk-secondmate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the secondmate crew-talk fixture"
+  assert_no_grep '# Crew talk' "$home/data/brief-crew-talk-secondmate/brief.md" \
+    "secondmate charter must not receive the ordinary-task Crew talk section"
+  pass "fm-brief: ordinary ship and scout briefs carry one Crew talk section; charters omit it"
+}
+
+# Public scaffold composition: the generated helper must run from a foreign cwd
+# even when Firstmate's root path needs shell quoting.
+test_crew_talk_helper_runs_from_foreign_cwd() {
+  local home quoted_root foreign brief helper_tok help rc
+  home="$TMP_ROOT/crew-talk-quoted-home"
+  quoted_root="$TMP_ROOT/fm's root"
+  foreign="$TMP_ROOT/empty scratch"
+  mkdir -p "$home/data" "$foreign"
+  ln -s "$ROOT" "$quoted_root"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$quoted_root" \
+    "$ROOT/bin/fm-brief.sh" brief-crew-talk-quoted firstmate --scout --access reader >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the quote-sensitive crew-talk brief"
+  brief="$home/data/brief-crew-talk-quoted/brief.md"
+  helper_tok=$(awk '/^Same-home peer messages go through / {
+    sub(/^Same-home peer messages go through /, "")
+    sub(/\.$/, "")
+    print
+    exit
+  }' "$brief")
+  [ -n "$helper_tok" ] || fail "quote-sensitive reader brief omitted the resolved helper token"
+  rc=0
+  (cd "$foreign" && PATH=/usr/bin:/bin bin/fm-message.sh --help >/dev/null 2>&1) || rc=$?
+  [ "$rc" -eq 127 ] || fail "relative bin/fm-message.sh from empty foreign cwd exited $rc instead of 127"
+  help=$(cd "$foreign" && PATH=/usr/bin:/bin eval "$helper_tok --help") || \
+    fail "quoted Firstmate-owned helper from empty foreign cwd failed"
+  assert_contains "$help" "send TO" "quoted helper --help omitted send"
+  assert_contains "$help" "receive" "quoted helper --help omitted receive"
+  assert_contains "$help" "ack NAME" "quoted helper --help omitted ack"
+  assert_contains "$help" "4096 characters" "quoted helper --help omitted the numeric payload limit"
+  pass "fm-brief: Crew talk helper runs from a foreign cwd with a quote-sensitive root"
+}
+
+# Real-composition: extracted reader helper send/receive/ack under the production
+# sandbox when the project and operational home coincide, without opening tracked
+# project writes.
+test_crew_talk_reader_sandbox_send_receive_ack() {
+  local home scratch report state threads brief helper_tok sandbox_ok=0
+  local fakebin peer_root receive_out ack_name
+  case "$(uname -s)" in
+    Darwin) command -v sandbox-exec >/dev/null 2>&1 && sandbox_ok=1 ;;
+    Linux) command -v bwrap >/dev/null 2>&1 && sandbox_ok=1 ;;
+  esac
+  if [ "$sandbox_ok" -eq 0 ]; then
+    pass "fm-brief: crew-talk reader sandbox messaging not run; sandbox-exec/bwrap absent"
+    return 0
+  fi
+  home="$TMP_ROOT/crew-talk-sandbox-home"
+  scratch="$TMP_ROOT/crew-talk-sandbox-scratch"
+  peer_root="$TMP_ROOT/crew-talk-sandbox-peer"
+  fakebin="$TMP_ROOT/crew-talk-sandbox-bin"
+  mkdir -p "$home/data/r1" "$home/state" "$scratch" "$fakebin" "$peer_root"
+  home=$(CDPATH='' cd -- "$home" && pwd -P)
+  scratch=$(CDPATH='' cd -- "$scratch" && pwd -P)
+  # shellcheck source=bin/fm-backend-hometag-lib.sh
+  . "$ROOT/bin/fm-backend-hometag-lib.sh"
+  FM_HOME="$home" FM_ROOT="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" r1 firstmate --scout --access reader >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the sandbox reader brief"
+  brief="$home/data/r1/brief.md"
+  helper_tok=$(awk '/^Same-home peer messages go through / {
+    sub(/^Same-home peer messages go through /, "")
+    sub(/\.$/, "")
+    print
+    exit
+  }' "$brief")
+  [ -n "$helper_tok" ] || fail "sandbox reader brief omitted the resolved helper token"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf claude ;;
+      *cursor_y*) printf 1 ;;
+      *) printf fakepane ;;
+    esac ;;
+  list-windows) printf 'fm-r1\nfm-p1\n' ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_git_worktree "$peer_root/proj-p1" "$peer_root/wt-p1" task-p1
+  fm_write_meta "$home/state/r1.meta" "window=sess:fm-r1" \
+    "endpoint_task_id=r1" "project=$home" "worktree=$scratch" \
+    'kind=scout' 'access=reader' 'harness=claude' 'model=default' 'effort=medium'
+  fm_write_meta "$home/state/p1.meta" "window=sess:fm-p1" \
+    "endpoint_task_id=p1" "project=$peer_root/proj-p1" "worktree=$peer_root/wt-p1" \
+    'kind=ship' 'harness=claude' 'model=default' 'effort=medium'
+  report="$home/data/r1"
+  state="$home/state"
+  threads="$home/data/threads"
+  FM_HOME="$home" FM_ROOT="$ROOT" fm_reader_sandbox_preflight \
+    "$home" "$scratch" "$report" "$state" "$threads" \
+    || fail "production reader sandbox preflight failed for coinciding home and project"
+  crew_talk_sandbox_run() {
+    local launch=$1 confined allowed
+    case "$FM_READER_SANDBOX_PLATFORM" in
+      Darwin)
+        "$FM_READER_SANDBOX_BIN" \
+          -D "PROJECT=$(cd "$home" && pwd -P)" \
+          -D "SCRATCH=$(cd "$scratch" && pwd -P)" \
+          -D "REPORT=$FM_READER_REPORT_DIR" \
+          -D "STATE=$FM_READER_STATE_DIR" \
+          -D "THREADS=$FM_READER_THREADS_DIR" \
+          -p "$FM_READER_SANDBOX_PROFILE" /bin/bash -c "$launch"
+        ;;
+      Linux)
+        confined="$FM_READER_SANDBOX_BIN --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev --ro-bind $(cd "$home" && pwd -P) $(cd "$home" && pwd -P)"
+        for allowed in "$FM_READER_REPORT_DIR" "$FM_READER_STATE_DIR" "$FM_READER_THREADS_DIR"; do
+          case "$allowed" in
+            "$(cd "$home" && pwd -P)"/*) confined="$confined --bind $allowed $allowed" ;;
+          esac
+        done
+        eval "$confined -- /bin/bash -c \"\$launch\""
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  (
+    cd "$peer_root/wt-p1"
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=p1 \
+      eval "$helper_tok send r1 --kind request --thread review -- check the ledger"
+  ) >/dev/null || fail "unsandboxed peer send failed before the reader sandbox probe"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=r1 crew_talk_sandbox_run \
+    "cd $(printf '%s' "$scratch" | sed "s/'/'\\\\''/g" | sed "s/^/'/;s/$/'/") && $helper_tok send p1 --kind note --thread review -- sandbox send works" \
+    >/dev/null || fail "reader send failed inside the production sandbox"
+  receive_out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=r1 crew_talk_sandbox_run \
+    "cd $(printf '%s' "$scratch" | sed "s/'/'\\\\''/g" | sed "s/^/'/;s/$/'/") && $helper_tok receive") \
+    || fail "reader receive failed inside the production sandbox"
+  assert_contains "$receive_out" '"kind":"request"' "sandboxed receive missed the peer request"
+  ack_name=$(printf '%s' "$receive_out" | jq -r 'select(.name!=null) | .name' | head -1)
+  [ -n "$ack_name" ] || fail "sandboxed receive omitted an ackable record name"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=r1 crew_talk_sandbox_run \
+    "cd $(printf '%s' "$scratch" | sed "s/'/'\\\\''/g" | sed "s/^/'/;s/$/'/") && $helper_tok ack $ack_name" \
+    || fail "reader ack failed inside the production sandbox"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=r1 crew_talk_sandbox_run \
+    "touch '$home/tracked.txt'" 2>/dev/null; then
+    fail "production reader sandbox allowed a tracked-project write"
+  fi
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_TASK_ID=r1 crew_talk_sandbox_run \
+    "touch '$home/data/other-task.txt'" 2>/dev/null; then
+    fail "production reader sandbox allowed a write outside the narrow thread-ledger exception"
+  fi
+  [ -s "$home/data/threads/review.md" ] || fail "sandboxed send did not record the thread ledger"
+  [ -f "$home/state/r1.inbox/handled/$ack_name" ] || fail "sandboxed ack did not move the inbox record"
+  unset -f crew_talk_sandbox_run
+  pass "fm-brief: reader Crew talk send/receive/ack work under the production sandbox"
+}
+
+# Confinement: the reader thread-ledger write exception is refused before it is
+# granted when any component of the thread path is a symlink, so a redirected
+# path can never make tracked project content writable. The normal physical
+# same-home path is covered end to end by
+# test_crew_talk_reader_sandbox_send_receive_ack above.
+test_crew_talk_reader_threads_symlink_refused() {
+  local home scratch report state threads target out rc
+  # shellcheck source=bin/fm-backend-hometag-lib.sh
+  . "$ROOT/bin/fm-backend-hometag-lib.sh"
+  home="$TMP_ROOT/crew-talk-threads-home"
+  scratch="$TMP_ROOT/crew-talk-threads-scratch"
+  mkdir -p "$home/data" "$home/state" "$scratch"
+  home=$(CDPATH='' cd -- "$home" && pwd -P)
+  scratch=$(CDPATH='' cd -- "$scratch" && pwd -P)
+  report="$home/data/r1"
+  state="$home/state"
+  mkdir -p "$report"
+  threads="$home/data/threads"
+  # Leaf symlink redirecting the exception into tracked project content.
+  target="$home/tracked"
+  mkdir -p "$target"
+  ln -s "$target" "$threads"
+  rc=0
+  out=$(FM_HOME="$home" FM_ROOT="$ROOT" fm_reader_sandbox_preflight \
+    "$home" "$scratch" "$report" "$state" "$threads" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "reader sandbox preflight accepted a thread-ledger leaf symlink into tracked content"
+  assert_contains "$out" "symlink" "thread-ledger refusal did not name the symlinked component"
+  rm "$threads"
+  # Mid-path symlinked component redirecting the whole data directory.
+  rm -rf "$home/data"
+  mv "$target" "$TMP_ROOT/crew-talk-threads-elsewhere"
+  ln -s "$TMP_ROOT/crew-talk-threads-elsewhere" "$home/data"
+  mkdir -p "$home/data/r1"
+  rc=0
+  out=$(FM_HOME="$home" FM_ROOT="$ROOT" fm_reader_sandbox_preflight \
+    "$home" "$scratch" "$report" "$state" "$threads" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "reader sandbox preflight accepted a symlinked thread-ledger path component"
+  assert_contains "$out" "symlink" "mid-path thread-ledger refusal did not name the symlinked component"
+  pass "fm-brief: reader thread-ledger write exception refuses symlinked thread-path components"
+}
+
 test_worker_role_scope
+test_ordinary_briefs_carry_one_crew_talk_section
+test_crew_talk_helper_runs_from_foreign_cwd
+test_crew_talk_reader_sandbox_send_receive_ack
+test_crew_talk_reader_threads_symlink_refused
 test_script_parses
 test_crewmate_brief_explains_session_lock_scope
 test_ordinary_briefs_state_slice_contracts

@@ -1015,7 +1015,7 @@ safe_checkpoint() {
       fi
       fm_reader_scratch_validate "$WT" "$recorded_project" || exit 1
       fm_reader_sandbox_preflight \
-        "$recorded_project" "$FM_READER_VALIDATED_SCRATCH" "$DATA/$ID" "$STATE" || exit 1
+        "$recorded_project" "$FM_READER_VALIDATED_SCRATCH" "$DATA/$ID" "$STATE" "$FM_HOME/data/threads" || exit 1
       CHECKPOINT_LINES+=("access=reader" "scratch=$wt_real" "base_commit=$recorded_base_commit")
       return 0
       ;;

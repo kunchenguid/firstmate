@@ -19,6 +19,7 @@ help() {
   printf '%s\n' \
     'Usage: fm-message.sh <command> [options]' \
     '  send TO[,TO...] TEXT        Send same-home data. Example: send peer-a,peer-b --kind request --thread review "check the API"' \
+    '    TEXT                     One nonempty printable line, at most 4096 characters. Put long content behind a file pointer in that line.' \
     '    --kind KIND              request|reply|note|needs-decision. Example: send peer-a --kind note "ready"' \
     '    --thread NAME            Use or create a named conversation. Example: send peer-a --thread review "ready"' \
     '    --ref MESSAGE_ID         Correlate a reply. Example: send peer-a --kind reply --ref msg-<32-hex> "checked"' \

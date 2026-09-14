@@ -174,13 +174,37 @@ FM_READER_SANDBOX_BIN=
 FM_READER_SANDBOX_PROFILE=
 FM_READER_REPORT_DIR=
 FM_READER_STATE_DIR=
+FM_READER_THREADS_DIR=
 
-fm_reader_sandbox_preflight() {  # <project-dir> <scratch-dir> <report-dir> <state-dir>
-  local project=$1 scratch=$2 report=$3 state=$4 project_real scratch_real report_real state_real platform sandbox_bin profile
+fm_reader_sandbox_preflight() {  # <project-dir> <scratch-dir> <report-dir> <state-dir> <threads-dir>
+  local project=$1 scratch=$2 report=$3 state=$4 threads=$5 project_real scratch_real report_real state_real threads_real threads_walk platform sandbox_bin profile
   project_real=$(cd "$project" 2>/dev/null && pwd -P) || return 1
   scratch_real=$(cd "$scratch" 2>/dev/null && pwd -P) || return 1
   report_real=$(cd "$report" 2>/dev/null && pwd -P) || return 1
   state_real=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  [ -n "$threads" ] || return 1
+  # The thread-ledger write exception must stay confined to its intended
+  # physical directory: reject any symlinked component of the literal thread
+  # path before creating or resolving it, or a redirected path would make the
+  # exception grant writes into tracked project content.
+  case $threads in
+    /*) ;;
+    *)
+      echo "error: reader thread-ledger directory must be an absolute path: $threads; refusing to launch" >&2
+      return 1
+      ;;
+  esac
+  threads_walk=$threads
+  while [ "$threads_walk" != / ]; do
+    if [ -L "$threads_walk" ]; then
+      echo "error: reader thread-ledger path $threads sits behind a symlink at $threads_walk; refusing to launch - the thread-ledger write exception must stay confined to its intended physical directory" >&2
+      return 1
+    fi
+    threads_walk=${threads_walk%/*}
+    [ -n "$threads_walk" ] || threads_walk=/
+  done
+  mkdir -p "$threads" || return 1
+  threads_real=$(cd "$threads" 2>/dev/null && pwd -P) || return 1
   case "$report_real" in
     "$project_real")
       echo "error: reader report directory cannot be the project root; refusing to launch without process-level write confinement" >&2
@@ -193,6 +217,12 @@ fm_reader_sandbox_preflight() {  # <project-dir> <scratch-dir> <report-dir> <sta
       return 1
       ;;
   esac
+  case "$threads_real" in
+    "$project_real")
+      echo "error: reader thread-ledger directory cannot be the project root; refusing to launch without process-level write confinement" >&2
+      return 1
+      ;;
+  esac
   platform=$(uname -s)
   case "$platform" in
     Darwin)
@@ -201,9 +231,10 @@ fm_reader_sandbox_preflight() {  # <project-dir> <scratch-dir> <report-dir> <sta
         echo "error: sandbox-exec is required for reader process confinement on macOS; refusing to launch" >&2
         return 1
       }
-      profile='(version 1)(allow default)(deny file-write* (subpath (param "PROJECT")))(allow file-write* (subpath (param "SCRATCH")))(allow file-write* (subpath (param "REPORT")))(allow file-write* (subpath (param "STATE")))'
+      profile='(version 1)(allow default)(deny file-write* (subpath (param "PROJECT")))(allow file-write* (subpath (param "SCRATCH")))(allow file-write* (subpath (param "REPORT")))(allow file-write* (subpath (param "STATE")))(allow file-write* (subpath (param "THREADS")))'
       "$sandbox_bin" -D "PROJECT=$project_real" -D "SCRATCH=$scratch_real" \
-        -D "REPORT=$report_real" -D "STATE=$state_real" -p "$profile" /usr/bin/true >/dev/null 2>&1 || {
+        -D "REPORT=$report_real" -D "STATE=$state_real" -D "THREADS=$threads_real" \
+        -p "$profile" /usr/bin/true >/dev/null 2>&1 || {
         echo "error: sandbox-exec could not establish reader process confinement; refusing to launch" >&2
         return 1
       }
@@ -235,4 +266,6 @@ fm_reader_sandbox_preflight() {  # <project-dir> <scratch-dir> <report-dir> <sta
   FM_READER_REPORT_DIR=$report_real
   # shellcheck disable=SC2034 # Output global consumed by scripts sourcing this library.
   FM_READER_STATE_DIR=$state_real
+  # shellcheck disable=SC2034 # Output global consumed by scripts sourcing this library.
+  FM_READER_THREADS_DIR=$threads_real
 }

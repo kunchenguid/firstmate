@@ -3444,17 +3444,17 @@ real_path_or_raw() {  # <path>
 # READER ISOLATION ENFORCEMENT PREDICATE (--access reader). The scratch path
 # checks below keep the launch root outside tracked territory; the reader-only
 # process sandbox applied to the final launch command denies absolute-path
-# writes back into the project while preserving the task's scratch and
-# firstmate-owned report/status surfaces. Both gates must pass before launch.
+# writes back into the project while preserving the task's scratch,
+# firstmate-owned report/status surfaces, and same-home thread ledgers. Both gates must pass before launch.
 reader_confine_launch() {  # <launch-command>
   local launch=$1 confined allowed
   case "$FM_READER_SANDBOX_PLATFORM" in
     Darwin)
-      printf '%s' "$(shell_quote "$FM_READER_SANDBOX_BIN") -D $(shell_quote "PROJECT=$PROJ_ABS_REAL") -D $(shell_quote "SCRATCH=$READER_SCRATCH") -D $(shell_quote "REPORT=$FM_READER_REPORT_DIR") -D $(shell_quote "STATE=$FM_READER_STATE_DIR") -p $(shell_quote "$FM_READER_SANDBOX_PROFILE") /bin/bash -c $(shell_quote "$launch")"
+      printf '%s' "$(shell_quote "$FM_READER_SANDBOX_BIN") -D $(shell_quote "PROJECT=$PROJ_ABS_REAL") -D $(shell_quote "SCRATCH=$READER_SCRATCH") -D $(shell_quote "REPORT=$FM_READER_REPORT_DIR") -D $(shell_quote "STATE=$FM_READER_STATE_DIR") -D $(shell_quote "THREADS=$FM_READER_THREADS_DIR") -p $(shell_quote "$FM_READER_SANDBOX_PROFILE") /bin/bash -c $(shell_quote "$launch")"
       ;;
     Linux)
       confined="$(shell_quote "$FM_READER_SANDBOX_BIN") --die-with-parent --cap-drop ALL --bind / / --dev-bind /dev /dev --ro-bind $(shell_quote "$PROJ_ABS_REAL") $(shell_quote "$PROJ_ABS_REAL")"
-      for allowed in "$FM_READER_REPORT_DIR" "$FM_READER_STATE_DIR"; do
+      for allowed in "$FM_READER_REPORT_DIR" "$FM_READER_STATE_DIR" "$FM_READER_THREADS_DIR"; do
         case "$allowed" in
           "$PROJ_ABS_REAL"/*)
             confined="$confined --bind $(shell_quote "$allowed") $(shell_quote "$allowed")"
@@ -3966,7 +3966,7 @@ if [ "$ACCESS" = reader ]; then
   fm_reader_scratch_validate "$TASK_TMP/scratch" "$PROJ_ABS_REAL" || exit 1
   READER_SCRATCH=$FM_READER_VALIDATED_SCRATCH
   fm_reader_sandbox_preflight \
-    "$PROJ_ABS_REAL" "$READER_SCRATCH" "$DATA/$ID" "$STATE" || exit 1
+    "$PROJ_ABS_REAL" "$READER_SCRATCH" "$DATA/$ID" "$STATE" "$FM_HOME/data/threads" || exit 1
   reader_ensure_read_handle "$READER_SCRATCH" "$READER_BASE_COMMIT" || exit 1
   SPAWN_TASK_CWD="$READER_SCRATCH"
   WT="$READER_SCRATCH"
