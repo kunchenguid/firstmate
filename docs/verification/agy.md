@@ -41,6 +41,14 @@ The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted 
 
 ## Trust dialog: pre-registered before launch, gated on a busy turn as the backstop
 
+> DIVERGENCE (option A port, 2026-09-14): this section verified the trust-store
+> write. The port keeps NOT writing it - `bin/fm-spawn.sh` never calls
+> `bin/fm-agy-trust.sh`, and only READS `trustedWorkspaces` to decide whether
+> the path is already covered. This home trusts its worktree root already, so
+> the dialog does not fire here. The dialog mechanics, the read-only coverage
+> check, and the answering backstop below are unchanged; only the write half
+> is gone.
+
 A first launch in a fresh worktree shows this dialog:
 
 ```

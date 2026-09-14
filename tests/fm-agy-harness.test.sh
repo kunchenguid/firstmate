@@ -11,19 +11,25 @@
 #      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the
 #      general boundary.
 #   3. The launch carries the brief via --prompt-interactive with --model,
-#      --effort, and --dangerously-skip-permissions; a requested model a
-#      reachable `agy models` omits refuses loudly instead of wedging a pane,
-#      while a hung or unreachable listing is cut off and never blocks.
-#   4. A fresh worktree would park agy on its folder-trust dialog, so the spawn
-#      pre-registers the worktree in agy's own trustedWorkspaces store through
-#      bin/fm-agy-trust.sh (scope-refused for anything but a linked worktree
-#      of the project) and the post-launch gate is the backstop: it answers a
-#      dialog that renders anyway exactly once, never counts a busy turn as
-#      ready on an unregistered path until the dialog has been answered (the
-#      Herdr native-busy-before-dialog race), and fails the spawn with endpoint
-#      cleanup when the brief cannot be confirmed to run in the worktree.
-#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
-#      and nothing is armed as busy wiring because no writer could clear it.
+#      --effort, and --dangerously-skip-permissions; a requested model the
+#      account's live catalogue omits refuses loudly instead of wedging a
+#      pane (both spellings agy accepts - the kebab id and the display name -
+#      are honoured), while a hung or unreachable listing establishes nothing
+#      and launches unvalidated and silent.
+#   4. A fresh worktree would park agy on its folder-trust dialog, and
+#      firstmate deliberately does NOT pre-register the worktree in agy's own
+#      trustedWorkspaces store (bin/fm-agy-trust.sh is never called at spawn;
+#      this home trusts its worktree root already). The spawn only READS the
+#      store to decide whether the path is already covered, and the
+#      post-launch gate is the enforcement: it answers a dialog that renders
+#      exactly once, never counts a busy turn as ready on an uncovered path
+#      until the dialog has been answered (the Herdr native-busy-before-dialog
+#      race), and fails the spawn with endpoint cleanup when the brief cannot
+#      be confirmed to run in the worktree.
+#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused.
+#      The spawn installs the ONE firstmate-owned global hook plugin (turn-end
+#      plus the agy-hook semantic busy source), so a busy generation IS armed
+#      and the worktree pointer plus registry token sidecars exist.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
 #   7. Herdr's registry already tracks agy, and exit detection proves the
@@ -436,14 +442,16 @@ test_agy_trust_refuses_out_of_scope_paths() {
 
 # The fake tmux renders an agy-shaped screen that advances through
 # launched -> (trust dialog ->) busy as the real spawn drives it, so the launch
-# command, the pre-registration, the single Enter that answers a dialog, and
-# the readiness gate are exercised through their real code paths. Whether the
-# dialog renders is decided the way agy decides it: the pane path is looked up
-# in the trustedWorkspaces array of the store the spawn just wrote.
+# command, the read-only trust-coverage check, the single Enter that answers a
+# dialog, and the readiness gate are exercised through their real code paths.
+# Whether the dialog renders is decided the way agy decides it: the pane path
+# is looked up in the trustedWorkspaces array of the store. The spawn never
+# writes that store (bin/fm-agy-trust.sh stays uncalled); the trust tests below
+# exercise that helper directly.
 # FM_FAKE_AGY_IGNORE_TRUST=1 models a vendor that stopped honouring the store;
 # FM_FAKE_AGY_ASSUME_TRUSTED=1 models a pane that never shows the dialog even
-# though firstmate could not register the path (a busy verdict with no proof
-# of where the turn runs);
+# though the path is uncovered (a busy verdict with no proof of where the
+# turn runs);
 # FM_FAKE_AGY_RACE=1 models Herdr's native busy verdict rendering one capture
 # before the dialog paints; FM_FAKE_AGY_ANSWER=stuck models a dialog whose
 # answer never turns into a busy turn.
@@ -582,10 +590,11 @@ $1
 EOF
 }
 
-# The spawn drives the real bin/fm-agy-trust.sh and the fake tmux's trust
-# lookup under this base PATH, and both read agy's settings store with node,
-# which runners do not keep in the system bin dirs. Carry the directory the
-# invoking environment resolves node from, the fm-kimi-harness shape.
+# The spawn drives the fake tmux's trust lookup under this base PATH; both
+# the spawn's read-only coverage check and the lookup read agy's settings
+# store with node, which runners do not keep in the system bin dirs. Carry
+# the directory the invoking environment resolves node from, the
+# fm-kimi-harness shape.
 NODE_BIN=$(command -v node) || fail "test needs node"
 NODE_BIN_DIR=$(dirname "$NODE_BIN")
 BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
@@ -607,7 +616,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
-    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_PROBE_TIMEOUT=${FM_AGY_PROBE_TIMEOUT:-20} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -663,7 +672,11 @@ test_agy_unlisted_model_refuses_before_pane_creation() {
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash) || rc=$?
   [ "$rc" -ne 0 ] || fail "an unlisted agy model should refuse the spawn"
-  assert_contains "$out" "not listed by 'agy models'" "unlisted model refusal lacked its concrete reason"
+  # Option A port: the refusal comes from the fork's live-catalogue check
+  # (fm_agy_list_models + fm_agy_catalog_has_model, accepting both the kebab
+  # id and the display name), not upstream's agy_model_validate, so the
+  # message names the catalogue source rather than the old probe wording.
+  assert_contains "$out" "agy model 'gemini-3.8-flash' is not available from" "unlisted model refusal lacked its concrete reason"
   [ -s "$CASE_DIR/launch.log" ] && fail "an unlisted model created a launch command" || true
   pass "fm-spawn: an unlisted agy model refuses before pane creation"
 }
@@ -678,7 +691,12 @@ test_agy_unreachable_listing_launches_unvalidated() {
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   expect_code 0 "$rc" "an unreachable model listing must not block the spawn"
   [ -s "$CASE_DIR/launch.log" ] || fail "an unreachable listing produced no launch command"
-  assert_contains "$out" "listing is unreachable" "an unreachable listing launched without its notice"
+  # The ported catalogue check (bin/fm-agy-lib.sh) treats an unreachable
+  # listing as unknown rather than as proof of absence, and launches silent:
+  # no refusal naming the catalogue, and the requested model still carried.
+  assert_not_contains "$out" "is not available from" "an unreachable listing was read as proof of absence"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
+    "an unreachable listing dropped the requested model instead of launching it unvalidated"
   pass "fm-spawn: an unreachable agy listing establishes nothing and launches"
 }
 
@@ -689,36 +707,24 @@ test_agy_hung_listing_is_cut_off_and_launches() {
   read_agy_spawn_record "$rec"
   rc=0
   started=$(date +%s)
-  out=$(FM_FAKE_AGY_MODELS_HANG=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+  out=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_PROBE_TIMEOUT=2 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   expect_code 0 "$rc" "a hung model listing must not block the spawn"
   [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
-  assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
+  # The ported probe (fm_agy_bounded_output) is silent on every path: a hung
+  # listing is cut off and launches unvalidated with no timeout notice.
+  assert_not_contains "$out" "is not available from" "a hung listing was read as proof of absence"
   [ -s "$CASE_DIR/launch.log" ] || fail "a hung listing produced no launch command"
   assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
     "a hung listing dropped the requested model instead of launching it unvalidated"
   pass "fm-spawn: a hung agy listing is cut off by the shared bound and launches unvalidated"
 }
 
-test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
-  local id rec out rc started elapsed
-  id="agy-zerobound-z14-$$"
-  rec=$(make_agy_spawn_case zerobound "$id")
-  read_agy_spawn_record "$rec"
-  rc=0
-  started=$(date +%s)
-  out=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_MODELS_TIMEOUT=0 \
-    run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
-    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
-  elapsed=$(( $(date +%s) - started ))
-  expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn"
-  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
-  assert_contains "$out" "did not answer within 15s" \
-    "a zero model bound was not clamped to the documented default"
-  [ -s "$CASE_DIR/launch.log" ] || fail "a zero model bound produced no launch command"
-  pass "fm-spawn: a zero FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
-}
+# NOTE: upstream's FM_AGY_MODELS_TIMEOUT zero-clamp test lived here. It pinned
+# upstream's agy_model_validate bound, which the port replaces with the fork's
+# fm_agy_bounded_output under FM_AGY_PROBE_TIMEOUT; the hung-listing test above
+# owns the bound, so there is nothing to clamp here.
 
 # Bare Enter key presses only: shell setup rides its Enter on the typed text
 # (`send-keys -t <target> export X=Y Enter`), while the launch submit and the
@@ -727,7 +733,7 @@ count_enter_sends() {  # <tmux-call-log>
   grep -c '^send-keys -t [^ ]* Enter$' "$1" || true
 }
 
-test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
+test_agy_spawn_never_writes_the_trust_store_and_answers_the_dialog() {
   local id rec out rc enters store
   id="agy-trust-z9-$$"
   rec=$(make_agy_spawn_case trust "$id")
@@ -738,22 +744,24 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
   rc=$?
   expect_code 0 "$rc" "an agy spawn into a fresh worktree should succeed"
   assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success"
-  assert_not_contains "$out" "could not pre-register" "a legitimate worktree failed trust pre-registration"
-  assert_agy_trusted "$store" "$WT_DIR" "the spawn did not pre-register the worktree in agy's trust store"
+  # Option A: the spawn READS the trust store for coverage and never writes
+  # it - bin/fm-agy-trust.sh stays uncalled. The fixture path is uncovered,
+  # so the dialog renders once and the gate answers it before counting busy.
+  assert_agy_not_trusted "$store" "$WT_DIR" "the spawn wrote the worktree into agy's trust store"
   assert_agy_trusted "$store" "/home/someone/elsewhere" "the spawn dropped an existing trustedWorkspaces entry"
   [ "$(agy_store_value "$store" model)" = '"Gemini 3.8 Flash (High)"' ] \
     || fail "the spawn did not preserve an unrelated agy setting"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
     || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
   enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
-  [ "$enters" -eq 1 ] \
-    || fail "a pre-trusted worktree must receive only the launch Enter, got $enters Enter sends"
+  [ "$enters" -eq 2 ] \
+    || fail "an uncovered worktree must receive the launch Enter plus exactly one dialog Enter, got $enters Enter sends"
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful agy spawn must never tear down the endpoint it just launched"
-  pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
+  pass "fm-spawn: agy never writes the trust store and answers the dialog once, then confirms busy"
 }
 
-test_agy_dialog_despite_registration_is_answered_once() {
+test_agy_dialog_on_uncovered_path_is_answered_once() {
   local id rec out rc enters
   id="agy-vendor-z10-$$"
   rec=$(make_agy_spawn_case vendor-dialog "$id")
@@ -761,7 +769,7 @@ test_agy_dialog_despite_registration_is_answered_once() {
   out=$(FM_FAKE_AGY_IGNORE_TRUST=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low)
   rc=$?
-  expect_code 0 "$rc" "an agy spawn whose dialog renders despite registration should succeed"
+  expect_code 0 "$rc" "an agy spawn whose dialog renders should succeed"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
     || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
   enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
@@ -782,8 +790,10 @@ test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered() {
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low)
   rc=$?
   expect_code 0 "$rc" "an agy spawn that meets the dialog after a premature busy verdict should still succeed"
-  assert_contains "$out" "could not pre-register agy workspace trust" \
-    "a broken store did not surface the registration warning"
+  # No registration is ever attempted, so a broken store surfaces no warning;
+  # the read-only coverage check simply reports uncovered and the gate takes
+  # its strict path. The store itself must be left exactly as found.
+  assert_not_contains "$out" "could not pre-register" "the spawn attempted a trust registration it must not perform"
   after=$(cat "$store")
   [ "$before" = "$after" ] || fail "the spawn rewrote an unparseable agy store"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
@@ -805,7 +815,7 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn() {
   out=$(FM_FAKE_AGY_ASSUME_TRUSTED=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   [ "$rc" -ne 0 ] || fail "a busy verdict on an unregistered path with no dialog must not pass the gate"
-  assert_contains "$out" "never showed its folder-trust dialog on an unregistered worktree" \
+  assert_contains "$out" "never showed its folder-trust dialog on an untrusted worktree" \
     "the failure did not name the unconfirmed workspace"
   assert_not_contains "$out" "spawned $id" "an unconfirmed workspace still reported a successful spawn"
   [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 1 ] \
@@ -866,22 +876,25 @@ test_agy_secondmate_is_refused() {
   pass "fm-spawn: agy cannot be launched as a secondmate"
 }
 
-test_agy_spawn_arms_no_busy_wiring() {
-  local id rec out rc statedir
-  id="agy-nowiring-z7-$$"
-  rec=$(make_agy_spawn_case nowiring "$id")
+test_agy_spawn_arms_hook_wiring() {
+  local id rec out rc statedir token
+  id="agy-wiring-z7-$$"
+  rec=$(make_agy_spawn_case wiring "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low)
   rc=$?
   expect_code 0 "$rc" "agy spawn should succeed"
   statedir="$HOME_DIR/state"
-  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
-  for sidecar in "$statedir/$id.agy-"*; do
-    [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
-  done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  # The whole port: upstream's adapter installs no hook, ours does. The spawn
+  # arms a busy generation, leaves the worktree pointer naming the private
+  # registry entry, and records that entry's token in state.
+  [ -e "$statedir/$id.busy-gen" ] || fail "agy spawn armed no busy generation for its hook to clear"
+  [ -f "$WT_DIR/.fm-agy-turnend" ] || fail "agy spawn left no worktree pointer for the global plugin"
+  token="$statedir/$id.agy-turnend-token"
+  [ -f "$token" ] || fail "agy spawn recorded no hook registry token"
+  [ -s "$token" ] || fail "agy spawn recorded an empty hook registry token"
+  pass "fm-spawn: agy installs its hook registry entry and arms busy wiring"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -902,15 +915,14 @@ test_agy_effort_xhigh_is_recorded_but_omitted
 test_agy_unlisted_model_refuses_before_pane_creation
 test_agy_unreachable_listing_launches_unvalidated
 test_agy_hung_listing_is_cut_off_and_launches
-test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
-test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
-test_agy_dialog_despite_registration_is_answered_once
+test_agy_spawn_never_writes_the_trust_store_and_answers_the_dialog
+test_agy_dialog_on_uncovered_path_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
-test_agy_spawn_arms_no_busy_wiring
+test_agy_spawn_arms_hook_wiring

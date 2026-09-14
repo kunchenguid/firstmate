@@ -187,6 +187,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# The agy ladder, for one question only: can the rung order this home's
+# config/crew-dispatch.json states actually be enforced? That library falls back
+# to its built-in order rather than refusing, which is right at dispatch time
+# and silent, so the loud half belongs here where a person reads it once.
+# shellcheck source=bin/fm-agy-ladder-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-agy-ladder-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -1222,6 +1228,16 @@ crew_dispatch_validate() {
     end
   ' "$file" 2>/dev/null || true)
   if [ -n "$err" ]; then
+    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
+    return 0
+  fi
+  # The checks above validate dispatch PROFILES. This one validates the agy
+  # LADDER order the same file also defines: a model the gate cannot rank
+  # makes it discard the captain's whole order and enforce the built-in one
+  # instead, and nothing at dispatch time says so.
+  if err=$(fm_agy_ladder_config_problem "$file"); then
+    :
+  else
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
   fi

@@ -255,6 +255,14 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    agy)
+      # agy's turn-end and busy hooks are one firstmate-owned GLOBAL plugin
+      # gated by this worktree pointer and its private registry entry; the
+      # session sidecar records the conversation and the model agy resolved.
+      printf '%s\n' "$wt/.fm-agy-turnend"
+      printf '%s\n' "$state/$id.agy-turnend-token"
+      printf '%s\n' "$state/$id.agy-session"
+      ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing
@@ -265,8 +273,8 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
-# grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
+# grok, kimi, and agy are the adapters whose turn-end hook is global and gated
+# by a private token file; every other adapter's wiring is fully covered by
 # fm_control_harness_wiring_paths. Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
@@ -274,6 +282,7 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   case "$harness" in
     grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
+    agy) printf '%s\n' "$state/$id.agy-turnend-token" ;;
   esac
 }
 
@@ -283,6 +292,11 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    # Stated inline for the same reason grok's and kimi's are: this file is a
+    # dependency-free contract, and taking an include for one path string would
+    # make every caller and fixture that symlinks it provide a second file.
+    # bin/fm-agy-lib.sh owns this layout; keep the two in step.
+    agy) printf '%s\n' "${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}/plugins/fm-turn-end/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
 }

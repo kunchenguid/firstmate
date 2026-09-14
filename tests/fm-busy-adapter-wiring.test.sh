@@ -422,10 +422,35 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_agy_hook_source_trusted() {
+  # The spawn-installed agy plugin pushes PreInvocation opens and Stop closes
+  # through the agy-hook source (bin/fm-spawn.sh installs it; this pins the
+  # trust half here and the registry wiring in the spend-gate suite). The
+  # rendered-tail fallback stays beneath it, not instead of it.
+  local state id=busy-agy-1 out gen
+  state="$TMP_ROOT/agy-hook/state"
+  mkdir -p "$state"
+  case " $(fm_busy_sources_for_harness agy) " in
+    *' agy-hook '*) : ;;
+    *) fail "agy must trust the agy-hook semantic source, got '$(fm_busy_sources_for_harness agy)'" ;;
+  esac
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" --source agy-hook --event pre-invocation >/dev/null \
+    || fail "agy-hook busy apply failed"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$state")
+  [ "$out" = "busy agy-hook" ] || fail "PreInvocation must classify 'busy agy-hook', got '$out'"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" --source agy-hook --event stop >/dev/null \
+    || fail "agy-hook idle apply failed"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$state")
+  [ "$out" = "idle agy-hook" ] || fail "Stop must classify 'idle agy-hook', got '$out'"
+  pass "agy PreInvocation opens and Stop closes through the trusted agy-hook source"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
+test_agy_hook_source_trusted
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless

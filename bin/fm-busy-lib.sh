@@ -36,6 +36,9 @@
 #   omp-ext          omp (Oh My Pi) per-task extension (agent_start/agent_end without willContinue)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   agy-hook         agy lifecycle hooks (PreInvocation opens, Stop closes),
+#                    delivered by the ONE firstmate-owned global agy plugin
+#                    bin/fm-spawn.sh installs (bin/fm-agy-lib.sh owns its paths)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -58,15 +61,20 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      Grok/Rovo temporary regex fallbacks classify a grok or rovo task from
+#      its rendered tail, and the AGY tail fallback backstops an agy task
+#      whose hook record has not landed yet, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
-# in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
-# path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
+# Grok and Rovo are the ONLY rendered-text classifications that survive the
+# redesign without a hook beside them, because neither structured lifecycle
+# was credited-live-verified in the approved audit (Rovo's clean ACP
+# stopReason lives outside the TUI path firstmate drives, see
+# references/harness/rovo.md); each is scoped to its own harness= and can
+# never classify another adapter. agy keeps its rendered-tail fallback too,
+# but as a backstop beneath its hook record, not instead of one: agy 1.2.x
+# exposes SessionStart, PreInvocation, PostInvocation and Stop, and the
+# spawn-installed plugin pushes PreInvocation opens and Stop closes through
+# the agy-hook source above. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
 # recorded worker state source.
@@ -204,6 +212,7 @@ fm_busy_sources_for_harness() {  # <harness>
     gemini*) adapter=gemini-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
+    agy*) adapter=agy-hook ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
@@ -856,16 +865,16 @@ fm_busy_rovo_tail_busy() {
     | grep -qiE "${FM_BUSY_ROVO_REGEX:-Rovo is thinking}"
 }
 
-# fm_busy_agy_tail_busy: the AGY-only temporary rendered-tail fallback.
-# Consumes the tail on stdin; 0 when AGY's verified busy signature matches:
+# fm_busy_agy_tail_busy: the AGY-only rendered-tail backstop beneath the hook
+# record. Consumes the tail on stdin; 0 when AGY's verified busy signature matches:
 # the `esc to cancel` token in the status row the TUI pins to the bottom of
 # the pane while a turn runs (verified live on agy 1.2.0; the idle status row
 # shows `? for shortcuts` instead). The `Generating...` spinner word that
 # renders beside it is deliberately NOT matched: it is a free-floating output
 # line, so ordinary worker output echoing the word would classify an idle
-# worker as busy. agy exposes no hook surface, so this fallback is the only
-# pane-side source; it is never armed as a semantic writer
-# (fm_busy_sources_for_harness trusts nothing for agy).
+# worker as busy. The hook record above is the primary pane-side source; this
+# fallback covers only the window before the first PreInvocation lands, and
+# is never armed as a semantic writer.
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
