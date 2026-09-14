@@ -27,7 +27,7 @@ echo "error: unknown option '--list-models'" >&2; exit 1
 SH
   cat > "$fakebin/codex-stubw" <<'SH'
 #!/usr/bin/env sh
-if [ "${1:-}" = --list-models ]; then printf '%s\n' 'alpha Alpha model' 'beta Beta model'; exit 0; fi
+if [ "${1:-}" = --list-models ]; then printf '%s\n' 'alpha Alpha model' 'beta Beta model' 'muse Muse model'; exit 0; fi
 exit 0
 SH
   chmod +x "$fakebin"/claude-stubw "$fakebin"/claude-pinnedw "$fakebin"/codex-stubw
@@ -68,7 +68,9 @@ EOF
 }
 
 wrapper_brief_ref() {
-  printf '"$(%s encode launch-brief < %s)"' \
+  # Double-quoted with an escaped dollar so the emitted launch fragment keeps
+  # a literal command substitution (single quotes would trip SC2016).
+  printf "\"\$(%s encode launch-brief < %s)\"" \
     "'$ROOT/bin/fm-operational-input.sh'" "'$HOME_DIR/data/$1/launch-brief.md'"
 }
 
@@ -116,11 +118,12 @@ test_codex_wrapper_keeps_notify_and_brief_position() {
   status=$?
   expect_code 0 "$status" "codex wrapper spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'alpha' -- -c 'model_reasoning_effort=" "codex wrapper launch shape wrong"
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'alpha' -c 'model_reasoning_effort=" "codex wrapper launch shape wrong"
+  if printf '%s' "$launch" | grep -F -q -- "'alpha' --"; then fail "codex wrapper launch carries a claude-style separator"; fi
   assert_contains "$launch" "\"high\"' --dangerously-bypass-approvals-and-sandbox" "codex wrapper launch shape wrong"
   assert_contains "$launch" "touch '$HOME_DIR/state/$id.turn-ended'" "codex wrapper launch lost turn-end notification"
   assert_contains "$launch" "$(wrapper_brief_ref "$id")" "codex wrapper launch lost brief position"
-  pass "codex wrapper keeps notify wiring and brief position behind separator"
+  pass "codex wrapper keeps notify wiring and brief position with no separator"
 }
 
 test_pool_claude_wrapper_carries_no_codex_notify_or_home() {
@@ -132,7 +135,7 @@ test_pool_claude_wrapper_carries_no_codex_notify_or_home() {
 {"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"claude-stubw","model":"beta","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
 JSON
 
-  out=$(run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
+  out=$(FM_FAKE_PANE_COMMAND=claude-stubw run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
   status=$?
   expect_code 0 "$status" "pool claude wrapper spawn should succeed"
   assert_contains "$out" "candidate=w" "pool spawn did not report wrapper candidate"
@@ -152,11 +155,12 @@ test_pool_codex_wrapper_keeps_notify_without_home() {
 {"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"codex-stubw","model":"alpha","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
 JSON
 
-  out=$(run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
+  out=$(FM_FAKE_PANE_COMMAND=codex-stubw run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
   status=$?
   expect_code 0 "$status" "pool codex wrapper spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'alpha' --" "pool codex wrapper launch shape wrong"
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'alpha' -c" "pool codex wrapper launch shape wrong"
+  if printf '%s' "$launch" | grep -F -q -- "'alpha' --"; then fail "pool codex wrapper launch carries a claude-style separator"; fi
   assert_contains "$launch" '-c "notify=' "pool codex wrapper launch lost notify wiring"
   if printf '%s' "$launch" | grep -F -q 'CODEX_HOME='; then fail "pool codex wrapper launch carries null codex home"; fi
   pass "pool codex wrapper delivery keeps notify wiring without codex home"
@@ -197,11 +201,73 @@ test_wrapper_refusals_fail_before_endpoint() {
   pass "unknown, missing, unlisted, pinned-alias and ultra wrapper launches refuse before endpoint"
 }
 
+test_codex_wrapper_omits_separator_on_muse_route() {
+  # Regression for the fleet-assignment-ship launch defect: the pool selected
+  # the muse candidate, but a Claude-style -- before the Codex options ended
+  # option parsing, so Codex exited on model_reasoning_effort and the route was
+  # still marked launched. The codex family must carry its flags with no
+  # separator while claude keeps its own (pinned above).
+  local rec id out status launch
+  id=wrap-codex-muse-z1
+  rec=$(make_wrapper_case codex-muse "$id")
+  read_wrapper_case "$rec"
+
+  out=$(run_wrapper_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex-stubw --model muse --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "codex muse wrapper spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'muse' -c 'model_reasoning_effort=\"xhigh\"" "codex muse route lost its effort flag position"
+  if printf '%s' "$launch" | grep -F -q -- "'muse' --"; then fail "codex muse route carries a claude-style separator"; fi
+  pass "codex muse route omits the separator the real launch choked on"
+}
+
+test_pool_launch_refuses_when_no_agent_becomes_live() {
+  # A pool route whose endpoint never runs an agent must refuse before meta
+  # publication with the receipt rolled back to failed, never marked launched.
+  # FM_FAKE_DROP_WINDOWS hides the created window (missing); the shell-command
+  # case proves the confident dead verdict refuses the same way.
+  local rec id out status receipt
+  id=wrap-pool-nolive-z1
+  rec=$(make_wrapper_case pool-nolive "$id")
+  read_wrapper_case "$rec"
+  cat > "$HOME_DIR/config/dispatch-pools.json" <<'JSON'
+{"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"codex-stubw","model":"alpha","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
+JSON
+
+  out=$(FM_FAKE_DROP_WINDOWS=1 FM_POOL_LIVENESS_ATTEMPTS=2 FM_POOL_LIVENESS_SLEEP=0 run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "pool spawn with a missing endpoint succeeded"
+  assert_contains "$out" "exited before an agent became live" "missing-endpoint refusal wrong"
+  assert_contains "$out" "state=missing" "missing-endpoint refusal misnames its verdict"
+  receipt=$(jq -r '.receipts[0].status' "$HOME_DIR/state/dispatch-pools.json")
+  [ "$receipt" = failed ] || fail "missing-endpoint receipt not rolled back, got $receipt"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused pool spawn published task metadata"
+
+  id=wrap-pool-dead-z1
+  rec=$(make_wrapper_case pool-dead "$id")
+  read_wrapper_case "$rec"
+  cat > "$HOME_DIR/config/dispatch-pools.json" <<'JSON'
+{"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"codex-stubw","model":"alpha","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
+JSON
+
+  out=$(FM_FAKE_PANE_COMMAND=zsh FM_POOL_LIVENESS_ATTEMPTS=2 FM_POOL_LIVENESS_SLEEP=0 run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "pool spawn with an exited agent succeeded"
+  assert_contains "$out" "exited before an agent became live" "dead-endpoint refusal wrong"
+  assert_contains "$out" "state=dead" "dead-endpoint refusal misnames its verdict"
+  receipt=$(jq -r '.receipts[0].status' "$HOME_DIR/state/dispatch-pools.json")
+  [ "$receipt" = failed ] || fail "dead-endpoint receipt not rolled back, got $receipt"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused pool spawn published task metadata"
+  pass "pool launches refuse and roll back when no agent becomes live"
+}
+
 test_claude_wrapper_threads_listed_alias_before_separator
 test_claude_pinned_wrapper_takes_no_positional_model
 test_codex_wrapper_keeps_notify_and_brief_position
 test_pool_claude_wrapper_carries_no_codex_notify_or_home
 test_pool_codex_wrapper_keeps_notify_without_home
+test_codex_wrapper_omits_separator_on_muse_route
+test_pool_launch_refuses_when_no_agent_becomes_live
 test_wrapper_refusals_fail_before_endpoint
 
 echo "# all fm-spawn-wrapper tests passed"

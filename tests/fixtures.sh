@@ -107,16 +107,59 @@ fm_test_fake_tmux_spawn() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  # Liveness seam for the pool-launch gate: FM_FAKE_PANE_COMMAND answers the
+  # pane_current_command read so a test can emulate a live agent (a harness
+  # name) or an exited one (a shell). Unset keeps the legacy
+  # agent-unattributable answer.
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
+# The liveness gate reads backend state, so this stub models a minimal
+# window lifecycle: new-window records its -n name beside the launch log and
+# list-windows inventories those records, so a created endpoint reads present
+# only after it is created. FM_FAKE_DUPLICATE_WINDOW keeps its explicit
+# pre-seed for the duplicate test that owns it; FM_FAKE_DROP_WINDOWS=1 hides
+# the records to emulate an endpoint that vanished after creation.
+_fm_fake_tmux_windows_file() {
+  [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] || return 1
+  printf '%s/.fake-tmux-windows' "$(dirname "$FM_FAKE_LAUNCH_LOG")"
+}
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
+    if [ -z "${FM_FAKE_DROP_WINDOWS:-}" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && [ -f "$wf" ] && cat "$wf"
+    fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    wname=; prev=
+    for _a in "$@"; do
+      if [ "$prev" = "-n" ]; then wname=$_a; fi
+      prev=$_a
+    done
+    if [ -n "$wname" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && printf '%s\n' "$wname" >> "$wf"
+    fi
+    exit 0
+    ;;
+  kill-window)
+    wt=; prev=
+    for _a in "$@"; do
+      if [ "$prev" = "-t" ]; then wt=$_a; fi
+      prev=$_a
+    done
+    if [ -n "$wt" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && [ -f "$wf" ] && {
+        wname=$(printf '%s' "$wt" | tr -d '=' | sed 's/^.*://')
+        grep -vxF -- "$wname" "$wf" > "$wf.tmp" && mv "$wf.tmp" "$wf"
+      }
+    fi
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

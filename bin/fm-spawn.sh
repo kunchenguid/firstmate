@@ -1790,12 +1790,14 @@ launch_template() {
 
 # wrapper_launch builds a supervised launch for a PATH wrapper executable in a
 # verified CLI family. The wrapper owns model selection: a listed alias goes
-# positionally before the separator, a pinned wrapper takes none, and -- carries
-# the family autonomy flags plus the brief through to the underlying CLI. Family
-# templates stay the single owner of flag shapes; this only swaps the binary
-# word and inserts the alias/separator. The caller re-derives the family for the
-# harness-keyed effort substitution below. HARNESS keeps the wrapper name so the
-# claude* wiring arms match it.
+# positionally first, a pinned wrapper takes none, and the family autonomy
+# flags plus the brief follow. Only the claude family keeps a -- separator
+# before its flags; the Codex CLI ends option parsing at --, so a separator
+# there would turn its -c/-- flags into positional text and kill the launch.
+# Family templates stay the single owner of flag shapes; this only swaps the
+# binary word and inserts the alias (and the claude-only separator). The caller
+# re-derives the family for the harness-keyed effort substitution below.
+# HARNESS keeps the wrapper name so the claude* wiring arms match it.
 wrapper_launch() {  # <wrapper> <kind> <model> -> launch on stdout
   local name=$1 kind=$2 model=$3 family bin famlaunch aliaspart bin_q rows
   case "$name" in
@@ -1816,7 +1818,7 @@ wrapper_launch() {  # <wrapper> <kind> <model> -> launch on stdout
   bin_q=$(shell_quote "$bin")
   case "$family" in
     claude) printf '%s' "${famlaunch%% claude *} $bin_q ${aliaspart}-- ${famlaunch#* claude }" ;;
-    codex) printf '%s' "$bin_q ${aliaspart}-- ${famlaunch#codex }" ;;
+    codex) printf '%s' "$bin_q ${aliaspart}${famlaunch#codex }" ;;
   esac
 }
 
@@ -4381,6 +4383,39 @@ if [ "$HARNESS" = agy ]; then
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
     exit 1
+  fi
+fi
+
+# Pool-launch liveness: a pool route whose process exits before an agent is
+# live must refuse here, after delivery but before meta publication and before
+# the receipt is marked launched, so the EXIT trap rolls the receipt back to
+# failed instead of recording a launch with no worker behind it. Only the
+# confident dead/missing verdicts refuse; ambiguous, unreadable, and unverified
+# readings proceed, because under fm_backend_agent_state's contract only dead
+# and missing license recovery. The settle poll covers the window between Enter
+# and the harness exec, during which even a healthy pane still reads as its
+# launching shell.
+if [ -n "$POOL_RECEIPT" ]; then
+  POOL_LIVENESS_ATTEMPTS=${FM_POOL_LIVENESS_ATTEMPTS:-6}
+  POOL_LIVENESS_SLEEP=${FM_POOL_LIVENESS_SLEEP:-1}
+  POOL_LIVE=0
+  POOL_LAST_STATE=unknown
+  while [ "$POOL_LIVENESS_ATTEMPTS" -gt 0 ]; do
+    POOL_LAST_STATE=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf 'unreadable')
+    case "$POOL_LAST_STATE" in
+      alive) POOL_LIVE=1; break ;;
+    esac
+    POOL_LIVENESS_ATTEMPTS=$((POOL_LIVENESS_ATTEMPTS - 1))
+    [ "$POOL_LIVENESS_ATTEMPTS" -gt 0 ] && sleep "$POOL_LIVENESS_SLEEP"
+  done
+  if [ "$POOL_LIVE" -ne 1 ]; then
+    case "$POOL_LAST_STATE" in
+      dead|missing)
+        printf 'failed: pool launch exited before an agent became live (candidate=%s state=%s)\n' "$POOL_CANDIDATE" "$POOL_LAST_STATE" >> "$STATE/$ID.status"
+        echo "error: pool launch for task $ID exited before an agent became live (candidate=$POOL_CANDIDATE receipt=$POOL_RECEIPT state=$POOL_LAST_STATE); inspect window $T" >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

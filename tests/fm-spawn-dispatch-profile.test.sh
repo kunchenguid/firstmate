@@ -1305,7 +1305,7 @@ test_native_candidate_pools() {
   fm_test_pool_codex "$FAKEBIN_DIR"
   fm_test_pool_config "$HOME_DIR/config/dispatch-pools.json"
   mkdir -p "$HOME_DIR/user-home/.codex"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); status=$?
+  out=$(FM_FAKE_PANE_COMMAND=codex run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); status=$?
   assert_equals 0 "$status" "native pool ship failed: $out"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-astra low
   assert_grep 'route_pool=test' "$HOME_DIR/state/$id.meta" 'pool not recorded'
@@ -1327,7 +1327,7 @@ test_native_candidate_pools() {
   fm_test_pool_codex "$FAKEBIN_DIR"
   fm_test_pool_config "$HOME_DIR/config/dispatch-pools.json"
   mkdir -p "$HOME_DIR/user-home/.codex"
-  out=$(run_spawn "$HOME_DIR" "$target" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$target" --secondmate 2>&1); status=$?
+  out=$(FM_FAKE_PANE_COMMAND=codex run_spawn "$HOME_DIR" "$target" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$target" --secondmate 2>&1); status=$?
   assert_equals 0 "$status" "native secondmate pool failed: $out"
   assert_grep 'route_pool=test' "$HOME_DIR/state/$id.meta" 'secondmate pool not recorded'
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-astra low
