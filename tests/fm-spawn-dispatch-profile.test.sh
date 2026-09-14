@@ -1184,7 +1184,7 @@ test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
-  local rec id out launch kind prompt brief_kind brief content
+  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
   for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
     [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
@@ -1221,12 +1221,28 @@ SH
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
     launch=$(cat "$LAUNCH_LOG")
+    envelope="$CASE_DIR/prompt-envelope"
+    encoded="$CASE_DIR/encoded-prompt"
     prompt="$CASE_DIR/prompt"
-    FM_ROLE_PROMPT="$prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
+    FM_ROLE_PROMPT="$envelope" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
+    sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
+    "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" ||
+      fail "could not decode $kind launch-brief envelope"
     # The final prompt delivered to the harness is the generated interface.
-    # An authored role heading must neither suppress nor duplicate the current
-    # worker contract; the launch section is its single, superseding owner.
+    # The current identity must precede the authored task, because a Firstmate
+    # worktree's own AGENTS.md assigns the unrelated supervisor identity.
+    first_line=$(sed -n '1p' "$prompt")
+    [ "$first_line" = '# Current worker role contract' ] ||
+      fail "$brief_kind $kind did not establish worker identity before task content"
+    role_line=$(grep -n '^# Current worker role contract$' "$prompt" | cut -d: -f1)
+    task_line=$(grep -n '^# Task$' "$prompt" | head -1 | cut -d: -f1)
+    [ "$role_line" -lt "$task_line" ] || fail "$brief_kind $kind put the worker identity after the task"
     assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
+    assert_grep 'You are a crewmate: an autonomous worker agent managed by firstmate' "$prompt" "$kind command did not establish the worker identity directly"
+    inbox="$HOME_DIR/state/$id.inbox"
+    assert_grep "$inbox" "$prompt" "$kind command did not name the worker's own steering inbox"
+    assert_grep "do not reject it as another home's state" "$prompt" "$kind command did not distinguish its inbox from another home's namespace"
+    assert_grep "Never inspect or change any other home's endpoint namespace" "$prompt" "$kind command weakened cross-home isolation"
     assert_grep 'brief for' "$prompt" "$kind command lost the task"
     [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
       fail "$brief_kind $kind duplicated the delivered worker contract"

@@ -526,9 +526,10 @@ test_disabled_relaunch_clears_prior_trace_context() {
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
-  local dir out rc brief
+  local dir out rc brief launch_brief first_line role_line task_line
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
+  cp "$ROOT/AGENTS.md" "$dir/wt/AGENTS.md"
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
   brief="$dir/home/data/rl2/brief.md"
@@ -537,7 +538,18 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
-  pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
+  launch_brief="$dir/home/data/rl2/launch-brief.md"
+  first_line=$(sed -n '1p' "$launch_brief")
+  [ "$first_line" = '# Current worker role contract' ] ||
+    fail "a Firstmate-worktree relaunch did not establish the crewmate identity first"
+  role_line=$(grep -n '^# Current worker role contract$' "$launch_brief" | cut -d: -f1)
+  task_line=$(grep -n '^# Task$' "$launch_brief" | head -1 | cut -d: -f1)
+  [ "$role_line" -lt "$task_line" ] || fail "the relaunched worker identity followed its task content"
+  assert_grep "$dir/home/state/rl2.inbox" "$launch_brief" \
+    "the Firstmate-worktree relaunch omitted the worker's exact steering inbox"
+  assert_grep 'do not reject it as another home' "$launch_brief" \
+    "the Firstmate-worktree relaunch did not distinguish its inbox from cross-home state"
+  pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {

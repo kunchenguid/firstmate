@@ -24,9 +24,10 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
-#   using the same private launch-brief overlay. This never rewrites a project's
-#   instruction files or a secondmate's charter.
+#   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
+#   first in the private launch-brief overlay, including the exact task-owned
+#   steering inbox. This never rewrites a project's instruction files or a
+#   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -2392,9 +2393,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    cat "$SOURCE_BRIEF" &&
+    fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
-      fm_brief_worker_role &&
+      cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi

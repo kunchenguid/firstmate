@@ -831,7 +831,7 @@ EOF
 }
 
 test_spawn_refreshes_legacy_worker_roles() {
-  local rec home proj fakebin kind id out brief project_kind
+  local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line
   rec=$(make_home worker-roles)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -858,9 +858,13 @@ EOF
       assert_not_contains "$out" 'could not render' "worker role rendering failed"
       brief="$home/data/$id/launch-brief.md"
       assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
+      first_line=$(sed -n '1p' "$brief")
+      [ "$first_line" = '# Current worker role contract' ] ||
+        fail "$project_kind $kind did not put worker identity first"
       assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
+      assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
-      assert_grep 'Other projects retain their own instructions unchanged' "$brief" "$project_kind $kind displaced project guidance"
+      assert_grep 'Project instructions still govern the work wherever they do not conflict with this worker identity' "$brief" "$project_kind $kind displaced project guidance"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
@@ -868,6 +872,10 @@ EOF
       [ "$(cat "$proj/CLAUDE.md")" = '@AGENTS.md' ] || fail "spawn changed the project import"
     done
   done
+  role_line=$(grep -n 'A ship or scout worker launched by Firstmate into a worktree of this repository' "$ROOT/AGENTS.md" | cut -d: -f1)
+  supervisor_line=$(grep -n '^You are the first mate\.$' "$ROOT/AGENTS.md" | head -1 | cut -d: -f1)
+  [ -n "$role_line" ] && [ "$role_line" -lt "$supervisor_line" ] ||
+    fail "Firstmate AGENTS.md does not disambiguate a launched worker before assigning the supervisor identity"
   cmp -s "$ROOT/AGENTS.md" "$home/AGENTS.md" || fail "worker spawn changed the primary contract"
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
