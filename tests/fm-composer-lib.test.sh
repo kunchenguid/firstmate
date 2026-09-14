@@ -698,6 +698,59 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+test_modal_dialog_is_dialog() {
+  local screen out
+  screen=$'╭─────────────────────────────────────────────────────────────────╮\n│ Dangerous rm operation on possibly-empty variable path: $S/*.mov│\n│ Do you want to proceed?  1. Yes  2. No                          │\n╰─────────────────────────────────────────────────────────────────╯'
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1)
+  [ "$out" = dialog ] \
+    || fail "a bordered box without a prompt glyph must read dialog, got '$out'"
+  pass "fm_composer_classify_screen: a bordered box without a prompt glyph is a modal dialog"
+}
+
+test_single_line_modal_dialog_is_dialog() {
+  local screen out
+  screen=$'╭─────────────────────────────────────────────────────────────────╮\n│ Do you trust the contents of this directory?                    │\n╰─────────────────────────────────────────────────────────────────╯'
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1)
+  [ "$out" = dialog ] \
+    || fail "a bordered box with a single trust-prompt line must read dialog, got '$out'"
+  pass "fm_composer_classify_screen: single line modal dialog is classified as dialog"
+}
+
+test_matrix_unicode_ellipsis_placeholder() {
+  # Opencode's idle hint now renders its dots as U+2026 HORIZONTAL ELLIPSIS
+  # with a rotating quoted suggestion (observed 2026-09-08): `Ask anything…
+  # "Fix broken tests"`. The fleet-wide idle literals spell three ASCII dots,
+  # so without ellipsis normalisation the hint reads as real typed text and an
+  # idle opencode worker classifies pending forever instead of empty.
+  local uni ascii typed
+  uni=$'  ┃\n  ┃  Ask anything… "Fix broken tests"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode unicode-ellipsis idle on plain backends" empty "$CAPS_PLAIN" "$uni"
+  assert_screen "opencode unicode-ellipsis idle on herdr" empty "$CAPS_STYLED" "$uni"
+  assert_screen "opencode unicode-ellipsis idle on zellij" empty "$CAPS_STYLED_NOID" "$uni"
+  ascii=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode ascii-dots idle on plain backends" empty "$CAPS_PLAIN" "$ascii"
+  typed=$'┃\n┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
+  assert_screen "opencode real typed text stays pending on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "opencode real typed text stays pending on herdr" pending "$CAPS_STYLED" "$typed"
+  # The same cosmetic switch on any other placeholder is covered by the same
+  # normalisation at the match layer, not by another literal: grok's bordered
+  # `Type a message…` matches the fleet-wide set once normalised, and the ASCII
+  # form still does. This stays a literal match, not a catch-all: longer text
+  # carrying an ellipsis still refuses to match the anchored placeholder.
+  fm_composer_idle_matches 'Type a message…' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive \
+    || fail "a Unicode-ellipsis grok placeholder must match the idle set"
+  fm_composer_idle_matches 'Type a message...' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive \
+    || fail "the ASCII grok placeholder must still match the idle set"
+  fm_composer_idle_matches 'Type a message… and more' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive \
+    && fail "a longer line carrying an ellipsis must NOT match the anchored placeholder"
+  fm_composer_idle_matches 'wait…' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive \
+    && fail "ordinary typed text carrying an ellipsis must NOT match the idle set"
+  pass "matrix: a Unicode-ellipsis idle placeholder reads empty, ASCII still does, and real typed text stays pending"
+}
+test_modal_dialog_is_dialog
+test_single_line_modal_dialog_is_dialog
+test_matrix_unicode_ellipsis_placeholder
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)

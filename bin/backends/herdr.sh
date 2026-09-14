@@ -2343,16 +2343,120 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_endpoint_tty: the controlling terminal of <target>'s pane,
+# as `ps` names it, or empty when it cannot be read. Herdr exposes no tty
+# field, so this goes through the pane's own shell pid, which it does expose;
+# the resulting name is the same one `ps -t` accepts on both macOS
+# (`ttys034`) and Linux (`pts/3`). Supplies fm-backend.sh's suspension probe.
+fm_backend_herdr_endpoint_tty() {  # <target>
+  local target=$1 session pane info shell_pid tty
+  # Parsed locally, never through fm_backend_herdr_parse_target: that helper
+  # publishes FM_BACKEND_HERDR_SESSION/PANE for its caller to read afterwards,
+  # and this probe runs from inside other classifiers. Setting those globals
+  # here would rewrite a caller's own endpoint under it mid-decision.
+  session=${target%%:*}
+  pane=${target#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 0
+  info=$(fm_backend_herdr_cli "$session" pane process-info \
+    --pane "$pane" 2>/dev/null) || return 0
+  shell_pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    select(.result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid
+    | select(type == "number" and . > 1) | floor
+  ' 2>/dev/null) || return 0
+  tty=$(LC_ALL=C ps -p "$shell_pid" -o tty= 2>/dev/null | tr -d '[:space:]') || return 0
+  case "$tty" in ''|'??'|'?') return 0 ;; esac
+  printf '%s' "$tty"
+}
+
+# fm_backend_herdr_identity_claimants: every live pane in <target>'s SESSION
+# whose owning tab is labeled <expected-label> and whose directory is
+# <expected-cwd>. One `<session>:<pane_id>` target per line.
+#
+# This is the lookup that makes a renumbered pane id recoverable rather than
+# indistinguishable from a closed one. Herdr's pane and tab ids are generated
+# and are re-issued when the server rebuilds its layout, so the recorded id is
+# the ONE part of a task's endpoint that is not stable; the tab label and the
+# directory are both written by firstmate at spawn and are.
+#
+# Scope is the recorded session, never the machine: another herdr session is
+# another server, and a pane there is not this task's endpoint. The label join
+# runs over `tab list`/`pane list` per workspace, and every surviving
+# candidate's directory is confirmed through `pane get` - whose
+# `.result.pane.cwd` is the creation-time cwd and `.result.pane.foreground_cwd`
+# tracks the live foreground process - matched both as given and canonicalized,
+# since a home under /tmp reaches Herdr as /private/tmp on macOS.
+fm_backend_herdr_identity_claimants() {  # <target> <expected-label> <expected-cwd>
+  local target=$1 label=$2 cwd=$3 session pane real_cwd workspaces ws tabs panes cand p info pcwd
+  [ -n "$label" ] && [ -n "$cwd" ] || return 0
+  # Parsed locally for the same reason fm_backend_herdr_endpoint_tty is.
+  session=${target%%:*}
+  pane=${target#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 0
+  real_cwd=$(cd "$cwd" 2>/dev/null && pwd -P) || real_cwd=$cwd
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$ws" 2>/dev/null) || continue
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$ws" 2>/dev/null) || continue
+    # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
+    # keyword (label/break), so declaring a jq variable named "label" is a
+    # compile error that `2>/dev/null` would silently swallow, making this
+    # lookup ALWAYS return empty.
+    cand=$(printf '%s\n%s\n' "$panes" "$tabs" | jq -r --arg session "$session" --arg want "$label" '
+      (.[0].result.panes | select(type == "array")) as $panes
+      | (.[1].result.tabs | select(type == "array")) as $tabs
+      | ([$tabs[] | select(.label == $want) | .tab_id]) as $wantids
+      | $panes[]
+      | select(.tab_id as $t | $wantids | index($t))
+      | .pane_id
+      | select(type == "string" and length > 0)
+      | "\($session):\(.)"
+    ' 2>/dev/null) || continue
+    [ -n "$cand" ] || continue
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      info=$(fm_backend_herdr_cli "$session" pane get "${p#*:}" 2>/dev/null) || continue
+      pcwd=$(printf '%s' "$info" | jq -r '.result.pane.cwd // empty, .result.pane.foreground_cwd // empty' 2>/dev/null)
+      [ -n "$pcwd" ] || continue
+      if printf '%s\n' "$pcwd" | grep -Fxq -e "$cwd" -e "$real_cwd"; then
+        printf '%s\n' "$p"
+      fi
+    done <<EOF
+$cand
+EOF
+  done <<EOF
+$(printf '%s' "$workspaces" | jq -r '.result.workspaces[]? | .workspace_id // empty' 2>/dev/null)
+EOF
+  return 0
+}
+
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
-# confirm; live, stale-agent, and unknown all refuse (1), so an inconclusive
-# read never licenses closing anything, and a stale registration - agent-free
-# for RECOVERY, which reuses the pane - still never licenses closing it, because
-# the shell it holds may be a nested worktree shell. Restored-layout recovery
-# depends on this fail-safe-toward-refusal behavior.
+# confirm, and only when no stopped agent process contradicts them; live and
+# unknown both refuse (1), so an inconclusive read never licenses closing
+# anything, and a stale registration - agent-free for RECOVERY, which reuses
+# the pane - still never licenses closing it, because the shell it holds may
+# be a nested worktree shell. Restored-layout recovery depends on this
+# fail-safe-toward-refusal behavior.
 fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
-    dead|no-agent) return 0 ;;
+    no-agent)
+      # A SUSPENDED agent reads exactly like a restored husk: Herdr
+      # deregisters the agent the moment the shell reclaims the foreground, so
+      # a ctrl-z'd worker answers agent_not_found while its process is still
+      # there, stopped, and resumable. Closing that tab would destroy live
+      # work, so the stopped-process evidence refuses here too. The probe
+      # lives in bin/fm-backend.sh, which this adapter must also work without
+      # (isolated consumers source the adapter on its own), so its absence
+      # keeps the historical verdict rather than failing the read.
+      if command -v fm_backend_endpoint_suspended >/dev/null 2>&1 \
+        && fm_backend_endpoint_suspended herdr "$1:$2"; then
+        return 1
+      fi
+      return 0
+      ;;
+    dead) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2388,7 +2492,9 @@ fm_backend_herdr_server_running_state() {  # <session>
 # a confirmed agent-less pane is `dead` - whether nothing is registered or a
 # registration lingers over a shell-only pane (stale-agent, issue #4115) - a
 # registered agent with a live process is `alive`, and an unexpected or failed
-# API read is `unreadable`.
+# API read is `unreadable`. Both recovery-licensing verdicts are then refined
+# against endpoint evidence by fm-backend.sh's fm_backend_agent_state, which
+# owns that rule for every backend.
 #
 # One exception to that last case, and it is deliberately made HERE rather than
 # in the husk classifier: a read can fail because the recorded session's server
@@ -3126,7 +3232,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|dialog|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then

@@ -521,7 +521,7 @@ fm_backend_zellij_composer_capture() {  # <target> [expected-label]
 # a message the crew never received. A dead pane still fails safe here: the
 # unconditional-exit-0 CLI quirk (file header) yields an empty dump, which
 # classifies unknown - never a confirmation.
-fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
+fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|dialog|unknown
   local target=$1 expected_label=${2:-} cap caps verdict
   if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label"); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")

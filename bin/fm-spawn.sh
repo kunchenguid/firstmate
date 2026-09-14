@@ -349,7 +349,13 @@
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
-# consumers can distinguish a replacement worker that reuses the same task id.
+# consumers can distinguish a replacement worker that reuses the same task id,
+# and a spawned_at= epoch stamping when THIS incarnation's record was published.
+# The record is published before the harness can possibly be running in the
+# endpoint, so spawned_at= is what lets a consumer tell an endpoint whose agent
+# has not started yet from one whose agent left (bin/fm-crew-state.sh's
+# registration grace); a relaunch refreshes it because the replacement agent
+# starts from scratch too.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -1386,7 +1392,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" \
+    "fm-$ID" "$(fm_meta_get "$RELAUNCH_META" worktree 2>/dev/null || true)")
   RELAUNCH_ENDPOINT_MISSING=0
   case "$RELAUNCH_STATE" in
     dead)
@@ -1400,6 +1407,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
       # not a failed read or a timeout. A replacement endpoint will be created
       # in the task's recorded worktree, bound to the same task.
       RELAUNCH_ENDPOINT_MISSING=1
+      ;;
+    drifted)
+      echo "error: task $ID's recorded endpoint no longer resolves, but a live endpoint still carries this task's identity, so its agent is running under a new identifier rather than gone; relaunching would put a second agent on the same worktree. Correct the record with bin/fm-control.sh $ID rebind, then decide from its actual state" >&2
+      exit 1
+      ;;
+    suspended)
+      echo "error: task $ID's agent is stopped, not gone; a relaunch would abandon a resumable worker. Resume it in its own endpoint (fg), then decide from its actual state" >&2
+      exit 1
       ;;
     *)
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires either an agent-free endpoint (dead) or a provably absent one (missing); stop the agent first with bin/fm-control.sh $ID exit" >&2
@@ -4051,6 +4066,7 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+SPAWN_PUBLISHED_AT=$(date +%s)
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -4067,7 +4083,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen spawned_at traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4087,6 +4103,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  echo "spawned_at=$SPAWN_PUBLISHED_AT"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4125,6 +4142,11 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
+# This incarnation is new, so any declaration that this task's endpoint is
+# agent-free by design describes an agent that no longer exists. The record's
+# incarnation binding already makes it inert (bin/fm-stopped-lib.sh); removing
+# it keeps a spent statement from being read at all.
+rm -f "$STATE/$ID.stopped"
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2

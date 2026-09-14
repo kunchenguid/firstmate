@@ -1811,8 +1811,17 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#   stopped - the declared-stop verdict (`stopped` from `declared-stop`, and only
+#             from it): firstmate ITSELF stopped this worker and said so
+#             durably, so the endpoint is agent-free BY DESIGN. A `stopped` from
+#             any other source is a crew that is merely gone, and surfaces.
+#             Distinct from `paused` because a
+#             pause is the WORKER's claim about a wait that may already have
+#             cleared, while a declared stop is firstmate's own act on an agent
+#             that is verified gone and cannot resume on its own;
+#   none    - none of those, so the wake must surface (a finished/parked/failed/
+#             torn-down/unknown crew, a worker that died on its own, or an
+#             unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
@@ -1826,6 +1835,14 @@ crew_absorb_class() {  # <id>
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = stopped ]; then
+    # Only the declared-stop verdict absorbs. The source matters as much as the
+    # state: `stopped` from any other source is a crew that is merely gone, and
+    # a crew that is merely gone must surface.
+    src=${line#*source: }; src=${src%% *}
+    [ "$src" = declared-stop ] && { printf 'stopped'; return; }
+    printf 'none'; return
+  fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
@@ -1852,6 +1869,18 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# 0 if crew <id> is intentionally not running: firstmate stopped it through the
+# control plane, the declaration still binds to the agent it stopped, and the
+# agent is verified gone (bin/fm-crew-state.sh pairs all three before saying so).
+# The stale path absorbs such a crew SILENTLY rather than on a re-surface
+# cadence: a re-surface exists to re-ask a question, and there is no open
+# question here - firstmate holds both the reason and the resume decision, and
+# the moment anything changes, the declaration stops binding and ordinary
+# supervision resumes on the next read.
+crew_is_declared_stopped() {  # <id>
+  [ "$(crew_absorb_class "$1")" = stopped ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

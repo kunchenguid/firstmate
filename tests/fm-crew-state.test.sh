@@ -40,12 +40,33 @@
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
 #       failed.
+#   (m) an agent that EXITED behind a live endpoint: with no terminal status
+#       line -> exited (never its stale pre-exit line); with one -> its own
+#       done/failed verdict; a present or unattributable agent -> never exited.
+#   (n) the spawn-registration grace: an agent-free endpoint on a record
+#       published moments ago reads unknown (a harness that has not started
+#       leaves the same empty endpoint as one that left), while a settled
+#       record over the same endpoint still reports exited.
+#   (o) the DECLARED STOP: a worker firstmate itself stopped through the control
+#       plane is agent-free by design, and reads `stopped` rather than `exited`
+#       - but only while the declaration binds to the incarnation it was written
+#       for, and only alongside a verified-gone agent, so a worker that died on
+#       its own and a replacement worker on the same task id are both untouched.
+#   (p) the declared-stop record itself (bin/fm-stopped-lib.sh): round-trip,
+#       incarnation binding, refusal of the unbindable, legacy fallback, and
+#       one-line collapse.
+#   (q) a worker parked on a modal dialog reads blocked, not working.
+#   (r) a status log older than the task's own record publication is a previous
+#       incarnation's line and is ignored; an unknown semantic state still falls
+#       through to a valid status log.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-stopped-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -112,16 +133,46 @@ set -u
 # responses that fm_backend_tmux_agent_state owns as death.
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
+  # The tmux endpoint surface. `display-message` is FORMAT-AWARE because the
+  # agent-liveness classifier (bin/backends/tmux.sh) asks it three different
+  # questions: the pane id (does the target resolve), the pane tty (whose
+  # foreground process group it reads with ps), and the pane's current command
+  # (the name it attributes). FM_FAKE_PANE_TTY defaults to a tty that owns no
+  # process, so the classifier falls through to the command name and these
+  # cases stay hermetic - the real foreground-process reading is proven against
+  # REAL processes in tests/fm-tmux-agent-liveness.test.sh, which is where that
+  # kernel-level signal belongs. FM_FAKE_TMUX_WINDOWS defaults to EMPTY, which
+  # the classifier reads as `missing`, so every case that does not opt in keeps
+  # exactly the behavior it had before the classifier was consulted here at all.
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
-    ;;
+    # A successful inventory that omits the crew's window proves absence by
+    # its answer (FM_FAKE_TMUX_WINDOWS names the windows it contains, empty by
+    # default). It stays successful even when addressed calls fail, which is
+    # exactly the shape that reads `missing` rather than `unreadable`.
+    printf '%s\n' ${FM_FAKE_TMUX_WINDOWS:-} ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    shift
+    fmt=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -p) shift ;;
+        *) fmt=$1; shift ;;
+      esac
+    done
+    case "$fmt" in
+      '#{pane_tty}') printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/fm-no-such-tty}" ;;
+      '#{pane_current_command}') printf '%s\n' "${FM_FAKE_PANE_COMMAND:-%1}" ;;
+      '#{cursor_y}') printf '1\n' ;;
+      *) printf '%%1\n' ;;
+    esac ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    if [ "${FM_FAKE_TMUX_DIALOG:-0}" = 1 ]; then
+      printf '╭─────────────────╮\n│ dialog text     │\n│ 1. yes 2. no    │\n╰─────────────────╯\n'
+      exit 0
+    fi
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -225,6 +276,10 @@ reset_fakes() {
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_UNREADABLE=0
+  FM_FAKE_TMUX_WINDOWS=""
+  FM_FAKE_TMUX_DIALOG=0
+  FM_FAKE_PANE_TTY=""
+  FM_FAKE_PANE_COMMAND=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_READ_FAIL=0
@@ -235,6 +290,7 @@ reset_fakes() {
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_TMUX_WINDOWS FM_FAKE_TMUX_DIALOG FM_FAKE_PANE_TTY FM_FAKE_PANE_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
 }
@@ -1412,6 +1468,7 @@ test_no_run_footer_text_alone_is_not_working() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   printf 'done: stale completion event\n' > "$d/state/feat-h2.status"
+  touch -t 202001010000 "$d/state/feat-h2.status"
   local out; out=$(run_crew_state "$d" feat-h2)
   assert_not_contains "$out" "state: working" "a footer alone must not read working for a converted adapter"
   assert_contains "$out" "state: unknown" "no semantic record -> unknown"
@@ -2065,6 +2122,584 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+# ---------------------------------------------------------------------------
+# (m) THE 2026-08-20 DEFECT: a worker whose AGENT exited, leaving its endpoint
+#     alive as a bare login shell.
+#
+#     Every record that could have said so was already saying something else.
+#     The agent's own shutdown hook wrote `idle` into the semantic busy record
+#     on its way out - truthfully, since its turn had ended - and the status log
+#     kept the last line the worker appended BEFORE it left. Nothing on this
+#     path asked the endpoint whether the AGENT was still there, so that
+#     pre-exit line became the reported CURRENT state, and four workers went on
+#     reporting `working` for up to an hour after they were gone.
+#
+#     The cases below pin the three-way separation the verdict now makes, and
+#     the two directions it must refuse to guess in. The endpoint evidence is
+#     stubbed here only down to the process NAME; the kernel-level foreground
+#     process group that produces that name is proven with REAL processes in
+#     tests/fm-tmux-agent-liveness.test.sh.
+
+# The defect itself: agent gone, no terminal line ever written.
+test_exited_agent_without_terminal_line_is_not_working() {
+  reset_fakes
+  local d; d=$(new_case exited-no-report)
+  make_repo_on_branch "$d/wt" fm/feat-exited
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-exited.meta" "window=fm:fm-feat-exited" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: reproducing the flake\n' > "$d/state/feat-exited.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-exited
+  FM_FAKE_PANE_COMMAND=zsh          # the agent left; its login shell is what remains
+  arm_idle_record "$d/state" feat-exited   # what the agent's own shutdown hook wrote
+  local out; out=$(run_crew_state "$d" feat-exited)
+  assert_contains "$out" "state: exited" "an exited agent reports exited, not its last pre-exit line"
+  assert_not_contains "$out" "state: working" "a departed worker must never still read as working"
+  assert_contains "$out" "source: pane" "the exit verdict comes from the endpoint, not the log"
+  assert_contains "$out" "reproducing the flake" "the last event it did write is preserved in the detail"
+  pass "an agent that exited without a terminal status line no longer reads as working"
+}
+
+# Same defect with nothing in the log at all - the verdict may not depend on
+# having a line to quote.
+test_exited_agent_with_no_status_events_still_reports_exited() {
+  reset_fakes
+  local d; d=$(new_case exited-silent)
+  make_repo_on_branch "$d/wt" fm/feat-silent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-silent.meta" "window=fm:fm-feat-silent" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-silent
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-silent
+  local out; out=$(run_crew_state "$d" feat-silent)
+  assert_contains "$out" "state: exited" "a silent worker that exited still reports exited"
+  assert_contains "$out" "no status events" "the detail says the log is empty rather than inventing one"
+  pass "an exited agent with no status events at all still reports exited"
+}
+
+# The other direction, and the reason the verdict is gated on the LOG and not
+# on the exit: exiting after reporting is how every healthy worker finishes.
+# That worker said what happened, so its own verdict must survive.
+test_exited_agent_that_reported_done_keeps_its_own_verdict() {
+  reset_fakes
+  local d; d=$(new_case exited-reported)
+  make_repo_on_branch "$d/wt" fm/feat-reported
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-reported.meta" "window=fm:fm-feat-reported" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'done: PR https://example.invalid/pr/7 checks complete\n' > "$d/state/feat-reported.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-reported
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-reported
+  local out; out=$(run_crew_state "$d" feat-reported)
+  assert_contains "$out" "state: done" "a worker that reported before exiting keeps its done verdict"
+  assert_not_contains "$out" "state: exited" "a normal reported finish is not an unreported exit"
+  pass "an exited agent that DID report keeps its own terminal verdict"
+}
+
+# The third state: the agent is fine, and an Escape would restore it. From the
+# outside that reads exactly like the two cases above - quiet endpoint, settled
+# record, stale log - so the verdict must never convert "cannot accept input"
+# into "gone". Confusing them is the expensive direction: relaunching a live
+# worker duplicates an agent onto its own worktree.
+test_live_agent_between_turns_is_never_reported_exited() {
+  reset_fakes
+  local d; d=$(new_case alive-not-exited)
+  make_repo_on_branch "$d/wt" fm/feat-alive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-alive.meta" "window=fm:fm-feat-alive" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: waiting on the build\n' > "$d/state/feat-alive.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-alive
+  FM_FAKE_PANE_COMMAND=claude       # the agent process is right there
+  arm_idle_record "$d/state" feat-alive
+  local out; out=$(run_crew_state "$d" feat-alive)
+  assert_not_contains "$out" "state: exited" "an agent that is present must never be reported as gone"
+  assert_contains "$out" "source: status-log" "a present idle agent still reads from its own log"
+  pass "a live agent between turns (or behind an overlay) is never reported exited"
+}
+
+# Fail-closed in the same direction: only a confident `dead` licenses the
+# verdict. An endpoint whose foreground process cannot be attributed is
+# `ambiguous`, and ambiguity is not evidence of departure.
+test_unattributable_endpoint_is_never_reported_exited() {
+  reset_fakes
+  local d; d=$(new_case ambiguous-not-exited)
+  make_repo_on_branch "$d/wt" fm/feat-amb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-amb.meta" "window=fm:fm-feat-amb" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: still going\n' > "$d/state/feat-amb.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-amb
+  FM_FAKE_PANE_COMMAND=some-unrelated-process
+  arm_idle_record "$d/state" feat-amb
+  local out; out=$(run_crew_state "$d" feat-amb)
+  assert_not_contains "$out" "state: exited" "an unattributable endpoint is not proof the agent left"
+  pass "an endpoint whose process cannot be attributed is never reported exited"
+}
+
+# A secondmate skips the busy check entirely (its idle endpoint is healthy), so
+# for one the status log is the ONLY other source and the exit check is the only
+# thing standing between a departed mate and a log that outlives it.
+test_exited_secondmate_does_not_ride_its_stale_log() {
+  reset_fakes
+  local d; d=$(new_case exited-secondmate)
+  make_repo_on_branch "$d/wt" fm/mate-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate-gone.meta" "window=fm:fm-mate-gone" "worktree=$d/wt" \
+    "kind=secondmate" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: picked up the routed task\n' > "$d/state/mate-gone.status"
+  FM_FAKE_TMUX_WINDOWS=fm-mate-gone
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" mate-gone)
+  assert_contains "$out" "state: exited" "a secondmate whose agent left reports exited"
+  assert_not_contains "$out" "state: working" "a departed secondmate must not ride its own stale log"
+  pass "an exited secondmate does not ride its stale status log"
+}
+
+# The fleet-facing consequence, through the watcher's own absorb predicate
+# rather than a re-reading of the line above: a wake about a departed worker
+# must never be swallowed as "still working". This is the property that decides
+# whether firstmate looks now or an hour from now.
+test_exited_agent_is_not_absorbed_as_working() {
+  reset_fakes
+  local d; d=$(new_case exited-absorb)
+  make_repo_on_branch "$d/wt" fm/feat-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-absorb.meta" "window=fm:fm-feat-absorb" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: implementing\n' > "$d/state/feat-absorb.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-absorb
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-absorb
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-absorb \
+    && fail "a wake about a departed worker was absorbed as still working"
+  pass "an exited worker is never absorbed as provably working"
+}
+
+# ---------------------------------------------------------------------------
+# (n) THE 2026-08-24 DEFECT: seconds after a spawn, the verdict reported a
+#     worker as `exited` while its agent was alive and mid-thought. It had
+#     simply not registered yet: the record is published the moment the
+#     endpoint exists, and the harness only enters that endpoint's foreground
+#     process group once it has actually started - so in between, the endpoint
+#     is shells alone, which is byte-for-byte what a departed agent leaves
+#     behind. Elapsed time is the only thing that separates the two cases.
+
+# An hour-old record publication time: every settled case below is about a
+# worker that has been running a while.
+settled_spawn_ts() {
+  echo $(( $(date +%s) - 3600 ))
+}
+
+# A record published this second over an endpoint that holds no agent yet is
+# not proof the agent left - it is equally consistent with a harness that has
+# not finished starting.
+test_fresh_spawn_with_empty_endpoint_is_not_exited() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-fresh)
+  make_repo_on_branch "$d/wt" fm/feat-fresh
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fresh.meta" "window=fm:fm-feat-fresh" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fresh
+  FM_FAKE_PANE_COMMAND=zsh          # the harness has not replaced the shell yet
+  local out; out=$(run_crew_state "$d" feat-fresh)
+  assert_not_contains "$out" "state: exited" \
+    "a worker that has not finished starting must never be reported as gone"
+  assert_contains "$out" "state: unknown" \
+    "the honest answer during the registration window is unknown, which licenses nothing"
+  pass "a freshly spawned worker that has not registered yet is never reported exited"
+}
+
+# The same fresh record must not be over-corrected into a claim of progress
+# either: `working` would let the watcher absorb a wake about a spawn that
+# really did die on arrival.
+test_fresh_spawn_is_not_absorbed_as_working() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-absorb)
+  make_repo_on_branch "$d/wt" fm/feat-fresh-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fresh-absorb.meta" "window=fm:fm-feat-fresh-absorb" \
+    "worktree=$d/wt" "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fresh-absorb
+  FM_FAKE_PANE_COMMAND=zsh
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_is_provably_working feat-fresh-absorb \
+    && fail "a worker still inside its registration window was claimed as provably working"
+  pass "the registration window withholds the exit verdict without inventing progress"
+}
+
+# The other direction, and the one the window must not trade away: once the
+# record is old enough that an empty endpoint can only mean the agent left, the
+# exit verdict is reached exactly as before.
+test_settled_record_with_empty_endpoint_still_reports_exited() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-settled)
+  make_repo_on_branch "$d/wt" fm/feat-settled
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-settled.meta" "window=fm:fm-feat-settled" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-settled
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" feat-settled)
+  assert_contains "$out" "state: exited" \
+    "a settled record over an empty endpoint must still report the agent gone"
+  pass "a worker past its registration window with an empty endpoint still reports exited"
+}
+
+# A record written by an older spawn carries no timestamp of its own. Its file's
+# publication time bounds the same thing, so the window still applies to it -
+# absent evidence must not silently drop the guard on the one verdict that can
+# start a duplicate agent.
+test_record_without_spawn_timestamp_uses_its_publication_time() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-legacy)
+  make_repo_on_branch "$d/wt" fm/feat-legacy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-legacy.meta" "window=fm:fm-feat-legacy" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-legacy
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" feat-legacy)
+  assert_not_contains "$out" "state: exited" \
+    "a record with no timestamp, published just now, must not license a relaunch"
+  # Age the record itself and the same endpoint becomes proof again.
+  touch -t "$(date -r "$(( $(date +%s) - 3600 ))" +%Y%m%d%H%M.%S 2>/dev/null \
+    || date -d "@$(( $(date +%s) - 3600 ))" +%Y%m%d%H%M.%S)" "$d/state/feat-legacy.meta"
+  out=$(run_crew_state "$d" feat-legacy)
+  assert_contains "$out" "state: exited" \
+    "an old untimestamped record over an empty endpoint still reports the agent gone"
+  pass "a record with no spawn timestamp falls back to its own publication time"
+}
+
+# The window withholds only the verdict the endpoint cannot support. A worker
+# that reported and left inside the same window said what happened, and its own
+# terminal verdict must not be delayed by a guard aimed at silence.
+test_registration_window_does_not_mask_a_reported_result() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-reported)
+  make_repo_on_branch "$d/wt" fm/feat-fastdone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fastdone.meta" "window=fm:fm-feat-fastdone" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  printf 'failed: the brief named a project that is not cloned here\n' \
+    > "$d/state/feat-fastdone.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fastdone
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-fastdone
+  local out; out=$(run_crew_state "$d" feat-fastdone)
+  assert_contains "$out" "state: failed" \
+    "a worker that reported inside the window keeps its own verdict"
+  pass "the registration window never delays a worker's own reported result"
+}
+
+# ---------------------------------------------------------------------------
+# (o) THE 2026-08-25 DEFECT: a worker firstmate DELIBERATELY stopped, whose
+#     endpoint it preserved on purpose, read as a worker that had died.
+#
+#     bin/fm-control.sh exit stops an agent and keeps the endpoint, the local
+#     copy and every uncommitted change. What it leaves behind is byte-identical
+#     to what a worker that died on its own leaves behind, so supervision had no
+#     way to tell them apart and reported both as needing attention - about
+#     forty alerts across one four-hour quota window, each indistinguishable at
+#     arrival from the one that matters.
+#
+#     The discriminator is the control plane's own declaration, bound to the
+#     exact incarnation it stopped. These cases pin that it separates the two,
+#     and the three directions it must NOT reach: an agent that died on its own,
+#     an agent that is still alive, and a replacement on the same task id.
+
+# Write a declared-stop record for <id> bound to <incarnation>.
+declare_stop() {  # <state-dir> <id> <incarnation> <reason>
+  {
+    echo "v1"
+    echo "task=$2"
+    echo "incarnation=$3"
+    echo "reason=$4"
+    echo "harness=claude"
+    echo "endpoint=fm:fm-$2"
+    echo "backend=tmux"
+    echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "epoch=$(date +%s)"
+  } > "$1/$2.stopped"
+}
+
+# The fix: a stop firstmate performed and recorded reads as intentional.
+test_declared_stop_reports_stopped_not_exited() {
+  reset_fakes
+  local d; d=$(new_case declared-stop)
+  make_repo_on_branch "$d/wt" fm/feat-stopped-on-purpose
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stop.meta" "window=fm:fm-feat-stop" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawn_gen=s1000.1.1" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: implementing the fix\n' > "$d/state/feat-stop.status"
+  declare_stop "$d/state" feat-stop s1000.1.1 "zero model quota until about 19:00; relaunch when it resets"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-stop
+  FM_FAKE_PANE_COMMAND=zsh          # the agent is gone, exactly as exit intended
+  arm_idle_record "$d/state" feat-stop
+  local out; out=$(run_crew_state "$d" feat-stop)
+  assert_contains "$out" "state: stopped" "a deliberately stopped worker must read as stopped"
+  assert_not_contains "$out" "state: exited" "an intentional stop is not an unreported departure"
+  assert_contains "$out" "source: declared-stop" "the verdict must name the declaration it came from"
+  assert_contains "$out" "zero model quota" "the recorded reason is what the next read reports"
+  assert_contains "$out" "relaunch" "the verdict must say how the worker resumes"
+  pass "a worker firstmate stopped on purpose reports stopped, with its reason"
+}
+
+# The direction that must not break: no declaration, no absorption. A worker
+# that died on its own is exactly the alert this change exists to protect.
+test_self_died_worker_still_reports_exited() {
+  reset_fakes
+  local d; d=$(new_case declared-stop-absent)
+  make_repo_on_branch "$d/wt" fm/feat-self-died
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-died.meta" "window=fm:fm-feat-died" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawn_gen=s2000.1.1" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: implementing the fix\n' > "$d/state/feat-died.status"
+  [ ! -e "$d/state/feat-died.stopped" ] || fail "fixture must not declare a stop"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-died
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-died
+  local out; out=$(run_crew_state "$d" feat-died)
+  assert_contains "$out" "state: exited" "a worker that died on its own must still surface immediately"
+  assert_not_contains "$out" "state: stopped" "an undeclared departure must never read as intentional"
+  pass "a worker that died on its own still reports exited (the property that must not break)"
+}
+
+# The incarnation binding. A relaunch mints a new spawn_gen, so a declaration
+# left by the worker it replaced describes an agent that no longer exists and
+# must silence nobody - the replacement is supervised from its first read.
+test_declared_stop_cannot_silence_a_later_incarnation() {
+  reset_fakes
+  local d; d=$(new_case declared-stop-spent)
+  make_repo_on_branch "$d/wt" fm/feat-relaunched
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-relaunch.meta" "window=fm:fm-feat-relaunch" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawn_gen=s3000.2.2" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: implementing the fix\n' > "$d/state/feat-relaunch.status"
+  # The declaration names the PREVIOUS incarnation; the record now runs another.
+  declare_stop "$d/state" feat-relaunch s3000.1.1 "stopped for the quota window"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-relaunch
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-relaunch
+  local out; out=$(run_crew_state "$d" feat-relaunch)
+  assert_contains "$out" "state: exited" "a spent declaration must not suppress the replacement's own verdict"
+  assert_not_contains "$out" "state: stopped" "a declaration may never outlive the incarnation it names"
+  pass "a declared stop cannot silence a later, different worker on the same task"
+}
+
+# The declaration is never believed alone. An agent that is right there is not
+# stopped, whatever any record says - the endpoint outranks the file.
+test_declared_stop_never_overrides_a_live_agent() {
+  reset_fakes
+  local d; d=$(new_case declared-stop-live)
+  make_repo_on_branch "$d/wt" fm/feat-still-alive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-live.meta" "window=fm:fm-feat-live" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawn_gen=s4000.1.1" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: still going\n' > "$d/state/feat-live.status"
+  declare_stop "$d/state" feat-live s4000.1.1 "stopped for the quota window"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-live
+  FM_FAKE_PANE_COMMAND=claude       # the agent process is right there
+  arm_idle_record "$d/state" feat-live
+  local out; out=$(run_crew_state "$d" feat-live)
+  assert_not_contains "$out" "state: stopped" "an agent that is present must never be reported as stopped"
+  assert_contains "$out" "source: status-log" "a live idle agent still reads from its own log"
+  pass "a declared stop is never believed over an agent that is actually there"
+}
+
+# The watcher's own absorb predicate, end to end over the REAL helper: this is
+# the single read that decides whether the stale pane goes quiet.
+test_declared_stop_absorb_predicate_end_to_end() {
+  reset_fakes
+  local d; d=$(new_case declared-stop-predicate)
+  make_repo_on_branch "$d/wt" fm/feat-predicate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pred.meta" "window=fm:fm-feat-pred" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawn_gen=s5000.1.1" "spawned_at=$(settled_spawn_ts)"
+  printf 'working: implementing the fix\n' > "$d/state/feat-pred.status"
+  declare_stop "$d/state" feat-pred s5000.1.1 "stopped for the quota window"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-pred
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-pred
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_declared_stopped feat-pred \
+    || fail "the declared-stop absorb predicate did not recognize an intentional stop"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-pred \
+    && fail "an intentionally stopped worker must not read as provably working"
+  rm -f "$d/state/feat-pred.stopped"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_declared_stopped feat-pred \
+    && fail "the predicate must not fire without a declaration"
+  pass "crew_is_declared_stopped: only a bound declaration plus a gone agent absorbs"
+}
+
+# ---------------------------------------------------------------------------
+# (p) The declared-stop RECORD itself (bin/fm-stopped-lib.sh): pure functions
+#     over exact bytes on disk - no agent, no backend, no endpoint. The pairing
+#     with a verified-gone agent is proven in (o); the absorb it licenses in
+#     the watcher suite.
+
+write_stopped_test_meta() {  # <state> <id> [extra key=value...]
+  local state=$1 id=$2
+  shift 2
+  {
+    echo "window=fm:fm-$id"
+    echo "worktree=$state/wt-$id"
+    echo "harness=claude"
+    local kv
+    for kv in "$@"; do echo "$kv"; done
+  } > "$state/$id.meta"
+}
+
+test_stopped_record_round_trips_reason_and_incarnation() {
+  local state; state=$(new_case stopped-lib-round-trip)
+  mkdir -p "$state"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s1.1.1"
+  fm_stopped_record "$state" t1 "zero model quota until about 19:00; relaunch when it resets" \
+    claude "fm:fm-t1" tmux || fail "recording a declared stop failed"
+  [ -f "$state/t1.stopped" ] || fail "no record was written"
+  [ "$(fm_stopped_field "$state" t1 incarnation)" = "s1.1.1" ] || fail "the incarnation was not recorded"
+  [ "$(fm_stopped_field "$state" t1 reason)" = "zero model quota until about 19:00; relaunch when it resets" ] \
+    || fail "the reason was not recorded verbatim"
+  [ "$(fm_stopped_field "$state" t1 harness)" = claude ] || fail "the harness evidence was not recorded"
+  [ "$(fm_stopped_field "$state" t1 backend)" = tmux ] || fail "the backend evidence was not recorded"
+  fm_stopped_declared "$state" t1 || fail "a freshly written record must bind to its own incarnation"
+  pass "the record round-trips its reason, incarnation, and evidence, and binds on write"
+}
+
+# A relaunch mints a new spawn_gen, so the predecessor's record must stop
+# binding the moment the meta names a different agent.
+test_stopped_record_stops_binding_when_the_incarnation_changes() {
+  local state; state=$(new_case stopped-lib-rebound)
+  mkdir -p "$state"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s2.1.1"
+  fm_stopped_record "$state" t1 "stopped for the quota window" || fail "recording failed"
+  fm_stopped_declared "$state" t1 || fail "the record must bind before the incarnation changes"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s2.2.2"   # the replacement worker
+  ! fm_stopped_declared "$state" t1 \
+    || fail "a record may never bind to an incarnation it was not written for"
+  pass "a declared stop stops binding the moment the task runs a different agent"
+}
+
+test_stopped_absent_record_is_never_declared() {
+  local state; state=$(new_case stopped-lib-absent)
+  mkdir -p "$state"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s3.1.1"
+  ! fm_stopped_declared "$state" t1 || fail "a task with no record must read as undeclared"
+  [ -z "$(fm_stopped_field "$state" t1 reason)" ] || fail "an absent record must yield no fields"
+  pass "a task with no record is undeclared, so a worker that died on its own still surfaces"
+}
+
+# A record whose meta has vanished has nothing to bind to. Refusing here is what
+# keeps an unbounded record from outliving every agent the task ever ran.
+test_stopped_unbindable_record_is_refused_and_never_declared() {
+  local state; state=$(new_case stopped-lib-unbindable)
+  mkdir -p "$state"
+  ! fm_stopped_record "$state" t1 "stopped" || fail "a record with no meta to bind to must be refused"
+  [ ! -f "$state/t1.stopped" ] || fail "a refused record must not be written"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s4.1.1"
+  fm_stopped_record "$state" t1 "stopped" || fail "recording with a meta present should succeed"
+  rm -f "$state/t1.meta"
+  ! fm_stopped_declared "$state" t1 || fail "a record whose meta is gone must not bind to nothing"
+  pass "a record that cannot be bound is refused, and one whose task record vanished stops binding"
+}
+
+# A meta published before spawn_gen existed still has an identity, so an old task
+# is bound rather than left unbounded - and changing that identity spends it.
+test_stopped_legacy_meta_without_spawn_gen_is_still_bound() {
+  local state; state=$(new_case stopped-lib-legacy)
+  mkdir -p "$state"
+  write_stopped_test_meta "$state" t1
+  fm_stopped_record "$state" t1 "stopped" || fail "a legacy meta must still be recordable"
+  legacy=$(fm_stopped_field "$state" t1 incarnation)
+  case "$legacy" in legacy-*) ;; *) fail "a legacy meta should bind through its endpoint identity, got: $legacy" ;; esac
+  fm_stopped_declared "$state" t1 || fail "a legacy record must bind to its own identity"
+  printf 'window=fm:fm-t1-elsewhere\nworktree=%s/wt-other\nharness=claude\n' "$state" > "$state/t1.meta"
+  ! fm_stopped_declared "$state" t1 || fail "a legacy record must stop binding when the identity changes"
+  pass "a meta with no spawn_gen is bound through its endpoint identity, not left unbounded"
+}
+
+# The record is read back into one-line supervision output, so a multi-line or
+# tabbed reason must not be able to forge extra fields.
+test_stopped_reason_is_collapsed_to_one_line() {
+  local state; state=$(new_case stopped-lib-oneline)
+  mkdir -p "$state"
+  write_stopped_test_meta "$state" t1 "spawn_gen=s5.1.1"
+  fm_stopped_record "$state" t1 "$(printf 'first line\nincarnation=forged\tand tabbed')" \
+    || fail "recording a multi-line reason failed"
+  [ "$(fm_stopped_field "$state" t1 incarnation)" = "s5.1.1" ] \
+    || fail "a reason must not be able to forge another field"
+  case "$(fm_stopped_field "$state" t1 reason)" in
+    *"first line"*"forged"*) ;;
+    *) fail "the reason text was lost rather than collapsed" ;;
+  esac
+  [ "$(grep -c . "$state/t1.stopped")" -eq 9 ] || fail "the record grew or lost lines: $(cat "$state/t1.stopped")"
+  pass "a multi-line or tabbed reason is collapsed to one line and cannot forge a field"
+}
+
+# ---------------------------------------------------------------------------
+# (q) A worker parked on a modal safety dialog is blocked, not working.
+
+test_no_run_dialog_pane() {
+  reset_fakes
+  local d; d=$(new_case dialog-pane)
+  make_repo_on_branch "$d/wt" fm/feat-d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  # The dialog overrides any busy record, but let's test without one first.
+  local out; out=$(FM_FAKE_TMUX_DIALOG=1 run_crew_state "$d" feat-d)
+  assert_contains "$out" "state: blocked" "dialog returns blocked"
+  assert_contains "$out" "source: pane" "dialog returns pane source"
+  assert_contains "$out" "modal dialog" "dialog detail"
+  pass "no run + a modal dialog pane reads blocked"
+}
+
+# ---------------------------------------------------------------------------
+# (r) The status log is a previous incarnation's line when it predates the
+#     task's own record publication - and an unknown semantic state still falls
+#     through to a valid line.
+
+test_stale_status_log_is_ignored() {
+  reset_fakes
+  local d; d=$(new_case stale-status-log)
+  make_repo_on_branch "$d/wt" fm/stale-status
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stale-status.meta" "window=fm:fm-stale-status" "worktree=$d/wt" "kind=ship" "harness=claude"
+  echo "done: stale completion event" > "$d/state/stale-status.status"
+  touch -t 202001010000 "$d/state/stale-status.status"
+  touch "$d/state/stale-status.meta"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" stale-status)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" stale-status idle --gen "$gen" --source claude-hook --event stop >/dev/null
+  local out; out=$(run_crew_state "$d" stale-status)
+  assert_not_contains "$out" "state: done" "stale status log must not be read"
+  assert_contains "$out" "state: unknown" "ignores stale status log"
+  pass "stale status log belonging to previous incarnation is ignored"
+}
+
+test_unknown_semantic_state_falls_through_to_valid_status_log() {
+  reset_fakes
+  local d; d=$(new_case unknown-semantic-valid-log)
+  make_repo_on_branch "$d/wt" fm/unknown-semantic
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unknown-semantic.meta" "window=fm:fm-unknown-semantic" "worktree=$d/wt" "kind=scout" "harness=herdr"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" unknown-semantic)
+  # Herdr returns idle natively if it's running a shell command, which is rejected as unknown by busy-event
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" unknown-semantic idle --gen "$gen" --source herdr --event stop >/dev/null
+  # But the agent wrote a valid status log
+  echo "working: running shell command" > "$d/state/unknown-semantic.status"
+  local out; out=$(run_crew_state "$d" unknown-semantic)
+  assert_contains "$out" "state: working" "unknown semantic state falls through to valid status log"
+  assert_contains "$out" "source: status-log" "unknown semantic state falls through to valid status log"
+  pass "unknown semantic state falls through to valid status log"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -2569,5 +3204,31 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_exited_agent_without_terminal_line_is_not_working
+test_exited_agent_with_no_status_events_still_reports_exited
+test_exited_agent_that_reported_done_keeps_its_own_verdict
+test_live_agent_between_turns_is_never_reported_exited
+test_unattributable_endpoint_is_never_reported_exited
+test_exited_secondmate_does_not_ride_its_stale_log
+test_exited_agent_is_not_absorbed_as_working
+test_fresh_spawn_with_empty_endpoint_is_not_exited
+test_fresh_spawn_is_not_absorbed_as_working
+test_settled_record_with_empty_endpoint_still_reports_exited
+test_record_without_spawn_timestamp_uses_its_publication_time
+test_registration_window_does_not_mask_a_reported_result
+test_declared_stop_reports_stopped_not_exited
+test_self_died_worker_still_reports_exited
+test_declared_stop_cannot_silence_a_later_incarnation
+test_declared_stop_never_overrides_a_live_agent
+test_declared_stop_absorb_predicate_end_to_end
+test_stopped_record_round_trips_reason_and_incarnation
+test_stopped_record_stops_binding_when_the_incarnation_changes
+test_stopped_absent_record_is_never_declared
+test_stopped_unbindable_record_is_refused_and_never_declared
+test_stopped_legacy_meta_without_spawn_gen_is_still_bound
+test_stopped_reason_is_collapsed_to_one_line
+test_no_run_dialog_pane
+test_stale_status_log_is_ignored
+test_unknown_semantic_state_falls_through_to_valid_status_log
 
 echo "all fm-crew-state tests passed"

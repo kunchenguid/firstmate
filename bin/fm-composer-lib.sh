@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer classification:
 # every shape a verified harness draws, every glyph, every container proof, and
-# the empty|pending|pending-unproven|unknown verdict, shared by every
+# the empty|pending|pending-unproven|dialog|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
 # bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
@@ -395,7 +395,10 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which continues with a
-# rotating quoted suggestion, hence the unanchored tail). cursor-agent renders
+# rotating quoted suggestion, hence the unanchored tail; opencode now renders
+# the hint's dots as U+2026 HORIZONTAL ELLIPSIS, observed 2026-09-08, and
+# fm_composer_idle_matches normalises that code point onto three ASCII dots
+# before matching so these literals stay ASCII). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
@@ -505,8 +508,23 @@ EOF
 }
 
 fm_composer_idle_matches() {
-  local content=$1 idle_re=$2 idle_case=$3
+  local content=$1 idle_re=$2 idle_case=$3 ellipsis
   [ -n "$idle_re" ] || return 1
+  # U+2026 HORIZONTAL ELLIPSIS normalisation: a harness may render the trailing
+  # dots of its idle placeholder as one Unicode ellipsis code point where the
+  # fleet-wide literals below spell three ASCII dots (opencode's idle hint now
+  # reads `Ask anything… "…"` with a rotating quoted suggestion, observed
+  # 2026-09-08; grok's `Type a message…` would read the same way). Map it onto
+  # `...` BEFORE matching so the one literal set never has to track a
+  # harness's cosmetic punctuation switch. This function is the single choke
+  # point every idle check funnels through (both content-classifier match
+  # points, the ghost-remnant check, the left-bar scan, and selected-content
+  # extraction), so one mapping covers every placeholder at once. The anchored
+  # literals themselves stay ASCII and reviewable, and real typed text still
+  # cannot match them - only the punctuation spelling is normalised, never the
+  # words, so this cannot widen into a catch-all.
+  printf -v ellipsis '%b' '\0342\0200\0246'
+  content=${content//"$ellipsis"/...}
   case "$idle_case" in
     insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
     *) printf '%s' "$content" | grep -qE "$idle_re" ;;
@@ -609,7 +627,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
 #                or `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
-# Prints exactly one verdict: empty | pending | pending-unproven | unknown,
+# Prints exactly one verdict: empty | pending | pending-unproven | dialog | unknown,
 # or the internal sentinel `need-identity` when caps declare identity=1, no
 # identity result was supplied, and the verdict depends on it. Adapters answer
 # `need-identity` by running their identity probe once and re-calling with
@@ -931,28 +949,46 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
 }
 
 # _fm_composer_classify_rows: shared multi-row container verdict for the box
-# and separated shapes: pending beats empty, an unreadable row is unknown, and
-# geometry ambiguity turns pending into pending-unproven and empty into
-# unknown (an ambiguous container is not positive proof).
+# and separated shapes: multiple pending rows without a prompt glyph read
+# dialog (a modal safety interlock), pending beats empty, an unreadable row is
+# unknown, and geometry ambiguity turns pending into pending-unproven and empty
+# into unknown (an ambiguous container is not positive proof).
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
-  local row raw content plain state unknown_seen=0
+  local row raw content plain state unknown_seen=0 pending_count=0 prompt_seen=0 glyph=''
+  local single_pending_plain=''
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
+    if fm_composer_leading_prompt_glyph_var glyph "$content"; then prompt_seen=1; fi
     state=$(fm_composer_classify_content 1 "$content" \
       "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
     case "$state" in
       pending)
-        if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
-        return 0
+        pending_count=$((pending_count + 1))
+        single_pending_plain="$plain"
         ;;
       unknown) unknown_seen=1 ;;
     esac
     row=$((row + 1))
   done
+  if [ "$prompt_seen" = 0 ]; then
+    if [ "$pending_count" -gt 1 ]; then
+      printf 'dialog'
+      return 0
+    elif [ "$pending_count" -eq 1 ]; then
+      if printf '%s\n' "$single_pending_plain" | grep -qiE "(Do you trust the contents of this directory\?|Do you trust this workspace\?)"; then
+        printf 'dialog'
+        return 0
+      fi
+    fi
+  fi
+  if [ "$pending_count" -gt 0 ]; then
+    if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
+    return 0
+  fi
   if [ "$unknown_seen" = 1 ] || [ "$ambiguous" = 1 ]; then
     printf 'unknown'
   else

@@ -14,7 +14,10 @@
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
 #      is idempotent success, and an agent that does not stop fails closed.
-#   6. Marker non-regression: a control command to a kind=secondmate task
+#   6. The declared stop: a verified exit records that this endpoint is
+#      agent-free BY DESIGN, with its reason, bound to the incarnation it
+#      stopped - and a relaunch spends that record.
+#   7. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
 set -u
@@ -833,7 +836,91 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
-# --- 6. marker non-regression -----------------------------------------------
+# --- 6. the declared stop ---------------------------------------------------
+#
+# The 2026-08-25 case: `exit` preserves the endpoint on purpose, and what it
+# leaves behind is byte-identical to what a worker that died on its own leaves
+# behind. Supervision therefore reported both as needing attention, roughly
+# forty times across one four-hour quota window. The declaration written here is
+# the only thing that separates them, so these cases pin what it says, what it
+# binds to, and the three verbs that must NOT write one.
+
+stop_field() {  # <case-dir> <id> <key>
+  grep "^$3=" "$1/home/state/$2.stopped" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+test_exit_declares_the_endpoint_agent_free_by_design() {
+  local dir out rc
+  dir=$(new_case declare-stop)
+  add_task "$dir" t1 claude
+  printf 'spawn_gen=s900.1.1\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit --reason "zero model quota until about 19:00; relaunch when it resets"); rc=$?
+  expect_code 0 "$rc" "exit should succeed"$'\n'"$out"
+  assert_contains "$out" "stop=declared" "the outcome line should report that the stop was declared"
+  [ -f "$dir/home/state/t1.stopped" ] || fail "a verified exit must leave a declared-stop record"
+  [ "$(stop_field "$dir" t1 incarnation)" = "s900.1.1" ] \
+    || fail "the record must bind to the incarnation it stopped, got: $(stop_field "$dir" t1 incarnation)"
+  [ "$(stop_field "$dir" t1 reason)" = "zero model quota until about 19:00; relaunch when it resets" ] \
+    || fail "the record must carry the reason it was given, got: $(stop_field "$dir" t1 reason)"
+  [ "$(stop_field "$dir" t1 harness)" = claude ] || fail "the record should note the harness it stopped"
+  pass "fm-control exit: a verified stop declares the endpoint agent-free by design, with its reason and incarnation"
+}
+
+test_exit_declares_a_default_reason_when_none_is_given() {
+  local dir out rc
+  dir=$(new_case declare-stop-default)
+  add_task "$dir" t1 claude
+  printf 'spawn_gen=s901.1.1\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit without a reason should still succeed"$'\n'"$out"
+  [ -n "$(stop_field "$dir" t1 reason)" ] \
+    || fail "an exit with no --reason must still record why the endpoint is empty"
+  pass "fm-control exit: a stop with no reason given still declares one rather than recording an empty field"
+}
+
+# Idempotent success is still a deliberate stop: firstmate asked for it, and the
+# endpoint is agent-free because firstmate wanted it to be.
+test_already_stopped_exit_also_declares() {
+  local dir out rc
+  dir=$(new_case declare-stop-idempotent)
+  add_task "$dir" t1 claude
+  printf 'spawn_gen=s902.1.1\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "an idempotent exit should succeed"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the outcome should still say it was already stopped"
+  [ -f "$dir/home/state/t1.stopped" ] || fail "an idempotent exit must declare the stop too"
+  pass "fm-control exit: an already-stopped agent is still declared, because firstmate is the one who asked"
+}
+
+test_reason_is_rejected_on_other_verbs() {
+  local dir out rc
+  dir=$(new_case declare-stop-scope)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 interrupt --reason "why"); rc=$?
+  expect_code 1 "$rc" "--reason on interrupt should refuse"
+  assert_contains "$out" "--reason applies to 'exit' only" "the refusal should name the verb it belongs to"
+  pass "fm-control: --reason is scoped to exit, not accepted on every verb"
+}
+
+# A rebind corrects the record, never the agent: on tmux the identifier IS the
+# task label, so it cannot drift, and the verb must refuse rather than rewrite
+# a record that already resolves.
+test_rebind_refuses_when_the_record_still_resolves() {
+  local dir out rc
+  dir=$(new_case rebind-resolves)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 rebind); rc=$?
+  expect_code 1 "$rc" "rebind of a resolving record should refuse"
+  assert_contains "$out" "still resolves" "the refusal should say there is nothing to correct"
+  pass "fm-control rebind: a record whose endpoint still resolves refuses, correcting nothing"
+}
+
+# --- 7. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
   local dir out rc typed home
@@ -912,5 +999,10 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_exit_declares_the_endpoint_agent_free_by_design
+test_exit_declares_a_default_reason_when_none_is_given
+test_already_stopped_exit_also_declares
+test_reason_is_rejected_on_other_verbs
+test_rebind_refuses_when_the_record_still_resolves
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

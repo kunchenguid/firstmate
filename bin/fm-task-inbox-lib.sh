@@ -292,7 +292,10 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    # A modal dialog is not a composer: typing the doorbell line into one
+    # could answer a safety interlock, so it refuses exactly like pending
+    # input rather than ringing through it.
+    pending|dialog) return 1 ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare

@@ -462,12 +462,22 @@ test_crew_absorb_class_classifier() {
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
+  FM_FAKE_CREW_STATE='state: stopped · source: declared-stop · stopped by firstmate on purpose'
+  [ "$(crew_absorb_class a)" = stopped ] || fail "declared stop not classed stopped"
+  crew_is_declared_stopped a || fail "crew_is_declared_stopped did not recognize a declared stop"
+  ! crew_is_provably_working a || fail "a declared stop was treated as provably working"
+  ! crew_is_paused a || fail "a declared stop was conflated with a declared pause"
+  # The source carries as much of the verdict as the state: a crew that is
+  # merely gone reports `stopped` too, and a crew that is merely gone surfaces.
+  FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  [ "$(crew_absorb_class a)" = none ] || fail "a merely-gone crew was classed absorbable"
+  ! crew_is_declared_stopped a || fail "a merely-gone crew was mistaken for a declared stop"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/stopped/none from one read; the three predicates agree and only declared-stop absorbs a gone agent"
 }
 
 # The wedge detector's third liveness input: writes inside the crew's own recorded
@@ -2037,6 +2047,174 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# --- a worker firstmate ITSELF stopped: absorbed silently, in every supervision
+#     mode, and only while the declaration binds ---------------------------
+# The live 2026-08-25 case: two workers hit zero model quota with about four
+# hours to reset, firstmate stopped them through bin/fm-control.sh exit - which
+# preserves the endpoint, the local copy and every uncommitted change - and both
+# went on raising a stale event every few minutes for the whole window, now
+# because the endpoint was agent-free. Around forty alerts, each
+# indistinguishable at arrival from the one that reports a genuinely dead worker.
+#
+# All three directions are driven from ONE fixture, changed only where the
+# discriminator lives, so the cases cannot drift apart: the declaration's
+# presence and the incarnation it names. The pane, the status log, the meta and
+# the crew-state verdict for a gone agent are identical in every round.
+
+# Write a declared-stop record bound to <incarnation>, as bin/fm-control.sh exit
+# does. Deliberately hand-written rather than produced by the control plane, so
+# this suite pins the READER's contract independently of the writer.
+declare_stop_record() {  # <state> <id> <incarnation>
+  {
+    echo "v1"
+    echo "task=$2"
+    echo "incarnation=$3"
+    echo "reason=zero model quota until about 19:00; relaunch when it resets"
+    echo "harness=claude"
+    echo "endpoint=test:fm-$2"
+    echo "backend=tmux"
+    echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "epoch=$(date +%s)"
+  } > "$1/$2.stopped"
+}
+
+# Lay down the shared fixture: an idle agent-free pane, a non-terminal status
+# log, and a meta on incarnation <spawn-gen>. Echoes the pane hash.
+stopped_worker_fixture() {  # <dir> <window> <spawn-gen>
+  local dir=$1 window=$2 gen=$3 state="$1/state" key sig
+  printf 'idle prompt, no agent' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\nspawn_gen=%s\n' \
+    "$window" "$gen" > "$state/quotastop.meta"
+  printf 'working: implementing the fix\n' > "$state/quotastop.status"
+  sig=$(seen_sig "$state/quotastop.status"); printf '%s' "$sig" > "$state/.seen-quotastop_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "idle prompt, no agent")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text "idle prompt, no agent")"
+}
+
+# 1. THE FIX. A stop firstmate performed and recorded goes quiet - and stays
+#    quiet across repeated polls, which is the whole point: the defect was not
+#    one alert, it was one every few minutes for four hours. Both wedge and
+#    pause cadences are set to 1s here, so any surviving cadence would fire.
+test_declared_stop_absorbed_silently() {
+  local dir state fakebin window key pane_hash pid
+  dir=$(make_case declared-stop-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-quotastop"
+  pane_hash=$(stopped_worker_fixture "$dir" "$window" s100.1.1)
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  declare_stop_record "$state" quotastop s100.1.1
+  export FM_FAKE_CREW_STATE='state: stopped · source: declared-stop · stopped by firstmate on purpose 900s ago: zero model quota until about 19:00; relaunch when it resets'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a deliberately stopped worker: $(cat "$dir/watch.out")"
+  fi
+  # A second cycle: the cadence that produced forty alerts would fire by now.
+  wait_poll_cycle "$state" "$pid" 60 || { reap "$pid"; fail "watcher exited on a later poll for a deliberately stopped worker: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/watch.out" ] || fail "a deliberately stopped worker printed a wake reason: $(cat "$dir/watch.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a deliberately stopped worker enqueued a wake: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on the intentional-stop absorb"
+  [ "$(cat "$state/.stopped-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "the intentional-stop absorb was not recorded for this hash"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an intentional stop must never start the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a worker firstmate deliberately stopped raises no stale events at all"
+}
+
+# 2. THE PROPERTY THAT MUST NOT BREAK. Identical fixture, no declaration: a
+#    worker that died on its own is exactly the alert this change protects, and
+#    it must still arrive on the first sighting, not after a timer.
+test_self_died_worker_still_surfaces_immediately() {
+  local dir state fakebin window key pane_hash pid drain_out
+  dir=$(make_case declared-stop-self-died); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-quotastop"; drain_out="$dir/drain.out"
+  pane_hash=$(stopped_worker_fixture "$dir" "$window" s200.1.1)
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  [ ! -e "$state/quotastop.stopped" ] || fail "fixture must carry no declaration"
+  # What fm-crew-state reports for an agent that left without saying so.
+  export FM_FAKE_CREW_STATE='state: exited · source: pane · harness agent exited without a terminal status line'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a worker that died on its own did not surface at once"
+  grep -Fx "stale: $window" "$dir/watch.out" >/dev/null || fail "no stale wake printed for a worker that died on its own"
+  [ ! -e "$state/.stopped-$key" ] || fail "an undeclared departure must not be recorded as an intentional stop"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the self-died stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the self-died worker's stale wake was not queued"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a worker that died on its own still surfaces immediately (no declaration, no absorb)"
+}
+
+# 3. THE INCARNATION BOUND. Identical fixture and a declaration that is present
+#    but names the PREVIOUS agent, which is what a relaunch leaves behind. A
+#    replacement worker on the same task id is supervised normally from its
+#    first read, so a stale declaration can never silence a later, different
+#    worker - and the cheap gate rejects it without even reading crew state.
+test_declared_stop_cannot_silence_a_later_incarnation() {
+  local dir state fakebin window key pid drain_out
+  dir=$(make_case declared-stop-spent); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-quotastop"; drain_out="$dir/drain.out"
+  stopped_worker_fixture "$dir" "$window" s300.2.2 >/dev/null
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  declare_stop_record "$state" quotastop s300.1.1   # the agent it stopped is gone
+  # Even if the state source were asked and answered `stopped`, the binding must
+  # refuse first - so the fixture answers `stopped` and the wake must still fire.
+  export FM_FAKE_CREW_STATE='state: stopped · source: declared-stop · stopped by firstmate on purpose'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a spent declaration silenced the replacement worker"
+  grep -Fx "stale: $window" "$dir/watch.out" >/dev/null || fail "no stale wake printed for the replacement worker"
+  [ ! -e "$state/.stopped-$key" ] || fail "a spent declaration must not record an absorb"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the replacement's stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the replacement worker's stale wake was not queued"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared stop cannot outlive its incarnation and silence a later worker on the same task"
+}
+
+# 4. AWAY MODE. The four-hour unattended stretch is exactly where this noise was
+#    measured, so the absorb is checked ahead of the away-mode branch and an
+#    intentional stop reaches the daemon no more than it reaches the watcher.
+test_declared_stop_absorbed_in_away_mode() {
+  local dir state fakebin window pid
+  dir=$(make_case declared-stop-afk); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-quotastop"
+  stopped_worker_fixture "$dir" "$window" s400.1.1 >/dev/null
+  declare_stop_record "$state" quotastop s400.1.1
+  : > "$state/.afk"
+  export FM_FAKE_CREW_STATE='state: stopped · source: declared-stop · stopped by firstmate on purpose'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited in away mode for a deliberately stopped worker: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "away mode enqueued a wake for a deliberately stopped worker: $(cat "$state/.wake-queue")"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an intentional stop is absorbed in away mode too, not handed to the daemon as a wedge suspect"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -4860,6 +5038,10 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_declared_stop_absorbed_silently
+test_self_died_worker_still_surfaces_immediately
+test_declared_stop_cannot_silence_a_later_incarnation
+test_declared_stop_absorbed_in_away_mode
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle

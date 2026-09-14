@@ -680,7 +680,11 @@ prefetch_task_current_states() {
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
-    if ! cp -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
+    # Preserve the record's own mtime (cp -p, like the status capture
+    # below): crew-state staleness guards read publication time off it for
+    # records that predate spawned_at=, and a copy-time mtime would discard
+    # status lines the incarnation actually wrote on every snapshot pass.
+    if ! cp -p -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
       # Teardown may unlink a task after the glob selected it but before cp opens
       # it. That task is no longer in the inventory; other copy failures remain
       # fatal rather than silently producing a partial snapshot.

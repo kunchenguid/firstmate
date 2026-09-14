@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `rebind`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -31,8 +31,17 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change, and declare the endpoint agent-free by design. Takes an optional `--reason <text>`. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The replacement's own published endpoint exists, and the durable record names the harness that is actually running. Readiness is reported separately as `ready=confirmed` when its agent was observed running and `ready=starting` when it had not registered one yet. |
+| `rebind` | Correct a record whose endpoint identifier stopped resolving while its agent kept running, by pointing it at the live endpoint that still carries the task's identity. Touches the record only, never the agent. | The rewritten record passes endpoint-identity validation and resolves to an endpoint the backend positively classifies. |
+
+`rebind` is the one verb that acts on the record rather than on the agent, and it is the answer to a failure the other three could not reach.
+A backend whose endpoint identifiers are generated re-issues them when it rebuilds its layout, so a recorded identifier can stop resolving while the agent behind it keeps running.
+Firstmate then reads that endpoint as absent, which is one of the two verdicts that authorise a relaunch, and the relaunch would put a second agent on a live worktree.
+[`bin/fm-backend.sh`](../bin/fm-backend.sh)'s `fm_backend_agent_state` now reports that case as `drifted` instead, and `rebind` is what clears it: before it existed, the only supported response was a fresh spawn, and recovering by hand meant closing a live agent's endpoint.
+
+It acts only on a `drifted` endpoint, only when exactly one live endpoint carries the task's label and directory, and only when that endpoint holds an agent.
+Two claimants refuse, because binding a task to the wrong endpoint would aim every later lifecycle command at a stranger.
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -43,7 +52,25 @@ An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
-**Teardown and discard are not verbs and will not become verbs.**
+## The declared stop
+
+An `exit` that verifies its stop also writes [`state/<id>.stopped`](../bin/fm-stopped-lib.sh), a durable record saying this endpoint is agent-free **by design**, why, and which agent it applies to.
+Supervision needs that record because an endpoint firstmate emptied on purpose is byte-identical to one a worker died in, and until it existed the fleet had no way to say "this worker is intentionally not running".
+The measured cost of not saying it: two workers stopped for a four-hour quota reset on 2026-08-25 raised on the order of forty stale alerts between them, each indistinguishable at arrival from the alert that reports a genuinely dead worker.
+
+The record is **not** a hold, and a hold is not this record.
+A task can be legitimately held for a captain decision while its worker is genuinely wedged, and that must still surface; the discriminator is whether firstmate itself stopped the agent, which only the control plane knows at the moment it acts.
+
+Three properties bound what the record can do:
+
+- **It is bound to one incarnation.** The record carries the `spawn_gen` of the exact agent it stopped, and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) mints a fresh one on every spawn and every relaunch. A record left behind by a predecessor therefore matches nothing and silences nobody, so a replacement worker on the same task id is supervised normally from its first read.
+- **It is never believed alone.** [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) reports `state: stopped · source: declared-stop · …` only when the record still binds *and* the backend's recovery-grade classifier reports the agent gone. An agent that died on its own writes no record and still reports `exited` immediately; an agent that is alive is never called stopped.
+- **Only that verdict absorbs anything.** The supervisors read the crew state, not the file. [`bin/fm-watch.sh`](../bin/fm-watch.sh)'s `declared_stop_absorb` takes such a pane out of stale detection silently, in every supervision mode, because a re-surface cadence exists to re-ask a question and firstmate holds both the reason and the resume decision here.
+
+`relaunch` clears the declaration outright and would spend it anyway, since the replacement carries a new incarnation.
+Pass `--reason` with the wait and the resume path (`--reason 'zero model quota until about 19:00; relaunch when it resets'`) whenever the stop is not self-evident: it is what the next read of that worker's state will say.
+
+  **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 

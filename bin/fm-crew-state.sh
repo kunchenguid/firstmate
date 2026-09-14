@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|stopped|exited|unknown> · source: <run-step|pane|status-log|declared-stop|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -75,10 +75,19 @@
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#   4. No run for this crew (pre-validation, or kind=scout): ask the endpoint
+#      what is actually there before believing any record about it. A readable
+#      target proves only that the SHELL survives, so a frozen agent reports
+#      suspended, an agent firstmate itself stopped through the control plane
+#      reports `stopped`, and an agent that EXITED with no terminal status line
+#      reports `exited` - none of them may fall through to a record its own
+#      writer is no longer around to advance. An agent that is merely idle or
+#      unreachable is never reported gone, and neither is one whose record was
+#      published so recently that its harness cannot be expected to have
+#      started yet (the registration grace at within_spawn_grace, below). Then
+#      the recorded backend's pane busy state, then the status log's last line
+#      only when its verb maps to a recognized run-state. Decision-only events
+#      such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -108,6 +117,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-stopped-lib.sh
+. "$SCRIPT_DIR/fm-stopped-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -126,6 +137,26 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # entire history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# Seconds after a task's endpoint record is published during which an
+# agent-free endpoint is NOT yet evidence that the agent left. See
+# within_spawn_grace below for what it guards; the value is bounded from both
+# sides by constants this fleet already lives with:
+#   floor - bin/fm-spawn.sh already allows a launched harness 30s to become
+#     usable in its endpoint (kimi_wait_for_ready: 60 polls x 0.5s), which is
+#     firstmate's own standing statement of how slow a start may legitimately
+#     be. The grace has to cover at least that, plus the launch line's delivery,
+#     which happens after the record is published.
+#   ceiling - the watcher does not escalate an idle worker as a possible wedge
+#     until FM_STALE_ESCALATE_SECS (240s, bin/fm-watch.sh), so any grace well
+#     under that costs a worker that really did die on arrival no supervision
+#     latency it did not already have.
+# 60 doubles the known startup budget for cold-start headroom (first run after
+# an upgrade, a cold binary, a loaded machine) and stays at a quarter of the
+# escalation floor. Cheap to be generous here and expensive to be tight: being
+# late to notice a dead-on-arrival worker costs one poll interval, while being
+# early to call a starting worker gone licenses a second agent on its worktree.
+FM_CREW_STATE_SPAWN_GRACE=${FM_CREW_STATE_SPAWN_GRACE:-60}
+case "$FM_CREW_STATE_SPAWN_GRACE" in ''|*[!0-9]*) FM_CREW_STATE_SPAWN_GRACE=60 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -157,11 +188,96 @@ if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
+# --- spawn-registration grace ----------------------------------------------
+# Epoch seconds at which THIS incarnation's endpoint record was published.
+# bin/fm-spawn.sh stamps spawned_at= on every fresh spawn and every relaunch. A
+# record written by an older spawn carries none, and the record file's own mtime
+# bounds the same thing instead - a later writer (bin/fm-pr-check.sh records pr=
+# into it) can only move that forward, which lengthens the grace rather than
+# shortening it, and long is the safe direction for a guard whose failure mode
+# is a duplicate agent.
+record_published_at() {
+  local at
+  at=$(meta_value spawned_at)
+  case "$at" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s' "$at"; return 0 ;;
+  esac
+  if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+    stat -f %m "$META" 2>/dev/null
+  else
+    stat -c %Y "$META" 2>/dev/null
+  fi
+}
+
+# True while this task's record is too young for an agent-free endpoint to mean
+# anything. The record is published the moment the endpoint exists, and the
+# harness only enters that endpoint's foreground process group once it has
+# actually started - so until it does, the endpoint is shells alone, which is
+# byte-for-byte what a departed agent leaves behind. fm_backend_agent_state is
+# right either way; it is being asked a question it cannot answer.
+#
+# That gap is why this exists and why it guards `exited` alone: `exited` is the
+# one verdict that licenses a relaunch, and a relaunch onto a worker that is
+# merely still starting puts a SECOND agent on one worktree. Elapsed time is
+# the only thing that separates the two cases - no further endpoint evidence
+# can, because a harness that has not started has painted nothing to read.
+# A timestamp that cannot be read at all, or one in the future (clock skew),
+# holds the grace rather than dropping it, and says which case it is in
+# SPAWN_GRACE_REASON so the emitted detail names what is actually unknown
+# instead of implying a measured age.
+SPAWN_GRACE_REASON=
+within_spawn_grace() {
+  local at now age
+  SPAWN_GRACE_REASON=
+  at=$(record_published_at)
+  case "$at" in
+    ''|*[!0-9]*)
+      SPAWN_GRACE_REASON="this task's record carries no readable publication time, so how long ago it was published cannot be established"
+      return 0
+      ;;
+  esac
+  now=$(date +%s)
+  age=$((now - at))
+  [ "$age" -lt "$FM_CREW_STATE_SPAWN_GRACE" ] || return 1
+  [ "$age" -ge 0 ] || age=0
+  SPAWN_GRACE_REASON="this task's record was published ${age}s ago, inside the ${FM_CREW_STATE_SPAWN_GRACE}s a launched harness is allowed to finish starting"
+  return 0
+}
+
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
+# Last non-empty status line, and its leading verb (the word before the colon).
+# A line predating THIS incarnation's publication is not this crew's: after a
+# relaunch the log still ends with the previous incarnation's last line until
+# the replacement appends its own, and reading it would misattribute the old
+# verdict to the new worker. The publication clock is spawned_at= content when
+# the record carries it (bin/fm-spawn.sh stamps it on every fresh spawn and
+# every relaunch, and content survives later meta rewrites and snapshot
+# copies), falling back to the record file's own mtime for older records -
+# whose staleness proof is weaker but still rejects an ancient log.
+# The mtime fallback compares against the ORIGINAL record's mtime: the fleet
+# snapshot must preserve it when capturing metadata (cp -p), because a
+# freshly copied meta would discard lines this incarnation actually wrote.
 log_last_line() {
   [ -f "$LOG" ] || return 1
+
+  local at log_mtime
+  at=$(record_published_at)
+  case "$at" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+        log_mtime=$(stat -f %m "$LOG" 2>/dev/null || true)
+      else
+        log_mtime=$(stat -c %Y "$LOG" 2>/dev/null || true)
+      fi
+      if [ -n "$log_mtime" ] && [ "$log_mtime" -lt "$at" ]; then
+        return 1
+      fi
+      ;;
+  esac
+
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
@@ -805,6 +921,17 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #             contradicted themselves, which is unknown, never death.
   # Backends with no classifier (orca, zellij, and cmux all report unverified)
   # keep their historical capture-failure-means-gone reading.
+  #
+  # An unreadable target is still not proof the crew is gone. A backend whose
+  # endpoint identifiers are generated (Herdr pane ids) re-issues them when it
+  # rebuilds its layout, and the recorded one then names nothing while the
+  # crew keeps running under a new one. Ask whether a live endpoint still
+  # carries this task's identity before reporting the crew as gone; the
+  # recorded worktree is the same directory the endpoint was created in.
+  if [ "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" \
+      "$EXPECTED_LABEL" "$WT" 2>/dev/null)" = drifted ]; then
+    emit unknown pane "recorded endpoint identifier is stale; a live endpoint still carries this task's identity - correct the record with bin/fm-control.sh $ID rebind"
+  fi
   case "$TASK_BACKEND" in
     tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;
@@ -827,17 +954,105 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
+# A stopped agent is checked before anything else here, and for every kind.
+# It is the one endpoint fact that makes every OTHER source untrustworthy at
+# once: the process that writes the semantic record is frozen, so the record
+# says whatever it last said forever, and the status log stopped where the
+# worker stopped. It is checked for a secondmate too, even though the busy
+# state below is not - a secondmate's idle pane is healthy, but a secondmate
+# frozen mid-turn is not idle, and the live incident that produced this check
+# was a secondmate.
+if fm_backend_endpoint_suspended "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null; then
+  emit unknown pane "harness process is suspended, not gone; resume it in its own endpoint before trusting any recorded state"
+fi
+
+# An agent that EXITED is checked next, and for the same reason: a readable
+# endpoint proves the SHELL is there, not the agent. pane_readable above only
+# asked whether the target resolves, so a worker whose agent left behind a live
+# prompt reached the busy verdict and the status log below with no one to
+# contradict them - the semantic record kept the `idle` its own shutdown hook
+# wrote, and the log kept the last line the worker appended BEFORE it left.
+# That pre-exit line then became the reported CURRENT state, which is how four
+# workers on 2026-08-20 each went on reporting `working` for up to an hour
+# after their agent was gone.
+#
+# fm_backend_agent_state is the one source that separates the three ways a
+# quiet endpoint looks identical from the outside, and it is deliberately the
+# ONLY thing consulted here: `dead` means the endpoint's foreground process
+# group is shells alone, `suspended` means the agent is present but frozen
+# (handled just above), and `alive` means the agent is right there - between
+# turns, or unable to accept input behind its own overlay. Only `dead` is
+# consumed, so an agent that is merely unreachable is never reported as gone,
+# and a live worker can never be relaunched onto its own worktree on this
+# evidence.
+#
+# The status log still decides whether the exit was a REPORT or a departure.
+# A worker that wrote done:/failed: (or a captain-relevant needs-decision: or
+# blocked:) and then exited said what happened, and keeps its own verdict from
+# the log below. This verdict answers only the case the log cannot: the
+# terminal line was never written at all. That distinction is the whole
+# defect - not the exit, which is normal, but the missing line, which is what
+# leaves firstmate unable to tell a finished worker from a stopped one.
+AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" \
+  "$EXPECTED_LABEL" "$WT" 2>/dev/null) || AGENT_STATE=unknown
+
+# A worker FIRSTMATE ITSELF stopped is separated here, before `exited`, because
+# the two are byte-identical from the outside and mean opposite things. An
+# endpoint that is agent-free because bin/fm-control.sh exit emptied it on
+# purpose is not a worker that needs attention; it is a worker that is
+# intentionally not running, and until this verdict existed there was no way to
+# say so. The declaration is only ever believed alongside a dead agent, and only
+# while it still binds to the incarnation it was written for
+# (bin/fm-stopped-lib.sh), so an agent that died on its own writes nothing and
+# still reports `exited`, an agent that is alive is never called stopped, and a
+# relaunch's replacement is supervised normally from its first read.
+#
+# It outranks the status log deliberately. Whatever the worker last appended, it
+# was appended BEFORE firstmate stopped it, so it describes the run rather than
+# the present; the stop is the newer fact and the one that explains the empty
+# endpoint.
+if [ "$AGENT_STATE" = dead ] && fm_stopped_declared "$STATE" "$ID"; then
+  STOP_REASON=$(fm_stopped_field "$STATE" "$ID" reason)
+  STOP_AGE=$(fm_stopped_age "$STATE" "$ID") || STOP_AGE=
+  STOP_DETAIL="stopped by firstmate on purpose"
+  [ -z "$STOP_AGE" ] || STOP_DETAIL="$STOP_DETAIL ${STOP_AGE}s ago"
+  [ -z "$STOP_REASON" ] || STOP_DETAIL="$STOP_DETAIL: $STOP_REASON"
+  emit stopped declared-stop "$STOP_DETAIL; its work is intact at $WT and nothing is running - resume it with bin/fm-control.sh $ID relaunch"
+fi
+
+if [ "$AGENT_STATE" = dead ] \
+  && ! status_is_terminal_verb "$LOG_LINE"; then
+  # ... unless the record is still inside its registration window, where the
+  # same emptiness is equally consistent with a harness that has not started.
+  # Reported as unknown rather than smoothed into working: unknown licenses
+  # nothing, so a spawn that really did die on arrival is still surfaced by the
+  # next read instead of being absorbed as progress.
+  if within_spawn_grace; then
+    emit unknown pane "endpoint holds no agent yet, but $SPAWN_GRACE_REASON; a harness that has not started leaves the same empty endpoint as one that left, so this is not proof either way - re-read it before acting, and do not relaunch on it"
+  fi
+  if [ -n "$LOG_LINE" ]; then
+    EXIT_LAST="last event: $(status_line_note "$LOG_LINE")"
+  else
+    EXIT_LAST="no status events"
+  fi
+  emit exited pane "harness agent exited without a terminal status line ($EXIT_LAST); its work is intact at $WT - read the deliverable to tell finished from stopped mid-task, and do not assume either"
+fi
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
+  COMPOSER_STATE=$(fm_backend_composer_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null)
+  if [ "$COMPOSER_STATE" = dialog ]; then
+    emit blocked pane "modal dialog"
+  fi
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *) PANE_UNKNOWN_REASON="harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi
 
@@ -856,6 +1071,10 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
+fi
+
+if [ -n "${PANE_UNKNOWN_REASON:-}" ]; then
+  emit unknown pane "$PANE_UNKNOWN_REASON"
 fi
 
 emit unknown none "no current-state source available"

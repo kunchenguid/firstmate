@@ -14,7 +14,7 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
-Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+Interrupt, stop, relaunch, and rebind a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch|rebind`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
@@ -34,6 +34,16 @@ A no-mistakes run matched to the crew's branch and current code remains authorit
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
+
+An endpoint that does not answer is not automatically an endpoint that is gone.
+A recorded identifier reported as `drifted` means a live endpoint still carries this task's identity under a new identifier, and a worker reported as `suspended` is stopped rather than gone; both refuse recovery on purpose, because relaunching over either one puts a second agent on a live copy of the work.
+Correct a drifted record with `bin/fm-control.sh <task-id> rebind` and then decide from its real state; resume a suspended worker in its own endpoint instead of replacing it.
+
+A worker reported as `exited` is the third shape, and the only one of the three where the agent really is gone: its endpoint survives as a bare shell and it never wrote a terminal status line.
+That verdict says the agent left, never that the work is unfinished - on 2026-08-20 the most expensive case was a complete report sitting on disk unclaimed for an hour while the record still read `working`.
+So decide from the work rather than from the last status line: read the task's deliverable and worktree first, claim a finished one through its normal completion path, and relaunch only what is genuinely incomplete.
+Nothing is lost either way, because the worktree, its commits, and any written deliverable all survive the exit and a relaunch in that same worktree resumes cleanly.
+A worker whose record was published moments ago never reaches that verdict and reports `unknown` instead, because a harness that has not finished starting leaves the same empty endpoint as one whose agent left; that read licenses nothing in either direction, so re-read it once the window named in its detail line has passed rather than relaunching on it.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.

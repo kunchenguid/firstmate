@@ -1494,6 +1494,15 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
+    bin/fm-stopped-lib.sh)
+      # The declared-stop record has three readers in three families: its own
+      # contract cases, the current-state verdict that pairs it with a
+      # verified-gone agent, and the supervision path that absorbs on that
+      # verdict. A change to the record's shape or binding breaks any of them.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' backend-dispatch
+      ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's

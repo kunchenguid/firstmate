@@ -10,7 +10,10 @@
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# although its initial no-verb status signal still surfaces in normal mode. A
+# worker firstmate ITSELF stopped is the one absorb with no cadence at all: its
+# endpoint is agent-free by design and firstmate holds both the reason and the
+# resume decision, so there is no question left to re-ask (declared_stop_absorb).
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
@@ -29,8 +32,12 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
-#                          applies does the log's last line decide:
+#                          human the wait is on. A worker firstmate ITSELF stopped
+#                          is the one absorb with no cadence at all: its endpoint
+#                          is agent-free by design and firstmate holds both the
+#                          reason and the resume decision, so there is no question
+#                          left to re-ask (declared_stop_absorb).
+#                          Only when no absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -162,6 +169,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# The declared-stop record: the one durable statement that an endpoint is
+# agent-free BY DESIGN, and the incarnation binding that keeps it from outliving
+# the agent it describes.
+# shellcheck source=bin/fm-stopped-lib.sh
+. "$SCRIPT_DIR/fm-stopped-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -1106,13 +1118,65 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.stopped-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
+}
+
+# Absorb the stale pane of a worker firstmate ITSELF stopped.
+#
+# The 2026-08-25 case this exists for: two workers hit zero model quota with
+# about four hours to reset, firstmate stopped them through the sanctioned
+# bin/fm-control.sh exit path - which preserves the endpoint, the local copy and
+# every uncommitted change - and both went on raising a stale event every few
+# minutes for the whole window, now because the endpoint was agent-free. Some
+# forty alerts, each indistinguishable at arrival from the one that reports a
+# genuinely dead worker on captain-facing work. That is how a reader learns to
+# skim the alert that matters.
+#
+# The discriminator is NOT that the task is held. A task can be legitimately held
+# for a captain decision while its worker is genuinely wedged, and that must
+# still surface - which it does, because a wedged worker's agent is ALIVE and
+# this path is reachable only through a verdict that requires it gone.
+#
+# Unlike a declared pause, this absorbs SILENTLY with no re-surface cadence. A
+# cadence exists to re-ask a question that may have answered itself; a stop
+# firstmate performed and recorded answers nothing by being asked again, and
+# firstmate holds both the reason and the resume decision. Everything that could
+# change the answer - a relaunch, a rebind, an agent appearing in the endpoint -
+# stops the declaration binding or makes the pane busy, and ordinary supervision
+# resumes from the next poll.
+#
+# Cheap by construction: the record's absence costs one stat, and the
+# authoritative crew-state read runs once per distinct stale hash, never per
+# poll, exactly as every other costly decision in this loop.
+# 0 when the pane was absorbed as an intentional stop, 1 when it was not.
+declared_stop_absorb() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key sf df
+  [ -n "$task" ] || return 1
+  # The cheap gate, and the one that spends a declaration a relaunch superseded:
+  # no record, or a record bound to an incarnation this task no longer runs, and
+  # nothing here applies. Only a still-binding record is worth a crew-state read.
+  fm_stopped_declared "$STATE" "$task" || return 1
+  key=$(window_key "$win")
+  sf="$STATE/.stale-$key"
+  df="$STATE/.stopped-$key"
+  if [ "$(cat "$df" 2>/dev/null || true)" != "$h" ]; then
+    # First sight of this hash: confirm through the one source that pairs the
+    # declaration with a verified-gone agent. A declaration alone never absorbs.
+    crew_is_declared_stopped "$task" || { rm -f "$df"; return 1; }
+    printf '%s' "$h" > "$df"
+    rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+    clear_pause_state "$key"
+  fi
+  printf '%s' "$h" > "$sf"
+  triage_log "absorbed stale (intentionally stopped by firstmate): $win"
+  return 0
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -2270,6 +2334,13 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif declared_stop_absorb "$w" "$task" "$h"; then
+          # A worker firstmate itself stopped: agent-free by design, in every
+          # supervision mode. Checked ahead of the away-mode branch on purpose -
+          # away mode is exactly the long unattended stretch this noise was
+          # measured across, and the daemon has no cheaper way to tell an
+          # intentional stop from a wedge than the verdict already read here.
+          :
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
