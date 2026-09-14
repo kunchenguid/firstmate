@@ -6,9 +6,9 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance. Azure DevOps Services URLs use bin/fm-azure-pr.py and require
+# GitHub and Azure DevOps Services pull request URLs, GitLab merge request URLs,
+# and Gerrit change URLs are accepted, including a merge request or change on a
+# self-hosted instance. Azure Services URLs use bin/fm-azure-pr.py and require
 # python3 and az/azure-devops; a failed live identity/head read refuses
 # registration rather than arming an unusable Azure poll.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft

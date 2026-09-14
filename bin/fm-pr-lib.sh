@@ -8,11 +8,11 @@
 # arbitrarily nested group/subgroup/project namespace on GitLab, and an
 # arbitrarily nested project name on Gerrit, where "number" is the change
 # number. Azure Services uses organization/project/_git/repository (or the
-# legacy collection route); bin/fm-azure-pr.py owns its strict URL and REST
-# contract. A GitLab or Gerrit project can sit at any depth, so no
-# owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# legacy collection route); bin/fm-azure-pr.py owns its URL and REST contract.
+# A GitLab or Gerrit project can sit at any depth, so no owner/repository pair
+# can address one and the sidecar carries the whole path instead. Both also run
+# on self-hosted instances, and Gerrit runs nowhere else, so the host is part of
+# that identity rather than a constant. Every consumer re-derives the identity
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #

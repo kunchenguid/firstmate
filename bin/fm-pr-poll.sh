@@ -6,8 +6,7 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
-# tooling to follow the first two. The Gerrit branch additionally needs jq,
+# GitLab, and gerrit-axi for Gerrit. The Gerrit branch additionally needs jq,
 # which bin/fm-pr-check.sh refuses to arm a Gerrit watch without.
 # Azure uses python3 and az/azure-devops via the trusted code-root helper
 # bin/fm-azure-pr.py; the watcher invokes this file in that code root,

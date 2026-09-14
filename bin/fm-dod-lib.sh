@@ -407,7 +407,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
-    pr_base=", against the base branch \`$base\` (\`--base $base_q\` on GitHub, \`--target-branch $base_q\` on Azure), not the repository default"
+    pr_base=", against the base branch \`$base\` (\`--base $base_q\` on GitHub; \`--target-branch $base_q\` on Azure DevOps), not the repository default"
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi

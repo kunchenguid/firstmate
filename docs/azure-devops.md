@@ -66,6 +66,6 @@ No optional tool installation or authentication repair is performed automaticall
 
 `tests/azure-pr-contract.py`, invoked by `tests/fm-pr-merge.test.sh`, covers the Azure CLI boundary with synthetic REST responses, including identity parsing, current policy revisions, build/check failures, revision races and accepted-but-unconfirmed completion.
 `tests/fm-teardown.test.sh` covers completed versus abandoned cleanup with real disposable Git repositories.
-`tests/fm-task-delivery.test.sh` and `tests/fm-review-diff.test.sh` cover prefix selection through scaffold, promotion, and comparison.
+`tests/fm-task-delivery.test.sh` and `tests/fm-review-diff.test.sh` cover prefix selection through scaffold, promotion, comparison and local landing.
 These are deterministic regressions, not evidence that an Azure merge was performed live.
 A live completion test requires a separately approved disposable Azure repository; reading an existing project never authorizes a test PR, vote, policy change or merge there.
