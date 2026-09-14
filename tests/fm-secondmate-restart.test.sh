@@ -630,8 +630,12 @@ test_persist_waits_are_polled_together() {
   pass "T10 pending persist answers are polled as one fleet"
 }
 
-# --- T11: a failed post-stop relaunch is not described as a nudge ------------
-test_post_stop_failure_is_reported_unreached() {
+# --- T11: a placed-but-starting replacement restarts the mate ---------------
+# A relaunch whose replacement is in place but has not registered an agent yet
+# is an unfinished start, not a failure: the endpoint and the work are both
+# where they belong, so the restart reports the mate restarted rather than
+# unreached - and still never describes the durable enqueue as a nudge.
+test_post_stop_starting_replacement_is_reported_restarted() {
   local dir out rc
   dir=$(new_case post-stop)
   add_local_mate "$dir" sm1
@@ -640,13 +644,13 @@ test_post_stop_failure_is_reported_unreached() {
 
   out=$(run_restart "$dir" sm1); rc=$?
 
-  expect_code 3 "$rc" "a post-stop relaunch failure must remain accounted for"$'\n'"$out"
-  assert_contains "$out" "unreached: sm1:" "a stopped mate must be reported as unreached"
-  assert_contains "$out" "restart outcome is unknown" "the report must not attribute the failed lifecycle operation"
+  expect_code 0 "$rc" "a placed-but-starting replacement restarts the mate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "a stopped mate with its replacement in place must be reported as restarted"
+  assert_not_contains "$out" "unreached: sm1" "an unfinished start must not be reported as unreached"
   assert_not_contains "$out" "nudged: sm1" "a durable enqueue must not masquerade as a running mate's nudge"
-  assert_contains "$out" "summary: 0 of 1 restarted, 0 nudged, 1 unreached" \
-    "the summary must not claim that a stopped mate remains on older instructions with a message"
-  pass "T11 post-stop restart failure is never misreported as a nudge"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
+    "the summary must count the restarted mate"
+  pass "T11 post-stop replacement that is still starting restarts the mate without a nudge"
 }
 
 # --- T12: relaunch work does not stop polling other persist answers ----------
@@ -845,7 +849,7 @@ test_remote_mate_restarts_over_the_transport_hop
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
-test_post_stop_failure_is_reported_unreached
+test_post_stop_starting_replacement_is_reported_restarted
 test_relaunches_do_not_block_persist_polling
 test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored

@@ -71,7 +71,12 @@
 # delivered. Submission dispatches through the target's recorded backend; the
 # tmux adapter shares its composer/submit core with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3; agy typed targets
-# default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). Slash
+# default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). FM_SEND_SLEEP is a
+# FLOOR, not the whole confirmation window: each backend widens the first Enter
+# attempt to fit the line being submitted, because a harness cannot start a turn
+# or clear its composer before it has accepted that whole line and some harnesses
+# take seconds to do so for a long steer (bin/fm-composer-lib.sh: "Submit
+# confirmation window"). Slash
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
 # A remote secondmate target has no typed text plane at all:

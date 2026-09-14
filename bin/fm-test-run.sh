@@ -317,6 +317,7 @@ family_for_basename() {
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
+    fm-spawn-relaunch-worktree-e2e.test.sh|\
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
@@ -366,8 +367,9 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-tmux-agent-liveness.test.sh|\
-    fm-control.test.sh|fm-control-relaunch.test.sh|\
+    fm-tmux-agent-liveness.test.sh|fm-submit-confirm-window.test.sh|\
+    fm-control.test.sh|fm-control-relaunch.test.sh|fm-relaunch-missing-endpoint.test.sh|\
+    fm-spawn-positional-args.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
@@ -413,6 +415,7 @@ family_for_basename() {
     fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
     fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
+    fm-lane-wrappers.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
@@ -2227,6 +2230,18 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$ROOT/bin/fm-timeout-lib.sh"
 fi
+
+# Scrub the inherited Herdr pane identity for the entire suite. A test launched
+# from inside a live Herdr pane inherits HERDR_ENV, HERDR_PANE_ID, etc., and any
+# test that runs fm-bootstrap.sh with a temp FM_HOME will reach the live session
+# through fm-herdr-orphan-reaper.sh, evaluating every live worker pane as
+# unclaimed and closing them. Unsetting these once here makes isolation
+# structural: no test inherits the live session identity, and a test that
+# deliberately exercises Herdr behaviour is free to set its own values after.
+# The variable set matches herdr_forget_inherited_pane() in
+# tests/herdr-test-safety.sh - one canonical list, not two that can drift.
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
+  HERDR_SOCKET_PATH HERDR_SESSION 2>/dev/null || true
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"

@@ -126,8 +126,14 @@ pass "agy typed send: no not-submitted refusal on confirmed idle-to-busy"
 case_dir=$(printf '%s\n' "$TMP_ROOT"/case-* | head -1)
 settles=$(grep -cv '^0\.4$' "$case_dir/sleep.log" || true)
 waits=$(grep -c '^0\.4$' "$case_dir/sleep.log" || true)
-[ "$settles" = 1 ] || fail "agy typed send: expected exactly 1 non-wait sleep (popup settle), got $settles"
-[ "$waits" = 5 ] || fail "agy typed send: expected the poll to reach the 5th busy read (5 x 0.4s: Enter wait + 4 poll waits), got $waits"
+# The first Enter attempt's window is sized to the 30-character steer
+# (30 x 0.015s = 0.45s, sampled once), so the log holds two non-0.4 sleeps -
+# the popup settle plus the sized first window - and the busy poll then runs
+# four 0.4s waits to the late render.
+[ "$settles" = 2 ] || fail "agy typed send: expected exactly 2 non-wait sleeps (popup settle + sized first window), got $settles"
+[ "$(grep -c '^0\.4500$' "$case_dir/sleep.log" || true)" = 1 ] \
+  || fail "agy typed send: expected one 0.45s first-window sleep sized to the 30-character steer"
+[ "$waits" = 4 ] || fail "agy typed send: expected the poll to reach the 5th busy read (4 x 0.4s poll waits after the sized first window), got $waits"
 pass "agy typed send: sleep log shows the confirm poll running to the late busy render"
 
 # agy with an explicit FM_SEND_RETRIES=3: the operator knob wins over the agy

@@ -272,6 +272,19 @@ local_default_safe_for_recovery() {
 # warning. Reads $cur (current branch, empty when detached), $dirty, and the
 # HEAD-vs-$BASE ancestry to pick the most informative description.
 stuck_state() {
+  local is_reversal=0 missing_files=""
+  if [ "$dirty" = yes ]; then
+    local index_tree behind_commit
+    index_tree=$(git -C "$PROJ" write-tree 2>/dev/null) || true
+    if [ -n "$index_tree" ]; then
+      behind_commit=$(git -C "$PROJ" --no-pager log -n 50 --format="%H %T" HEAD | awk -v tree="$index_tree" 'NR > 1 && $2 == tree {print $1; exit}')
+      if [ -n "$behind_commit" ]; then
+        is_reversal=1
+        missing_files=$(git -C "$PROJ" diff --name-only "$behind_commit" HEAD | tr '\n' ' ' | sed 's/ $//')
+      fi
+    fi
+  fi
+
   local s
   if [ -n "$cur" ]; then
     s="branch $cur"
@@ -284,9 +297,14 @@ stuck_state() {
   elif ! local_default_safe_for_recovery; then
     s="detached HEAD (local $DEFAULT diverged from $BASE)"
   else
-    s="detached HEAD"
+    s="detached HEAD (clean, ancestral)"
   fi
-  [ "$dirty" = no ] || s="$s with uncommitted changes"
+
+  if [ "$is_reversal" = 1 ]; then
+    s="$s whose index or tree is BEHIND its own HEAD (missing landed work: $missing_files)"
+  elif [ "$dirty" = yes ]; then
+    s="$s with uncommitted changes"
+  fi
   printf '%s\n' "$s"
 }
 
@@ -297,6 +315,9 @@ report_stuck() {
   local state=$1 behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
+  if printf '%s' "$state" | grep -q "BEHIND its own HEAD"; then
+    echo "                     Recovery command: git -C \"$PROJ\" reset --hard HEAD"
+  fi
 }
 
 sync_project() {

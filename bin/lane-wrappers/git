@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Firstmate git wrapper: prevents forcefully checking out a branch that is checked
+# out in another worktree (which would silently corrupt that worktree's state).
+
+is_checkout=0
+force=0
+branch=""
+
+for arg in "$@"; do
+  if [ "$arg" = "checkout" ] || [ "$arg" = "switch" ]; then
+    is_checkout=1
+  elif [ "$is_checkout" = 1 ]; then
+    if [ "$arg" = "-B" ] || [ "$arg" = "-C" ]; then
+      force=1
+    elif [ "$force" = 1 ] && [ -z "$branch" ] && [[ "$arg" != -* ]]; then
+      branch="$arg"
+    fi
+  fi
+done
+
+REAL_GIT=$(type -p -a git | grep -v "/bin/lane-wrappers/git" | head -n 1)
+SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+if [ -z "$REAL_GIT" ] || [ "$(cd "$(dirname "$REAL_GIT")" && pwd -P)/$(basename "$REAL_GIT")" = "$SELF_DIR/git" ]; then
+  echo "fatal: Firstmate lane-wrappers/git: cannot find real git binary on PATH (only the wrapper is visible). Check your PATH." >&2
+  exit 127
+fi
+
+if [ "$is_checkout" = 1 ] && [ "$force" = 1 ] && [ -n "$branch" ]; then
+  current_wt=$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$current_wt" ]; then
+    if ! "$REAL_GIT" worktree list --porcelain 2>/dev/null | awk -v ref="branch refs/heads/$branch" -v cwt="$current_wt" '
+      /^worktree / { wt = substr($0, 10) }
+      /^branch / { if ($0 == ref && wt != cwt) { print wt; exit 1 } }
+    '; then
+      echo "fatal: Firstmate protection: cannot forcefully check out '$branch' because it is checked out in another worktree." >&2
+      exit 128
+    fi
+  fi
+fi
+
+exec "$REAL_GIT" "$@"

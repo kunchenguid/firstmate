@@ -1813,4 +1813,51 @@ test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
+test_herdr_identity_scrub() {
+  # The runner must unset inherited Herdr identity variables so no test can
+  # reach the live session. A test that deliberately sets its own values must
+  # still be free to do so after the scrub.
+  local tmp fixture out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-herdr-scrub.XXXXXX")
+  fixture="$tmp/herdr-scrub.test.sh"
+  out="$tmp/out.txt"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+set -eu
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# The runner must have scrubbed all inherited herdr identity variables.
+[ -z "${HERDR_ENV:-}" ]            || fail "HERDR_ENV leaked: $HERDR_ENV"
+[ -z "${HERDR_PANE_ID:-}" ]        || fail "HERDR_PANE_ID leaked: $HERDR_PANE_ID"
+[ -z "${HERDR_TAB_ID:-}" ]         || fail "HERDR_TAB_ID leaked: $HERDR_TAB_ID"
+[ -z "${HERDR_WORKSPACE_ID:-}" ]   || fail "HERDR_WORKSPACE_ID leaked: $HERDR_WORKSPACE_ID"
+[ -z "${HERDR_SOCKET_PATH:-}" ]    || fail "HERDR_SOCKET_PATH leaked: $HERDR_SOCKET_PATH"
+[ -z "${HERDR_SESSION:-}" ]        || fail "HERDR_SESSION leaked: $HERDR_SESSION"
+# A test must be free to set its own herdr identity after the scrub.
+export HERDR_ENV=lab HERDR_PANE_ID=test-pane HERDR_SESSION=test-session
+export HERDR_SOCKET_PATH=/tmp/test.sock HERDR_TAB_ID=test-tab
+export HERDR_WORKSPACE_ID=test-ws
+[ "$HERDR_ENV" = lab ]                || fail "test cannot set HERDR_ENV"
+[ "$HERDR_PANE_ID" = test-pane ]      || fail "test cannot set HERDR_PANE_ID"
+[ "$HERDR_SESSION" = test-session ]   || fail "test cannot set HERDR_SESSION"
+[ "$HERDR_SOCKET_PATH" = /tmp/test.sock ] || fail "test cannot set HERDR_SOCKET_PATH"
+[ "$HERDR_TAB_ID" = test-tab ]        || fail "test cannot set HERDR_TAB_ID"
+[ "$HERDR_WORKSPACE_ID" = test-ws ]   || fail "test cannot set HERDR_WORKSPACE_ID"
+echo "ok - herdr scrub and re-set"
+SH
+  chmod +x "$fixture"
+  # Inject synthetic herdr identity to prove the runner scrubs it.
+  set +e
+  HERDR_ENV=live-env HERDR_PANE_ID=live-pane HERDR_TAB_ID=live-tab \
+    HERDR_WORKSPACE_ID=live-ws HERDR_SOCKET_PATH=/live.sock \
+    HERDR_SESSION=live-session \
+    "$RUNNER" "$fixture" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/err.txt"; rm -rf "$tmp"; fail "herdr scrub fixture failed (rc=$rc)"; }
+  grep -q 'ok - herdr scrub and re-set' "$out" \
+    || { rm -rf "$tmp"; fail "herdr scrub fixture output missing success marker"; }
+  rm -rf "$tmp"
+  pass "suite-level herdr identity scrub removes inherited vars; test can still set its own"
+}
 test_aggregate_json
+test_herdr_identity_scrub

@@ -281,7 +281,7 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$terminal" "$retries" "$sleep_s"
+    "$terminal" "$retries" "$sleep_s" '' "${#text}"
 }
 
 fm_backend_orca_kill() {  # <terminal-id>

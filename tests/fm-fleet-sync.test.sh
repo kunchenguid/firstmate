@@ -816,4 +816,34 @@ test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
 test_fork_tracking_already_current
+test_reversal_is_stuck_with_missing_files() {
+  local home clone out head_after
+  home=$(new_home)
+  clone=$(build_pair "$home" reversalrepo)
+
+  # Advance the main branch on origin with a new commit
+  advance_origin "$home" reversalrepo C1
+
+  # Fetch so we have the new commit locally
+  git -C "$clone" fetch origin --quiet
+
+  # Simulate the reversal: advance HEAD to origin/main but leave the index
+  # and working tree at the old commit. This is exactly what happens when a
+  # worker lane runs `git checkout -B main origin/main` and it updates the
+  # shared branch ref without touching the other worktree's index/tree.
+  head_after=$(git -C "$clone" rev-parse origin/main)
+  git -C "$clone" update-ref refs/heads/main "$head_after"
+
+  # Verify the reversal state: HEAD is at the new commit but index matches old
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$head_after" ] || fail "HEAD was not advanced"
+
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "reversalrepo: STUCK:" "reversal clone reports STUCK"
+  assert_contains "$out" "whose index or tree is BEHIND its own HEAD" "STUCK names the reversal state"
+  assert_contains "$out" "missing landed work:" "STUCK names missing files"
+  assert_contains "$out" "Recovery command: git -C" "Recovery command printed"
+  assert_contains "$out" "reset --hard HEAD" "Recovery command includes reset --hard HEAD"
+  pass "reversal state is reported STUCK with missing files"
+}
 test_fork_tracking_fast_forwards
+test_reversal_is_stuck_with_missing_files

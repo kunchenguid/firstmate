@@ -40,7 +40,10 @@
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
-#   the new incarnation. The replacement still never starts outside the copy
+#   the new incarnation. A recorded endpoint the backend proves ABSENT is the
+#   one case that creates a replacement endpoint; it is created directly in the
+#   recorded worktree, never in the project, and never by acquiring a second
+#   worktree for the task. The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
@@ -932,6 +935,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+RELAUNCH_ENDPOINT_MISSING=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1199,7 +1203,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
-ID=${POS[0]}
+ID=${POS[0]:-}
+[ -n "$ID" ] || {
+  echo "error: missing <task-id> positional; usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>] [--model <name>] [--effort <level>] [--backend <name>] (ship), fm-spawn.sh <task-id> <project-dir> --scout [...] (scout), fm-spawn.sh <task-id> [<firstmate-home>] [...] --secondmate" >&2
+  exit 1
+}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -1218,6 +1226,28 @@ fi
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  # Ship and scout spawns take the project directory as the second positional.
+  # Refusing a missing or non-path argument here - after the role-partition
+  # refusal above (which owns precedence as the security boundary) but before
+  # backend selection, locks, and any fleet mutation - is what keeps a spawn
+  # from ever guessing which project to launch into. A bare project NAME is
+  # never a target: it would resolve against the caller's cwd instead of the
+  # home. Absolute paths and projects/<name> (resolved through the home below)
+  # are the accepted forms; anything else carrying a slash still faces the
+  # resolution refusal where the directory is entered.
+  [ "${#POS[@]}" -ge 2 ] || {
+    echo "error: missing <project-dir> positional; ship and scout spawns require the project's absolute directory path (or projects/<name>) as the second positional, never a bare project name" >&2
+    exit 1
+  }
+  case "${POS[1]}" in
+    */*) ;;
+    *)
+      echo "error: project argument '${POS[1]}' is not a directory path; pass an absolute directory path or projects/<name>, not a bare project name" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -1357,10 +1387,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  RELAUNCH_ENDPOINT_MISSING=0
+  case "$RELAUNCH_STATE" in
+    dead)
+      # The endpoint exists but no agent is running - the normal relaunch case.
+      ;;
+    missing)
+      # The endpoint is authoritatively absent from the backend's inventory.
+      # This happens when a pane is destroyed outside teardown (e.g. by a
+      # sibling task's teardown reclaiming a shared worktree, or by an operator
+      # manually closing it). The backend has PROVEN the pane is gone - this is
+      # not a failed read or a timeout. A replacement endpoint will be created
+      # in the task's recorded worktree, bound to the same task.
+      RELAUNCH_ENDPOINT_MISSING=1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires either an agent-free endpoint (dead) or a provably absent one (missing); stop the agent first with bin/fm-control.sh $ID exit" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1386,6 +1431,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    # Presenting the task's recorded pane as the launcher (HERDR_PANE_ID above)
+    # is what puts a replacement back in the workspace the task already lived
+    # in. When the endpoint is provably absent, that pane is gone too, and
+    # placement has nothing left to read - the exact case --relaunch exists for
+    # would refuse with the workspace it needed sitting in this very record.
+    # Hand the recorded placement to the backend as an explicit, evidence-gated
+    # recovery input; fm_backend_herdr_relaunch_placement owns every condition
+    # under which it may be used and announces it when it is.
+    if [ "$RELAUNCH_ENDPOINT_MISSING" = 1 ]; then
+      # shellcheck disable=SC2034  # read by the sourced herdr adapter's placement
+      FM_BACKEND_HERDR_RELAUNCH_SESSION=$HERDR_SES
+      # shellcheck disable=SC2034  # read by the sourced herdr adapter's placement
+      FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=$HERDR_WORKSPACE_ID
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -2332,7 +2391,12 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  # The cd's own stderr stays suppressed so a failure surfaces only as the
+  # actionable refusal below, never as a raw shell line number.
+  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" 2>/dev/null && pwd)" || {
+    echo "error: project directory cannot be resolved: $PROJ; pass an absolute directory path or projects/<name>" >&2
+    exit 1
+  }
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -2587,7 +2651,7 @@ spawn_worktree_has_origin_config() {  # <worktree>
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default upstream tracked_remote target expected actual status fetch_ok
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2603,24 +2667,53 @@ freshen_spawn_worktree_base() {  # <worktree>
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
+  # Resolve the default branch name. Try the existing fallback chain first
+  # (origin/HEAD, then local main, then master). When nothing local names it,
+  # fetch once so remote HEAD discovery has refs to resolve, then discover it
+  # (this also finds non-standard names like trunk). Both discovery steps are
+  # best-effort: whatever is still unknown after them refuses below.
   default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+    git -C "$worktree" fetch --quiet origin 2>/dev/null || true
+    git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || true
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  # Derive the tracked remote from the default branch's upstream configuration.
+  # In a fork fleet the default branch tracks fork/main, not origin/main;
+  # hardcoding origin would reset the worktree to the wrong remote's tip and
+  # produce a diverged base that no distance check can distinguish from a
+  # merely stale one.
+  upstream=$(git -C "$worktree" rev-parse --abbrev-ref "${default}@{upstream}" 2>/dev/null) || true
+  if [ -n "$upstream" ]; then
+    tracked_remote="${upstream%%/*}"
+  fi
+  # When there is no upstream tracking or the remote cannot be extracted, fall
+  # back to origin. Single-remote repos and legacy pools without tracking work
+  # unchanged; the fork-fleet fix only activates when tracking IS configured.
+  if [ -z "${tracked_remote:-}" ]; then
+    tracked_remote=origin
+    upstream="origin/$default"
+  fi
+  target="$upstream"
+  # Fetch is best-effort: an unreachable remote is unknown, not wrong.
+  # bin/fm-startup-network.sh exists because the startup path must not block on
+  # the network; the same principle applies here. When the fetch fails, fall
+  # through to the local-only base assertion below which verifies ancestry from
+  # whatever refs are locally available.
+  fetch_ok=1
+  if ! git -C "$worktree" fetch --quiet "$tracked_remote" 2>/dev/null; then
+    echo "warning: could not fetch '$tracked_remote' for worktree '$worktree'; proceeding with locally available refs" >&2
+    fetch_ok=0
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    if [ "$fetch_ok" = 0 ]; then
+      # The tracked upstream ref is not available locally and we could not
+      # fetch. This is an unreadable upstream - unknown, not wrong.
+      echo "warning: tracked upstream '$target' is not locally resolvable and remote is unreachable for worktree '$worktree'; launching with unverified base" >&2
+      return 0
+    fi
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
@@ -2631,6 +2724,49 @@ freshen_spawn_worktree_base() {  # <worktree>
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+  # Wrong-remote backstop: a positive ancestry assertion that refuses on divergence.
+  # The assertion sits AFTER the refresh, so it is a post-condition and cannot false-positive.
+  if ! git -C "$worktree" merge-base --is-ancestor "$target" HEAD 2>/dev/null; then
+    echo "error: pooled worktree '$worktree' has HEAD diverged from tracked '$target'; base is on the wrong remote - refusing to launch" >&2
+    return 1
+  fi
+}
+
+# Independent post-condition: assert the worktree HEAD is based on the project's
+# tracked upstream. This uses local refs only (no fetch), so it is fast and cannot
+# block on the network. It catches the case where freshen_spawn_worktree_base
+# resolved to the wrong remote, or where a non-pool worktree (Orca, relaunch) was
+# created from a stale or wrong base.
+#
+# The assertion is: the tracked upstream commit must be an ancestor of HEAD.
+# - If the tracked upstream ref is not locally resolvable: warn and proceed
+#   (unreadable = unknown, not wrong; see fm-startup-network.sh rationale).
+# - If HEAD is not a descendant: refuse loudly and leave the copy untouched
+#   (AGENTS.md hard rule 1 forbids writing to a project, hard rule 3 forbids
+#   touching unlanded work).
+assert_spawn_tracked_base() {  # <worktree>
+  local worktree=$1 default upstream tracked_sha head_sha
+  default=$(default_branch "$worktree") || {
+    echo "warning: could not determine the default branch for worktree '$worktree'; skipping tracked-base assertion" >&2
+    return 0
+  }
+  upstream=$(git -C "$worktree" rev-parse --abbrev-ref "${default}@{upstream}" 2>/dev/null) || {
+    echo "warning: default branch '$default' has no upstream tracking in worktree '$worktree'; skipping tracked-base assertion" >&2
+    return 0
+  }
+  tracked_sha=$(git -C "$worktree" rev-parse --verify --quiet "$upstream^{commit}" 2>/dev/null) || {
+    echo "warning: tracked upstream '$upstream' is not locally resolvable in worktree '$worktree'; skipping tracked-base assertion (unreadable upstream)" >&2
+    return 0
+  }
+  head_sha=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) || {
+    echo "error: worktree '$worktree' has no HEAD; refusing to launch" >&2
+    return 1
+  }
+  if ! git -C "$worktree" merge-base --is-ancestor "$tracked_sha" "$head_sha" 2>/dev/null; then
+    echo "error: worktree '$worktree' HEAD ($head_sha) is not based on tracked upstream '$upstream' ($tracked_sha); the copy was cut from the wrong base - refusing to launch" >&2
+    echo "The worktree was left untouched. Inspect it and reconcile manually, or remove the pool slot so the next spawn gets a clean one." >&2
     return 1
   fi
 }
@@ -2757,7 +2893,7 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_ENDPOINT_MISSING" -eq 0 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
   # terminal, no second worktree, and every uncommitted change left exactly
@@ -2769,6 +2905,33 @@ if [ "$RELAUNCH" -eq 1 ]; then
   WT_TARGET=$T
   SES=${T%%:*}
 else
+# SPAWN_CWD: the directory a newly created endpoint's shell starts in.
+#
+# A fresh spawn has no worktree yet, so it starts in the project and (for
+# ship/scout) `treehouse get` below acquires one and moves the shell into it.
+# A relaunch replacement is the opposite case: its worktree already exists and
+# is named in the task's own record, so it must be ENTERED, never re-acquired -
+# allocating a second copy for one task is exactly what the relaunch worktree
+# assertion below exists to catch. Creating the replacement endpoint directly
+# in the recorded worktree, rather than creating it in the project and
+# correcting it afterwards, is also what keeps it out of the project directory
+# entirely: `projects/` entries are commonly symlinks into real working
+# checkouts, so an endpoint that starts in the project and only moves later is,
+# for that window, an agent sitting in the captain's own checkout.
+#
+# This is the placement half of the same recovery the herdr relaunch-placement
+# recovery fixes the workspace half of, and it comes from the same evidence -
+# the task's own durable record, already validated as a present directory when
+# the relaunch adopted it.
+SPAWN_CWD=$PROJ_ABS
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_ENDPOINT_MISSING" -eq 1 ]; then
+  # The recorded endpoint is authoritatively gone. Create a REPLACEMENT
+  # endpoint bound to the same task and worktree. The worktree is preserved -
+  # only the runtime endpoint changes.
+  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  echo "relaunch: endpoint $RELAUNCH_TARGET is provably absent (backend: $BACKEND); creating a replacement" >&2
+  SPAWN_CWD=$WT
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -2779,7 +2942,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2831,7 +2994,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2885,7 +3048,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2938,7 +3101,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2951,7 +3114,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2963,7 +3126,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -3364,6 +3527,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  assert_spawn_tracked_base "$WT" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
@@ -4156,6 +4320,9 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Prepend the lane git wrapper so a worker lane can never corrupt the shared
+# checkout with `git checkout -B` / `switch -C` onto a branch held elsewhere.
+spawn_send_text_line "$T" "export PATH=\"\$FM_ROOT/bin/lane-wrappers:\$PATH\""
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
