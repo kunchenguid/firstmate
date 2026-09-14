@@ -348,6 +348,8 @@ records_journal="$TROOT/transactions/$records_tx.json"
 python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$TROOT/fleet.json" --secondmate harness \
   --manager manager-2 --source-home "$TROOT/manager-1" --transaction "$records_tx" \
   --journal "$records_journal" >/dev/null || fail "prepare records-ready recovery fixture"
+python3 "$ROOT/bin/fm-fleet-registry.py" "$TROOT/fleet.json" transfer-claim --secondmate harness --transaction "$records_tx" \
+  --expected-generation "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$records_journal" | json_value 'json.load(sys.stdin)["expected_generation"]')" || fail "claim records-ready recovery fixture"
 python3 "$ROOT/bin/fm-fleet-transfer.py" apply --journal "$records_journal" || fail "apply records-ready recovery fixture"
 python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$records_journal" --set preparing >/dev/null || fail "simulate crash before records-ready journal publication"
 export FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$FAIL_HOOK

@@ -672,8 +672,10 @@ def transfer_rollback_valid(reg: dict, args: argparse.Namespace) -> dict | None:
         (row for row in reg["transfers"] if row.get("transaction") == args.transaction),
         None,
     )
+    if not transfer or transfer.get("secondmate") != args.secondmate:
+        raise ValueError(f"transfer {args.transaction} holds no registry claim; rollback refused")
     current = assignment_map(reg).get(args.secondmate)
-    if transfer and transfer.get("generation"):
+    if transfer.get("generation"):
         if not current or current.get("generation") != transfer["generation"]:
             raise ValueError("published assignment generation changed; rollback refused")
     return transfer

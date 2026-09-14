@@ -257,11 +257,13 @@ def rollback(args: argparse.Namespace) -> None:
 
 def state(args: argparse.Namespace) -> None:
     journal = read_json(Path(args.journal))
-    if args.set or args.destination_stopped:
+    if args.set or args.destination_stopped is not None or args.secondmate_stopped is not None:
         if args.set:
             journal["state"] = args.set
-        if args.destination_stopped:
-            journal["destination_stopped"] = True
+        if args.destination_stopped is not None:
+            journal["destination_stopped"] = bool(args.destination_stopped)
+        if args.secondmate_stopped is not None:
+            journal["secondmate_stopped"] = bool(args.secondmate_stopped)
         atomic_json(Path(args.journal), journal)
     print(json.dumps(journal, sort_keys=True))
 
@@ -287,7 +289,8 @@ def main() -> int:
     st = commands.add_parser("state")
     st.add_argument("--journal", required=True)
     st.add_argument("--set", default="")
-    st.add_argument("--destination-stopped", action="store_true")
+    st.add_argument("--destination-stopped", type=int, choices=(0, 1))
+    st.add_argument("--secondmate-stopped", type=int, choices=(0, 1))
     st.set_defaults(function=state)
     args = parser.parse_args()
     try:

@@ -343,4 +343,31 @@ if reasoning_live_test "$FROOT/manager-2" || reasoning_live_test "$src_home"; th
 out=$("$FLEET" transfer recover --transaction "$claim_tx" 2>&1) || fail "moved transfer was not recoverable: $out"
 [ "$(manager_for paperclip)" = "$(basename "$src_home")" ] || fail "recovery of moved transfer did not publish"
 
+# An unclaimed stale journal never gains mutation authority, even after a newer transfer succeeds.
+stale_tx=stale-unclaimed
+stale_journal="$FROOT/transactions/$stale_tx.json"
+python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$FROOT/fleet.json" --secondmate paperclip --manager manager-2 \
+  --source-home "$src_home" --transaction "$stale_tx" --journal "$stale_journal" >/dev/null || fail "prepare stale journal fixture"
+for n in 1 3; do [ "$FROOT/manager-$n" = "$src_home" ] || newer=manager-$n; done
+out=$("$FLEET" transfer begin --secondmate paperclip --to "$newer" 2>&1) || fail "newer transfer after stale journal: $out"
+records_digest() {
+  python3 - "$FROOT" <<'PY'
+import glob, hashlib, os, sys
+root = sys.argv[1]
+paths = [os.path.join(root, "fleet.json"), os.path.join(root, "secondmates/paperclip/.fm-secondmate-parent")]
+paths += sorted(glob.glob(os.path.join(root, "manager-*/data/secondmates.md")) + glob.glob(os.path.join(root, "manager-*/state/paperclip.*")))
+print(hashlib.sha256(b"".join(p.encode() + open(p, "rb").read() for p in paths)).hexdigest())
+PY
+}
+before=$(records_digest); : > "$FM_HOOK_LOG"
+if "$FLEET" transfer rollback --transaction "$stale_tx" >/dev/null 2>&1; then fail "rollback accepted an unclaimed stale journal"; fi
+if "$FLEET" transfer recover --transaction "$stale_tx" >/dev/null 2>&1; then fail "recover accepted an unclaimed stale journal"; fi
+[ "$(records_digest)" = "$before" ] || fail "stale journal rewrote owner records"
+[ ! -s "$FM_HOOK_LOG" ] || fail "stale journal ran an endpoint lifecycle action: $(cat "$FM_HOOK_LOG")"
+[ "$(manager_for paperclip)" = "$newer" ] || fail "stale journal changed the newer assignment"
+out=$("$FLEET" transfer abandon --transaction "$stale_tx" 2>&1) || fail "abandon of stale journal: $out"
+[ "$(tx_state "$stale_journal")" = abandoned ] || fail "abandon did not retire the stale reservation"
+[ "$(records_digest)" = "$before" ] || fail "abandon rewrote owner records"
+if "$FLEET" transfer abandon --transaction "$claim_tx" >/dev/null 2>&1; then fail "abandon accepted a claimed transfer"; fi
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

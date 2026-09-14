@@ -126,7 +126,11 @@ The command prints the transaction id before it stops anything.
 One exit trap is armed from the reservation until the transfer is active. It runs on every failure, including a fleet-lock timeout or a signal.
 Under the fleet lock, the trap checks the registry for a claim row for this transaction. The record claim takes the same lock, and a claim refuses a journal that is no longer `preparing`.
 If no claim row exists, the trap marks the journal `abandoned`, restarts a destination that this command stopped, and relaunches a stopped source SecondMate. The assignment and parent records stay unchanged.
-If the claim has committed, or the lock cannot be taken, the trap restarts nothing. It leaves the journal and the stopped endpoints for `transfer recover` or `transfer rollback`, and prints that hint.
+If the claim has committed, the trap restarts nothing. It leaves the journal and the stopped endpoints for `transfer recover` or `transfer rollback`, and prints that hint.
+If the fleet lock stays busy, the trap also restarts nothing. It prints `transfer abandon --transaction <id>`, which retries the same conditional release.
+The journal records `destination_stopped` and `secondmate_stopped`, so the trap and `transfer abandon` restart the same endpoints.
+The registry transaction row is the only source of mutation authority. `transfer recover` and `transfer rollback` refuse a journal that has no registry row for its exact transaction, and they refuse before running any endpoint hook. That covers an unclaimed stale journal and a transaction whose row a later transfer replaced.
+`transfer abandon` refuses a claimed or finished transaction.
 The journal records `destination_stopped`. So if the owner-record move fails, `transfer rollback` also restarts that destination manager.
 Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.
 `recover` selects its destination the same way, keeps that destination live, journals the move as a failover, and does not relaunch the destination manager.
