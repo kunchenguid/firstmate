@@ -395,13 +395,13 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which uses either three
-# ASCII periods or U+2026 and continues with a rotating quoted suggestion,
-# hence the unanchored tail). cursor-agent renders
+# ASCII periods or U+2026 and may continue with one rotating quoted
+# suggestion). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)([[:space:]]+"[^"]*")?$|^Plan, search, build anything$|^Add a follow-up$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1065,21 +1065,39 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 
 # _fm_composer_classify_leftbar: opencode's left-bar composer. Blank rows and
 # the idle hint read empty; the run's LAST row may be the mode/model footer
-# (composer furniture, never typed text). Real content is pending when styling
-# can prove it real, unknown otherwise.
+# (composer furniture, never typed text). An exact idle-hint row is excused as
+# furniture only at its structural placeholder position, and furniture alone
+# cannot prove emptiness: a later blank row or ghost-stripped row must
+# independently corroborate it. Real content is pending when styling can prove
+# it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local row raw content plain pending_seen=0 empty_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT} furniture_re
+  furniture_re="^(${idle_re})$"
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
+    plain=$(_fm_composer_row_content "$raw" 0)
     case "$content" in
       '┃'*) content=${content#┃} ;;
     esac
+    case "$plain" in
+      '┃'*) plain=${plain#┃} ;;
+    esac
     fm_composer_normalize_trim_var content
-    if [ -z "$content" ]; then row=$((row + 1)); continue; fi
+    fm_composer_normalize_trim_var plain
+    if [ -z "$content" ]; then
+      if [ -n "$plain" ]; then
+        empty_seen=1
+        leading_blank=0
+      elif [ "$leading_blank" = 0 ]; then
+        empty_seen=1
+      fi
+      row=$((row + 1)); continue
+    fi
     if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
       placeholder_position=1
     else
@@ -1087,7 +1105,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     fi
     leading_blank=0
     if [ "$placeholder_position" = 1 ] \
-       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
+       && fm_composer_idle_matches "$content" "$furniture_re" insensitive; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -1099,8 +1117,10 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   done
   if [ "$pending_seen" = 1 ]; then
     if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
-  else
+  elif [ "$empty_seen" = 1 ]; then
     printf 'empty'
+  else
+    printf 'unknown'
   fi
 }
 
@@ -1201,6 +1221,8 @@ _fm_composer_select_cursorless() {
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT} furniture_re
+  furniture_re="^(${idle_re})$"
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1261,7 +1283,7 @@ EOF
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \
-            && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
+            && fm_composer_idle_matches "$content" "$furniture_re" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
