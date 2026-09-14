@@ -47,7 +47,8 @@ Anywhere else, knowledge wins over a scratch NAME or extension, so a conversatio
 
 Each bounded list spends its slots on what the report exists to surface, since the one thing the cap can cost is the captain's own document never being printed.
 Paths are ordered by the signal the classifier already carries - the project's knowledge surface (`docs/`, `.agents/`, `AGENTS.md`) first, then documents by name, then the rest - rather than alphabetically.
-When a list does not fit, the fullest directories collapse to one counted line each until it does, so 45 caption files beside one audit no longer bury the audit; nothing collapses while everything fits, because the names are the point.
+The slots go to those names in that order, and only what they leave over folds, one counted line per directory: 45 caption files beside one audit show as a count while the audit is named, and a crowded `docs/` is never the thing replaced by a number.
+Nothing collapses while everything fits, because the names are the point.
 The omission line says how many of what it hides is knowledge, which is what decides whether to re-run with a larger `--limit`.
 
 **Known gap, still open: a git submodule's own uncommitted knowledge is invisible to the scan.**

@@ -341,9 +341,10 @@ bounded_file_count() {  # <dir> <cap>
 # captain's own document never being printed.
 #   - Order is the signal the classifier already carries, not the alphabet: the
 #     project's knowledge surface first, then documents by name, then the rest.
-#   - One directory cannot take every slot. When the list does not fit, the
-#     fullest directories collapse to one counted line each until it does, so
-#     45 caption files beside one audit no longer bury the audit.
+#   - The slots go to those names in that order, and only what they leave over
+#     folds - one counted line per directory. So 45 caption files beside one
+#     audit show as a count while the audit is named, and a crowded `docs/` is
+#     never the thing replaced by a number.
 #   - Nothing collapses while everything fits, because the names are the point.
 # The omission line says how many of what it hides is knowledge, which is the
 # number that decides whether to look further with a larger --limit.
@@ -368,48 +369,45 @@ print_path_list() {  # <limit> < paths
       rank[NR] = $1 + 0
       dir[NR] = $2
       path[NR] = $3
-      count[$2]++
-      if ($1 + 0 < 2) known[$2]++
-      if (!($2 in seen)) { seen[$2] = 1; order[++nd] = $2 }
       n = NR
     }
     END {
-      lines = n
-      while (lines > limit) {
-        biggest = ""
-        most = 1
-        for (i = 1; i <= nd; i++) {
-          d = order[i]
-          if (folded[d]) continue
-          if (count[d] > most) { most = count[d]; biggest = d }
+      # Entries arrive most valuable first, so the slots go to them in order and
+      # only what is left over folds. Nothing is chosen for folding by how full
+      # its directory is: a crowded `docs/` would be exactly the wrong thing to
+      # replace with a number.
+      take = (limit < n) ? limit : n
+      fold = 1
+      while (take > 0) {
+        gen++
+        spill = 0
+        for (i = take + 1; i <= n; i++) {
+          if (spillgen[dir[i]] != gen) { spillgen[dir[i]] = gen; spill++ }
         }
-        if (biggest == "") break
-        folded[biggest] = 1
-        lines -= count[biggest] - 1
+        if (take + spill <= limit) break
+        take--
       }
-      shown = 0
+      # More directories than slots: folding cannot buy a single name back, so
+      # the omission line carries everything instead.
+      if (take == 0) {
+        fold = 0
+        take = (limit < n) ? limit : n
+      }
+      for (i = 1; i <= take; i++) printf "    %s\n", path[i]
       hidden = 0
       hidden_known = 0
-      for (i = 1; i <= n; i++) {
+      nleft = 0
+      for (i = take + 1; i <= n; i++) {
         d = dir[i]
-        if (folded[d]) {
-          if (done[d]) continue
-          done[d] = 1
-          if (shown < limit) {
-            printf "    %s (%d files)\n", d, count[d]
-            shown++
-          } else {
-            hidden += count[d]
-            hidden_known += known[d]
-          }
-          continue
-        }
-        if (shown < limit) {
-          printf "    %s\n", path[i]
-          shown++
-        } else {
-          hidden++
-          if (rank[i] < 2) hidden_known++
+        if (!(d in leftover)) { leftover[d] = 0; leftorder[++nleft] = d }
+        leftover[d]++
+        hidden++
+        if (rank[i] < 2) hidden_known++
+      }
+      if (fold) {
+        for (j = 1; j <= nleft; j++) {
+          d = leftorder[j]
+          printf "    %s (%d more files)\n", d, leftover[d]
         }
       }
       if (hidden > 0) printf "    ... and %d more (%d of them knowledge)\n", hidden, hidden_known

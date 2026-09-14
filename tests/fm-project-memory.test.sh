@@ -380,8 +380,38 @@ test_a_crowded_directory_never_buries_the_captains_own_document() {
   out=$(run_scan "$world")
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 46" "the count stopped being complete"
   assert_contains "$out" "docs/audit.md" "a crowded directory buried the captain's own document"
-  assert_contains "$out" "assets/ (45 files)" "the crowded directory did not collapse into one counted line"
+  assert_contains "$out" "assets/ (7 more files)" "the overflow did not collapse into one counted line"
   pass "fm-project-memory.sh: a crowded directory never buries the captain's own document"
+}
+
+# The mirror of the case above, and the one that catches folding by size: here
+# the fullest directory is also the most valuable. Its documents are what the
+# slots are for, so the pictures beside them are what gets counted instead of
+# named - never the other way round.
+test_the_fullest_directory_is_not_folded_when_it_is_the_valuable_one() {
+  local world out i
+  world=$(make_world valuablecrowd)
+  mkdir -p "$world/source/docs" "$world/source/assets"
+  i=1
+  while [ "$i" -le 45 ]; do
+    printf 'finding %s\n' "$i" >"$world/source/docs/note-$i.md"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 20 ]; do
+    printf 'caption\n' >"$world/source/assets/shot-$i.txt"
+    i=$((i + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 65" "the count stopped being complete"
+  assert_contains "$out" "docs/note-1.md" "the captain's documents were folded away instead of named"
+  assert_contains "$out" "docs/note-19.md" "the listing stopped short of spending its slots on documents"
+  assert_contains "$out" "assets/ (20 more files)" "the captions were named instead of counted"
+  assert_not_contains "$out" "assets/shot-1.txt" "a slot went to a caption while documents were folded"
+  assert_contains "$out" "... and 27 more (27 of them knowledge)" \
+    "the omission line did not say how much of what it hides is knowledge"
+  pass "fm-project-memory.sh: the fullest directory is not folded when it is the valuable one"
 }
 
 test_scratch_is_counted_but_never_listed() {
@@ -508,7 +538,10 @@ test_scan_is_bounded_by_limit() {
   record_source "$world"
   out=$(run_scan "$world" --limit 3)
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 12" "the complete count was not reported"
-  assert_contains "$out" "docs/ (12 files)" "one crowded directory was not collapsed to fit the limit"
+  assert_contains "$out" "docs/note-0.md" "a bounded listing returned no document name at all"
+  assert_contains "$out" "docs/ (10 more files)" "what the limit left over was not collapsed into a counted line"
+  assert_contains "$out" "... and 10 more (10 of them knowledge)" \
+    "the omission line did not say how much of what it hides is knowledge"
   assert_not_contains "$out" "docs/note-7.md" "the listing printed past its limit"
 
   # When the overflow is spread across directories there is nothing to collapse,
@@ -541,6 +574,7 @@ test_a_knowledge_document_with_a_scratch_name_is_still_knowledge
 test_documentation_inside_a_dependency_tree_is_not_project_knowledge
 test_a_vendored_tree_is_not_project_knowledge
 test_a_crowded_directory_never_buries_the_captains_own_document
+test_the_fullest_directory_is_not_folded_when_it_is_the_valuable_one
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak
