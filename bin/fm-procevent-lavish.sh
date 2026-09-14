@@ -33,11 +33,19 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below.
+#            transient interruption described below. A response that carries
+#            nothing to deliver while the artifact file is still there is not a
+#            result at all: the listener prints nothing and exits
+#            POLL_QUIET_ABSENCE_EXIT, which the runner's own no-result path turns
+#            into "leave the registration armed", so the next cycle listens
+#            again.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
-#            calls, and the only place Lavish's notion of "ended" is decided.
+#            calls, and the only place Lavish's notion of "ended" is decided: a
+#            board FILE that no longer resolves ends the source, and a session
+#            ending does not, which is the subject of the source-tracks-the-board
+#            note below.
 # silent     Exit 0 when the captured result is a routine no-op the runner should
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
@@ -56,10 +64,42 @@
 # it classifies `feedback`, never `ended`, and is announced exactly as before; so
 # is any `ended` result that still carries a `prompts` or `feedback` block, which
 # the published poll is not expected to produce but which must never be dropped
-# on that expectation. A `waiting` session, a `missing` one, an `unknown` or
-# unreadable result, and any error all stay announced, because none of them
-# positively proves nothing was said. Silence is only ever an absence this
-# adapter can see in the result, never an absence it assumes.
+# on that expectation. A `waiting` session, an `unknown` or unreadable result,
+# and every error all stay announced, because none of them positively proves
+# nothing was said. Silence is only ever an absence this adapter can see in the
+# result, never an absence it assumes. A `missing` session is the one other shape
+# the listener waits out, and the next paragraph is where that lives.
+#
+# A QUIET ABSENCE IS NOT DELIVERED AT ALL, not merely left unannounced. The
+# listener waits it out whole: it prints nothing and exits nonzero, the runner
+# records no result for the capture, and this registration stays armed. `silent`
+# is the adapter's single statement of the narrower shape - an ended session that
+# said nothing - and the listener consults that same command rather than
+# restating it, adding only the second shape: no active session at all, which is
+# what a stopped Lavish server and a board nobody has opened yet both return.
+# Printing either one instead would capture a fresh result on every supervision
+# cycle and grow the inbox without bound.
+#
+# THE SOURCE TRACKS THE BOARD FILE, NOT THE SESSION, and reading a session as
+# final is the defect this adapter used to have. `lavish-axi <file>` opens,
+# resumes, and reopens a session for the same artifact as often as anyone likes,
+# and the Lavish server also stops when it is idle, so a session reaching `ended`
+# - or an artifact having no active session at all - says nothing about whether
+# this board can deliver again. Retiring on either one removed registrations the
+# captain was still using, and every such retirement was silent: the listener
+# gone, the wake gone, and the board's next round of feedback reaching nobody. So
+# the board file itself is this source's lifetime. A missing artifact makes
+# `lavish-axi` refuse to resolve the path before it ever looks for a session, and
+# that refusal is the one thing `terminal` calls terminal.
+#
+# The listener holds back at most POLL_HOLD_LIMIT_BYTES of a response, which is
+# what recognizing a quiet absence whole costs, and streams everything past that
+# bound straight through: a response too large to be a quiet absence needs no
+# decision, and the runner's own output bound applies to it unchanged. Both
+# quiet-absence envelopes are a few hundred bytes, so the bound sits far above
+# what it must hold and far below a real feedback payload. A quiet absence that
+# ever outgrew the bound would be delivered rather than waited out; that is the
+# one shape where a stale registration can still accumulate a result per cycle.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -80,12 +120,16 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
+# It wraps ONLY the currently published interface, verified against 0.1.45 and
+# re-verified against 0.1.67:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# server-side events. It adds no periodic discovery: nothing here ever derives a
+# result from a cadence, and a listener that waited a quiet absence out exits as
+# a no-result and is simply run again by the same supervision-cycle restart path
+# every other non-terminal result already used. It depends on no unreleased
+# capability.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -124,7 +168,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -178,21 +222,40 @@ POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
-# Exit 0 only for the exact two-line interruption, and nothing else. The whole
-# response must be those two lines with those exact bytes: whitespace variants,
-# a longer response that merely opens with them, and any other SERVER_ERROR are
+# The hold-back bound described in the header.
+POLL_HOLD_LIMIT_BYTES=4096
+
+# What a waited-out quiet absence exits with. Its stdout is empty, which is what
+# makes the runner's no-result path leave the registration armed; the code itself
+# only names the reason for anyone reading `no-result:` output.
+POLL_QUIET_ABSENCE_EXIT=3
+
+# Hold the opening of a response back far enough to answer exactly one question
+# - is this a quiet absence the listener waits out, or something to deliver -
+# and give up the moment the answer is no. A response too large to be a quiet
+# absence is therefore never held as a decision at all, and streams through with
+# the runner's own output bound on it exactly as before.
+#
+# The exit code is the interface cmd_poll reads, because a large response has
+# already reached stdout by the time the question is settled:
+#   0   streamed through, so it cannot be a quiet absence
+#   10  exactly the transient interruption, staged at the response file
+#   11  the whole response fits the bound and is staged there for inspection
+# A read or staging failure is exit 2, which cmd_poll refuses rather than
+# swallowing. The interruption is still matched exactly: whitespace variants, a
+# longer response that merely opens with it, and any other SERVER_ERROR are
 # genuine errors this adapter must never swallow.
-poll_response_filter() {  # <response-file>
+poll_response_filter() {  # <response-file> <hold-limit-bytes>
   perl -e '
     use strict;
     use warnings;
-    my ($stage) = @ARGV;
+    my ($stage, $limit) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
     binmode $staged;
-    my ($candidate, $streaming) = ("", 0);
+    my ($held, $streaming) = ("", 0);
     sub write_all {
       my ($handle, $bytes) = @_;
       my $offset = 0;
@@ -210,22 +273,18 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $chunk);
         next;
       }
-      my $room = length($expected) + 1 - length($candidate);
-      my $take = length($chunk) < $room ? length($chunk) : $room;
-      my $prefix = substr($chunk, 0, $take);
-      $candidate .= $prefix;
-      write_all($staged, $prefix);
-      my $matches_prefix = length($candidate) <= length($expected)
-        && substr($expected, 0, length($candidate)) eq $candidate;
-      if (!$matches_prefix) {
-        write_all(*STDOUT, $candidate);
-        write_all(*STDOUT, substr($chunk, $take));
+      $held .= $chunk;
+      if (length($held) > $limit) {
+        write_all(*STDOUT, $held);
+        $held = "";
         $streaming = 1;
       }
     }
-    exit 10 if !$streaming && $candidate eq $expected;
-    write_all(*STDOUT, $candidate) unless $streaming;
-  ' "$1"
+    exit 0 if $streaming;
+    write_all($staged, $held);
+    exit 10 if $held eq $expected;
+    exit 11;
+  ' "$1" "$2"
 }
 
 # Minimum seconds between retry attempt starts. FM_LAVISH_POLL_RETRY_DELAY is a
@@ -281,26 +340,52 @@ cmd_poll() {
   done
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    lavish-axi poll "$artifact" | poll_response_filter "$response" "$POLL_HOLD_LIMIT_BYTES"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
     case "$filter_rc" in
-      0) break ;;
+      # Streamed through, so it was too large to be a quiet absence.
+      0) return "$rc" ;;
+      11)
+        # A response that carries nothing to deliver while the artifact file is
+        # still there is not a result: print nothing and exit nonzero, and the
+        # runner's no-result path leaves this registration armed instead of
+        # capturing a fresh result every cycle. See the source-tracks-the-board
+        # note in the header.
+        if [ -f "$artifact" ] && poll_response_is_quiet_absence "$response"; then
+          return "$POLL_QUIET_ABSENCE_EXIT"
+        fi
+        cat -- "$response"
+        return "$rc"
+        ;;
       10)
         if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
           poll_iteration_floor_wait "$iteration_started" "$delay" \
             || die "cannot enforce the poll rate governor"
-        else
-          cat -- "$response"
-          break
+          continue
         fi
+        cat -- "$response"
+        return "$rc"
         ;;
       *) die "cannot classify the poll response" ;;
     esac
   done
-  return "$rc"
+}
+
+# Whether a staged poll response is one the listener waits out rather than
+# delivers. It is the union of the two shapes the header describes, and it asks
+# the adapter's own `silent` command for the first of them rather than restating
+# that rule here.
+poll_response_is_quiet_absence() {  # <result-file>
+  local file=${1-}
+  [ -n "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  case "$(cmd_classify "$file")" in
+    missing) return 0 ;;
+  esac
+  cmd_silent "$file"
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
@@ -343,23 +428,37 @@ cmd_classify() {
   fi
 }
 
+# Whether a captured result is the published poll's own refusal to resolve the
+# artifact path. `lavish-axi` resolves that path before it looks for a session, so
+# an artifact that is gone comes back as this exact two-line envelope and never as
+# a session status. Both lines are read from the leading envelope at column zero,
+# so captain-supplied payload text can neither forge the shape nor hide behind
+# it. A future Lavish that rewords the message leaves the source armed instead,
+# which is the safe direction: nothing is lost, and explicit retirement still
+# cleans up.
+artifact_unresolvable() {  # <result-file>
+  local first second
+  first=$(sed -n '1p' "$1")
+  second=$(sed -n '2p' "$1")
+  printf '%s\n' "$first" \
+    | grep -Eq '^error: "ENOENT: no such file or directory, realpath .*"$' || return 1
+  [ "$second" = 'code: UNKNOWN' ]
+}
+
 # Whether a captured result ends this source, for the generic runner's automatic
-# retirement. Lavish's notion of "ended" lives here and nowhere else: an ended
-# session produces nothing further, a missing session has nothing left to
-# produce, and the published poll delivers the final feedback of a `Send & End`
-# review marked with session_ended and returns only empty ended sessions after
-# it. Anything else - including an unreadable result - keeps the source armed.
+# retirement. Lavish's notion of "ended" lives here and nowhere else, and it is
+# about the board file rather than the session: an artifact that no longer
+# resolves is the only thing that ends a source, because `lavish-axi <file>` can
+# open, resume, or reopen a session for it at any time. An ended session, a board
+# with no active session, and the final feedback of a `Send & End` review all
+# keep the source armed. The listener never delivers a missing or ended response
+# while the artifact file is still there, so the captures that reach this verdict
+# are a board's disappearance and real feedback.
 cmd_terminal() {
   local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
-  case "$(cmd_classify "$file")" in
-    ended|missing) return 0 ;;
-  esac
-  case "$(session_field "$file" session_ended)" in
-    true|True|TRUE) return 0 ;;
-  esac
-  return 1
+  artifact_unresolvable "$file"
 }
 
 # Whether a completed result carries any queued content block at all. The

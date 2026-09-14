@@ -37,35 +37,67 @@ Note that `lavish-axi <anything> --help` exits 0 for any argument, including a n
 
 The adapter depends on none of this: it uses only the published poll shape above.
 
-## Why an ended Lavish review is terminal
+## Why the board file, not a session, is a Lavish source's lifetime
 
-Re-verified on 2026-08-01 against the same installed build.
-The published poll help states the lifecycle directly:
+Re-measured on 2026-09-14 against the installed `lavish-axi` 0.1.67, on macOS (Darwin 25.5.0).
+Every response quoted here is the real CLI's own output, and the poll was also driven through the real adapter and runner against a real board.
+
+The published poll help still states the session lifecycle: `` `Send & End` ends the session ``, its final feedback is still delivered once, and polling stops after that response.
+What it does not say is that the session is the board.
+`lavish-axi <file>` opens, resumes, and reopens a session for the same artifact as often as anyone likes, and the Lavish server also stops when it is idle.
+A board with no open session answers like this:
 
 ```text
-$ lavish-axi poll --help | tr '.' '\n' | grep -F 'Send & End'
- `Send & End` ends the session
-$ lavish-axi poll --help | tr '.' '\n' | grep -F 'polling stops'
- After that response, polling stops, and the agent must not reopen the session uninvited
+$ lavish-axi poll <a board with no open session>
+error: No active Lavish Editor session for this file
+code: NOT_FOUND
+help[1]: Run `lavish-axi <that board>` first
+$ echo $?
+1
 ```
 
-The sentence between those two, in the same help text, is "Its final feedback is still delivered once."
+So `missing` means a board with nothing to say right now, not a finished board, and it is what every armed source sees at once when the server self-stops.
+A session the captain ended in the browser answers with the session still present:
 
-So the last useful response of an ended review is a `feedback` response, and every poll after it returns an empty ended session immediately.
-That is why the adapter's terminal verdict covers a `feedback` response carrying `session_ended`, not only `status: ended` and a missing session: without it, one human `Send & End` leaves the source armed and each later cycle captures another empty ended result.
+```text
+$ lavish-axi poll <a board the captain ended in the browser>
+session:
+  file: <that board>
+  status: ended
+  ended_by: user
+next_step: The user ended this Lavish Editor session. Stop polling ...
+$ echo $?
+0
+```
+
+Treating either response as final was the defect.
+It retired registrations the captain was still using - four times in one day in one home, each repaired by hand - and every retirement was silent, so a board reopened afterwards had no listener and the captain's next message sat queued on it.
+The registration is the durable thing, so it is now tied to the artifact: the listener waits both responses out, and only an artifact that no longer resolves ends the source.
+`lavish-axi` resolves that path before it ever looks for a session, so a deleted board never reaches the session lookup:
+
+```text
+$ lavish-axi poll <a deleted board>
+error: "ENOENT: no such file or directory, realpath '<that board>'"
+code: UNKNOWN
+$ echo $?
+1
+```
+
+A `Send & End` close carrying the captain's own answer is a `feedback` response rather than an `ended` one.
 `session_ended` is a session-level field emitted beside `status` in the response's leading `session:` block, which is why the adapter reads it there and ignores identical text appearing in prompt payloads.
 
 ## Why an empty board close is silent
 
 The same published lifecycle above is the whole basis for the `silent` verdict, so no new source knowledge was needed.
-`Send & End` delivers the captain's final feedback once as a `feedback` response carrying `session_ended`, and every poll after it returns an empty ended session.
-A board the captain closes without saying anything therefore produces exactly one `ended` response carrying no queued content block, and announcing it put a wake in front of the handler whose entire content was that nothing happened.
+`Send & End` delivers the captain's final feedback once as a `feedback` response carrying `session_ended`, and every poll after it returns that empty ended response.
+A board the captain closes without saying anything therefore answers a poll with an empty ended session and nothing else, and announcing that put a wake in front of the handler whose entire content was that nothing happened.
+That is what the adapter's `silent` command answers, and the listener now consults that same command rather than restating the rule: a quiet absence is neither captured nor announced, and the registration stays armed for the board's next round.
 
 The verdict is confined to that one shape and fails closed everywhere else.
-A `Send & End` close carrying the captain's own answer classifies `feedback`, never `ended`, so it is announced unchanged; so is any `ended` result that still carries a `prompts` or `feedback` block, which this lifecycle is not expected to produce but which must never be dropped on that expectation.
-A `waiting` session, a `missing` one, an `unknown` or unreadable result, and every error stay announced, because none of them positively proves nothing was said.
+A `Send & End` close carrying the captain's own answer classifies `feedback`, never `ended`, so it is delivered unchanged; so is any `ended` result that still carries a `prompts` or `feedback` block, which this lifecycle is not expected to produce but which must never be dropped on that expectation.
+A `waiting` session, an `unknown` or unreadable result, and every error all still reach the runner rather than being waited out, because none of them proves nothing was said.
 The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
-Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore announced.
+Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore delivered.
 
 ## The loss limitation this runner cannot close
 
@@ -98,11 +130,15 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | adapter-owned application of a captured result | a remote-secondmate reply captured through the real relay in an isolated home reaches that secondmate's local status mirror, settles its correlated pending-reply expectation, re-arms the next cursor-anchored source, and is acknowledged, with no handler step or duplicate `check` wake; its new mirrored bytes remain visible to the watcher's signal gate, while a cursor-loss whole-log recapture that adds no bytes is acknowledged quietly; for an already-escalated request, the same path closes the exact decision so the open-decision fold clears and remains clear; a capture whose adapter application fails because local storage for a referenced remote document is obstructed is left unacknowledged and receives the fallback `check` wake, and the handler's own `handle` still applies it in full after storage recovers |
 | generic built-in keyed-answer feed | `tests/fm-captain-hold-lifecycle.test.sh` drives a bound built-in source through the real runner with a fixture adapter that only prints keyed lines, proving any bound built-in channel reaches the one keyed-answer intake: named captain-held tasks close at capture time, a card-declared release mode frees held work, keys naming no captain-held task skip, freeform prose forges nothing, matching answer-and-mode replays are idempotent while mode mismatches refuse, an unbound source closes nothing, and capture remains independent of the handler wake. |
 | structured reconcile feed | The same suite drives the optional `reconciles` adapter seam through the real runner and proves only a bound captured source can create a request; the ordinary keyed-answer and chat paths refuse the reserved value without closing or creating a request, versioned selection stays separate from its note, rollout-compatible ordinary legacy answers still pass, and legacy reconcile-shaped values feed neither intake. |
-| adapter-owned silence verdict | an armed Lavish source driven against a stand-in poll that returns an empty ended session captures its result, records it durably handled, appends no wake, and stays silent through a later `reconcile` that would otherwise republish it, while still retiring its ended source; the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler |
+| adapter-owned silence verdict | an armed Lavish source whose stand-in poll returns an empty ended session captures nothing and appends no wake, while the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler; the adapter's `silent` command is the listener's own rule for that shape |
+| Lavish source persistence | an armed Lavish source survives the end of its session, a browser end, a board with no active session at all, and a stopped server: each of those transcripts runs the real adapter and runner against a stand-in poll, captures nothing, appends no wake, and leaves the registration in place, and a board reopened afterwards still delivers its next round as sequence 2 |
+| quiet-absence determinism | the transcripts the routing above rests on were re-measured against the real installed `lavish-axi` 0.1.67 and a real board driven over a real review window: a captain browser end answers with the `status: ended` envelope and an artifact with no active session answers with the not-found envelope, both of which the listener waits out, while a deleted artifact answers with its own path-resolution refusal |
+| the board file ends the source | a stand-in poll returning the published poll's own artifact-path refusal captures exactly one result, announces it, retires the registration, and releases the claim, while an ended session, a `Send & End` delivery, a missing session, and payload text imitating that refusal all keep the source armed |
+| deliberate break | the persistence suite re-runs its own scenario against a copy of the adapter with the listener's quiet-absence predicate and the terminal verdict disabled, and requires that copy to lose the registration, so a green persistence assertion cannot be an artefact of a test that never reached the rule |
 | silence fails closed | the adapter's published `silent` command suppresses only an `ended` session with no queued content block, and announces a real answer, freeform prose, any recognized content block regardless of its declared count, a malformed top-level content header, a `waiting` or `missing` session, a server error, an unreadable result, and indented payload text imitating an empty content block; the `remote-reply` and `when` adapters, which implement no `silent` command, announce every result |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers; a live owner retiring its own terminal source mid-capture tolerates only its transient reservation-removal failure and still removes the registration under exact ownership |
-| one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
+| one session-ending round, one result each | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once, answers the next two polls with the empty ended session that follows it, and then delivers the reopened board's next round, captures exactly two results, publishes exactly two distinct events, keeps its registration, and delivers that second round to the captain |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a presented-but-unacknowledged wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |

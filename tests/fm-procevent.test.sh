@@ -607,29 +607,36 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
 # --- end-user-aligned regression: one Send & End, one captured result -------
-# The dogfood defect: a real armed Lavish source received one human `Send & End`
-# action, and the runner captured four results - the human's real feedback, then
-# recurring empty ended sessions - because it kept restarting a source whose own
-# adapter already knew the session had ended. Driven through the adapter's own
-# arm command against a stand-in for the published poll shape, so registration,
-# the runner, capture, publication, and retirement all run for real.
+# THE PERSISTENCE DEFECT this suite exists to hold. A real armed Lavish source
+# was retired the moment its session ended, so when the captain reopened the same
+# board and answered again the registration was gone and his feedback woke
+# nobody; in the field that happened four times in one day and was repaired by
+# hand each time. A Lavish source tracks the BOARD FILE, not the session, so the
+# end of a session must leave the registration armed, must not capture the empty
+# ended sessions that follow it, and must still deliver the next round. Driven
+# through the adapter's own arm command against a stand-in for the published poll
+# shape, so registration, the runner, capture, publication, and retirement all
+# run for real.
 HLT="$TMP_ROOT/hlt"; new_home "$HLT"
 LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
 LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
 export LAVISH_POLL_COUNT
 cat > "$LAVISH_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
-# feedback is delivered exactly once carrying session_ended, and every later
-# poll returns an empty ended session immediately.
+# Stand-in for `lavish-axi poll <file>` across one board's whole life: the human
+# answers with `Send & End`, the next two polls return the empty ended session
+# that follows it, and then the board is reopened and answers again.
 n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
-if [ "$n" = 1 ]; then
-  printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
-else
-  printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
-fi
+case "$n" in
+  1)
+    printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
+  2|3)
+    printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n' ;;
+  *)
+    printf 'session:\n  file: /review.html\n  status: feedback\nfeedback[1]{text}:\n  round two\n' ;;
+esac
 SH
 chmod +x "$LAVISH_BIN/lavish-axi"
 REVIEW_ART="$TMP_ROOT/review.html"
@@ -637,39 +644,114 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 fm_test_track_procevent_home "$HLT"
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
-for _ in $(seq 1 6); do
-  PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
-  sleep 0.3
+# One poll per explicit start, so the stub's scripted rounds line up with the
+# runner's captures exactly rather than with however often reconcile happened.
+for _ in 1 2 3 4; do
+  PATH="$LAVISH_BIN:$PATH" pe "$HLT" start "$lavish_id" >/dev/null
 done
-[ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
-  || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
-[ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
-  || fail "one Send & End produced $(count_results "$HLT" "$lavish_id") captured results"
-[ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
-  || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
+[ "$(cat "$LAVISH_POLL_COUNT")" = 4 ] \
+  || fail "the listener made $(cat "$LAVISH_POLL_COUNT") polls instead of the scripted four"
+[ "$(count_results "$HLT" "$lavish_id")" = 2 ] \
+  || fail "one Send & End plus one reopened round produced $(count_results "$HLT" "$lavish_id") captured results instead of two"
+[ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 2 ] \
+  || fail "one Send & End plus one reopened round produced a different number of events: $(wake_payloads "$HLT" | sort -u)"
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
-assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
-assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
-LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
-assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
+assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 2" \
+  "the reopened board's next round reaches the captain"
+[ -f "$HLT/state/procevent/$lavish_id.source" ] \
+  || fail "an ended review retired a registration whose board file is still there"
+assert_grep 'ship it' "$(first_result "$HLT" "$lavish_id" || true)" \
+  "the ended round's own feedback is retained"
+assert_grep 'round two' "$HLT/state/procevent-inbox/$lavish_id.2.result" \
+  "the reopened round's feedback is the second captured result"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
-assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
-pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+assert_contains "$out" "retired: $lavish_id" "explicit retirement still cleans up an armed board"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "retirement releases the owned claim"
+pass "an ended review keeps its registration armed and delivers the reopened board's next round"
 
-# --- end-user-aligned regression: an empty board close is not news ------------
-# The captain's report: closing a review surface he had said nothing on still
-# put a wake in his chat whose entire content was that nothing happened. The
-# adapter now answers the runner's silence seam for exactly that shape, so the
-# result is captured and recorded handled without ever being announced. Driven
-# through the adapter's own arm command and the real runner, so registration,
-# capture, the silence verdict, and retirement all run for real.
+# --- deliberate break: the persistence assertions above are load-bearing -----
+# The same experiment against a copy of the adapter with the fix's two predicates
+# disabled - the listener's quiet-absence test answering no, and the terminal
+# verdict answering yes - must LOSE the registration. Without this, a green
+# persistence assertion above could be an artefact of a test that never reached
+# the rule it claims to hold. Each substitution adds one early `return` to a
+# definition; the `# <result-file>` usage annotation the source carries ends up
+# as a trailing comment on the added line, which is all it is either way.
+MUT_ROOT="$TMP_ROOT/lavish-mutant"
+mkdir -p "$MUT_ROOT/bin"
+for mutant_lib in fm-procevent.sh fm-pr-lib.sh fm-wake-lib.sh fm-procevent-lib.sh; do
+  ln -s "$ROOT/bin/$mutant_lib" "$MUT_ROOT/bin/$mutant_lib"
+done
+perl -0777 -pe '
+  s!poll_response_is_quiet_absence\(\) \{!poll_response_is_quiet_absence() {\n  return 1!;
+  s!artifact_unresolvable\(\) \{!artifact_unresolvable() {\n  return 0!;
+' "$ROOT/bin/fm-procevent-lavish.sh" > "$MUT_ROOT/bin/fm-procevent-lavish.sh"
+chmod +x "$MUT_ROOT/bin/fm-procevent-lavish.sh"
+cmp -s "$ROOT/bin/fm-procevent-lavish.sh" "$MUT_ROOT/bin/fm-procevent-lavish.sh" \
+  && fail "test fixture error: the deliberate-break mutation changed nothing"
+MUT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-mutant-stub")
+MUT_COUNT="$TMP_ROOT/lavish-mutant-count"
+cat > "$MUT_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>`: the first poll returns the empty ended
+# session the fixed adapter waits out, and every later poll is the reopened
+# board's answer.
+n=$(cat "$LAVISH_MUT_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_MUT_COUNT"
+if [ "$n" = 1 ]; then
+  printf 'session:\n  file: /mutant.html\n  status: ended\n  ended_by: user\n'
+else
+  printf 'session:\n  file: /mutant.html\n  status: feedback\nfeedback[1]{text}:\n  round two\n'
+fi
+SH
+chmod +x "$MUT_BIN/lavish-axi"
+MUT_ART="$TMP_ROOT/mutant-board.html"
+printf '<h1>mutant</h1>\n' > "$MUT_ART"
+mut_id=$("$MUT_ROOT/bin/fm-procevent-lavish.sh" source-id "$MUT_ART")
+HMUT="$TMP_ROOT/hmut"; new_home "$HMUT"
+fm_test_track_procevent_home "$HMUT"
+PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
+  "$MUT_ROOT/bin/fm-procevent-lavish.sh" arm "$MUT_ART" >/dev/null
+for _ in 1 2; do
+  PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
+    "$MUT_ROOT/bin/fm-procevent.sh" start "$mut_id" >/dev/null 2>&1 || true
+done
+assert_absent "$HMUT/state/procevent/$mut_id.source" \
+  "the deliberate-break mutant did not lose the registration, so the persistence assertions above prove nothing"
+assert_absent "$HMUT/state/procevent-inbox/$mut_id.2.result" \
+  "the deliberate-break mutant still delivered the reopened round"
+pass "putting the fix's two behaviour changes back loses the registration, so the persistence test has teeth"
+
+# --- end-user-aligned regression: a quiet absence is not a result ------------
+# The other face of the same defect: the Lavish server stops when it is idle and a
+# board nobody has opened yet has no session, so the published poll answers `No
+# active Lavish Editor session for this file`. That is a board with nothing to
+# say right now, not a board that is finished, so it must wake nobody, capture
+# nothing, and leave the registration armed - printing it instead would capture a
+# fresh result on every supervision cycle. Driven through the adapter's own arm
+# command and the real runner, so registration, capture, and the wait all run for
+# real.
 HEMPTY="$TMP_ROOT/hempty"; new_home "$HEMPTY"
 EMPTY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-empty-stub")
+EMPTY_COUNT="$TMP_ROOT/lavish-empty-count"
+EMPTY_OPEN="$TMP_ROOT/lavish-empty-open"
 cat > "$EMPTY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` when the captain closes a board he said
-# nothing on: an ended session carrying no queued content at all.
-printf 'session:\n  file: /quiet.html\n  status: ended\n  ended_by: user\n'
+# Stand-in for `lavish-axi poll <file>`: the captain closes the board saying
+# nothing, and then no session is active until the test says the board is open
+# again, at which point the captain answers.
+n=$(cat "$LAVISH_EMPTY_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_EMPTY_COUNT"
+if [ "$n" = 1 ]; then
+  printf 'session:\n  file: /quiet.html\n  status: ended\n  ended_by: user\n'
+elif [ -e "$LAVISH_EMPTY_OPEN" ]; then
+  printf 'session:\n  file: /quiet.html\n  status: feedback\nfeedback[1]{text}:\n  the captain came back\n'
+else
+  printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\nhelp[1]: Run `lavish-axi /quiet.html` first\n'
+  exit 1
+fi
 SH
 chmod +x "$EMPTY_BIN/lavish-axi"
 QUIET_ART="$TMP_ROOT/quiet-board.html"
@@ -678,33 +760,71 @@ quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
 fm_test_track_procevent_home "$HEMPTY"
 PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
-quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
-assert_not_contains "$quiet_out" "not-autohandled" \
-  "a durably silenced result was reported as still unacknowledged"
-# The handled marker is written at exactly the point the wake would otherwise
-# have been appended, so waiting on it - rather than on a fixed sleep - is what
-# makes "no wake" a real observation instead of a race the test won by being
-# early.
-QUIET_HANDLED="$HEMPTY/state/procevent-inbox/$quiet_id.1.handled"
-for _ in $(seq 1 100); do
-  [ -f "$QUIET_HANDLED" ] && break
-  sleep 0.1
+for _ in 1 2; do
+  PATH="$EMPTY_BIN:$PATH" LAVISH_EMPTY_COUNT="$EMPTY_COUNT" LAVISH_EMPTY_OPEN="$EMPTY_OPEN" \
+    pe "$HEMPTY" start "$quiet_id" >/dev/null
 done
-[ -f "$QUIET_HANDLED" ] \
-  || fail "a silenced result was not durably recorded handled, so a later reconcile would announce it"
-[ "$(count_results "$HEMPTY" "$quiet_id")" = 1 ] \
-  || fail "an empty board close captured $(count_results "$HEMPTY" "$quiet_id") results instead of one"
+[ "$(count_results "$HEMPTY" "$quiet_id")" = 0 ] \
+  || fail "a quiet absence captured $(count_results "$HEMPTY" "$quiet_id") results instead of none"
 [ -z "$(wake_payloads "$HEMPTY")" ] \
-  || fail "an empty board close woke the captain: $(wake_payloads "$HEMPTY")"
-# Re-announcement is exactly what the handled marker exists to stop, so the
-# silence has to survive the reconcile that would otherwise republish it.
-PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" reconcile >/dev/null
+  || fail "a quiet absence woke the captain: $(wake_payloads "$HEMPTY")"
+[ -f "$HEMPTY/state/procevent/$quiet_id.source" ] \
+  || fail "a quiet absence retired a registration whose board file is still there"
+# The reconcile that would otherwise republish a captured result has nothing to
+# republish, and must not manufacture one either.
+PATH="$EMPTY_BIN:$PATH" LAVISH_EMPTY_COUNT="$EMPTY_COUNT" LAVISH_EMPTY_OPEN="$EMPTY_OPEN" \
+  pe "$HEMPTY" reconcile >/dev/null
 sleep 0.3
+[ "$(count_results "$HEMPTY" "$quiet_id")" = 0 ] \
+  || fail "a later reconcile captured a quiet absence: $(count_results "$HEMPTY" "$quiet_id") results"
 [ -z "$(wake_payloads "$HEMPTY")" ] \
-  || fail "a later reconcile re-announced a silenced empty board close: $(wake_payloads "$HEMPTY")"
-assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
-  "an empty board close still retires its ended source"
-pass "an empty board close is captured and recorded handled without ever waking the captain"
+  || fail "a later reconcile announced a quiet absence: $(wake_payloads "$HEMPTY")"
+# The whole point of staying armed: the board's next round still arrives.
+: > "$EMPTY_OPEN"
+PATH="$EMPTY_BIN:$PATH" LAVISH_EMPTY_COUNT="$EMPTY_COUNT" LAVISH_EMPTY_OPEN="$EMPTY_OPEN" \
+  pe "$HEMPTY" start "$quiet_id" >/dev/null
+wait_for "$HEMPTY/state/.wake-queue" \
+  || fail "a board reopened after a quiet absence produced no wake"
+assert_contains "$(wake_payloads "$HEMPTY")" "procevent lavish $quiet_id 1" \
+  "a board reopened after a quiet absence reaches the captain"
+assert_grep 'the captain came back' "$(first_result "$HEMPTY" "$quiet_id")" \
+  "the reopened board's own feedback is what was captured"
+PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$QUIET_ART" >/dev/null
+pass "a quiet absence is neither captured nor announced, and the board's next round is"
+
+# --- the board file itself is what ends a source ----------------------------
+# The one thing that ends a Lavish source: an artifact that no longer resolves,
+# so no session exists and none can ever be opened. `lavish-axi` resolves that
+# path before it looks for a session, which is the refusal the adapter reads as
+# terminal. Driven through the real runner so capture, announcement, and
+# automatic retirement all run for real.
+HGONE="$TMP_ROOT/hgone"; new_home "$HGONE"
+GONE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-gone-stub")
+cat > "$GONE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` on an artifact that is gone.
+printf 'error: "ENOENT: no such file or directory, realpath '"'"'/deleted.html'"'"'"\ncode: UNKNOWN\n'
+exit 1
+SH
+chmod +x "$GONE_BIN/lavish-axi"
+GONE_ART="$TMP_ROOT/deleted-board.html"
+printf '<h1>deleted</h1>\n' > "$GONE_ART"
+gone_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$GONE_ART")
+fm_test_track_procevent_home "$HGONE"
+PATH="$GONE_BIN:$PATH" FM_HOME="$HGONE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GONE_ART" >/dev/null
+rm -f "$GONE_ART"
+PATH="$GONE_BIN:$PATH" pe "$HGONE" start "$gone_id" >/dev/null
+[ "$(count_results "$HGONE" "$gone_id")" = 1 ] \
+  || fail "a deleted board captured $(count_results "$HGONE" "$gone_id") results instead of one"
+assert_contains "$(wake_payloads "$HGONE")" "procevent lavish $gone_id 1" \
+  "a deleted board's source announces the result that ends it"
+assert_absent "$HGONE/state/procevent/$gone_id.source" \
+  "a board that no longer resolves retires its own source"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$gone_id.claim" \
+  "a board that no longer resolves releases its owned claim"
+pass "only a board file that no longer resolves retires a Lavish source"
 
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
@@ -731,6 +851,8 @@ assert_contains "$(wake_payloads "$HANSWER")" "procevent lavish $answer_id 1" \
   "a real board answer still reaches the captain"
 [ ! -f "$HANSWER/state/procevent-inbox/$answer_id.1.handled" ] \
   || fail "a real board answer was recorded handled without ever being handled"
+[ -f "$HANSWER/state/procevent/$answer_id.source" ] \
+  || fail "a session-ending answer retired a registration whose board file is still there"
 pass "a board close carrying the captain's real answer is still announced"
 
 # --- end-user-aligned regression: a transient poll interruption is not news ---
@@ -765,7 +887,7 @@ case "${plan[$i]}" in
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
   stream)
-    printf 'x%.0s' {1..4096}
+    printf 'x%.0s' {1..16384}
     printf 'ready\n' > "$LAVISH_STREAM_READY"
     while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
     printf '\n' ;;
@@ -920,6 +1042,10 @@ LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
 mkdir -p "$STREAM_TMPDIR"
 printf '<h1>stream</h1>\n' > "$STREAM_ART"
 stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
+# The hold-back bound is the one this test has to check against, so it is read
+# from the adapter rather than restated here where the two could drift apart.
+stream_hold=$(sed -n 's/^POLL_HOLD_LIMIT_BYTES=//p' "$ROOT/bin/fm-procevent-lavish.sh")
+[ -n "$stream_hold" ] || fail "the hold-back bound is not where this test reads it"
 fm_test_track_procevent_home "$HSTREAM"
 LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
@@ -929,9 +1055,9 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
   FM_PROCEVENT_MAX_OUTPUT_BYTES=100 pe "$HSTREAM" reconcile >/dev/null
 wait_for "$LAVISH_STREAM_READY" || fail "streaming poll did not start"
 stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
-[ -e "${stream_staged[0]}" ] || fail "streaming poll created no classifier staging file"
-[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le 100 ] \
-  || fail "streaming poll exceeded its bounded classifier staging"
+[ -e "${stream_staged[0]}" ] || fail "streaming poll created no staging file"
+[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le "$stream_hold" ] \
+  || fail "streaming poll held back more than its declared bound"
 : > "$LAVISH_STREAM_RELEASE"
 wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
 stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
@@ -939,7 +1065,7 @@ stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
   || fail "streaming poll bypassed the runner output bound"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$STREAM_ART" >/dev/null
-pass "Lavish classification staging stays bounded while nonmatches stream"
+pass "Lavish listener staging stays bounded while a large nonmatch streams"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
@@ -2172,31 +2298,42 @@ printf 'garbage that is not a session block\n' > "$CLS"
 assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$CLS")" unknown "malformed output classifies as unknown rather than a lifecycle state"
 pass "the adapter classifies published poll output safely"
 
-# The adapter, not the runner, decides which results end a Lavish source. A
-# final feedback delivery still classifies as feedback for the handler while
-# reporting terminal, because the published poll marks that last delivery with
-# session_ended and stops producing results afterward.
+# The adapter, not the runner, decides which results end a Lavish source, and
+# the answer is about the board FILE rather than the session: `lavish-axi <file>`
+# opens, resumes, and reopens a session for one artifact at any time, so neither
+# an ended session nor an absent one may retire a registration. Only a board
+# whose path no longer resolves can never deliver again, and the published poll
+# says so before it ever looks for a session.
 TRM="$TMP_ROOT/terminal-verdict"
 printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\n' > "$TRM"
 assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$TRM")" feedback \
   "a final feedback delivery still classifies as feedback for the handler"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
-  || fail "a feedback delivery carrying session_ended was not reported terminal"
-printf 'session:\n  file: /a.html\n  status: feedback\n' > "$TRM"
-"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
-  && fail "an ordinary feedback delivery was reported terminal"
+  && fail "a Send & End delivery retired a source whose board file can still be reopened"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$TRM"
-"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" || fail "an ended session was not reported terminal"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an ended session retired a reopenable board"
+printf 'session:\n  file: /a.html\n  status: feedback\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an ordinary feedback delivery was reported terminal"
 printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$TRM"
-"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" || fail "a missing session was not reported terminal"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  && fail "a board with no active session retired a source whose artifact is still there"
 printf 'session:\n  file: /a.html\n  status: waiting\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "a waiting session was reported terminal"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "a server error was reported terminal"
 printf 'garbage that is not a session block\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an unreadable result was reported terminal"
-printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  session_ended: true\n' > "$TRM"
+printf 'error: "ENOENT: no such file or directory, realpath '"'"'/a.html'"'"'"\ncode: UNKNOWN\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
-  && fail "prompt payload text was read as a session-level terminal marker"
-pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
+  || fail "the poll's own refusal to resolve the artifact path was not reported terminal"
+printf 'error: "EACCES: permission denied, realpath '"'"'/a.html'"'"'"\ncode: UNKNOWN\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an unreadable artifact was treated as a missing one"
+printf 'error: "ENOENT: no such file or directory, realpath '"'"'/a.html'"'"'"\ncode: SERVER_ERROR\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an ENOENT line paired with another code was read as terminal"
+printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  error: "ENOENT: no such file or directory, realpath '"'"'/a.html'"'"'"\n  code: UNKNOWN\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  && fail "payload text was read as the poll's own artifact-path refusal"
+pass "the adapter ends a Lavish source only when its board file no longer resolves"
 
 # The adapter, not the runner, decides which Lavish results are routine no-ops
 # the runner should record without announcing. Exercised through the published
