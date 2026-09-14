@@ -67,8 +67,10 @@ cat > "$LAB/payload.json" <<'JSON'
     }
   ],
   "underway": [],
+  "awaiting": [],
   "landed": [],
-  "charted": []
+  "charted": [],
+  "awaiting_nudge_days": 7
 }
 JSON
 

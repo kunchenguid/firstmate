@@ -4,8 +4,9 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//   { stats:[{n,label,owners}], charted:[...], underway:[...], awaiting:[...],
+//     landed:[...], call:[{title,badges,link}], awaitingSub, awaitingEmpty,
+//     empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -24,9 +25,18 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
+    const has = (c) => this.className.split(/\s+/).includes(c);
+    const add = (c) => { if (!has(c)) this.className = (this.className + " " + c).trim(); };
+    const remove = (c) => {
+      this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" ");
+    };
     this.classList = {
-      add: (c) => { this.className = (this.className + " " + c).trim(); },
-      contains: (c) => this.className.split(/\s+/).includes(c),
+      add,
+      remove,
+      contains: has,
+      // the shipped deck toggles the pile classes as cards are dealt
+      toggle: (c, on) => { if (on === undefined ? has(c) : !on) remove(c); else add(c); },
     };
   }
   get textContent() {
@@ -37,7 +47,7 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(name, handler) { this.listeners[name] = handler; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -78,11 +88,32 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+const prompts = [];
+globalThis.window = { lavish: { queuePrompt: (prompt, context) => {
+  prompts.push({prompt, tag: context.tag, text: context.text, data: context.data});
+} } };
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+if (process.argv[3]) {
+  globalThis.FormData = class {
+    constructor(form) { this.values = form.values; }
+    get(name) { return this.values[name] || ""; }
+  };
+  const forms = [];
+  const walk = (node) => {
+    if (node.tagName === "form") forms.push(node);
+    node.children.forEach(walk);
+  };
+  [...byId.values()].forEach(walk);
+  for (const answer of JSON.parse(process.argv[3])) {
+    const form = forms.find((node) => node.attributes["data-lavish-question"] === answer.key);
+    if (!form) throw new Error("No question for " + answer.key);
+    form.values = {answer: answer.selection, note: answer.note};
+    form.listeners.submit({preventDefault() {}});
+  }
+}
 
 const badgesOf = (row) =>
   row.children
@@ -93,26 +124,47 @@ const strip = byId.get("bb-stats") || new Node("div");
 const stats = strip.children.map((t) => ({
   n: Number(t.children.find((c) => c.className.includes("bb-stat__num"))?.textContent),
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
+  // "" when the tile carries no ownership sub-line at all
+  owners: t.children.find((c) => c.className.includes("bb-stat__owners"))?.textContent ?? "",
 }));
 
-const rowsOf = (container) =>
-  container.children
+const rowsOf = (id) => {
+  const host = byId.get(id) || new Node("div");
+  return host.children
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
     .map((row) => {
       const main = row.children.find((c) => c.className.includes("bb-row__main"));
+      const pr = row.children.find((c) => c.className.includes("bb-row__pr"));
+      const age = row.children.find((c) => c.className.includes("bb-row__age"));
       return {
         title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
         badges: badgesOf(row),
+        pr: pr ? { text: pr.textContent, href: pr.href } : null,
+        age: age ? age.textContent : null,
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
       };
     });
+};
+const emptyOf = (id) =>
+  (byId.get(id) || new Node("div")).children
+    .filter((c) => c.className.includes("bb-empty"))
+    .map((c) => c.textContent);
 
-const uw = byId.get("bb-underway") || new Node("div");
-const underway = rowsOf(uw);
+const call = (byId.get("bb-call") || new Node("div")).children
+  .filter((c) => c.className.includes("bb-decision"))
+  .map((card) => {
+    const pad = card.children[0] || new Node("div");
+    const top = pad.children.find((c) => c.className.includes("bb-decision__top"));
+    return {
+      title: pad.children.find((c) => c.className.includes("bb-decision__title"))?.textContent ?? "",
+      badges: top ? badgesOf(top) : [],
+      link: pad.children.find((c) => c.className.includes("bb-decision__link"))?.textContent ?? "",
+    };
+  });
 
 const ch = byId.get("bb-charted") || new Node("div");
-const charted = rowsOf(ch);
+const charted = rowsOf("bb-charted");
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]
@@ -123,4 +175,19 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({
+    stats,
+    prompts,
+    charted,
+    underway: rowsOf("bb-underway"),
+    awaiting: rowsOf("bb-awaiting"),
+    landed: rowsOf("bb-landed"),
+    call,
+    // the Delivered sub-line states the exit rule, including its absence
+    awaitingSub: (byId.get("bb-awaiting-sub") || new Node("div")).textContent,
+    awaitingEmpty: emptyOf("bb-awaiting"),
+    empty,
+    more,
+    error: errorText,
+  }) + "\n",
+);

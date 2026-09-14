@@ -6,7 +6,7 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+SNAPSHOT=${FM_TEST_FLEET_SNAPSHOT:-$ROOT/bin/fm-fleet-snapshot.sh}
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
@@ -884,14 +884,6 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
-# A COMPLETED scout report must never be read as a pending decision. A scout that
-# raised a needs-decision and then finished (done) - its report delivered, its
-# decision either answered or captured in the report for the captain - must surface
-# only as a report POINTER, not a reopened pending decision, even when the report
-# body and the stale status line contain decision-like prose. This is the Lavish-103
-# defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
-# must not linger as pending. Decisions come purely from the keyed fold reconciled
-# against the crew lifecycle; report prose never opens or reopens a decision.
 test_completed_scout_report_is_pointer_not_pending() {
   local home fakebin out
   home=$(make_home completed-scout)
@@ -904,7 +896,6 @@ test_completed_scout_report_is_pointer_not_pending() {
     "kind=scout" \
     "mode=scout"
   record_claude_idle "$home/state" lavish-103
-  # Stale needs-decision, then the scout finished (done). No keyed resolution.
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
   printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
   # Completed report whose PROSE reads like the decision.
@@ -913,17 +904,22 @@ test_completed_scout_report_is_pointer_not_pending() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "lavish-103")
+    | .current_state.state == "done" and .hints.pending_decision
+      and [.hints.open_decisions[].key] == ["default"]
+      and .hints.scout_report_present
+  ' >/dev/null || fail "scout completion erased its unresolved decision: $out"
+  printf 'resolved: captain chose approach A\ndone: report ready\n' >> "$home/state/lavish-103.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lavish-103")
     | .current_state.state == "done"
       and .hints.pending_decision == false
       and (.hints.open_decisions | length) == 0
       and .hints.scout_report_present == true
   ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
-  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
+  pass "a completed scout preserves its decision until resolution and never reopens it from report prose"
 }
 
-# The complementary safety property: a scout still PARKED at a decision (its last
-# event is the needs-decision, it has not finished) DOES stay pending. The terminal
-# clear must not over-fire on a live, undecided scout.
 test_parked_scout_decision_stays_pending() {
   local home fakebin out
   home=$(make_home parked-scout)
@@ -945,7 +941,7 @@ test_parked_scout_decision_stays_pending() {
       and (.hints.open_decisions | length) == 1
       and .hints.open_decisions[0].key == "q1"
   ' >/dev/null || fail "a scout still parked at a decision must stay pending: $out"
-  pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
+  pass "a scout still parked at a decision stays pending"
 }
 
 # Home-summary validity treats persistent secondmates as registered homes, not
@@ -1045,6 +1041,111 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_merge_poll_timestamp_shares_the_validated_registration() {
+  local home fakebin mode out state replacement expected_epoch=1783533600
+  # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-pr-lib.sh"
+  for mode in stable retired replaced replaced-open unavailable; do
+    home=$(make_home "poll-observation-$mode")
+    fakebin=$(make_fakebin "$home")
+    state="$home/state"
+    replacement="$home/replacement"
+    mkdir -p "$replacement"
+    fm_write_meta "$state/task-a.meta" \
+      "window=firstmate:fm-task-a" "worktree=$home/projects" "project=alpha" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/2"
+    printf 'paused: waiting on the maintainer\n' > "$state/task-a.status"
+    record_claude_idle "$state" task-a
+    fm_pr_poll_prepare "$state" task-a github https://github.com/acme/repo/pull/2 \
+      github.com acme/repo 2 "$ROOT/bin/fm-pr-poll.sh" || fail "poll preparation failed"
+    fm_pr_poll_publish_prepared || fail "poll publication failed"
+    if [ "$(uname)" = Darwin ]; then
+      TZ=UTC0 touch -t "$(TZ=UTC0 date -r "$expected_epoch" +%Y%m%d%H%M.%S)" "$state/task-a.pr-poll-registration"
+    else
+      touch -d "@$expected_epoch" "$state/task-a.pr-poll-registration"
+    fi
+    if [ "$mode" = replaced ] || [ "$mode" = replaced-open ]; then
+      fm_write_meta "$replacement/task-a.meta" "pr=https://github.com/acme/repo/pull/99"
+      fm_pr_poll_prepare "$replacement" task-a github https://github.com/acme/repo/pull/99 \
+        github.com acme/repo 99 "$ROOT/bin/fm-pr-poll.sh" || fail "replacement preparation failed"
+      fm_pr_poll_publish_prepared || fail "replacement publication failed"
+      touch -t 202609010000.00 "$replacement/task-a.pr-poll-registration"
+    fi
+    cat > "$home/race-env.sh" <<'SH'
+race_replace_poll() {
+  local suffix
+  for suffix in meta pr-poll check.sh pr-poll-registration; do
+    mv "$RACE_HOME/replacement/task-a.$suffix" "$RACE_HOME/state/task-a.$suffix" || return 1
+  done
+  : > "$RACE_HOME/observed"
+}
+uname() {
+  if [ "${RACE_MODE:-}" = unavailable ] && [ "${FUNCNAME[1]:-}" = fm_pr_poll_registration_parse ]; then
+    printf 'Linux\n'
+    return
+  fi
+  if [ "${RACE_MODE:-}" = replaced-open ] && [ "${FUNCNAME[1]:-}" = fm_pr_poll_registration_parse ] \
+    && [ ! -e "$RACE_HOME/observed" ]; then
+    race_replace_poll || return 1
+  fi
+  case " ${FUNCNAME[*]} " in
+    *" fm_pr_metadata_identity_parse "*)
+      if [ "${FM_PR_REG_ID:-}" = task-a ] && [ ! -e "$RACE_HOME/observed" ]; then
+        case "$RACE_MODE" in
+          retired)
+            mv "$RACE_HOME/state/task-a.pr-poll-registration" "$RACE_HOME/retired-registration" || return 1
+            : > "$RACE_HOME/observed"
+            ;;
+          replaced)
+            race_replace_poll || return 1
+            ;;
+        esac
+      fi
+      ;;
+  esac
+  command uname "$@"
+}
+stat() {
+  if [ "${RACE_MODE:-}" = unavailable ] && [ "${*: -1}" = /dev/fd/7 ]; then
+    : > "$RACE_HOME/observed"
+    return 1
+  fi
+  command stat "$@"
+}
+SH
+    out=$(PATH="$fakebin:$PATH" BASH_ENV="$home/race-env.sh" RACE_HOME="$home" RACE_MODE="$mode" \
+      FM_HOME="$home" "$SNAPSHOT" --json) || fail "snapshot failed during $mode poll observation"
+    if [ "$mode" = unavailable ]; then
+      printf '%s' "$out" | jq -e '
+        .tasks[] | select(.id == "task-a")
+        | .pr.url == "https://github.com/acme/repo/pull/2"
+          and .pr.merge_poll == {armed:false,armed_epoch:null}
+      ' >/dev/null || fail "incomplete poll observation still armed delivery evidence: $out"
+    else
+      printf '%s' "$out" | jq -e --argjson epoch "$expected_epoch" '
+        .tasks[] | select(.id == "task-a")
+        | .pr.url == "https://github.com/acme/repo/pull/2"
+          and .pr.merge_poll == {armed:true,armed_epoch:$epoch}
+      ' >/dev/null || fail "$mode poll observation lost its validated timestamp: $out"
+    fi
+    case "$mode" in
+      retired)
+        [ ! -e "$state/task-a.pr-poll-registration" ] || fail "retirement race did not remove the registration"
+        ;;
+      replaced|replaced-open)
+        fm_pr_poll_artifacts_valid "$state" task-a "$ROOT/bin/fm-pr-poll.sh" \
+          || fail "replacement race left an invalid poll"
+        [ "$FM_PR_REG_URL" = https://github.com/acme/repo/pull/99 ] \
+          && [ "$FM_PR_REG_EPOCH" != "$expected_epoch" ] || fail "replacement race did not change the PR and timestamp"
+        ;;
+    esac
+    [ "$mode" = stable ] || [ -f "$home/observed" ] || fail "$mode fault was not exercised"
+  done
+  pass "poll observations preserve timestamp identity or leave delivery unavailable"
+}
+
+test_merge_poll_timestamp_shares_the_validated_registration
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

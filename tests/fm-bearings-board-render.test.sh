@@ -2,7 +2,8 @@
 # Behavior tests for the shipped bearings board renderer
 # (.agents/skills/bearings/assets/board-template.html), exercised through a real
 # `fm-bearings-board.sh build` and then executed under the minimal DOM shim in
-# tests/assets/board-render-harness.mjs. The assertions are on what the page
+# tests/assets/board-render-harness.mjs, with queued-owner geometry also checked
+# in real Chromium. The assertions are on what the page
 # renders - row badges, the stat strip, the empty state - never on the
 # template's source text.
 set -u
@@ -56,15 +57,21 @@ SH
   printf '%s\n' "$home"
 }
 
-# Build the board from <underway-json> plus <charted-json> and return what the
-# renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
-  jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+# Build the board from <charted-json> and return what the renderer produced.
+render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
+  render_payload "$1" "$(jq -n --argjson charted "$2" \
+    --argjson more "${3:-0}" --argjson warning_more "${4:-0}" \
+    '{charted:$charted, charted_more:$more, charted_warning_more:$warning_more}')"
+}
+
+# Build the board from a partial payload (merged over the minimal valid one) and
+# return what the renderer produced.
+render_payload() {  # <home> <payload-overrides-json>
+  local home=$1 overrides=$2 data="$1/payload.json"
+  jq -n --argjson overrides "$overrides" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
-    charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
+    prs_live:false, captains_call:[], underway:[], awaiting:[], landed:[],
+    charted:[], awaiting_nudge_days:7} * $overrides' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -73,9 +80,12 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     || fail "the built board could not be rendered"
 }
 
-# Build the board from <charted-json> alone and return what the renderer produced.
-render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
-  render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
+# Build the board from <underway-json> plus <charted-json> and return what the
+# renderer produced.
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
+  render_payload "$1" "$(jq -n --argjson underway "$2" --argjson charted "$3" \
+    --argjson more "${4:-0}" --argjson warning_more "${5:-0}" \
+    '{underway:$underway, charted:$charted, charted_more:$more, charted_warning_more:$warning_more}')"
 }
 
 charted_next_count() {  # <render-json>
@@ -86,8 +96,8 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   local home out
   home=$(make_home warning-badge)
   out=$(render "$home" '[
-    {"id":"real-queued","repo":"sample","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
-    {"id":"main-inventory","repo":"sample","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
+    {"id":"real-queued","repo":"sample","owner":"(main)","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
+    {"id":"main-inventory","repo":"sample","owner":"(main)","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
   ]')
   printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
     || fail "the board rendered its fail-closed error instead of the fleet: $out"
@@ -107,9 +117,9 @@ test_warnings_are_excluded_from_the_charted_next_count() {
   local home out
   home=$(make_home warning-count)
   out=$(render "$home" '[
-    {"id":"queued-one","repo":"sample","title":"One","reason":"gated","dispatchable":true},
-    {"id":"warn-one","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
-    {"id":"warn-two","repo":"sample","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
+    {"id":"queued-one","repo":"sample","owner":"(main)","title":"One","reason":"gated","dispatchable":true},
+    {"id":"warn-one","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
+    {"id":"warn-two","repo":"sample","owner":"(main)","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
   ]')
   [ "$(charted_next_count "$out")" = 1 ] \
     || fail "the charted next tally counted alarms as queued work: $out"
@@ -122,7 +132,7 @@ test_a_board_of_only_warnings_still_reports_nothing_queued() {
   local home out
   home=$(make_home warning-only)
   out=$(render "$home" '[
-    {"id":"warn-only","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
+    {"id":"warn-only","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]')
   [ "$(charted_next_count "$out")" = 0 ] \
     || fail "a warning-only board claimed queued work: $out"
@@ -137,7 +147,7 @@ test_omitted_warnings_never_count_as_more_queued() {
   local home out
   home=$(make_home warning-more)
   out=$(render "$home" '[
-    {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
+    {"id":"warn-visible","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]' 0 1)
   [ "$(charted_next_count "$out")" = 0 ] \
     || fail "an omitted warning was counted as queued work: $out"
@@ -153,8 +163,8 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   local home out
   home=$(make_home default-kind)
   out=$(render "$home" '[
-    {"id":"with-reason","repo":"sample","title":"With reason","reason":"blocked on prep","dispatchable":true},
-    {"id":"no-reason","repo":"sample","title":"No reason","reason":"","dispatchable":true}
+    {"id":"with-reason","repo":"sample","owner":"(main)","title":"With reason","reason":"blocked on prep","dispatchable":true},
+    {"id":"no-reason","repo":"sample","owner":"(main)","title":"No reason","reason":"","dispatchable":true}
   ]' 2)
   [ "$(charted_next_count "$out")" = 4 ] \
     || fail "an omitted kind changed the charted next tally: $out"
@@ -165,11 +175,308 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+# --- ownership -------------------------------------------------------------
+# The captain's fleet and his second mate both work the SAME repository, so the
+# repo column cannot tell their rows apart. Ownership is a payload field, and
+# these pin that it reaches the board without anyone typing it into a title.
+
+test_queued_owners_remain_visible_beside_the_lavish_sidebar() {
+  local home chrome candidate
+  chrome=${FM_CHROME_BIN:-}
+  if [ -z "$chrome" ]; then
+    for candidate in google-chrome google-chrome-stable chromium chromium-browser \
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+    do
+      chrome=$(command -v "$candidate") && break
+    done
+  fi
+  if [ -z "$chrome" ]; then
+    printf 'skip: Chrome or Chromium not found for queued-owner layout; set FM_CHROME_BIN\n'
+    return
+  fi
+  home=$(make_home queued-owner-layout)
+  render "$home" '[
+    {"id":"held-recorded","repo":"firstmate","owner":"(main)","title":"Delivery waiting on a dependency",
+     "reason":"dependency https://github.com/acme/repo/…","dispatchable":false,"pr_url":"https://github.com/acme/repo/pull/2"},
+    {"id":"held-child","repo":"firstmate","owner":"mate","title":"Delivery waiting on a dependency",
+     "reason":"dependency https://github.com/acme/repo/…","dispatchable":false,"pr_url":"https://github.com/acme/repo/pull/2"}
+  ]' >/dev/null
+  node "$ROOT/tests/assets/board-layout-harness.mjs" "$chrome" "$home/.lavish/bearings-board.html" \
+    || fail "same-repository queued owners are not fully visible in the browser"
+  pass "same-repository queued owners remain visible beside the Lavish sidebar"
+}
+
+owners_of() {  # <render-json> <tile-label>
+  printf '%s' "$1" | jq -r --arg l "$2" '.stats[] | select(.label == $l) | .owners'
+}
+
+test_underway_rows_name_their_home_when_the_repo_cannot() {
+  local home out
+  home=$(make_home owner-rows)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"Main fleet work"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","name":"fm-self/b","kind":"ship","state":"working","doing":"Second mate work"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 2
+      and (.underway[0].sub | test("firstmate") and endswith("(main)"))
+      and (.underway[1].sub | test("firstmate") and endswith("fm-self"))
+  ' >/dev/null || fail "two same-repo rows did not name their different homes: $out"
+  pass "an underway row names the home that owns it, not just its repo"
+}
+
+test_a_tile_owned_by_one_home_still_names_it() {
+  local home out
+  home=$(make_home owner-single)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"(main)","name":"b","kind":"ship","state":"working","doing":"Two"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 (main)" ] \
+    || fail "a tile owned entirely by one home refused to name it: $out"
+  pass "a tile whose rows share one home still says which home"
+}
+
+# A truncated section must not let its breakdown imply a total it cannot see.
+test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows() {
+  local home out
+  home=$(make_home owner-truncated)
+  out=$(render_payload "$home" '{"charted":[
+    {"id":"a","repo":"firstmate","owner":"(main)","title":"One","reason":"gated","dispatchable":true},
+    {"id":"b","repo":"firstmate","owner":"fm-self","title":"Two","reason":"gated","dispatchable":true}
+  ],"charted_more":20}')
+  [ "$(owners_of "$out" "charted next")" = "1 (main) · 1 fm-self shown" ] \
+    || fail "a truncated tile implied its breakdown covered every row: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | select(.label == "charted next") | .n] == [22]' >/dev/null \
+    || fail "the truncated tile lost its real total: $out"
+  pass "a truncated tile counts every row but says its breakdown covers the shown ones"
+}
+
+test_owner_labels_do_not_collide_with_inherited_properties() {
+  local home out
+  home=$(make_home owner-inherited-keys)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"constructor","name":"b","kind":"ship","state":"working","doing":"Two"},
+    {"id":"c","repo":"firstmate","owner":"constructor","name":"c","kind":"ship","state":"working","doing":"Three"},
+    {"id":"d","repo":"firstmate","owner":"__proto__","name":"d","kind":"ship","state":"working","doing":"Four"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 constructor · 1 (main) · 1 __proto__" ] \
+    || fail "valid owner labels disappeared from the breakdown: $out"
+  printf '%s' "$out" | jq -e '.stats[] | select(.label == "underway") | .n == 4' >/dev/null \
+    || fail "the ownership breakdown disagrees with the underway total: $out"
+  pass "all valid owner labels count even when they name inherited properties"
+}
+
+test_main_home_and_a_mate_named_main_remain_distinct() {
+  local home out
+  home=$(make_home main-owner-collision)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"main","name":"b","kind":"ship","state":"working","doing":"Two"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "1 (main) · 1 main" ] || fail "distinct homes were combined: $out"
+  printf '%s' "$out" | jq -e '.underway[0].sub | endswith("(main)")' >/dev/null || fail "main owner was aliased"
+  printf '%s' "$out" | jq -e '.underway[1].sub | endswith("· main")' >/dev/null || fail "mate owner was aliased"
+  pass "the main home and a mate named main retain distinct structural labels"
+}
+
+test_nudge_submissions_bypass_task_answer_intake() {
+  local home url overrides captured result answers nudges
+  home=$(make_home nudge-answer-routing)
+  url="https://gitlab.example/$(printf '%0170d' 1)/$(printf '%0170d' 2)/$(printf '%0170d' 3)/-/merge_requests/44"
+  printf '## In flight\n\n## Queued\n- [ ] nudge.foo - Unrelated captain call (repo: firstmate) (kind: captain) (hold: choose a route) (hold-kind: captain)\n\n## Done\n' > "$home/data/backlog.md"
+  overrides=$(jq -n --arg url "$url" '{captains_call:[{key:$url,type:"nudge",repo:"firstmate",title:"Nudge foo",
+    age_days:23,pr_url:$url,options:[{value:"leave",label:"Leave it"}]}]}')
+  render_payload "$home" "$overrides" >/dev/null
+  captured=$(node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    "$(jq -nc --arg url "$url" '[{key:$url,selection:"leave",note:"still waiting"}]')") || fail "nudge submission failed"
+  printf '%s' "$captured" | jq -e --arg url "$url" '
+    [.prompts[] | {tag,data}] == [{tag:"nudge",data:{schema:"fm-bearings-nudge.v1",pr_url:$url,selection:"leave",note:"still waiting"}}]
+  ' >/dev/null || fail "nudge used the task-answer schema or lost request identity: $captured"
+  result="$home/nudge.result"
+  printf 'prompts[1]{tag,text,prompt}:\n' > "$result"
+  printf '%s' "$captured" | jq -r '.prompts[]
+    | [.tag,.text,(.prompt + "\n\nContext data:\n" + (.data | tojson))]
+    | map(tojson) | "  " + join(",")' >> "$result"
+  answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result") || fail "answer extraction failed"
+  [ -z "$answers" ] || fail "a nudge reached the task-answer intake: $answers"
+  [ -z "$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$result")" ] || fail "a nudge reached reconcile intake"
+  nudges=$("$ROOT/bin/fm-procevent-lavish.sh" nudges "$result") || fail "nudge extraction failed"
+  printf '%s' "$nudges" | jq -e --arg url "$url" '.pr_url == $url and .selection == "leave" and .note == "still waiting"' \
+    >/dev/null || fail "the separate nudge reader lost the long request or answer: $nudges"
+  printf '%s' "$answers" | FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" answers '(any)' --source "nudge test" >/dev/null || fail "answer feed failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" open nudge.foo --distinguish-absent >/dev/null || fail "the unrelated captain hold was closed"
+  printf 'prompts[1]{tag,text,prompt}:\n' > "$result"
+  jq -nr '["choice","Ordinary task answer",("Context data:\n" +
+    ({schema:"fm-bearings-answer.v1",question:"nudge.foo",selection:"leave",note:""} | tojson))]
+    | map(tojson) | "  " + join(",")' >> "$result"
+  answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result") || fail "ordinary task answer extraction failed"
+  [ "${answers%%$'\t'*}" = nudge.foo ] || fail "separating nudges changed the task-answer key contract"
+  [ -z "$("$ROOT/bin/fm-procevent-lavish.sh" nudges "$result")" ] || fail "a task answer entered the nudge route"
+  pass "long request-keyed nudge submissions route separately and cannot close a task-shaped collision"
+}
+
+test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
+  local home out
+  home=$(make_home owner-breakdown)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"One"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","name":"fm-self/b","kind":"ship","state":"working","doing":"Two"},
+    {"id":"fm-self/c","repo":"firstmate","owner":"fm-self","name":"fm-self/c","kind":"ship","state":"working","doing":"Three"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 fm-self · 1 (main)" ] \
+    || fail "the underway tile did not break its count down by owner: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | .label] | index("owner") == null' >/dev/null \
+    || fail "ownership took a tile of its own instead of a sub-line: $out"
+  pass "the tiles carry an ownership sub-line rather than an ownership tile"
+}
+
+# THE INVIOLABLE RULE. What needs the captain needs him wherever it came from.
+# The needs-you tile must never be split by owner and never filtered by owner:
+# a partitioned tile is exactly how a second mate's call would end up in a
+# corner nobody reads. If a refactor ever splits or filters it, this fails.
+test_the_needs_you_tile_is_never_split_or_filtered_by_owner() {
+  local home out call_tiles
+  home=$(make_home needs-you-whole)
+  out=$(render_payload "$home" '{"captains_call":[
+    {"key":"main-call","type":"decision","repo":"firstmate","owner":"(main)","title":"Main home call",
+     "options":[{"value":"go","label":"Go"}]},
+    {"key":"mate-call","type":"decision","repo":"firstmate","owner":"fm-self","title":"Second mate call",
+     "options":[{"value":"go","label":"Go"}]},
+    {"key":"third-call","type":"decision","repo":"other","owner":"fm-self","title":"Another mate call",
+     "options":[{"value":"go","label":"Go"}]}
+  ]}')
+  call_tiles=$(printf '%s' "$out" | jq '[.stats[] | select(.label | test("need you"))] | length')
+  [ "$call_tiles" = 1 ] \
+    || fail "the needs-you tile was split into $call_tiles tiles: $out"
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and ([.stats[] | select(.label == "need you")] | length) == 1
+      and ([.stats[] | select(.label == "need you") | .n] == [3])
+      and ([.stats[] | select(.label == "need you") | .owners] == [""])
+      and (.call | length) == 3
+  ' >/dev/null || fail "the needs-you tile dropped, filtered, or split a home's calls: $out"
+  pass "the needs-you tile counts every home's calls in one undivided tile"
+}
+
+# --- delivered, waiting on a maintainer ------------------------------------
+
+# The captain must be able to SEE that the exit rule is off. An unbounded wait
+# rendered with no sign of it looks exactly like a bounded one, and a delivered
+# box that silently never escalates is the polite graveyard this section was
+# built to avoid. So the sub-line says which regime is in force.
+test_the_delivered_box_says_when_no_exit_rule_is_in_force() {
+  local home out
+  home=$(make_home delivered-nothreshold-render)
+  out=$(render_payload "$home" '{"awaiting_nudge_days":null,"awaiting":[
+    {"id":"stuck","repo":"firstmate","owner":"(main)","what":"Very old delivery","age_days":400,
+     "pr_url":"https://github.com/o/r/pull/9"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 1 and (.awaiting[0] | .age == "400d")
+      and (.awaitingSub == "no nudge threshold set - these rows will not escalate")
+  ' >/dev/null || fail "the delivered box did not say the exit rule is off: $out"
+
+  out=$(render_payload "$home" '{"awaiting_nudge_days":7,"awaiting":[
+    {"id":"young","repo":"firstmate","owner":"(main)","what":"Recent delivery","age_days":2,
+     "pr_url":"https://github.com/o/r/pull/9"}
+  ]}')
+  printf '%s' "$out" | jq -e '.awaitingSub == "nudge-worthy after 7 days"' >/dev/null \
+    || fail "the delivered box did not name the threshold in force: $out"
+  pass "the delivered box names the exit rule in force, including when there is none"
+}
+
+test_a_delivered_row_leads_with_its_age_and_its_request_link() {
+  local home out
+  home=$(make_home delivered-rows)
+  out=$(render_payload "$home" '{"awaiting":[
+    {"id":"young","repo":"firstmate","owner":"(main)","what":"Newer delivery","age_days":1,
+     "pr_url":"https://github.com/o/r/pull/11"},
+    {"id":"older","repo":"firstmate","owner":"fm-self","what":"Older delivery","age_days":5,
+     "pr_url":"https://github.com/o/r/pull/22"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 2
+      and (.awaiting[0] | .title == "Older delivery" and .age == "5d"
+        and .pr.href == "https://github.com/o/r/pull/22" and (.sub | endswith("waiting on a merge we do not control")))
+      and (.awaiting[1] | .title == "Newer delivery" and .age == "1d"
+        and .pr.href == "https://github.com/o/r/pull/11")
+  ' >/dev/null || fail "a delivered row lost its age, its link, or its order: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | select(.label == "delivered") | .n] == [2]' >/dev/null \
+    || fail "the delivered rows were not counted in their own tile: $out"
+  pass "delivered rows lead with the wait, carry their request link, and count separately"
+}
+
+test_delivered_work_is_no_longer_counted_as_underway() {
+  local home out
+  home=$(make_home delivered-not-underway)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","name":"a","kind":"ship","state":"working","doing":"Still moving"}
+  ],"awaiting":[
+    {"id":"b","repo":"firstmate","owner":"(main)","what":"Delivered","age_days":2,
+     "pr_url":"https://github.com/o/r/pull/33"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    ([.stats[] | select(.label == "underway") | .n] == [1])
+      and ([.stats[] | select(.label == "delivered") | .n] == [1])
+      and ((.underway | length) == 1)
+  ' >/dev/null || fail "a delivered row still inflated the underway count: $out"
+  pass "a delivered row counts once, in the delivered tile, not as work in the air"
+}
+
+test_an_empty_delivered_box_still_renders_its_state() {
+  local home out threshold regime
+  home=$(make_home delivered-empty)
+  for threshold in null 7; do
+    if [ "$threshold" = null ]; then
+      regime="no nudge threshold set - these rows will not escalate"
+    else
+      regime="nudge-worthy after 7 days"
+    fi
+    out=$(render_payload "$home" "$(jq -n --argjson threshold "$threshold" '{awaiting_nudge_days:$threshold}')")
+    printf '%s' "$out" | jq -e --arg regime "$regime" '
+      (.awaitingEmpty | length) == 1
+        and (.awaitingEmpty[0] | test("Nothing is waiting on a merge we do not control"))
+        and ([.stats[] | select(.label == "delivered") | .n] == [0])
+        and (.awaitingSub == $regime)
+    ' >/dev/null || fail "the empty delivered section lost its state or regime: $out"
+  done
+  pass "the delivered section always renders its empty state and configured regime"
+}
+
+test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
+  local home out
+  home=$(make_home delivered-nudge)
+  out=$(render_payload "$home" '{"captains_call":[
+    {"key":"https://github.com/o/r/pull/44","type":"nudge","repo":"firstmate","title":"Nudge the maintainer",
+     "age_days":23,"pr_url":"https://github.com/o/r/pull/44",
+     "detail":"Green and complete for 23 days; only the maintainer can merge it.",
+     "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and (.call | length) == 1
+      and (.call[0].title == "Nudge the maintainer")
+      and ([.call[0].badges[] | .text] | index("waiting 23d") != null)
+      and (.call[0].link == "https://github.com/o/r/pull/44")
+      and ([.stats[] | select(.label == "need you") | .n] == [1])
+      and (.awaiting | length) == 0
+      and (.awaitingSub == "nudge-worthy after 7 days")
+  ' >/dev/null || fail "an aged delivery did not surface as a needs-you nudge: $out"
+  pass "an aged delivery rises into the captain's call carrying its wait and its link"
+}
+
+test_queued_owners_remain_visible_beside_the_lavish_sidebar
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
   local home out
   home=$(make_home underway-name)
   out=$(render_board "$home" '[
-    {"id":"fm-board-name-r1","repo":"firstmate","name":"Show task names on the board",
+    {"id":"fm-board-name-r1","repo":"firstmate","owner":"(main)","name":"Show task names on the board",
      "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
@@ -187,7 +494,7 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   local home out
   home=$(make_home underway-identifier)
   out=$(render_board "$home" '[
-    {"id":"mate/child-1","repo":null,"name":"mate/child-1",
+    {"id":"mate/child-1","repo":null,"owner":"mate","name":"mate/child-1",
      "state":"working","kind":"secondmate","doing":"fixing the failing check"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
@@ -204,9 +511,9 @@ test_charted_next_reads_newest_filed_first() {
   local home out
   home=$(make_home charted-order)
   out=$(render_board "$home" '[]' '[
-    {"id":"oldest","repo":"sample","title":"Filed in June","reason":"queued","dispatchable":true,"filed":"2026-06-01"},
-    {"id":"newest","repo":"sample","title":"Filed in August","reason":"queued","dispatchable":true,"filed":"2026-08-14T09:30:00Z"},
-    {"id":"middle","repo":"sample","title":"Filed in July","reason":"queued","dispatchable":true,"filed":"2026-07-22"}
+    {"id":"oldest","repo":"sample","owner":"(main)","title":"Filed in June","reason":"queued","dispatchable":true,"filed":"2026-06-01"},
+    {"id":"newest","repo":"sample","owner":"(main)","title":"Filed in August","reason":"queued","dispatchable":true,"filed":"2026-08-14T09:30:00Z"},
+    {"id":"middle","repo":"sample","owner":"(main)","title":"Filed in July","reason":"queued","dispatchable":true,"filed":"2026-07-22"}
   ]')
   printf '%s' "$out" | jq -e '
     [.charted[] | .title] == ["Filed in August", "Filed in July", "Filed in June"]
@@ -218,9 +525,9 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   local home out
   home=$(make_home charted-undated)
   out=$(render_board "$home" '[]' '[
-    {"id":"undated-first","repo":"sample","title":"Undated one","reason":"queued","dispatchable":true},
-    {"id":"dated","repo":"sample","title":"Dated","reason":"queued","dispatchable":true,"filed":"2026-07-22"},
-    {"id":"undated-second","repo":"sample","title":"Undated two","reason":"queued","dispatchable":true,"filed":null}
+    {"id":"undated-first","repo":"sample","owner":"(main)","title":"Undated one","reason":"queued","dispatchable":true},
+    {"id":"dated","repo":"sample","owner":"(main)","title":"Dated","reason":"queued","dispatchable":true,"filed":"2026-07-22"},
+    {"id":"undated-second","repo":"sample","owner":"(main)","title":"Undated two","reason":"queued","dispatchable":true,"filed":null}
   ]')
   printf '%s' "$out" | jq -e '
     [.charted[] | .title] == ["Dated", "Undated one", "Undated two"]
@@ -237,3 +544,16 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_underway_rows_name_their_home_when_the_repo_cannot
+test_the_tiles_break_down_by_owner_without_a_tile_of_their_own
+test_owner_labels_do_not_collide_with_inherited_properties
+test_main_home_and_a_mate_named_main_remain_distinct
+test_nudge_submissions_bypass_task_answer_intake
+test_a_tile_owned_by_one_home_still_names_it
+test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows
+test_the_needs_you_tile_is_never_split_or_filtered_by_owner
+test_the_delivered_box_says_when_no_exit_rule_is_in_force
+test_a_delivered_row_leads_with_its_age_and_its_request_link
+test_delivered_work_is_no_longer_counted_as_underway
+test_an_empty_delivered_box_still_renders_its_state
+test_an_aged_delivery_reaches_the_captain_as_a_nudge_card

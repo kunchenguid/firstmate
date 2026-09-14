@@ -44,6 +44,7 @@ FM_PR_REG_DATA_HASH=
 FM_PR_REG_TEMPLATE_HASH=
 FM_PR_REG_DATA_IDENTITY=
 FM_PR_REG_CHECK_IDENTITY=
+FM_PR_REG_EPOCH=
 FM_PR_POLL_DATA_TMP=
 FM_PR_POLL_CHECK_TMP=
 FM_PR_POLL_REG_TMP=
@@ -367,7 +368,7 @@ fm_pr_poll_data_parse() {
 # The version tag moved to v2 with the provider tag, so a registration written
 # by the previous release is recognised as old and refused.
 fm_pr_poll_registration_parse() {
-  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
+  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity epoch
   FM_PR_REG_ID=
   FM_PR_REG_PROVIDER=
   FM_PR_REG_URL=
@@ -378,6 +379,7 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=
   FM_PR_REG_DATA_IDENTITY=
   FM_PR_REG_CHECK_IDENTITY=
+  FM_PR_REG_EPOCH=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 7< "$file" || return 1
   IFS= read -r version <&7 || { exec 7<&-; return 1; }
@@ -394,6 +396,11 @@ fm_pr_poll_registration_parse() {
   if IFS= read -r _extra <&7; then
     exec 7<&-
     return 1
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    epoch=$(/usr/bin/stat -L -f %m /dev/fd/7 2>/dev/null) || epoch=
+  else
+    epoch=$(stat -L -c %Y /dev/fd/7 2>/dev/null) || epoch=
   fi
   exec 7<&-
   [ "$version" = fm-pr-poll-registration-v2 ] || return 1
@@ -417,6 +424,9 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=$template_hash
   FM_PR_REG_DATA_IDENTITY=$data_identity
   FM_PR_REG_CHECK_IDENTITY=$check_identity
+  # Consumed by bin/fm-fleet-snapshot.sh from this validated registration.
+  # shellcheck disable=SC2034
+  FM_PR_REG_EPOCH=$epoch
 }
 
 fm_pr_poll_cleanup() {
@@ -435,6 +445,9 @@ fm_pr_poll_revoke_final() {
   if [ -e "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ]; then
     rm -f -- "$FM_PR_POLL_CHECK_DEST" || failed=1
   fi
+  # Accepted limit: revoking a failed publication also loses the delivery clock.
+  # A retry may delay a nudge; it cannot produce a wrong one. This rare failure
+  # announces itself through the command error, so no separate clock is persisted.
   if [ -e "$FM_PR_POLL_REG_DEST" ] || [ -L "$FM_PR_POLL_REG_DEST" ]; then
     rm -f -- "$FM_PR_POLL_REG_DEST" || failed=1
   fi
@@ -577,7 +590,9 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
-fm_pr_poll_artifacts_valid() {
+# Optional captured metadata keeps validation bound to the snapshot's task
+# identity instead of a live metadata file that may have changed during probes.
+fm_pr_poll_artifacts_valid() {  # <state> <id> <template> [captured-meta]
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -585,7 +600,7 @@ fm_pr_poll_artifacts_valid() {
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
-  meta="$state/$id.meta"
+  meta=${4:-$state/$id.meta}
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
