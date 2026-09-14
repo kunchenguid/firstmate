@@ -640,6 +640,53 @@ run_watcher_bounded() {
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
+# The PR checker and captain-hold completion are separate metadata writers.
+# Keep their real ordering in this regression so a registered poll survives a
+# captain-call inventory update without weakening the metadata boundary.
+test_captain_hold_attestation_keeps_poll_authenticated() {
+  local dir url meta
+  dir=$(make_case captain-hold-attestation)
+  url=https://github.com/o/r/pull/108
+  meta="$dir/home/state/task-a.meta"
+  write_task_meta "$dir"
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  cat > "$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$dir/home" && PATH="$dir/fakebin:$PATH" tasks-axi add task-a \
+    'PR poll captain-hold attestation' --kind ship --repo firstmate --start) \
+    >/dev/null || fail "could not create captain-hold poll regression task"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "could not register the captain-hold poll regression PR"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "registered captain-hold poll was not initially authenticated"
+
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-a \
+    --reason 'branch protection decision is pending' >/dev/null \
+    || fail "could not record the captain call"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-a task-a >/dev/null \
+    || fail "could not complete the captain-call inventory"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "captain-call metadata invalidated its registered poll"
+
+  cp "$meta" "$meta.valid"
+  printf '%s\n' 'unexpected_after_pr=1' >> "$meta"
+  ! fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "arbitrary post-PR metadata bypassed poll validation"
+  cp "$meta.valid" "$meta"
+  pass "captain-hold completion preserves authenticated PR poll metadata"
+}
+
 test_rejected_metacharacter_bytes_are_inert() {
   local dir family rc before after
   dir=$(make_case rejected-metacharacters)
@@ -2439,6 +2486,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_captain_hold_attestation_keeps_poll_authenticated
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
