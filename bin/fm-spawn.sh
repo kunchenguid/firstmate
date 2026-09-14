@@ -3210,7 +3210,6 @@ rovo_endpoint_cleanup() {
 # start plus a further 60s for the first working turn), because a budget that
 # expires kills the endpoint.
 CODEX_TRUST_DIALOG='Do you trust the contents of this directory?'
-CODEX_TRUST_OPTION='› 1. Yes, continue'
 CODEX_TRUST_ANSWERED=0
 
 codex_capture() {
@@ -3222,10 +3221,9 @@ codex_capture() {
 # safe option, exactly once - not by counting how often its prose appears in
 # the scrollback.
 codex_pane_shows_trust_dialog() {  # <plain-pane-capture>
-  printf '%s\n' "$1" | awk -v dialog="$CODEX_TRUST_DIALOG" \
-    -v option="$CODEX_TRUST_OPTION" '
+  printf '%s\n' "$1" | awk -v dialog="$CODEX_TRUST_DIALOG" '
     index($0, dialog) { dialog_count++ }
-    index($0, option) && $0 ~ /^[[:space:]]*›[[:space:]]*1[.] Yes, continue[[:space:]]*$/ { option_count++ }
+    /^[[:space:]]*›[[:space:]]*1[.][[:space:]]*Yes, continue[[:space:]]*$/ { option_count++ }
     END { exit !(dialog_count >= 1 && option_count == 1) }
   '
 }
