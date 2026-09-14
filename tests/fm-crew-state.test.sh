@@ -3073,6 +3073,116 @@ make_no_python_toolbin() {
   printf '%s\n' "$tb"
 }
 
+test_complete_inventory_ignores_unrelated_semantics() {
+  local branch encoded d toolbin out i=0
+  for branch in 'fix/c++' 'fix/a,b' 'fix/a"b'; do
+    i=$((i + 1))
+    make_competing_runs_case "unrelated-semantics-$i" running cancelled
+    d=$TMP_ROOT/unrelated-semantics-$i
+    git -C "$d/wt" check-ref-format --branch "$branch" >/dev/null || fail 'fixture branch must be valid Git syntax'
+    encoded=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$branch")
+    FM_FAKE_AXI_HOME="$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/2 of 2/3 of 3/; s/runs\[2\]/runs[3]/')
+  01OTHER,$encoded,running,$FM_FAKE_RUN_HEAD,\"\""
+    FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+    FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+    toolbin=$(make_no_python_toolbin "$d")
+    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+    assert_contains "$out" 'state: parked' 'R6 unrelated branch syntax must not suppress the requested gate'
+    assert_contains "$out" '01NEW' 'selection retains the requested run identity'
+    FM_FAKE_AXI_HOME="$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/^  01OTHER,/d')
+  foreign.id,$encoded,FUTURE,unresolved,\"\""
+    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
+    assert_contains "$out" 'state: parked' 'unrelated id status and head semantics cannot suppress the requested gate'
+    assert_not_contains "$out" 'foreign.id' 'unrelated identities are not candidates'
+  done
+  pass 'R6 complete selection ignores unrelated branch semantics'
+}
+
+test_requested_branch_has_no_character_whitelist() {
+  local branch encoded d out i=0
+  for branch in 'fix/c++' 'fix/a,b'; do
+    i=$((i + 1))
+    make_competing_runs_case "requested-branch-syntax-$i" running cancelled
+    d=$TMP_ROOT/requested-branch-syntax-$i
+    git -C "$d/wt" branch -m "$branch"
+    encoded=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$branch")
+    FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  01NEW,$encoded,running,$FM_FAKE_RUN_HEAD,\"\"
+  01OLD,$encoded,cancelled,$FM_FAKE_RUN_HEAD,\"\""
+    FM_FAKE_AXI_STATUS="$(run_running "$branch" | sed 's/01RUN/01NEW/')"
+    FM_FAKE_AXI_STATUS_RUN="$(run_parked "$branch" | sed 's/01RUN/01NEW/')"
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" 'state: parked' 'R6 requested branch identity must not depend on a character whitelist'
+    assert_contains "$out" '01NEW' 'the requested branch keeps its selected run'
+  done
+  pass 'R6 requested branches use exact identity without a whitelist'
+}
+
+test_capped_inventory_ignores_unrelated_semantics() {
+  make_capped_runs_case capped-unrelated-semantics running running
+  local d=$TMP_ROOT/capped-unrelated-semantics out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01OTHER00,fm/other-0,running,[^,]*,@foreign.id,"fix/a,b",FUTURE,unresolved,@')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'competing runs remain ambiguous beside unrelated metadata'
+  assert_contains "$out" '01NEW' 'capped ambiguity retains the visible id'
+  assert_contains "$out" '01OLD' 'R6 unrelated semantics cannot hide an id beyond the history window'
+  assert_not_contains "$out" 'foreign.id' 'unrelated runs do not claim this branch'
+  pass 'R6 capped inventory ignores unrelated semantics and names both ids'
+}
+
+test_capped_requested_semantics_do_not_hide_ids() {
+  make_capped_runs_case capped-requested-semantics running running
+  local d=$TMP_ROOT/capped-requested-semantics out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01NEW,fm/competing,running,[^,]*,@01NEW,fm/competing,FUTURE,unresolved,@')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'readable competing identities remain ambiguous'
+  assert_contains "$out" '01NEW' 'the visible requested run remains identified'
+  assert_contains "$out" '01OLD' 'R6 partial requested-row semantics cannot preempt complete identity lookup'
+  pass 'R6 complete identity lookup precedes partial-row semantic rejection'
+}
+
+test_capped_requested_branch_with_comma_names_both_ids() {
+  make_capped_runs_case capped-comma-branch running running
+  local d=$TMP_ROOT/capped-comma-branch out branch=fix/a,b
+  git -C "$d/wt" branch -m "$branch"
+  python3 - "$NM_HOME/state.sqlite" "$branch" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE runs SET branch = ? WHERE repo_id = 'repo' AND branch = 'fm/competing'", (sys.argv[2],))
+PY
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@fm/competing@"fix/a,b"@g')
+  FM_FAKE_AXI_STATUS="$(run_running "$branch" | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked "$branch" | sed 's/01RUN/01NEW/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'quoted branch fields retain ambiguous authority'
+  assert_contains "$out" '01NEW' 'the quoted requested branch retains its visible run'
+  assert_contains "$out" '01OLD' 'R6 complete inventory preserves quoted branch identity and both ids'
+  pass 'R6 capped inventory preserves quoted requested-branch identity'
+}
+
+test_inventory_structure_and_requested_semantics_remain_checked() {
+  local mode d out
+  for mode in columns count status head; do
+    make_competing_runs_case "requested-validation-$mode" running cancelled
+    d=$TMP_ROOT/requested-validation-$mode
+    FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+    FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+    case "$mode" in
+      columns) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,""$//') ;;
+      count) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/2 of 2/1 of 2/') ;;
+      status) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,FUTURE,/') ;;
+      head) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,[a-f0-9]*,""$/,unresolved,""/') ;;
+    esac
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" 'state: unknown' "$mode still prevents a confident selection"
+    assert_contains "$out" '01NEW' "$mode preserves the available newer identity"
+    assert_contains "$out" '01OLD' "$mode preserves the available older identity"
+  done
+  pass 'R6 structural completeness and requested-run validation remain enforced'
+}
+
 test_complete_inventory_without_python_keeps_gate() {
   make_competing_runs_case no-python-complete running cancelled
   local d=$TMP_ROOT/no-python-complete toolbin out
@@ -3403,6 +3513,12 @@ test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
+test_complete_inventory_ignores_unrelated_semantics
+test_requested_branch_has_no_character_whitelist
+test_capped_inventory_ignores_unrelated_semantics
+test_capped_requested_semantics_do_not_hide_ids
+test_capped_requested_branch_with_comma_names_both_ids
+test_inventory_structure_and_requested_semantics_remain_checked
 test_complete_inventory_without_python_keeps_gate
 test_complete_ambiguity_without_python_names_both_ids
 test_capped_without_python_preserves_available_ids
