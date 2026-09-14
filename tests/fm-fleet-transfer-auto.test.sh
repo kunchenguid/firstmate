@@ -410,7 +410,7 @@ case "$out" in *"retry transfer abandon --transaction $relaunch_tx"*) ;; *) fail
 out=$("$FLEET" transfer abandon --transaction "$relaunch_tx" 2>&1) || fail "abandon retry after relaunch failure: $out"
 [ "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" | json_value '(json.load(sys.stdin).get("destination_stopped"))')" = False ] || fail "abandon retry did not clear the restarted destination"
 
-# A slow activation of an older failover cannot recreate its row after a newer recovery claims.
+# While a failover is published and still activating, no newer transfer for that SecondMate is admitted.
 SLOW_START="$TMP_ROOT/slow-start.sh"
 cat > "$SLOW_START" <<SH
 #!/usr/bin/env bash
@@ -422,26 +422,33 @@ rm -f "$TMP_ROOT/slow.ready" "$TMP_ROOT/slow.release"
 add_lock "$FROOT/manager-1"; old_live=$LAST_HOLDER
 FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$SLOW_START "$FLEET" recover --secondmate paperclip > "$TMP_ROOT/old.out" 2>&1 & old_pid=$!
 i=0; while [ ! -e "$TMP_ROOT/slow.ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
-[ -e "$TMP_ROOT/slow.ready" ] || fail "older failover never reached activation: $(cat "$TMP_ROOT/old.out")"
+[ -e "$TMP_ROOT/slow.ready" ] || fail "failover never reached activation: $(cat "$TMP_ROOT/old.out")"
 tx_old=$(basename "$(newest_journal paperclip)" .json)
 remove_lock "$FROOT/manager-1" "$old_live"
 add_lock "$FROOT/manager-3"; new_live=$LAST_HOLDER
-out=$(FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$SLOW_START "$FLEET" recover --secondmate paperclip 2>&1) || fail "newer recovery during slow activation: $out"
-tx_new=$(basename "$(newest_journal paperclip)" .json)
-[ "$tx_new" != "$tx_old" ] || fail "fixture: newer recovery wrote no journal"
+: > "$FM_HOOK_LOG"
+out=$("$FLEET" recover --secondmate paperclip 2>&1) && fail "recovery was admitted during a published activation: $out"
+case "$out" in *"already in flight for paperclip"*) ;; *) fail "recovery during activation refused for the wrong reason: $out" ;; esac
+! grep -q 'stop-secondmate\|start-' "$FM_HOOK_LOG" || fail "refused recovery ran an endpoint hook: $(cat "$FM_HOOK_LOG")"
+out=$("$FLEET" transfer begin --secondmate paperclip --to manager-2 2>&1) && fail "planned transfer was admitted during a published activation: $out"
+remove_lock "$FROOT/manager-3" "$new_live"
 : > "$TMP_ROOT/slow.release"
-if wait "$old_pid"; then fail "superseded failover reported activation: $(cat "$TMP_ROOT/old.out")"; fi
-python3 - "$FROOT/fleet.json" "$tx_new" <<'PY' || fail "superseded activation recreated a transfer row"
+wait "$old_pid" || fail "published failover did not activate: $(cat "$TMP_ROOT/old.out")"
+[ "$(manager_for paperclip)" = manager-1 ] || fail "published failover did not keep manager-1"
+python3 - "$FROOT/fleet.json" "$tx_old" <<'PY' || fail "activation left an in-flight transfer row or lost its assignment transaction"
 import json, sys
 with open(sys.argv[1]) as handle: reg = json.load(handle)
-rows = [row for row in reg["transfers"] if row["secondmate"] == "paperclip"]
-assert [(row["transaction"], row["state"]) for row in rows] == [(sys.argv[2], "active")], rows
+assert not [row for row in reg["transfers"] if row["secondmate"] == "paperclip"], reg["transfers"]
+assert next(row for row in reg["assignments"] if row["secondmate"] == "paperclip")["transaction"] == sys.argv[2]
 PY
-[ "$(tx_state "$FROOT/transactions/$tx_old.json")" = superseded ] || fail "superseded failover journal was not marked superseded"
-case "$(cat "$TMP_ROOT/old.out")" in *"recover or rollback"*|*"recover $tx_old"*) fail "superseded failover advertised recovery: $(cat "$TMP_ROOT/old.out")" ;; esac
-remove_lock "$FROOT/manager-3" "$new_live"
-out=$("$FLEET" transfer begin --secondmate paperclip --to manager-1 2>&1) || fail "superseded failover leaked its manager-1 reservation: $out"
-[ "$(manager_for paperclip)" = manager-1 ] || fail "transfer after a superseded activation did not publish manager-1"
+
+# An abandoned later attempt leaves the earlier active transfer rollbackable.
+BAD_STOP="$TMP_ROOT/bad-stop.sh"; printf '#!/usr/bin/env bash\nexit 1\n' > "$BAD_STOP"; chmod +x "$BAD_STOP"
+out=$(FM_FLEET_TRANSFER_STOP_HOOK=$BAD_STOP "$FLEET" transfer begin --secondmate paperclip --to manager-2 2>&1) && fail "fixture: failing later attempt succeeded: $out"
+[ "$(tx_state "$(newest_journal paperclip)")" = abandoned ] || fail "failed later attempt was not abandoned"
+out=$("$FLEET" transfer rollback --transaction "$tx_old" 2>&1) || fail "abandoned later attempt blocked rollback of the earlier active transfer: $out"
+[ "$(manager_for paperclip)" = manager-2 ] || fail "rollback of the earlier failover did not restore manager-2"
+out=$("$FLEET" transfer begin --secondmate paperclip --to manager-1 2>&1) || fail "manager-1 stayed reserved after activation and rollback: $out"
 
 # Two transfers for the same SecondMate: the second is refused before it stops anything.
 SLOW_SM_STOP="$TMP_ROOT/slow-sm-stop.sh"

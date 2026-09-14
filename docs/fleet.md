@@ -119,23 +119,26 @@ Any pending-reply record whose phase is not `resolved` blocks the move.
 Resolved records stay in the source home and are not deleted or copied.
 
 The source home session lock must be stopped before `transfer begin`.
-The registry `transfers` list is the only transfer authority. It holds at most one current row per SecondMate, and that row moves through `preparing`, `records-ready`, `published` and `active`, or ends as `abandoned` or `rolled-back`. Journals under `<fleet-root>/transactions/` are audit and recovery evidence, and they never grant authority by themselves.
-`--to` is optional. Without it, one fleet-lock critical section selects the least-loaded healthy reasoning manager, excluding the source and any manager that an in-flight (`preparing` or `records-ready`) registry row reserves.
+The registry `transfers` list holds only in-flight transfers, at most one per SecondMate, in `preparing`, `records-ready` or `published`. Each of those rows reserves its destination manager.
+When a transfer becomes active, its row is removed. The assignment row, which records the publishing transaction, is then the only supervision authority.
+An abandoned transfer, or one that is rolled back, also removes its row and leaves the assignment as it was. A reservation never replaces or deletes an existing assignment.
+Journals under `<fleet-root>/transactions/` are audit and recovery evidence, and they never grant authority by themselves.
+`--to` is optional. Without it, one fleet-lock critical section selects the least-loaded healthy reasoning manager, excluding the source and any manager that an in-flight registry row reserves.
 In the same critical section, the command writes the `preparing` journal, which validates every non-liveness precondition above. It then admits the transfer with `transfer-reserve`, which writes the SecondMate's `preparing` row.
 Admission refuses a second in-flight transfer for the same SecondMate, whatever its destination, and refuses a reserved destination. So two concurrent transfers can never both stop the same SecondMate or the same manager.
 Only then does the command stop the selected destination and recheck both endpoint locks.
 The command prints the transaction id before it stops anything.
 One exit trap is armed from the reservation until the transfer is active. It runs on every failure, including a fleet-lock timeout or a signal.
-Under the fleet lock, the trap runs `transfer-release`, which retires this transaction's row only while it is still `preparing`. The record claim takes the same lock and requires that same `preparing` row.
+Under the fleet lock, the trap runs `transfer-release`, which removes this transaction's row only while it is still `preparing`. The record claim takes the same lock and requires that same `preparing` row.
 If the release succeeds, the trap marks the journal `abandoned`, restarts a destination that this command stopped, and relaunches a stopped source SecondMate. The assignment and parent records stay unchanged.
 If the claim has committed, the trap restarts nothing. It leaves the journal and the stopped endpoints for `transfer recover` or `transfer rollback`, and prints that hint.
 If the fleet lock stays busy, the trap also restarts nothing. It prints `transfer abandon --transaction <id>`, which retries the same conditional release.
 The journal records `destination_stopped` and `secondmate_stopped`, so the trap and `transfer abandon` restart the same endpoints.
 Those flags are honored only while this transaction still holds the SecondMate's current row. The SecondMate flag also requires the assignment generation and the parent binding to still match the journal. Any other flag is cleared, the endpoint is left untouched, and the command says so.
-`transfer recover` and `transfer rollback` require their transaction to be that SecondMate's current row, in the `records-ready`, `published` or `active` state. They check this before running any endpoint hook. So an unclaimed stale journal, or an older transaction that a newer reservation replaced, is refused even when the generations match.
+`transfer recover` requires the transaction's in-flight row to be `records-ready` or `published`. `transfer rollback` also accepts a finished transaction whose publishing transaction is still recorded on the current assignment. Both check this before running any endpoint hook. So an unclaimed stale journal, or an older transaction that a newer transfer replaced, is refused even when the generations match.
 `transfer abandon` refuses a claimed or finished transaction.
-`transfer-state` changes only the current `published` or `active` row for its exact transaction, and it never adds a row.
-A `published` row does not block a newer reservation, so recovery can proceed when a published destination dies before activation. When that older activation finishes late, it is a superseded no-op: its journal is marked `superseded`, it reserves no manager, it restarts nothing, and it does not suggest recover or rollback.
+`transfer-state` activates only the current `published` row for its exact transaction, removing it. It never adds a row.
+Until that activation, no other transfer or recovery for the SecondMate is admitted, so a late activation can never race a newer transfer. If a published destination dies before activation, finish that transfer with `transfer recover --transaction <id>` or undo it with `transfer rollback --transaction <id>` before starting another.
 If a relaunch fails, `transfer abandon` and the exit trap exit non-zero. The endpoint's stopped flag stays in the journal, and the output names the `transfer abandon --transaction <id>` retry command.
 The journal records `destination_stopped`. So if the owner-record move fails, `transfer rollback` also restarts that destination manager.
 Explicit `--to` remains the administrative override. It requires an already stopped, unreserved destination and uses the same preflight and abandonment path.

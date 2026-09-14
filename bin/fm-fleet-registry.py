@@ -601,42 +601,45 @@ def require_expected_generation(reg: dict, args: argparse.Namespace) -> None:
         raise ValueError("assignment generation changed during transfer")
 
 
-IN_FLIGHT_TRANSFER = ("preparing", "records-ready")
-
-
 def current_transfer(reg: dict, secondmate: str, transaction: str, states: tuple[str, ...]) -> dict:
-    """Return the SecondMate's one transfer row when it is exactly this transaction in an eligible state."""
+    """Return the SecondMate's in-flight transfer row when it is exactly this transaction in an eligible state."""
     rows = [row for row in reg["transfers"] if row.get("secondmate") == secondmate]
     if len(rows) != 1 or rows[0].get("transaction") != transaction or rows[0].get("state") not in states:
         raise ValueError(f"transfer {transaction} is not the current {'/'.join(states)} transfer for {secondmate}")
     return rows[0]
 
 
+def transfer_authority(reg: dict, secondmate: str, transaction: str) -> str:
+    """The in-flight row state for this transaction, 'active' when its published assignment is current, else 'superseded'."""
+    rows = [row for row in reg["transfers"] if row.get("secondmate") == secondmate]
+    if rows:
+        return rows[0]["state"] if rows[0].get("transaction") == transaction else "superseded"
+    current = assignment_map(reg).get(secondmate)
+    return "active" if current and current.get("transaction") == transaction else "superseded"
+
+
 def reserved_managers(reg: dict, failover: bool) -> set[str]:
     """Managers held by in-flight transfer rows; a failover shares live managers, so it honors only planned rows."""
     return {
         row["destination_manager"] for row in reg["transfers"]
-        if row.get("state") in IN_FLIGHT_TRANSFER and row.get("destination_manager")
-        and (not failover or not row.get("failover"))
+        if row.get("destination_manager") and (not failover or not row.get("failover"))
     }
 
 
 def command_transfer_reserve(args: argparse.Namespace) -> None:
-    """Admit one transfer per SecondMate and reserve its destination manager."""
+    """Admit one in-flight transfer per SecondMate and reserve its destination manager."""
     path = Path(args.registry)
     reg = load(path)
     require_valid(reg)
     if args.manager not in {row["id"] for row in reg["managers"]}:
         raise ValueError(f"unknown destination manager {args.manager}")
     for row in reg["transfers"]:
-        if row.get("secondmate") == args.secondmate and row.get("state") in IN_FLIGHT_TRANSFER:
+        if row.get("secondmate") == args.secondmate:
             raise ValueError(f"transfer {row.get('transaction')} is already in flight for {args.secondmate}")
     if args.manager in reserved_managers(reg, bool(args.failover)):
         raise ValueError(f"destination manager {args.manager} is reserved by an unfinished transfer")
-    reg["transfers"] = [
-        row for row in reg["transfers"] if row.get("secondmate") != args.secondmate
-    ] + [{"secondmate": args.secondmate, "transaction": args.transaction, "state": "preparing",
-          "destination_manager": args.manager, "failover": bool(args.failover)}]
+    reg["transfers"].append({"secondmate": args.secondmate, "transaction": args.transaction, "state": "preparing",
+                             "destination_manager": args.manager, "failover": bool(args.failover)})
     require_valid(reg)
     write_atomic(path, reg)
 
@@ -645,20 +648,25 @@ def command_transfer_reserved(args: argparse.Namespace) -> None:
     print(" ".join(sorted(reserved_managers(load(Path(args.registry)), bool(args.failover)))))
 
 
+def command_transfer_authority(args: argparse.Namespace) -> None:
+    print(transfer_authority(load(Path(args.registry)), args.secondmate, args.transaction))
+
+
 def command_transfer_release(args: argparse.Namespace) -> None:
-    """Retire this transaction's unclaimed reservation; print whether it still owned the SecondMate."""
+    """Remove this transaction's unclaimed reservation; print whether it still owned the SecondMate."""
     path = Path(args.registry)
     reg = load(path)
     require_valid(reg)
-    rows = [row for row in reg["transfers"] if row.get("transaction") == args.transaction]
-    if rows and rows[0].get("state") not in ("preparing", "abandoned"):
-        raise ValueError(f"transfer {args.transaction} claimed its record move or finished")
-    current = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
-    owned = len(current) == 1 and current[0].get("transaction") == args.transaction
-    if owned and current[0]["state"] == "preparing":
-        current[0]["state"] = "abandoned"
+    row = next((item for item in reg["transfers"] if item.get("transaction") == args.transaction), None)
+    if row and row.get("state") != "preparing":
+        raise ValueError(f"transfer {args.transaction} claimed its record move")
+    if row:
+        reg["transfers"].remove(row)
         require_valid(reg)
         write_atomic(path, reg)
+        owned = True
+    else:
+        owned = args.retry and not any(item.get("secondmate") == args.secondmate for item in reg["transfers"])
     print("owned" if owned else "superseded")
 
 
@@ -668,7 +676,7 @@ def command_transfer_claim(args: argparse.Namespace) -> None:
     reg = load(path)
     require_valid(reg)
     require_expected_generation(reg, args)
-    current_transfer(reg, args.secondmate, args.transaction, IN_FLIGHT_TRANSFER)["state"] = "records-ready"
+    current_transfer(reg, args.secondmate, args.transaction, ("preparing", "records-ready"))["state"] = "records-ready"
     require_valid(reg)
     write_atomic(path, reg)
 
@@ -686,6 +694,7 @@ def command_transfer_publish(args: argparse.Namespace) -> None:
         "state": "active",
         "assigned_at": now(),
         "recovery_reason": args.reason,
+        "transaction": args.transaction,
     }
     reg["assignments"] = [
         item for item in reg["assignments"] if item["secondmate"] != args.secondmate
@@ -703,18 +712,18 @@ def command_transfer_state(args: argparse.Namespace) -> None:
     require_valid(reg)
     if args.state != "active":
         raise ValueError("transfer-state only activates a published transfer")
-    current_transfer(reg, args.secondmate, args.transaction, ("published", "active"))["state"] = "active"
+    if transfer_authority(reg, args.secondmate, args.transaction) == "active":
+        return
+    reg["transfers"].remove(current_transfer(reg, args.secondmate, args.transaction, ("published",)))
     require_valid(reg)
     write_atomic(path, reg)
 
 
 def transfer_rollback_valid(reg: dict, args: argparse.Namespace) -> dict | None:
-    transfer = current_transfer(reg, args.secondmate, args.transaction, ("records-ready", "published", "active"))
-    current = assignment_map(reg).get(args.secondmate)
-    if transfer.get("generation"):
-        if not current or current.get("generation") != transfer["generation"]:
-            raise ValueError("published assignment generation changed; rollback refused")
-    return transfer
+    authority = transfer_authority(reg, args.secondmate, args.transaction)
+    if authority not in ("records-ready", "published", "active"):
+        raise ValueError(f"transfer {args.transaction} is not the current transfer for {args.secondmate}; rollback refused")
+    return next((row for row in reg["transfers"] if row.get("transaction") == args.transaction), None)
 
 
 def command_transfer_rollback_check(args: argparse.Namespace) -> None:
@@ -737,7 +746,7 @@ def command_transfer_rollback(args: argparse.Namespace) -> None:
             reg["assignments"].append(prior)
             reg["assignments"].sort(key=lambda value: value["secondmate"])
     if transfer:
-        transfer["state"] = "rolled-back"
+        reg["transfers"].remove(transfer)
     require_valid(reg)
     write_atomic(path, reg)
 
@@ -800,7 +809,12 @@ def parser() -> argparse.ArgumentParser:
     release = commands.add_parser("transfer-release")
     release.add_argument("--secondmate", required=True)
     release.add_argument("--transaction", required=True)
+    release.add_argument("--retry", action="store_true")
     release.set_defaults(function=command_transfer_release)
+    authority = commands.add_parser("transfer-authority")
+    authority.add_argument("--secondmate", required=True)
+    authority.add_argument("--transaction", required=True)
+    authority.set_defaults(function=command_transfer_authority)
     claim = commands.add_parser("transfer-claim")
     claim.add_argument("--secondmate", required=True)
     claim.add_argument("--expected-generation", type=int, required=True)
