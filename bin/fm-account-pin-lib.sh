@@ -33,8 +33,11 @@
 # Preflight: the runner's own non-interactive check, run with only HOME, PATH,
 # TMPDIR, and the pin in its environment, so a provider key left in the caller
 # cannot answer for an empty root. Claude: `quota-axi auth --json --provider
-# claude`; a source that is available, expired (renewed on next use), or
-# skipped with a credential present passes. Pi: `pi auth check --provider
+# claude`; a source that is available or expired (renewed on next use) passes.
+# A source skipped with credentialPresent passes only when the root's own
+# .claude.json records a login (oauthAccount): quota-axi 0.1.41 answers an
+# empty root skipped/keychain_presence_check_failed with credentialPresent
+# true, while a keychain-only /login still writes oauthAccount to that file. Pi: `pi auth check --provider
 # <the launch model's provider> --json --no-refresh`, and only status "ready"
 # passes. That command loads no extensions, so an extension-registered provider
 # comes back not_ready/provider_not_found; only that one answer falls through to
@@ -252,10 +255,12 @@ fm_account_pin_preflight() {
     claude)
       out=$(fm_run_timed "$FM_ACCOUNT_PIN_PREFLIGHT_SECONDS" "${clean[@]}" "CLAUDE_CONFIG_DIR=$root" \
         quota-axi auth --json --provider claude 2>/dev/null </dev/null)
-      verdict=$(printf '%s\n' "$out" | jq -r '
+      local logged_in=false
+      [ "$(jq -r 'has("oauthAccount")' "$root/.claude.json" 2>/dev/null)" != true ] || logged_in=true
+      verdict=$(printf '%s\n' "$out" | jq -r --argjson logged_in "$logged_in" '
         [.auth[]? | select(.provider == "claude") | .sources[]?] as $s |
         if any($s[]; .status == "available" or .status == "expired" or
-               (.status == "skipped" and .credentialPresent == true))
+               (.status == "skipped" and .credentialPresent == true and $logged_in))
         then "ready"
         else ($s | map("\(.source)=\(.status)") | join(", "))
         end' 2>/dev/null)

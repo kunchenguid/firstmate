@@ -228,8 +228,10 @@ The `keychain` answers recorded above were taken on 0.1.30 and no longer hold, s
 A root with a real login still answers determinately: one account root reports `{"source":"keychain","status":"available"}` and another `{"source":"keychain","status":"expired"}`.
 Two other roots answer `{"source":"keychain","status":"skipped","error":"keychain_prompt_required","credentialPresent":true}` and `{"source":"keychain","status":"skipped","error":"keychain_presence_check_failed","credentialPresent":true}`.
 A throwaway root holding nothing at all gets that same `keychain_presence_check_failed` answer, so on this version `credentialPresent` is not evidence when the presence check did not complete, and an empty Claude root passes the preflight.
-The library's Claude branch is deliberately unchanged: the two cases are indistinguishable in this output, so tightening the rule would also refuse a root whose only credential lives in the keychain.
-What should count as ready when the presence check cannot run is its own call.
+The two cases are indistinguishable in that output, so the library no longer takes a skipped source's `credentialPresent` on its own.
+It passes that answer only when the root's own `.claude.json` has an `oauthAccount` entry, which `/login` writes whether the token lands in a file or the keychain.
+On 2026-09-14 the three logged-in account roots on this host had that entry and a throwaway root did not.
+`tests/fm-account-pin-claude-preflight.test.sh` replays the 0.1.41 answer against an empty root, a root without the entry, and a root with it.
 
 ### Extension-registered Pi providers
 

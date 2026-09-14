@@ -140,8 +140,8 @@ test_claude_roots() {
 
   out=$(preflight claude "$empty"); status=$?
   expect_code 1 "$status" "$QUOTA_VERSION: an empty Claude root must refuse: $out
-    Known on 0.1.41: the keychain source answers skipped/keychain_presence_check_failed with
-    credentialPresent true, which the library counts as ready. See the dated readings in
+    On 0.1.41 the keychain source answers skipped/keychain_presence_check_failed with
+    credentialPresent true, which the library accepts only with oauthAccount in .claude.json. See the dated readings in
     docs/verification/dispatch-auth.md under \"quota-axi keychain reporting on 0.1.41\"."
   assert_contains "$out" "oauth-file=missing" "$QUOTA_VERSION: an empty Claude root refused for an unexpected reason"
 
