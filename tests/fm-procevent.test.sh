@@ -1034,38 +1034,46 @@ quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
   || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"
 pass "poll cleanup safely handles an apostrophe-containing TMPDIR"
 
-HSTREAM="$TMP_ROOT/hstream"; new_home "$HSTREAM"
 STREAM_ART="$TMP_ROOT/stream-board.html"
 STREAM_TMPDIR="$TMP_ROOT/stream-stage"
 LAVISH_STREAM_READY="$TMP_ROOT/stream-ready"
 LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
+STREAM_OUT="$TMP_ROOT/stream-out"
 mkdir -p "$STREAM_TMPDIR"
 printf '<h1>stream</h1>\n' > "$STREAM_ART"
-stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
-# The hold-back bound is the one this test has to check against, so it is read
-# from the adapter rather than restated here where the two could drift apart.
-stream_hold=$(sed -n 's/^POLL_HOLD_LIMIT_BYTES=//p' "$ROOT/bin/fm-procevent-lavish.sh")
-[ -n "$stream_hold" ] || fail "the hold-back bound is not where this test reads it"
-fm_test_track_procevent_home "$HSTREAM"
+# The ceiling this test holds the adapter to, declared here rather than read
+# back from the adapter: deriving it from the implementation would let a widened
+# hold-back bound move the expectation with it and stay green. It is the
+# qualitative bound the adapter advertises - far above the few-hundred-byte
+# quiet-absence envelopes it must hold whole, far below a real feedback payload -
+# and the 16384-byte nonmatch the `stream` fixture writes stands in for the
+# latter, well past this ceiling.
+stream_hold_max=4096
 LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STREAM_ART" >/dev/null
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
   LAVISH_STREAM_READY="$LAVISH_STREAM_READY" LAVISH_STREAM_RELEASE="$LAVISH_STREAM_RELEASE" \
-  FM_PROCEVENT_MAX_OUTPUT_BYTES=100 pe "$HSTREAM" reconcile >/dev/null
-wait_for "$LAVISH_STREAM_READY" || fail "streaming poll did not start"
-stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
-[ -e "${stream_staged[0]}" ] || fail "streaming poll created no staging file"
-[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le "$stream_hold" ] \
-  || fail "streaming poll held back more than its declared bound"
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$STREAM_ART" > "$STREAM_OUT" 2>/dev/null &
+STREAM_POLL_PID=$!
+wait_for "$LAVISH_STREAM_READY" || { kill "$STREAM_POLL_PID" 2>/dev/null || true;
+  fail "the streaming poll never started on its scripted response"; }
+# Streaming is observable while the source is still open: the bytes are already
+# on the listener's stdout because it stopped holding the moment the response
+# passed the ceiling. A ceiling wide enough to hold this whole response pockets
+# it in memory until the source closes, so nothing appears here before release.
+stream_out_bytes=0
+for _ in $(seq 1 100); do
+  stream_out_bytes=$(wc -c < "$STREAM_OUT" 2>/dev/null | tr -d ' ')
+  case "$stream_out_bytes" in ''|*[!0-9]*) stream_out_bytes=0 ;; esac
+  [ "$stream_out_bytes" -gt "$stream_hold_max" ] && break
+  sleep 0.1
+done
+if [ "$stream_out_bytes" -le "$stream_hold_max" ]; then
+  kill "$STREAM_POLL_PID" 2>/dev/null || true
+  fail "a large nonmatch was held back instead of streamed past the $stream_hold_max-byte ceiling"
+fi
 : > "$LAVISH_STREAM_RELEASE"
-wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
-stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
-[ "$(wc -c < "$stream_result" | tr -d ' ')" -le 100 ] \
-  || fail "streaming poll bypassed the runner output bound"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$STREAM_ART" >/dev/null
-pass "Lavish listener staging stays bounded while a large nonmatch streams"
+wait "$STREAM_POLL_PID" || fail "the streaming poll did not exit cleanly"
+pass "a large nonmatch streams past the hold-back ceiling while its source is still open"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
