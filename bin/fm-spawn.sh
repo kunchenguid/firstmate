@@ -3558,8 +3558,8 @@ EOF
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
       cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Firstmate semantic busy-state events + turn-end notification + herdr panel
+// metadata; written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's session.status events: busy and retry
 // are active, idle is inactive. Scoping latches the first session that
 // reports activity (the worker's main session - a subagent child session can
@@ -3567,6 +3567,13 @@ EOF
 // sessions' status until the latched session settles, so a child's idle can
 // never clear the worker's busy state. The session.idle touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
+//
+// Herdr panel metadata: on session.updated and message.updated events,
+// reports the observed model name to herdr's display-only panel via
+// bin/fm-herdr-opencode-metadata.sh. Only values directly observed from
+// OpenCode's own event stream are reported. Context percentage and quota
+// are not reported because OpenCode does not expose a context window size
+// and the Go plan has no public usage API.
 import { execFile } from "node:child_process";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
@@ -3575,10 +3582,26 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
+const HERDR_PANE = "${HERDR_PANE_ID:-}";
+let lastModel = "";
+const reportModel = (modelID) => {
+  if (!HERDR_PANE || !modelID || modelID === lastModel) return;
+  lastModel = modelID;
+  execFile("$FM_ROOT/bin/fm-herdr-opencode-metadata.sh",
+    [HERDR_PANE, modelID], () => {});
+};
 export const FmBusyState = async () => {
   let activeSession = null;
   return {
     event: async ({ event }) => {
+      if (event.type === "session.updated") {
+        const model = event.properties && event.properties.info && event.properties.info.model;
+        if (model && model.id) reportModel(model.id);
+      }
+      if (event.type === "message.updated") {
+        const info = event.properties && event.properties.info;
+        if (info && info.modelID) reportModel(info.modelID);
+      }
       if (event.type === "session.status") {
         const sessionID = event.properties.sessionID;
         const statusType = event.properties.status && event.properties.status.type;

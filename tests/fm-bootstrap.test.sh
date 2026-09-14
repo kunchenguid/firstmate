@@ -5,7 +5,8 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'PRESENTATION_UNAVAILABLE: lavish-axi ...', and
+# 'MISSING: gh-axi (install: ...)', 'PRESENTATION_UNAVAILABLE: lavish-axi ...',
+# 'UPGRADE: <tool> (installed: ..., required: ..., upgrade: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
@@ -301,9 +302,9 @@ treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi reports an upgrade^1^0.1.0^1^-^exact^UPGRADE: tasks-axi (installed: 0.1.0, required: 0.2.4, upgrade: npm install -g tasks-axi)^
+tasks-axi without archive-body reports an upgrade^1^0.2.4:noarchive^1^-^exact^UPGRADE: tasks-axi (installed: 0.2.4, required: 0.2.4, upgrade: npm install -g tasks-axi)^
+tasks-axi without multi-id mv reports an upgrade^1^0.2.4:nomulti^1^-^exact^UPGRADE: tasks-axi (installed: 0.2.4, required: 0.2.4, upgrade: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
@@ -312,10 +313,9 @@ ROWS
 }
 
 test_no_mistakes_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  local label version expected_ver mode case_dir fakebin out upgrade n
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version expected_ver mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/no-mistakes-$n"
@@ -328,24 +328,24 @@ test_no_mistakes_min_version() {
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      upgrade)
+        upgrade="UPGRADE: no-mistakes (installed: $expected_ver, required: 1.46.0, upgrade: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)"
+        [ "$out" = "$upgrade" ] || fail "$label: expected '$upgrade', got: $out" ;;
     esac
   done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^empty
-newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^empty
-newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
-older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^missing
-unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
+minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^^empty
+newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^^empty
+newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^^empty
+older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^1.45.4^upgrade
+unparseable no-mistakes version reports an upgrade^no-mistakes development build^unknown^upgrade
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
 test_gh_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
+  local label version expected_ver mode case_dir fakebin out upgrade n
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version expected_ver mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/gh-axi-$n"
@@ -357,17 +357,18 @@ test_gh_axi_min_version() {
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      upgrade)
+        upgrade="UPGRADE: gh-axi (installed: $expected_ver, required: 0.1.29, upgrade: npm install -g gh-axi && gh-axi setup hooks)"
+        [ "$out" = "$upgrade" ] || fail "$label: expected '$upgrade', got: $out" ;;
     esac
   done <<'ROWS'
-minimum gh-axi version is accepted^0.1.29^empty
-newer gh-axi patch is accepted^0.1.30^empty
-newer gh-axi minor is accepted^0.2.0^empty
-newer gh-axi major is accepted^1.0.0^empty
-older gh-axi patch reports an upgrade^0.1.19^missing
-much older gh-axi minor reports an upgrade^0.0.9^missing
-unparseable gh-axi version reports an upgrade^gh-axi development build^missing
+minimum gh-axi version is accepted^0.1.29^^empty
+newer gh-axi patch is accepted^0.1.30^^empty
+newer gh-axi minor is accepted^0.2.0^^empty
+newer gh-axi major is accepted^1.0.0^^empty
+older gh-axi patch reports an upgrade^0.1.19^0.1.19^upgrade
+much older gh-axi minor reports an upgrade^0.0.9^0.0.9^upgrade
+unparseable gh-axi version reports an upgrade^gh-axi development build^unknown^upgrade
 ROWS
   pass "bootstrap enforces gh-axi minimum version"
 }
@@ -408,10 +409,9 @@ ROWS
 }
 
 test_tasks_axi_min_version() {
-  local label version mode case_dir fakebin out missing n archive_body multi_id
-  missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
+  local label version expected_ver mode case_dir fakebin out upgrade n archive_body multi_id
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version expected_ver mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/tasks-axi-$n"
@@ -438,30 +438,30 @@ test_tasks_axi_min_version() {
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      upgrade)
+        upgrade="UPGRADE: tasks-axi (installed: $expected_ver, required: 0.2.4, upgrade: npm install -g tasks-axi)"
+        [ "$out" = "$upgrade" ] || fail "$label: expected '$upgrade', got: $out" ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.4^empty
-newer tasks-axi patch is accepted^0.2.5^empty
-newer tasks-axi minor is accepted^0.3.0^empty
-newer tasks-axi major is accepted^1.0.0^empty
-older tasks-axi with features reports an upgrade^0.1.1^missing
-the patch just below the floor reports an upgrade^0.2.3^missing
-unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
-tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
-tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
+minimum tasks-axi version is accepted^0.2.4^^empty
+newer tasks-axi patch is accepted^0.2.5^^empty
+newer tasks-axi minor is accepted^0.3.0^^empty
+newer tasks-axi major is accepted^1.0.0^^empty
+older tasks-axi with features reports an upgrade^0.1.1^0.1.1^upgrade
+the patch just below the floor reports an upgrade^0.2.3^0.2.3^upgrade
+unparseable tasks-axi version reports an upgrade^tasks-axi development build^unknown^upgrade
+tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^0.2.4^upgrade
+tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^0.2.4^upgrade
 ROWS
   pass "bootstrap enforces tasks-axi minimum version"
 }
 
 # These rows exercise the real bootstrap check with a fake quota-axi answering
-# --version: below the floor produces MISSING, while at or above is silent.
+# --version: below the floor produces UPGRADE, while at or above is silent.
 test_quota_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: quota-axi (install: npm install -g quota-axi)'
+  local label version expected_ver mode case_dir fakebin out upgrade n
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version expected_ver mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/quota-axi-$n"
@@ -473,17 +473,18 @@ test_quota_axi_min_version() {
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+      upgrade)
+        upgrade="UPGRADE: quota-axi (installed: $expected_ver, required: 0.1.29, upgrade: npm install -g quota-axi)"
+        [ "$out" = "$upgrade" ] || fail "$label: expected '$upgrade', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.29^empty
-newer quota-axi patch is accepted^0.1.30^empty
-newer quota-axi minor is accepted^0.2.0^empty
-newer quota-axi major is accepted^1.0.0^empty
-the patch just below the floor reports an upgrade^0.1.28^missing
-much older quota-axi minor reports an upgrade^0.0.9^missing
-unparseable quota-axi version reports an upgrade^quota-axi development build^missing
+minimum quota-axi version is accepted^0.1.29^^empty
+newer quota-axi patch is accepted^0.1.30^^empty
+newer quota-axi minor is accepted^0.2.0^^empty
+newer quota-axi major is accepted^1.0.0^^empty
+the patch just below the floor reports an upgrade^0.1.28^0.1.28^upgrade
+much older quota-axi minor reports an upgrade^0.0.9^0.0.9^upgrade
+unparseable quota-axi version reports an upgrade^quota-axi development build^unknown^upgrade
 ROWS
   pass "bootstrap enforces quota-axi minimum version"
 }
@@ -1050,7 +1051,7 @@ SH
   : > "$log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "MISSING: tasks-axi (install:" "the unaided run did not probe tasks-axi"
+  assert_contains "$out" "UPGRADE: tasks-axi (installed:" "the unaided run did not probe tasks-axi"
   assert_grep '--version' "$log" "the unaided run never ran the probe"
 
   # With it, the probe is skipped entirely and the handed-in verdict is used.
@@ -1059,6 +1060,7 @@ SH
     FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_TASKS_AXI_COMPATIBLE=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: tasks-axi" "the handed-in verdict was ignored"
+  assert_not_contains "$out" "UPGRADE: tasks-axi" "the handed-in verdict was ignored"
   [ ! -s "$log" ] || fail "the handed-in verdict did not save the probe: $(cat "$log")"
 
   # A malformed value is not a verdict.
@@ -1066,7 +1068,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_TASKS_AXI_COMPATIBLE=yes "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "MISSING: tasks-axi (install:" "a malformed handoff value was trusted"
+  assert_contains "$out" "UPGRADE: tasks-axi (installed:" "a malformed handoff value was trusted"
 
   # And the handoff never reaches a grandchild: bootstrap spawns agents, and a
   # verdict cached into an agent's environment would outlive the tool it describes.
@@ -1162,6 +1164,58 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_project_registry_validation() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/project-registry"
+  mkdir -p "$case_dir/home/data" "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  # A registry with entries, prose, and annotations - no status lines.
+  cat > "$case_dir/home/data/projects.md" <<'EOF'
+# Projects
+<!-- comment -->
+
+Standing delivery posture is direct-PR fleet-wide.
+**The captain ruled on 2024-01-14.**
+
+- foo [direct-PR] - A project (added 2024-01-01)
+- foo,bar [no-mistakes +yolo] - A project (added 2024-01-01)
+  **Purpose, set by the captain.** Both a daily channel and a capability.
+- baz [local-only] - Another project (added 2024-01-01)
+EOF
+
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh")
+  set -e
+  if printf '%s\n' "$out" | grep -q 'PROJECT_REGISTRY:'; then
+    fail "Valid registry should not produce output, got: $out"
+  fi
+
+  # A registry with status-protocol lines appended.
+  cat > "$case_dir/home/data/projects.md" <<'EOF'
+# Projects
+- foo [direct-PR] - A project (added 2024-01-01)
+done: PR pushed
+working: setting up
+blocked [key=some-key]: stuck on CI
+EOF
+
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh")
+  set -e
+  if ! printf '%s\n' "$out" | grep -q 'PROJECT_REGISTRY: status-protocol line at line 3'; then
+    fail "Status-protocol line not detected at line 3, got: $out"
+  fi
+  if ! printf '%s\n' "$out" | grep -q 'PROJECT_REGISTRY: status-protocol line at line 4'; then
+    fail "Status-protocol line not detected at line 4, got: $out"
+  fi
+  if ! printf '%s\n' "$out" | grep -q 'PROJECT_REGISTRY: status-protocol line at line 5'; then
+    fail "Status-protocol line not detected at line 5, got: $out"
+  fi
+
+  pass "bootstrap detects status-protocol lines in data/projects.md"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1190,3 +1244,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_project_registry_validation

@@ -106,15 +106,26 @@
 #
 # Exit status is non-zero if any selected script exits non-zero, a configured
 # --fail-on-gate-skip token appears, the measured duration exceeds
-# --max-wall-ms, timing-artifact finalization fails, or a concurrent worker
-# violates its isolation check. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate; each one
-# is logged with its reason and recorded in the timing artifact.
+# --max-wall-ms, timing-artifact finalization fails, a concurrent worker
+# violates its isolation check, or a script whose family declares
+# expected_gate_skip=none gate-skips anyway. A gate skip (first meaningful line
+# matching ^skip:) in a family that DOES expect one remains successful and is
+# counted as skipped_gate; each one is logged with its reason and recorded in
+# the timing artifact.
+#
+# expected_gate_skip=none is this script's own claim that the named script has
+# no gate and therefore always executes. Enforcing that claim is what stops the
+# coverage guard's "every test file is scheduled" from quietly meaning "and some
+# of them never ran": the guard can prove a file was SCHEDULED, only this can
+# prove it EXECUTED. A script caught here is either misclassified (move it into
+# the family whose gate it actually has) or missing a dependency the lane must
+# install.
 #
 # expected_gate_skip classes name why a family is allowed to skip: herdr (the
 # pinned real-Herdr lane), optional-binary (a backend whose binary is optional),
 # live-capability (a live-harness guard governed by fm_live_gate, which records
-# unavailable tools and explicit policy skips; see tests/lib.sh), or none.
+# unavailable tools and explicit policy skips; see tests/lib.sh),
+# windows-native (a script that only executes under native Windows Node), or none.
 #
 # Every selected script runs isolated from the host's global and system Git
 # configuration, including one that sources no test helper of its own;
@@ -384,6 +395,13 @@ family_for_basename() {
     fm-backend-orca.test.sh)
       printf '%s\n' orca
       ;;
+    fm-pi-windows-shell-invocation.test.sh)
+      # Single-member family: the script exercises the Pi extension through a
+      # native Windows Node and gate-skips everywhere else BY DESIGN, so it
+      # declares that gate rather than failing the expected_gate_skip=none
+      # guard that keeps unclassified scripts honest.
+      printf '%s\n' windows-gated
+      ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
@@ -412,6 +430,7 @@ expected_gate_skip_for_family() {
     live-harness-optin) printf '%s\n' live-capability ;;
     cmux|zellij|orca) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
+    windows-gated) printf '%s\n' windows-native ;;
     *) printf '%s\n' none ;;
   esac
 }
@@ -431,6 +450,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+windows-gated
 standalone
 unclassified
 EOF
@@ -1395,6 +1415,9 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-brief.test.sh"
       ;;
+    bin/fm-project-registry-validate.sh)
+      printf '%s\n' session-bootstrap
+      ;;
     bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
@@ -2276,6 +2299,10 @@ record_script_result() {
     gate_skip=true
     gate_reason=$(gate_skip_reason "$out")
     SKIPPED_GATE=$((SKIPPED_GATE + 1))
+    if [ "$expected" = none ]; then
+      log "unexpected gate skip in $script: family=$family declares expected_gate_skip=none"
+      rc=1
+    fi
     # A capability skip is the runner's only record of what this host could not
     # exercise, so name it rather than leaving a silent green.
     log "gate skip: $script: ${gate_reason:-<no reason given>}"

@@ -413,6 +413,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $INBOX_SECTION
 
+# Tests
+Size the run before you start it: a changed-file selection can be WIDER than a single lane or family when your change has wide fan-out, so compare both sizes before picking rather than assuming the change-scoped one is smaller.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -510,6 +513,9 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+# Tests
+Size the run before you start it: a changed-file selection can be WIDER than a single lane or family when your change has wide fan-out, so compare both sizes before picking rather than assuming the change-scoped one is smaller.
 
 $DOD
 EOF

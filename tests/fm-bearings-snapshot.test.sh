@@ -3308,6 +3308,61 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+# A secondmate home with orphan in-flight rows (backlog marks them in_flight
+# but no child metadata exists) must NOT silently drop its captain-held
+# decisions, and the inventory gap must be disclosed in omitted[] rather than
+# left for a reader to notice by absence. The snapshot layer already keeps the
+# structured surfaces for such homes; this pins the bearings end of that
+# contract: the holds still project and the home is named with its reason.
+test_orphan_in_flight_home_keeps_decisions_and_is_disclosed() {
+  local home mate fakebin json
+  home=$(make_home orphan-decisions)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  mate="$TMP_ROOT/orphan-decisions-home"
+  make_valid_secondmate_home orphan-mate "$mate"
+  append_secondmate_registry "$home" orphan-mate "$mate"
+  fm_write_secondmate_meta "$home/state/orphan-mate.meta" "$mate" "firstmate:fm-orphan-mate" sample
+  printf 'working [key=old]: old parent activity\n' > "$home/state/orphan-mate.status"
+  mkdir -p "$mate/projects/real-worker"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-a - Ghost row A has no worker (repo: sample) (kind: ship)
+- [ ] orphan-b - Ghost row B has no worker (repo: sample) (kind: ship)
+- [ ] real-worker - Active task with a worker (repo: sample) (kind: ship)
+
+## Queued
+- [ ] captain-decision-a - Choose approach A (repo: sample) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+- [ ] captain-decision-b - Choose approach B (repo: sample) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+
+## Done
+- [x] landed-item - Landed work (repo: sample) (kind: ship) (merged 2026-08-17)
+EOF
+  fm_write_meta "$mate/state/real-worker.meta" \
+    "window=firstmate:fm-real-worker" "worktree=$mate/projects/real-worker" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" real-worker busy
+  printf 'working: actively building\n' > "$mate/state/real-worker.status"
+  fakebin=$(make_fakebin "$home")
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | select(.owner == "orphan-mate")] | length) == 2
+      and (.secondmates | any(.[]; .id == "orphan-mate" and .state == "captain_decision"
+        and (.reason | contains("in-flight backlog item has no child metadata"))))
+      and (.omitted | any(.surface | contains("unaccounted inventory")))
+      and (.omitted | any(.surface | contains("orphan-mate")))
+      and (.landed | any(.[]; .id == "landed-item" and .owner == "orphan-mate"))
+  ' >/dev/null || fail "orphan in-flight hid captain decisions or inventory was not disclosed: $json"
+  pass "orphan in-flight rows do not hide captain-held decisions"
+}
+
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
@@ -3367,3 +3422,5 @@ test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_orphan_in_flight_home_keeps_decisions_and_is_disclosed
+echo "ALL TESTS COMPLETED"

@@ -25,7 +25,7 @@
 # callers must check it before selecting backend-specific flags or exemptions.
 #
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
-# failing check into the operator-facing MISSING diagnostic.
+# failing check into the operator-facing UPGRADE diagnostic.
 #
 # COMPATIBILITY VERDICT REUSE. fm_tasks_axi_compatible costs three tasks-axi
 # subprocesses, and one session start needs the same verdict twice: once in
