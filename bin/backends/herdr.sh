@@ -3199,6 +3199,29 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   fi
 }
 
+# fm_backend_herdr_submit_pending_is_proof: 0 when a `pending` verdict left by
+# fm_backend_herdr_send_text_submit at <target> proves a swallowed Enter.
+# Answered per pane because this adapter's busy primitive is the harness's own
+# native agent_status, and only a legibly idle pane carries that proof:
+#   idle/done - the pre-Enter baseline was legibly idle, so allow_rendered was
+#             1 and the rendered busy footer supplied the queued-Enter signal;
+#             a `pending` that survived that read is a genuine swallow.
+# Every other native state carries no proof. `working` read HERE is read AFTER
+# the submit, so it is evidence the Enter LANDED, not that it was swallowed:
+# a pane that was working at conversion time would already have had its
+# `pending` converted to `empty` by fm_composer_queued_enter_verdict, so a
+# `pending` still standing beside a now-working pane is a late transition
+# across our own read. Cursor's always-`blocked` pane and an unreadable status
+# never reached a busy read at all. All of those must stay advisory rather than
+# name a stranded input line on a pane whose Enter may well have landed.
+fm_backend_herdr_submit_pending_is_proof() {  # <target>
+  local target=$1 raw
+  fm_backend_herdr_parse_target "$target" || return 1
+  raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  [ "$(fm_backend_herdr_classify_submit_agent_status "$raw")" = idle ] || return 1
+  return 0
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0

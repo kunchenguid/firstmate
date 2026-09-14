@@ -27,7 +27,8 @@
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
-#   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
+#   <task>.inbox/.ring-state   watcher re-ring ladder:
+#                              "<msg>\t<count>\t<epoch>\t<input-blocked-streak>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -47,8 +48,15 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates.
+# The ladder also counts the consecutive attempts that delivered nothing
+# BECAUSE the endpoint's input line holds unsubmitted text
+# (fm_task_inbox_blocked_streak), because that condition suppresses this plane
+# without the plane being able to clear it: the pre-check protects the text and
+# the ladder cannot submit it. A budget spent entirely that way is a stranded
+# input line, not an unresponsive worker, and the caller owns naming that
+# difference in its escalation.
+# The caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
@@ -269,19 +277,38 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
+# composer pre-check, then the backend's submit machinery with an Enter-retry
+# budget, verifying that our own text actually left the input line.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
+# record), 4 typed but the submit was PROVENLY swallowed, so this attempt's own
+# doorbell text is stranded in the composer. 4 is reserved for endpoints whose
+# submit core can tell a swallowed Enter from one queued behind a working agent
+# (fm_backend_submit_pending_is_proof, answered per endpoint because a harness
+# with no legible native busy state is unproven even on a backend that usually
+# has one); elsewhere a pending verdict is not proof of anything and the
+# attempt reports 0 as it did before. No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# 4 exists because 0 used to cover it: the post-submit verdict was discarded,
+# so an Enter that never landed was reported as rung while its text stayed in
+# the composer, where the pre-check above then deferred every later attempt on
+# this plane - firstmate suppressing itself with its own doorbell, with the
+# ladder's budget spent on a path that could not clear the text it was blocked
+# by (a live codex worker sat on an unread instruction for hours this way).
+# A stranded attempt is NOT rung, and this plane still never clears, cancels,
+# overwrites, or submits composer content it did not just type: only an
+# acknowledged submit of our own text counts, and recovery of a stranded line
+# belongs to the caller's escalation, not to a blind keystroke here.
+# The Enter budget is the shared typed-plane default rather than a single
+# keystroke, since the submit core retries Enter ONLY and never retypes, so a
+# swallowed first Enter costs another Enter instead of a stranded line.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -298,13 +325,33 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  # Exact `pending` is a stranded-text proof only at an endpoint whose submit
+  # core could resolve a queued Enter (fm_backend_submit_pending_is_proof);
+  # every other value (empty, unknown, pending-unproven, ...) and every
+  # `pending` from an endpoint without that proof stays advisory and never
+  # blocks a ring.
+  case "$verdict" in
+    send-failed) return 2 ;;
+    pending)
+      if fm_backend_submit_pending_is_proof "$backend" "$target"; then
+        return 4
+      fi
+      ;;
+  esac
   return 0
+}
+
+# 0 when this ring return code means the attempt delivered nothing BECAUSE the
+# endpoint's input line holds unsubmitted text - the one condition this plane
+# cannot clear for itself. The single owner of that classification.
+fm_task_inbox_rc_is_input_blocked() {  # <ring-rc>
+  case "$1" in
+    1|4) return 0 ;;
+  esac
+  return 1
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>
@@ -345,7 +392,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last blocked
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -360,8 +407,12 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   fi
   count=0
   last=0
+  blocked=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  # `blocked` is read but unused here: without it the trailing field would be
+  # swallowed into `last`, whose numeric guard would then silently reset the
+  # ring spacing. The streak itself belongs to fm_task_inbox_blocked_streak.
+  IFS=$(printf '\t') read -r rec_base count last blocked <<EOF
 $ladder
 EOF
   if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
@@ -399,22 +450,60 @@ EOF
 # A concurrently removed inbox is a successful no-op; otherwise failure means
 # the caller must surface the unwritable ladder while the record remains
 # unhandled.
-fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
-  local dir base ladder rec_base count last
+# The optional ring return code also maintains the consecutive input-blocked
+# streak read back by fm_task_inbox_blocked_streak. An omitted code counts as
+# not input-blocked, which resets the streak: a caller that cannot say why an
+# attempt delivered nothing must not have its silence read as evidence of a
+# stranded input line.
+fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [ring-rc]
+  local dir base ladder rec_base count last blocked rc=${4:-}
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
+  blocked=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  IFS=$(printf '\t') read -r rec_base count last blocked <<EOF
 $ladder
 EOF
-  [ "$rec_base" = "$base" ] || count=0
+  if [ "$rec_base" != "$base" ]; then
+    count=0
+    blocked=0
+  fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  case "$blocked" in ''|*[!0-9]*) blocked=0 ;; esac
+  if [ -n "$rc" ] && fm_task_inbox_rc_is_input_blocked "$rc"; then
+    blocked=$((blocked + 1))
+  else
+    blocked=0
+  fi
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\n' \
+      "$base" "$((count + 1))" "$(date +%s)" "$blocked" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi
+}
+
+# The consecutive delivery attempts for <record-path> that delivered nothing
+# because the endpoint's input line held unsubmitted text. Prints 0 when the
+# ladder names another record, has no such streak, or cannot be read: callers
+# treat a nonzero streak as positive evidence and never infer one from silence.
+fm_task_inbox_blocked_streak() {  # <state-dir> <task-id> <record-path>
+  # `count` and `last` are read only to consume their fields so the streak
+  # lands in `blocked` rather than being appended to an earlier variable.
+  local dir base ladder rec_base count last blocked
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  base=${3##*/}
+  ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r rec_base count last blocked <<EOF
+$ladder
+EOF
+  if [ "$rec_base" != "$base" ]; then
+    printf '0'
+    return 0
+  fi
+  case "$blocked" in ''|*[!0-9]*) blocked=0 ;; esac
+  printf '%s' "$blocked"
 }
 
 # Mark the current oldest as escalated after its stale wake is durably queued,

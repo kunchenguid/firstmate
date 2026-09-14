@@ -431,7 +431,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state blocked
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -463,7 +463,7 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$ring_rc"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
@@ -477,7 +477,26 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      # Two different failures end the ladder, and they send the reader to
+      # different places. A budget spent entirely on attempts that delivered
+      # nothing because the endpoint's input line held unsubmitted text is a
+      # stranded input line - frequently firstmate's own doorbell, typed by an
+      # Enter that never landed - on a worker that is idle and healthy, and the
+      # steering plane cannot clear it without submitting content it did not
+      # type. Naming the worker there sends the investigation to the wrong
+      # place, so the input-blocked case says what is actually stuck and what
+      # releases it. The ladder budget is what bounds it: the suppression is
+      # surfaced once instead of repeating the blocked path forever - and
+      # because this escalation marks the record, no further watcher ring will
+      # reach it, so the wake must hand the reader a delivery path of its own
+      # rather than promise one.
+      blocked=$(fm_task_inbox_blocked_streak "$STATE" "$task" "$rec")
+      case "$blocked" in ''|*[!0-9]*) blocked=0 ;; esac
+      if [ "$count" -gt 0 ] && [ "$blocked" -ge "$count" ]; then
+        reason="stale: $w (unread firstmate instruction: $rec still unhandled; all $count doorbell delivery attempts were suppressed because the endpoint's input line holds unsubmitted text while the pane is idle - the worker is not the blocker; inspect that input line, submit it when it is firstmate's own stranded doorbell or clear it when it is the worker's own half-typed text, then deliver the steer yourself with bin/fm-send.sh or hand $rec to the worker - this ladder has already escalated and will not ring this record again)"
+      else
+        reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      fi
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
