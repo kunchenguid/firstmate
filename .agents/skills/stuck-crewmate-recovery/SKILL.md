@@ -29,6 +29,7 @@ Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secon
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 For every stale notification, resolve the exact task and read `bin/fm-crew-state.sh <id>` before trusting its status log or deciding whether to absorb the stale pane.
+The verified `captain-held` transfer is the separate status-backed exception: its durable hold remains on the declared-wait path even when no worker metadata remains.
 An authoritative `state: working` from `source: run-step` or `source: pane` means the worker is genuinely in progress: do not ask the captain for action; continue supervision.
 A declared `paused` state remains the existing bounded external-wait path; it is intentional waiting and must not be mislabeled a wedge.
 Any other current state, including `parked`, `done`, `blocked`, `failed`, `unknown`, or an unreadable result, does not support absorption as routine progress.

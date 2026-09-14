@@ -165,9 +165,7 @@ Classify each wake this way:
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
   The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
-- `stale` with a task association -> the stuck-worker recovery skill first reconciles the associated worker's current state before trusting the status log.
-  Current `working` evidence means the worker is still in progress and the stale notification is absorbed without asking the captain for action.
-  Any other or unreadable current state surfaces a concrete recovery decision, and an unidentified pane is surfaced for inspection before relaunch.
+- `stale` -> load and apply [`stuck-crewmate-recovery`](../stuck-crewmate-recovery/SKILL.md), which owns current-state reconciliation and recovery routing.
 - `check` -> always escalate.
   Check scripts print only when firstmate should wake.
 - `heartbeat` -> self-handle.

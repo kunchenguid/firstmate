@@ -198,6 +198,7 @@ test_classification_commits_its_captured_endpoint() {
 test_stale_masked_event_escalates_at_captured_endpoint() {
   local dir state key out
   dir=$(make_supercase stale-masked); state="$dir/state"
+  fm_write_meta "$state/stale-r2.meta" "window=sess:fm-stale-r2" "backend=tmux"
   printf 'blocked: release host unavailable\nworking: retrying upload\n' > "$state/stale-r2.status"
   FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r2" "$state"
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
@@ -211,6 +212,7 @@ test_stale_masked_event_escalates_at_captured_endpoint() {
 test_stale_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase stale-unreadable); state="$dir/state"
+  fm_write_meta "$state/stale-r3.meta" "window=sess:fm-stale-r3" "backend=tmux"
   printf 'working: retrying upload\n' > "$state/stale-r3.status"
   key=$(printf '%s' stale-r3 | tr ':/.' '___')
   printf '3@%s' "$(_fm_open_decisions_file_ident "$state/stale-r3.status")" \
@@ -638,6 +640,17 @@ test_stale_current_state_controls_classification() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · endpoint unreadable'
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
   case "$out" in escalate\|*"recovery decision"*) ;; *) fail "unknown current state did not surface recovery decision: $out" ;; esac
+  printf 'paused: old external wait\n' > "$state/current-w1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
+  case "$out" in escalate\|*"recovery decision"*) ;; *) fail "old pause bypassed unknown current state: $out" ;; esac
+  FM_FAKE_CREW_STATE='state: paused · source: status · external wait'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
+  case "$out" in pause\|*) ;; *) fail "current paused state did not retain pause cadence: $out" ;; esac
+
+  rm "$state/current-w1.meta"
+  printf 'working: legacy recorded progress\n' > "$state/current-w1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-current-w1" "$state")
+  case "$out" in escalate\|*"unidentified pane"*) ;; *) fail "metadata-free status bypassed current-state reconciliation: $out" ;; esac
   unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "stale classification reconciles current worker state before status-log handling"
 }
@@ -676,14 +689,8 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     )
     case "$case_name" in
       paused)
-        # A current declared wait owns the cadence: the enriched wedge routes to the
-        # bounded PAUSE_RESURFACE_SECS recheck instead of escalating on the wedge
-        # cadence. test_enriched_wedge_under_declared_wait_uses_pause_cadence pins
-        # the full cadence, including the one recheck that still re-surfaces it.
-        [ ! -s "$state/.subsuper-escalations" ] \
-          || fail "paused enriched wedge escalated instead of routing to the pause cadence: $(cat "$state/.subsuper-escalations")"
-        [ -e "$state/.subsuper-paused-$key" ] \
-          || fail "paused enriched wedge erased ordinary pause tracking" ;;
+        grep -F "recovery decision" "$state/.subsuper-escalations" >/dev/null \
+          || fail "paused status without current-state support did not surface recovery" ;;
       *)
         [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
           || fail "$case_name enriched wedge did not produce exactly one escalation"
@@ -717,12 +724,16 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   local dir state fakebin task win pane key reason i escalations
   dir=$(make_supercase enriched-wedge-declared-wait)
   state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
   task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
   key=$(printf '%s' "$task" | tr ':/.' '___')
   fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
   printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
     > "$state/$task.status"
   printf 'idle prompt $\n' > "$pane"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: paused · source: status · external wait'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
     pause\|*) ;;
     *) fail "the fixture's own classifier verdict is not a pause, so this case pins nothing about the override" ;;
@@ -779,6 +790,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
     || fail "wedge escalation was not restored after the crew left its declared wait"
   [ ! -e "$state/.subsuper-paused-$key" ] \
     || fail "pause tracking survived a status append that no longer declares the wait"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
 }
 
@@ -797,12 +809,17 @@ test_stale_terminal_escalates() {
 }
 
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
-  local dir state win key out reason resumed_win resumed_key
-  dir=$(make_supercase stale-actionable-wait); state="$dir/state"
+  local dir state fakebin win key out reason resumed_win resumed_key
+  dir=$(make_supercase stale-actionable-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-waiting-r10"; key=$(printf '%s' waiting-r10 | tr ':/.' '___')
+  fm_write_meta "$state/waiting-r10.meta" "window=$win" "backend=tmux"
   printf 'blocked [key=release]: need captain approval\npaused: waiting for release access\n' \
     > "$state/waiting-r10.status"
 
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: paused · source: status · external wait'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
   case "$out" in escalate\|*"blocked [key=release]: need captain approval"*) ;;
     *) fail "a current wait hid an unreported blocker from stale classification: $out" ;;
@@ -819,13 +836,16 @@ test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
     || fail "an actionable current wait was also aged as a wedge"
 
   resumed_win="sess:fm-resumed-r10"; resumed_key=$(printf '%s' resumed-r10 | tr ':/.' '___')
+  fm_write_meta "$state/resumed-r10.meta" "window=$resumed_win" "backend=tmux"
   printf 'paused: old wait\nworking: resumed after access arrived\n' > "$state/resumed-r10.status"
   printf '1' > "$state/.subsuper-paused-$resumed_key"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · resumed'
   FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $resumed_win" "$state"
   [ ! -e "$state/.subsuper-paused-$resumed_key" ] \
     || fail "an older pause declaration kept a resumed crew on pause cadence"
   [ -e "$state/.subsuper-stale-$resumed_key" ] \
     || fail "a resumed crew did not return to ordinary stale aging"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "stale escalation and current wait cadence remain independent"
 }
 
@@ -833,14 +853,20 @@ test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
 test_stale_paused_classifies_pause() {
-  local dir state out pause_reason
+  local dir state fakebin out pause_reason
   dir=$(make_supercase stale-paused)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
   pause_reason='paused: waiting for upstream checks green, merged, and blocked state to clear'
   status_is_captain_relevant "$pause_reason" && fail "pause reason phrases made the status captain-relevant"
+  fm_write_meta "$state/held-w9.meta" "window=sess:fm-held-w9" "backend=tmux"
   printf '%s\n' "$pause_reason" > "$state/held-w9.status"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: paused · source: status · external wait'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
@@ -863,17 +889,23 @@ test_stale_captain_held_classifies_pause() {
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
 test_handle_wake_paused_records_pause_marker() {
-  local dir state key win
+  local dir state fakebin key win
   dir=$(make_supercase handle-paused)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-held-w10"
+  fm_write_meta "$state/held-w10.meta" "window=$win" "backend=tmux"
   printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10.status"
   key=$(printf '%s' "held-w10" | tr ':/.' '___')
   date +%s > "$state/.subsuper-stale-$key"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: paused · source: status · external wait'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "pause marker not recorded by handle_wake"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared when the crew declared a pause"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause escalated on the wake itself (should defer to the long recheck)"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
@@ -1949,8 +1981,6 @@ test_classify_signal_dedup_against_scan() {
 }
 
 test_classify_stale_dedup_against_signal() {
-  # If the signal path already escalated a status (seen marker matches),
-  # classify_stale must self-handle to avoid a duplicate in the digest.
   local dir state key out
   dir=$(make_supercase stale-dedup)
   state="$dir/state"
@@ -1958,12 +1988,11 @@ test_classify_stale_dedup_against_signal() {
   key=$(printf '%s' "dup-s10" | tr ':/.' '___')
   seen_through "$state" "dup-s10"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
-  case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
+  case "$out" in escalate\|*"unidentified pane"*) ;; *) fail "seen legacy status hid an unidentified stale pane: $out" ;; esac
   rm -f "$state/.subsuper-seen-status-$key"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
-  case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
-  pass "classify_stale dedupes against the signal path seen marker"
+  case "$out" in escalate\|*"unidentified pane"*) ;; *) fail "legacy status hid an unidentified stale pane: $out" ;; esac
+  pass "metadata-free stale panes surface recovery regardless of status history"
 }
 
 # AFK incident regression: a nonterminal working: line that was already surfaced
@@ -1975,17 +2004,22 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   dir=$(make_supercase afk-working-merged-wedge)
   state="$dir/state"
   fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-wishlist-w1"
   pane="$dir/pane.txt"
   incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
+  fm_write_meta "$state/wishlist-w1.meta" "window=$win" "backend=tmux"
   printf '%s\n' "$incident" > "$state/wishlist-w1.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
   # Simulate an earlier false-positive escalate that wrote the seen marker.
   seen_through "$state" "wishlist-w1"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · active'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
   case "$out" in
-    self\|*transient*) ;;
+    self\|*working*) ;;
     escalate\|*) fail "nonterminal working: escalated as terminal stale: $out" ;;
     *)
       case "$out" in
@@ -2007,6 +2041,7 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
     || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
   grep -q 'possible wedge' "$state/.subsuper-escalations" \
     || fail "housekeeping escalate was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 

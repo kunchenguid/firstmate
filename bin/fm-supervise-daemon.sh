@@ -417,11 +417,19 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
       return
     fi
   fi
+  last=$(last_status_line "$state/$task.status")
+  if [ "$has_meta" -eq 0 ]; then
+    if [ -n "$last" ] && status_is_captain_held "$last"; then
+      printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    else
+      printf 'escalate|stale pane is not associated with a recorded worker; recovery decision: inspect the unidentified pane before relaunching'
+    fi
+    return
+  fi
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" "$(status_seen_offset "$state" "$task")")
     rc=$?
   fi
-  last=$(last_status_line "$state/$task.status")
   if [ "$rc" -eq 2 ]; then
     if [ ! -e "$state/$task.status" ]; then
       printf 'self|stale + missing status for %s' "$task"
@@ -436,7 +444,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     printf 'escalate|stale + actionable status: %s' "$event"
     return
   fi
-  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+  if [ -n "$last" ] && { status_is_captain_held "$last" || { [ "$current_class" = paused ] && status_is_paused "$last"; }; }; then
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -462,10 +470,6 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     else
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
     fi
-    return
-  fi
-  if [ "$has_meta" -eq 0 ] && [ -z "$last" ]; then
-    printf 'escalate|stale pane is not associated with a recorded worker; recovery decision: inspect the unidentified pane before relaunching'
     return
   fi
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
