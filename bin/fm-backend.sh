@@ -744,19 +744,31 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 }
 
 # fm_backend_submit_pending_is_proof: 0 when a `pending` verdict from
-# fm_backend_send_text_submit PROVES the submit was swallowed and the typed
-# text is stranded in the input line. Only backends whose submit core runs the
-# verdict through fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh)
-# qualify: that policy converts pending+busy to `empty`, so what survives as
-# `pending` is a genuine swallow rather than an Enter queued behind a busy
-# agent. Backends that return the shared fm_composer_submit_retry_core verdict
-# raw have no busy primitive to make that distinction, so their `pending`
-# stays advisory and callers must keep their neutral, self-healing behavior.
-fm_backend_submit_pending_is_proof() {  # <backend>
-  case "$1" in
-    tmux|herdr) return 0 ;;
+# fm_backend_send_text_submit against <target> PROVES the submit was swallowed
+# and the typed text is stranded in the input line.
+#
+# The proof is a property of the ENDPOINT, not of the backend name. It holds
+# only where the submit core could have converted a queued Enter through
+# fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh), whose pending+busy
+# -> empty rule is what makes a surviving `pending` a genuine swallow rather
+# than an Enter accepted behind a working agent. tmux reads its busy primitive
+# from the pane itself, so every tmux endpoint qualifies. herdr's busy primitive
+# is the harness's native agent_status, so it answers per pane: a harness that
+# never reports `working` (Cursor reads `blocked` in every state) never receives
+# that conversion, and its `pending` is exactly as unproven as the raw
+# fm_composer_submit_retry_core verdict on a backend with no busy primitive at
+# all. An advisory `pending` must keep the caller's neutral, self-healing
+# behavior instead of naming a stranded line.
+fm_backend_submit_pending_is_proof() {  # <backend> <target>
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux) return 0 ;;
+    herdr) ;;
+    *) return 1 ;;
   esac
-  return 1
+  fm_backend_source "$backend" || return 1
+  fm_backend_herdr_submit_pending_is_proof "$@"
 }
 
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
