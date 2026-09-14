@@ -72,7 +72,7 @@ $ echo $?
 
 Treating either response as final was the defect.
 It retired registrations the captain was still using - four times in one day in one home, each repaired by hand - and every retirement was silent, so a board reopened afterwards had no listener and the captain's next message sat queued on it.
-The registration is the durable thing, so it is now tied to the artifact: the listener waits both responses out, and only an artifact that no longer resolves ends the source.
+The registration is the durable thing, so it is now tied to the artifact: the listener waits both responses out, and it is an artifact that no longer resolves - never a session - that ends the source.
 `lavish-axi` resolves that path before it ever looks for a session, so a deleted board never reaches the session lookup:
 
 ```text
@@ -106,7 +106,7 @@ That bound used to be a fixed 4096, justified as sitting far above envelopes of 
 Measured against the installed `lavish-axi` 0.1.67 and the real `@toon-format/toon` encoder, a 929-character path encodes to 4094 bytes and a 930-character one to 4098, so the old bound was already overrun by a path length the tool accepts.
 The bound is now `378 + 4 x PATH_MAX`, asked of the filesystem, which no artifact path can exceed.
 
-An over-bound response is the one pathological case left, and it is bounded and loud rather than silent: the listener never claims silence for a response it could not hold whole, so the runner announces it exactly once and then the terminal verdict retires the source.
+An over-bound quiet absence is the one pathological case left, and it is bounded and loud rather than silent: the listener never claims silence for a response it could not hold whole, so the runner announces it exactly once and then the terminal verdict retires the source.
 A real feedback payload above the bound is streamed, delivered, and announced unchanged and is never retired.
 
 ## The loss limitation this runner cannot close
