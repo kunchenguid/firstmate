@@ -41,6 +41,7 @@ from textual.screen import ModalScreen  # noqa: E402
 from textual.widgets import Button, DataTable, Footer, Input, Label, ListItem, ListView, Static  # noqa: E402
 
 DEFAULT_INTERVAL = 15.0
+MODAL_KEY_HINT = "Tab: switch buttons  Enter: activate  Escape: cancel"
 
 
 def default_snapshot_cmd() -> list[str]:
@@ -94,6 +95,8 @@ class MessageModal(ModalScreen[None]):
 class ConfirmModal(ModalScreen[bool]):
     """Show the exact text that will be queued and ask yes/no."""
 
+    BINDINGS = [Binding("escape", "cancel_modal", "Cancel")]
+
     def __init__(self, prompt: str, note_text: str) -> None:
         super().__init__()
         self._prompt = prompt
@@ -104,6 +107,7 @@ class ConfirmModal(ModalScreen[bool]):
             yield Label(self._prompt, id="modal-title")
             yield Static(f'"{self._note_text}"', id="modal-body")
             yield Label("This is queued for firstmate; nothing runs until firstmate acts on it.")
+            yield Label(MODAL_KEY_HINT, classes="modal-hint")
             with Vertical(id="confirm-buttons"):
                 yield Button("Queue it", id="confirm-yes", variant="primary")
                 yield Button("Cancel", id="confirm-no")
@@ -111,9 +115,14 @@ class ConfirmModal(ModalScreen[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "confirm-yes")
 
+    def action_cancel_modal(self) -> None:
+        self.dismiss(False)
+
 
 class TextInputModal(ModalScreen[str | None]):
     """Free-text entry, used by the 's' (ask) and '/' (route) queued keys."""
+
+    BINDINGS = [Binding("escape", "cancel_modal", "Cancel")]
 
     def __init__(self, prompt: str) -> None:
         super().__init__()
@@ -123,6 +132,7 @@ class TextInputModal(ModalScreen[str | None]):
         with Vertical(id="modal-box"):
             yield Label(self._prompt, id="modal-title")
             yield Input(placeholder="type your message, enter to continue", id="text-input")
+            yield Label(MODAL_KEY_HINT, classes="modal-hint")
             with Vertical(id="confirm-buttons"):
                 yield Button("Continue", id="text-ok", variant="primary")
                 yield Button("Cancel", id="text-cancel")
@@ -139,9 +149,14 @@ class TextInputModal(ModalScreen[str | None]):
         else:
             self.dismiss(None)
 
+    def action_cancel_modal(self) -> None:
+        self.dismiss(None)
+
 
 class SelectModal(ModalScreen[str | None]):
     """Pick one target from a short list, used by the '/' route key."""
+
+    BINDINGS = [Binding("escape", "cancel_modal", "Cancel")]
 
     def __init__(self, prompt: str, options: list[str]) -> None:
         super().__init__()
@@ -152,12 +167,16 @@ class SelectModal(ModalScreen[str | None]):
         with Vertical(id="modal-box"):
             yield Label(self._prompt, id="modal-title")
             yield ListView(*[ListItem(Label(opt), name=opt) for opt in self._options], id="select-list")
+            yield Label(MODAL_KEY_HINT, classes="modal-hint")
             yield Button("Cancel", id="select-cancel")
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         self.dismiss(event.item.name)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    def action_cancel_modal(self) -> None:
         self.dismiss(None)
 
 
@@ -177,6 +196,7 @@ class BridgeConsole(App[None]):
     }
     #modal-body-scroll { height: auto; max-height: 20; }
     #confirm-buttons { height: auto; align: right middle; }
+    .modal-hint { color: $text-muted; }
     #header-bar, #quota-strip, #backlog-bar, #upstream-bar, #warnings-bar { height: auto; padding: 0 1; }
     .band-normal { color: $text; }
     .band-amber { color: $warning; }
