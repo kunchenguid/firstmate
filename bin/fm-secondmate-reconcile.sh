@@ -384,7 +384,7 @@ cmd_process_requests() {
       "$SCRIPT_DIR/fm-secondmate-reconcile.sh" notify --snapshot "$claimed" \
       > "$output" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ] \
-      && ! grep -Eq '^(skipped|failed|sent-unrecorded):' "$output" 2>/dev/null; then
+      && ! grep -Eq '^(skipped|deferred|failed|sent-unrecorded):' "$output" 2>/dev/null; then
       if rm -f -- "$claimed"; then
         processed=$((processed + 1))
       else
@@ -524,8 +524,14 @@ cmd_notify() {
     send_rc=0
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" \
-      "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
+      "$SCRIPT_DIR/fm-send.sh" "$id" --automatic --fire-and-forget "$did" \
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
+    # exit 4: the mate is waiting on its own open decision, so nothing was sent
+    # and the request stays for a later pass without starting the cooldown.
+    if [ "$send_rc" -eq 4 ]; then
+      printf 'deferred: %s %s\n' "$id" "$kind"
+      continue
+    fi
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then

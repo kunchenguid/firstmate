@@ -946,6 +946,9 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   task_id=$(fm_pending_reply_get "$rec" task_id)
   # A remote mate's report may exist and simply not have been mirrored yet.
   fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
+  # A mate waiting on its own open decision or blocker is never poked: the
+  # recovery stays unattempted until firstmate's deliberate answer lands.
+  [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}

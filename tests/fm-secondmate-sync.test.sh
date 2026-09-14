@@ -546,6 +546,72 @@ test_bootstrap_nudge_failure_records_retry_marker() {
   pass "T8c failed bootstrap nudge is surfaced and recorded for retry"
 }
 
+# Contract: the automatic re-read nudge never wakes a mate waiting on its own
+# decision; it is reported as deferred and its retry marker is kept.
+test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision() {
+  local w c1 fakebin out marker
+  w=$(new_world nudge-deferred)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm-instr.status"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: deferred: sm-instr is waiting on its open decision or blocker (pick)" \
+    "a nudge to a mate waiting on its decision should be reported as deferred"
+  assert_not_contains "$out" "send failed" "a deferred nudge is not a failed send"
+  [ -z "$(find "$w/home/state/sm-instr.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "the mate waiting on its decision received the nudge"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "a deferred nudge should keep its retry marker"
+  pass "T8g bootstrap defers the re-read nudge while the mate waits on its decision"
+}
+
+# Contract: the deferral is classified by fm-send's EXIT STATUS, never by the
+# shape of its output. fm-send runs the supervision guard, which prints a
+# worktree-tangle banner whenever the primary checkout sits on a feature branch
+# - exactly what a pull-request checkout is - and that banner lands ahead of the
+# deferred line. Matching the output text instead reported a waiting mate as a
+# failed send, with the banner as the reason.
+test_bootstrap_nudge_defers_when_the_send_prints_a_banner_first() {
+  local w c1 fakebin out send_out send_rc marker
+  w=$(new_world nudge-deferred-banner)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm-instr.status"
+  git -C "$w/main" checkout -q -b fm/tangle
+
+  # Drive the signals apart: prove the banner really does precede the deferred
+  # line here, or the regression below would pass without exercising anything.
+  send_rc=0
+  send_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" fm-sm-instr --automatic 'reread' 2>&1) || send_rc=$?
+  [ "$send_rc" -eq 4 ] || fail "precondition: an automatic send to a waiting mate should exit 4, got $send_rc"
+  assert_contains "$send_out" "WORKTREE TANGLE" \
+    "precondition: the guard banner should precede the deferred line on a feature-branch primary"
+  case "$send_out" in
+    deferred:*) fail "precondition: the deferred line was first, so this case cannot regress" ;;
+  esac
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: deferred: sm-instr is waiting on its open decision or blocker (pick)" \
+    "output printed ahead of the deferred line must not read as a failed send"
+  assert_not_contains "$out" "send failed" "a deferred nudge is not a failed send"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "a deferred nudge should keep its retry marker"
+  pass "T8h a deferred nudge is classified by exit status, not by the first line of output"
+}
+
 test_bootstrap_nudge_retry_is_idempotent() {
   local w c1 fakebin out marker out2
   w=$(new_world nudge-retry)
@@ -1354,6 +1420,8 @@ test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
+test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision
+test_bootstrap_nudge_defers_when_the_send_prints_a_banner_first
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn

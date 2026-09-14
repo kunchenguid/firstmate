@@ -337,6 +337,40 @@ test_each_home_carries_its_own_cooldown() {
   pass "the cooldown is per home, not fleet-wide"
 }
 
+# Contract: the automatic reconcile ask never wakes a mate waiting on its own
+# decision; the request stays queued without starting the cooldown, and is
+# delivered once the decision closes.
+test_a_mate_waiting_on_its_decision_is_not_nudged() {
+  local home mate fakebin snap out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home waiting mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$home/state/mate.status"
+  out=$(run_notify "$home" "$fakebin" waiting "$snap") || fail "a deferred ask must not fail notify: $out"
+  assert_contains "$out" "deferred: mate orphan_in_flight" "the deferred ask was not reported: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 0 ] || fail "the mate waiting on its decision was nudged"
+  [ ! -e "$home/state/mate.reconcile-nudged" ] || fail "a deferred ask started the cooldown"
+
+  process() {
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      FM_FAKE_TMUX_WINDOW="firstmate:fm-mate" FM_FAKE_TMUX_LOG="$TMP_ROOT/waiting-tmux.log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/waiting-fake/pane.txt" \
+      "$RECONCILE" "$@"
+  }
+  process request --snapshot "$snap" >/dev/null 2>&1 || fail "the reconcile request could not be queued"
+  if out=$(process process-requests 2>&1); then
+    fail "a deferred request was retired: $out"
+  fi
+  [ -n "$(find "$home/state/reconcile-notify" -maxdepth 1 -name 'request-*.json')" ] \
+    || fail "the deferred request was not kept for a later pass"
+  [ "$(inbox_records "$home/state" mate)" -eq 0 ] || fail "processing the request nudged the waiting mate"
+
+  printf 'resolved [key=pick]: answered: alpha\n' >> "$home/state/mate.status"
+  out=$(process process-requests 2>&1) || fail "the request was not delivered once the decision closed: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] || fail "the ask was not delivered after the decision closed"
+  pass "the reconcile ask waits while the mate waits on its decision, then is delivered"
+}
+
 test_the_ask_never_arms_a_reply_expectation_or_a_re_ring() {
   local home mate fakebin snap ladder
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home fireforget mate)
@@ -993,6 +1027,7 @@ test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
 test_the_cooldown_starts_when_delivery_finishes
 test_the_window_is_four_hours
 test_each_home_carries_its_own_cooldown
+test_a_mate_waiting_on_its_decision_is_not_nudged
 test_the_ask_never_arms_a_reply_expectation_or_a_re_ring
 test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
