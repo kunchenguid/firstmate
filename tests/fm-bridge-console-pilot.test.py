@@ -7,8 +7,12 @@ unittest coverage in tests/fm-bridge-console-lib.test.py is what CI relies on.
 When Textual IS available (for example run through `uv run --with textual`,
 as the colocated tests/fm-bridge-console.test.sh does), this drives the app
 headless against the fixture snapshot with every external command stubbed,
-asserts the main screen and the peek modal render, and saves an SVG
-screenshot of each as PR evidence.
+asserts the main screen, the peek modal, and the timeline modal render, and
+saves an SVG screenshot of each as PR evidence. The timeline modal reads a
+finished direct-PR record written under the scratch FM_HOME (passed as
+--fm-home), so the `t` key never reaches the developer's real
+data/<id>/timeline.json, and a row with no record shows the explicit
+"no timeline record" line.
 
 The queued-key flows (U, s, /, f) are each driven to completion, not just
 opened: every dialog in the chain is pressed to Confirm by mouse click and
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -108,7 +113,7 @@ async def _settle(pilot) -> None:
     await pilot.pause()
 
 
-async def _run(fake_peek: Path, fake_inbox: Path, inbox: InboxLog) -> None:
+async def _run(fake_peek: Path, fake_inbox: Path, inbox: InboxLog, fm_home: Path) -> None:
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     args = console.parse_args(
         [
@@ -120,6 +125,8 @@ async def _run(fake_peek: Path, fake_inbox: Path, inbox: InboxLog) -> None:
             str(fake_peek),
             "--inbox-cmd",
             str(fake_inbox),
+            "--fm-home",
+            str(fm_home),
         ]
     )
     app = console.BridgeConsole(args)
@@ -145,6 +152,32 @@ async def _run(fake_peek: Path, fake_inbox: Path, inbox: InboxLog) -> None:
         await _settle(pilot)
         assert _screen_name(app) == "MessageModal", app.screen
         app.save_screenshot(str(SCREENSHOT_DIR / "peek-modal.svg"))
+        await pilot.press("escape")
+        await _settle(pilot)
+
+        # -- t: timeline of the selected row, read from the scratch home's record
+        table.cursor_coordinate = (0, 0)  # "cim-signal" per the fixture's row order
+        await _settle(pilot)
+        await pilot.press("t")
+        await asyncio.sleep(0.3)
+        await _settle(pilot)
+        assert _screen_name(app) == "MessageModal", app.screen
+        body = str(app.screen.query_one("#modal-body").render())
+        assert "cim-signal (ship, direct-PR) - finished" in body, body
+        assert "no pipeline run: this task shipped direct-PR" in body, body
+        assert "biggest cost:" in body, body
+        app.save_screenshot(str(SCREENSHOT_DIR / "timeline-modal.svg"))
+        await pilot.press("escape")
+        await _settle(pilot)
+
+        table.cursor_coordinate = (2, 0)  # "orca-scout-7": no record in the scratch home
+        await _settle(pilot)
+        await pilot.press("t")
+        await asyncio.sleep(0.3)
+        await _settle(pilot)
+        assert _screen_name(app) == "MessageModal", app.screen
+        body = str(app.screen.query_one("#modal-body").render())
+        assert "no timeline record for orca-scout-7" in body, body
         await pilot.press("escape")
         await _settle(pilot)
 
@@ -341,9 +374,36 @@ def main() -> int:
     fake_inbox.chmod(0o755)
     inbox = InboxLog(inbox_log)
 
-    asyncio.run(_run(fake_peek, fake_inbox, inbox))
+    fm_home = scratch / "fm-home"
+    record_dir = fm_home / "data" / "cim-signal"
+    record_dir.mkdir(parents=True)
+    (record_dir / "timeline.json").write_text(json.dumps({
+        "schema": "fm-task-timeline.v1",
+        "task_id": "cim-signal",
+        "kind": "ship",
+        "project": "/projects/cimulate",
+        "mode": "direct-PR",
+        "yolo": "off",
+        "dispatches": [{
+            "at": "2026-09-13T10:00:00Z", "relaunch": False, "spawn_gen": "s1", "harness": "codex", "model": "default",
+            "effort": "default", "backend": "herdr", "worktree": "/wt", "window": "fm-cim-signal",
+        }],
+        "cleanup": {
+            "at": "2026-09-13T12:00:00Z",
+            "status_log": {
+                "present": True, "path": "/state/cim-signal.status", "last_modified": "2026-09-13T11:30:00Z",
+                "events": [{"seq": 1, "state": "working", "note": "setup done"}, {"seq": 2, "state": "done", "note": "PR https://example.test/pr/3"}],
+            },
+            "no_mistakes": {"queried": True, "reason": "no pipeline run: this task shipped direct-PR", "branch": "fm/cim-signal", "runs": []},
+            "session_logs": [],
+            "session_logs_reason": "no session log with assistant activity matched",
+            "pr": "https://example.test/pr/3",
+        },
+    }))
+
+    asyncio.run(_run(fake_peek, fake_inbox, inbox, fm_home))
     print(
-        "ok - fm-bridge-console pilot: main screen and peek modal render; "
+        "ok - fm-bridge-console pilot: main screen, peek modal, and timeline modal render; "
         "U/s//f dialog chains complete and cancel by click and by keyboard, "
         "queueing exactly the expected note and nothing on cancel"
     )

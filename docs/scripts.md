@@ -16,13 +16,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print structured fleet snapshot JSON and refresh only its parent-side remote-ledger cache (schema `fm-fleet-snapshot.v1`) |
 | `fm-bridge-snapshot.sh`  | Print the read-only bridge console snapshot JSON for fleet, quota, context, token, validation, process, and upstream observability |
+| `fm-task-timeline.sh`    | Write the per-task timeline record's dispatch and cleanup checkpoints (called by `fm-spawn.sh` and `fm-teardown.sh`) and build the read-only per-task time and token timeline the bridge console's `t` key shows; `bin/fm_task_timeline.py` owns the record schema |
 | `fm-home-summary-refresh.sh` | Atomically publish this home's structured summary ledger                         |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-host-report.sh`      | Print a bounded sectioned host status report, or single-line summary with `--line`   |
 | `fm-mate-view.sh`        | Inspect registered second mates across local and remote hosts in parallel            |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
-| `fm-bridge-console.py`  | Textual terminal console over the fm-bridge-snapshot.v1 collector: quota, fleet, backlog, upstream, and unrecorded-process observability; read-only keys run directly, everything else queues a note for firstmate |
+| `fm-bridge-console.py`  | Textual terminal console over the fm-bridge-snapshot.v1 collector: quota, fleet, backlog, upstream, and unrecorded-process observability, plus the selected task's time and token timeline on `t`; read-only keys run directly, everything else queues a note for firstmate |
 | `fm-bridge.sh`           | Launch `fm-bridge-console.py` through `uv run`, resolving its PEP 723 inline dependencies without a global install |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes, classifying every live mate left on the target commit for restart or fallback nudge |

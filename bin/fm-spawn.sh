@@ -4322,6 +4322,18 @@ fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 
+# Dispatch checkpoint of the durable per-task timeline record
+# (bin/fm-task-timeline.sh; schema owner bin/fm_task_timeline.py). Runs only
+# once the task's metadata is committed, never for a persistent secondmate, and
+# exits 0 with a warning on any failure so it cannot undo a delivered launch.
+if [ "$KIND" != secondmate ]; then
+  SPAWN_TIMELINE_ARGS=(checkpoint dispatch "$ID")
+  [ "$RELAUNCH" -eq 0 ] || SPAWN_TIMELINE_ARGS+=(--relaunch)
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-task-timeline.sh" "${SPAWN_TIMELINE_ARGS[@]}" >/dev/null \
+    || echo "warning: timeline dispatch checkpoint for $ID not written (exit $?)" >&2
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

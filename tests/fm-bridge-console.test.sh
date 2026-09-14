@@ -57,6 +57,6 @@ fi
 printf '%s\n' "$PILOT_OUT"
 case "$PILOT_OUT" in
   skip:*) pass "Textual pilot test skipped cleanly (Textual not installed)" ;;
-  *"ok - "*) pass "Textual pilot: main screen and peek modal render against the fixture" ;;
+  *"ok - "*) pass "Textual pilot: main screen, peek modal, and timeline modal render against the fixture" ;;
   *) fail "Textual pilot test produced unexpected output: $PILOT_OUT" ;;
 esac

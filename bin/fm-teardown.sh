@@ -3279,7 +3279,18 @@ else
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# them). Cleanup checkpoint of the durable per-task timeline record
+# (bin/fm-task-timeline.sh; schema owner bin/fm_task_timeline.py) runs first,
+# while the status log, worktree, and task metadata it reads still exist. It
+# exits 0 with a warning on any failure and never changes what this teardown
+# refuses or removes.
+if [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-task-timeline.sh" checkpoint cleanup "$ID" >/dev/null \
+    || echo "warning: timeline cleanup checkpoint for $ID not written (exit $?)" >&2
+fi
+
+# Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the

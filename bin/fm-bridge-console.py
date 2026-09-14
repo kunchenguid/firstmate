@@ -7,8 +7,11 @@
 Reads the fm-bridge-snapshot.v1 JSON produced by bin/fm-bridge-snapshot.sh
 (the collector, built alongside this in a separate task) and renders it as a
 Textual app: quota strip, fleet table, backlog counts, upstream status, and
-unrecorded-process warnings. Direct keys (r/q/u/p/o) run immediately and only
-ever read. Queued keys (s, /, f, U) always show what will be sent, ask for
+unrecorded-process warnings. Direct keys (r/q/u/p/o/t) run immediately and only
+ever read; `t` renders the selected task's time and token timeline from the
+durable record bin/fm_task_timeline.py owns (data/<id>/timeline.json) plus, for
+a live task, the same sources the collector reads. Queued keys (s, /, f, U)
+always show what will be sent, ask for
 confirmation, then hand the text to `bin/fm-inbox.sh note` - this console
 never calls fm-send.sh, fm-spawn.sh, fm-control.sh, fm-pr-merge.sh, `git push`,
 or any merge; that is firstmate's job once it drains the note.
@@ -32,6 +35,9 @@ BIN_DIR = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("fm_bridge_lib", BIN_DIR / "fm_bridge_lib.py")
 lib = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(lib)
+_tl_spec = importlib.util.spec_from_file_location("fm_task_timeline", BIN_DIR / "fm_task_timeline.py")
+timeline = importlib.util.module_from_spec(_tl_spec)
+_tl_spec.loader.exec_module(timeline)
 
 from rich.text import Text  # noqa: E402
 from textual.app import App, ComposeResult  # noqa: E402
@@ -61,6 +67,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--inbox-cmd", default=str(BIN_DIR / "fm-inbox.sh"))
     p.add_argument("--quota-cmd", default="quota-axi")
     p.add_argument("--lavish-cmd", default="lavish-axi")
+    p.add_argument("--fm-home", default=None, help="home whose data/<id>/timeline.json the t key reads (default: the snapshot's fm_home)")
     return p.parse_args(argv)
 
 
@@ -214,7 +221,7 @@ class BridgeConsole(App[None]):
         Binding("slash", "route", "Route"),
         Binding("f", "propose_restart", "Restart"),
         Binding("U", "take_upstream", "Take upstream"),
-        Binding("t", "timeline_coming", "Timeline (coming)"),
+        Binding("t", "timeline", "Timeline"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
@@ -451,8 +458,22 @@ class BridgeConsole(App[None]):
             text.append("no PR on the selected agent and no open Lavish sessions")
         return text
 
-    def action_timeline_coming(self) -> None:
-        self.notify("timeline view is coming in a later piece")
+    def action_timeline(self) -> None:
+        agent = self._selected_agent_id()
+        if agent is None:
+            self.notify("select an agent in the fleet table first", severity="warning")
+            return
+        self.run_worker(lambda: self._timeline(agent), thread=True, exclusive=True, group="timeline")
+
+    def _timeline(self, agent_id: str) -> None:
+        """Read-only: the durable record under data/<id>/, plus the live sources
+        for a task that is still running (bin/fm_task_timeline.py owns both)."""
+        fm_home = self.args.fm_home or (self.snapshot or {}).get("fm_home") or None
+        try:
+            body = timeline.format_timeline(timeline.build_timeline(fm_home, agent_id))
+        except Exception as exc:  # noqa: BLE001 - one broken source must not take the console down.
+            body = f"timeline failed: {exc}"
+        self.call_from_thread(self.push_screen, MessageModal(f"timeline: {agent_id}", body or "(empty)"))
 
     # -- queued keys (confirm, then fm-inbox.sh note) -------------------------
 
