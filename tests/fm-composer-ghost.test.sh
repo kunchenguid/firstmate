@@ -479,11 +479,12 @@ test_unproved_empty_geometry_fails_closed() {
           fm_tmux_composer_state "fakepane")
         ;;
       idle)
-        # A row matching the idle-placeholder regex is recognized furniture
+        # A row matching the idle-placeholder regex is excused as furniture
         # regardless of styling (issue #2483's hint-row-poisoning case), so
-        # this row reads empty rather than pending; ambiguous geometry then
-        # cannot prove that empty, so the box falls to unknown, same as the
-        # ghost case above.
+        # this row casts no pending vote; furniture alone is never positive
+        # proof of emptiness though, and no other row in this single-row box
+        # reads empty on its own merits, so the box falls to unknown, same as
+        # the ghost case above.
         expected=unknown
         printf '╭────────────╮\n│ idle hint │\n╰────────────╯\n' > "$capture"
         out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
