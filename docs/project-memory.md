@@ -38,8 +38,17 @@ bin/fm-project-memory.sh scan --all
 
 The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, knowledge the project's own ignore rules keep out of every clone (`IGNORED_KNOWLEDGE`, and no other category sees it), and ignored directories that hold working material rather than knowledge.
 `IGNORED_KNOWLEDGE` covers both shapes an ignore rule takes, because the leak is the same either way: a `docs/*-internal.md` rule over a production audit, and a plain `notes/` rule over the whole directory.
-The same classifier decides which of the two an ignored directory is, so `notes/` and `docs/` count in the gap while `vendor/` and `herramientas/` stay working material.
-Untracked paths are listed one by one rather than folded into their directory, so a wholly untracked `informes/` is classified by the documents inside it instead of by its own name, and a document is tested against the knowledge rules before the scratch ones, so a conversation dump named `docs/conversaciones.log` is knowledge rather than build output.
+The same classifier decides which of the two an ignored directory is, so `notes/` and `docs/` count in the gap while `herramientas/` stays working material.
+Untracked paths are listed one by one rather than folded into their directory, so a wholly untracked `informes/` is classified by the documents inside it instead of by its own name.
+
+Scratch is decided by **scope**, not by precedence.
+Inside a dependency or build tree - `node_modules/`, `vendor/`, `.venv/`, `dist/`, `build/` and their like - scratch wins whatever the file is called, so `node_modules/react/README.md` is a dependency's own documentation and never counts as this project's knowledge.
+Anywhere else, knowledge wins over a scratch NAME or extension, so a conversation dump at `docs/conversaciones.log` is counted rather than disappearing into the scratch tally.
+
+Each bounded list spends its slots on what the report exists to surface, since the one thing the cap can cost is the captain's own document never being printed.
+Paths are ordered by the signal the classifier already carries - the project's knowledge surface (`docs/`, `.agents/`, `AGENTS.md`) first, then documents by name, then the rest - rather than alphabetically.
+When a list does not fit, the fullest directories collapse to one counted line each until it does, so 45 caption files beside one audit no longer bury the audit; nothing collapses while everything fits, because the names are the point.
+The omission line says how many of what it hides is knowledge, which is what decides whether to re-run with a larger `--limit`.
 
 **Known gap, still open: a git submodule's own uncommitted knowledge is invisible to the scan.**
 The superproject reports a dirty submodule as a single modified entry (` M vendorlib`), which the classifier reads as working material, so `vendorlib/docs-audit.md` sitting uncommitted inside it produces `KNOWLEDGE_GAP: 0` and `VERDICT: parity`.

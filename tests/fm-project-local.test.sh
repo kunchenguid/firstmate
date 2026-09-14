@@ -471,6 +471,44 @@ test_a_directory_read_only_halfway_is_never_counted_as_updated() {
   pass "fm-project-local.sh: a directory read only halfway is never counted as updated"
 }
 
+# What one manifest path could not finish copying must never end up filed under
+# the next one. A read-only directory in the captain's home makes the cleanup of
+# a failed copy fail too, and a shared staging area would then hand the leftover
+# to whatever path came next - wrong material under a name the worker trusts,
+# with no error anywhere.
+test_a_failed_copy_never_leaks_into_the_next_manifest_path() {
+  local world out
+  world=$(make_world crosstalk)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas/locked" "$world/canonical/informes"
+  printf 'the replay tool\n' >"$world/canonical/herramientas/replay.py"
+  printf 'the production audit\n' >"$world/canonical/herramientas/audit.md"
+  printf 'material that belongs under herramientas\n' >"$world/canonical/herramientas/locked/leak.txt"
+  printf 'the bug findings\n' >"$world/canonical/informes/bugs.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\ninformes\n' >"$world/home/data/project-local/demo/manifest"
+  local_cmd "$world" sync demo >/dev/null || fail "the first sync failed"
+
+  chmod 000 "$world/canonical/herramientas/audit.md"
+  chmod 555 "$world/canonical/herramientas/locked"
+  out=$(local_cmd "$world" sync demo) || fail "the sync failed outright: $out"
+  chmod 755 "$world/canonical/herramientas/locked"
+  chmod 644 "$world/canonical/herramientas/audit.md"
+
+  assert_absent "$world/home/data/project-local/demo/material/informes/locked" \
+    "material from one manifest path was filed under the next one"
+  assert_grep "the bug findings" "$world/home/data/project-local/demo/material/informes/bugs.md" \
+    "the clean manifest path did not reach the store"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  assert_absent "$world/copy/.fm-local/informes/locked" "the worker received material filed under the wrong path"
+  pass "fm-project-local.sh: a failed copy never leaks into the next manifest path"
+}
+
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
   local world out rc
   world=$(make_world visible)
@@ -524,6 +562,7 @@ test_the_unverified_date_survives_a_change_of_reason
 test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be
 test_a_failed_copy_leaves_the_stores_own_copy_standing
 test_a_directory_read_only_halfway_is_never_counted_as_updated
+test_a_failed_copy_never_leaks_into_the_next_manifest_path
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

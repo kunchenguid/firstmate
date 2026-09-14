@@ -244,19 +244,31 @@ is_git_worktree_root() {  # <path>
 # needs. Deliberately generous, because the cost of listing one extra document
 # for the captain to judge is far below the cost of silently leaving four
 # months of findings on one desktop.
-looks_like_knowledge() {  # <relative path>
-  local p=$1 base=${1##*/}
-  case $base in
+# The project's own knowledge surface: the memory files an agent loads by name,
+# and the directories a project keeps its documents in. This is the strongest
+# signal the classifier has, which is why a bounded listing spends its slots
+# here first.
+looks_like_knowledge_home() {  # <relative path>
+  case ${1##*/} in
     AGENTS.md | CLAUDE.md | GEMINI.md | QWEN.md | .cursorrules | .windsurfrules) return 0 ;;
-    README* | CONTRIBUTING* | CHANGELOG* | NOTES* | TODO*) return 0 ;;
   esac
-  case $base in
-    *.md | *.mdx | *.rst | *.adoc | *.org | *.txt | *.pdf | *.docx) return 0 ;;
-  esac
-  case $p in
+  case $1 in
     docs/* | doc/* | notes/* | knowledge/* | playbooks/* | reference/* | research/* | findings/* | .agents/* | .claude/* | .cursor/* | .github/instructions/*) return 0 ;;
   esac
   return 1
+}
+
+# A document anywhere else, recognised by its own name or extension.
+looks_like_knowledge_name() {  # <relative path>
+  case ${1##*/} in
+    README* | CONTRIBUTING* | CHANGELOG* | NOTES* | TODO*) return 0 ;;
+    *.md | *.mdx | *.rst | *.adoc | *.org | *.txt | *.pdf | *.docx) return 0 ;;
+  esac
+  return 1
+}
+
+looks_like_knowledge() {  # <relative path>
+  looks_like_knowledge_home "$1" || looks_like_knowledge_name "$1"
 }
 
 # Scratch: build output, caches, editor state, and per-run artifacts. Reported
@@ -266,10 +278,10 @@ looks_like_knowledge() {  # <relative path>
 # dependency's own README is the dependency's, not the captain's.
 looks_like_scratch_tree() {  # <relative path>
   case "/$1" in
-    */node_modules/* | */__pycache__/* | */.venv/* | */venv/* | */.pytest_cache/* | */.mypy_cache/* | */.ruff_cache/* | */.gradle/* | */.idea/* | */.vscode/* | */dist/* | */build/* | */target/* | */coverage/* | */.next/* | */.turbo/*) return 0 ;;
+    */node_modules/* | */vendor/* | */__pycache__/* | */.venv/* | */venv/* | */.pytest_cache/* | */.mypy_cache/* | */.ruff_cache/* | */.gradle/* | */.idea/* | */.vscode/* | */dist/* | */build/* | */target/* | */coverage/* | */.next/* | */.turbo/*) return 0 ;;
   esac
   case $1 in
-    node_modules/ | __pycache__/ | .venv/ | venv/ | .pytest_cache/ | .mypy_cache/ | .ruff_cache/ | .gradle/ | .idea/ | .vscode/ | dist/ | build/ | target/ | coverage/ | .next/ | .turbo/) return 0 ;;
+    node_modules/ | vendor/ | __pycache__/ | .venv/ | venv/ | .pytest_cache/ | .mypy_cache/ | .ruff_cache/ | .gradle/ | .idea/ | .vscode/ | dist/ | build/ | target/ | coverage/ | .next/ | .turbo/) return 0 ;;
     *.egg-info/) return 0 ;;
   esac
   return 1
@@ -322,6 +334,87 @@ bounded_file_count() {  # <dir> <cap>
   else
     printf '%s\n' "$n"
   fi
+}
+
+# A bounded list of PATHS spends its slots on what the report exists to
+# surface. Three rules, all of them about the one thing the cap can cost: the
+# captain's own document never being printed.
+#   - Order is the signal the classifier already carries, not the alphabet: the
+#     project's knowledge surface first, then documents by name, then the rest.
+#   - One directory cannot take every slot. When the list does not fit, the
+#     fullest directories collapse to one counted line each until it does, so
+#     45 caption files beside one audit no longer bury the audit.
+#   - Nothing collapses while everything fits, because the names are the point.
+# The omission line says how many of what it hides is knowledge, which is the
+# number that decides whether to look further with a larger --limit.
+print_path_list() {  # <limit> < paths
+  local limit=$1 path rank dir
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if looks_like_knowledge_home "$path"; then
+      rank=0
+    elif looks_like_knowledge_name "$path"; then
+      rank=1
+    else
+      rank=2
+    fi
+    case $path in
+      */*) dir="${path%/*}/" ;;
+      *) dir='./' ;;
+    esac
+    printf '%s\t%s\t%s\n' "$rank" "$dir" "$path"
+  done | LC_ALL=C sort -t"$(printf '\t')" -k1,1n -k3,3 | awk -F'\t' -v limit="$limit" '
+    {
+      rank[NR] = $1 + 0
+      dir[NR] = $2
+      path[NR] = $3
+      count[$2]++
+      if ($1 + 0 < 2) known[$2]++
+      if (!($2 in seen)) { seen[$2] = 1; order[++nd] = $2 }
+      n = NR
+    }
+    END {
+      lines = n
+      while (lines > limit) {
+        biggest = ""
+        most = 1
+        for (i = 1; i <= nd; i++) {
+          d = order[i]
+          if (folded[d]) continue
+          if (count[d] > most) { most = count[d]; biggest = d }
+        }
+        if (biggest == "") break
+        folded[biggest] = 1
+        lines -= count[biggest] - 1
+      }
+      shown = 0
+      hidden = 0
+      hidden_known = 0
+      for (i = 1; i <= n; i++) {
+        d = dir[i]
+        if (folded[d]) {
+          if (done[d]) continue
+          done[d] = 1
+          if (shown < limit) {
+            printf "    %s (%d files)\n", d, count[d]
+            shown++
+          } else {
+            hidden += count[d]
+            hidden_known += known[d]
+          }
+          continue
+        }
+        if (shown < limit) {
+          printf "    %s\n", path[i]
+          shown++
+        } else {
+          hidden++
+          if (rank[i] < 2) hidden_known++
+        }
+      }
+      if (hidden > 0) printf "    ... and %d more (%d of them knowledge)\n", hidden, hidden_known
+    }
+  '
 }
 
 print_capped_list() {  # <limit> < paths
@@ -597,7 +690,7 @@ scan_project() {  # <project> <limit>
 
   if [ "$knowledge" -gt 0 ]; then
     printf 'UNCOMMITTED_KNOWLEDGE: %s\n' "$knowledge"
-    print_capped_list "$limit" <"$tmp/knowledge"
+    print_path_list "$limit" <"$tmp/knowledge"
     gap=$((gap + knowledge))
   else
     printf 'UNCOMMITTED_KNOWLEDGE: none\n'
@@ -611,7 +704,7 @@ scan_project() {  # <project> <limit>
   fi
   if [ "$other" -gt 0 ]; then
     printf 'UNCOMMITTED_OTHER: %s\n' "$other"
-    print_capped_list "$limit" <"$tmp/other"
+    print_path_list "$limit" <"$tmp/other"
     context=$((context + other))
   else
     printf 'UNCOMMITTED_OTHER: none\n'

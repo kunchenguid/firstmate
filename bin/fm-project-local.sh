@@ -172,34 +172,47 @@ refuse_symlinks() {  # <dir> <what>
 # settles the shape: a path that was a directory and is a file now lands in its
 # place rather than inside the directory it used to be.
 copy_into_store() {  # <project> <source> <destination under material>
-  local staging status
-  staging="$(store_dir "$1")/.incoming.$$"
-  mkdir -p "$(dirname "$staging")" || return 1
-  rm -rf -- "$staging"
+  local staging payload status rc=1
+  mkdir -p "$(store_dir "$1")" || return 1
+  # A name of its own per call, not per process: a cleanup that cannot finish -
+  # the source made a directory read-only, so the copy is stuck there - must
+  # never leave something the NEXT manifest path would be extracted on top of
+  # and carried into the store as its own material.
+  staging=$(mktemp -d "$(store_dir "$1")/.incoming.XXXXXX") || return 1
+  payload="$staging/payload"
   if [ -d "$2" ]; then
-    mkdir -p "$staging" || return 1
-    (cd "$2" && tar cf - .) | (cd "$staging" && tar xf -)
-    # The pipeline's own status is the extractor's, and tar extracts a truncated
-    # stream without complaining, so the reader's status is the one that says
-    # whether the whole tree was actually read.
-    status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
-    if [ "$status" != "0:0" ]; then
-      rm -rf -- "$staging"
-      return 1
+    if mkdir -p "$payload"; then
+      (cd "$2" && tar cf - .) | (cd "$payload" && tar xf -)
+      # The pipeline's own status is the extractor's, and tar extracts a
+      # truncated stream without complaining, so the reader's status is the one
+      # that says whether the whole tree was actually read.
+      status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
+      [ "$status" = "0:0" ] && rc=0
     fi
-  elif ! cp -- "$2" "$staging"; then
-    rm -rf -- "$staging"
+  elif cp -- "$2" "$payload"; then
+    rc=0
+  fi
+  if [ "$rc" -ne 0 ] || ! mkdir -p "$(dirname "$3")"; then
+    remove_tree "$staging"
     return 1
   fi
-  mkdir -p "$(dirname "$3")"
-  chmod -R u+w "$3" 2>/dev/null || true
-  rm -rf -- "$3"
-  if ! mv -- "$staging" "$3"; then
-    rm -rf -- "$staging"
+  remove_tree "$3"
+  if ! mv -- "$payload" "$3"; then
+    remove_tree "$staging"
     return 1
   fi
+  remove_tree "$staging"
   chmod -R u+w "$3" 2>/dev/null || true
   return 0
+}
+
+# Material copied out of a source tree carries that tree's permissions, so a
+# directory the captain made read-only would defeat a plain `rm -rf` and leave
+# the store holding something nobody meant it to keep.
+remove_tree() {  # <path>
+  [ -e "$1" ] || return 0
+  chmod -R u+w "$1" 2>/dev/null || true
+  rm -rf -- "$1"
 }
 
 canonical_home() {  # <project>
@@ -250,10 +263,7 @@ stage_material() {  # <project> <worktree>
   # Pool slots are reused across a project's tasks, so a previous task's staged
   # material has to go even when this task stages none; leaving it would hand a
   # worker material nobody decided it should have.
-  if [ -e "$wt/$STAGE_DIR_NAME" ]; then
-    chmod -R u+w "$wt/$STAGE_DIR_NAME" 2>/dev/null || true
-    rm -rf -- "${wt:?}/$STAGE_DIR_NAME"
-  fi
+  remove_tree "${wt:?}/$STAGE_DIR_NAME"
   [ "$empty" -eq 0 ] || return 0
 
   # git resolves --git-path relative to the worktree, not to this process's cwd,
@@ -293,8 +303,7 @@ stage_material() {  # <project> <worktree>
   # and the caller is refused rather than launched.
   seen=$(git -C "$wt" status --porcelain --untracked-files=all -- "$STAGE_DIR_NAME" 2>/dev/null || true)
   if [ -n "$seen" ]; then
-    chmod -R u+w "$dest" 2>/dev/null || true
-    rm -rf -- "$dest"
+    remove_tree "$dest"
     die "git still reports paths under $STAGE_DIR_NAME in $wt after excluding it; refusing to stage material a worker could commit"
   fi
   printf 'staged: %s local material into %s\n' "$project" "$dest"
@@ -353,8 +362,7 @@ case "$CMD" in
     valid_relative_path "$REL" || die "invalid path: $REL"
     MATERIAL=$(material_dir "$NAME")
     [ -e "$MATERIAL/$REL" ] || die "not in the store: $REL"
-    chmod -R u+w "$MATERIAL/$REL" 2>/dev/null || true
-    rm -rf -- "${MATERIAL:?}/$REL"
+    remove_tree "${MATERIAL:?}/$REL"
     echo "removed: $NAME $REL"
     ;;
   sync)

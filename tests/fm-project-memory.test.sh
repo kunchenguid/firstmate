@@ -216,18 +216,18 @@ test_scan_reports_a_knowledge_file_the_project_ignores() {
 test_documents_inside_an_ignored_tree_stay_folded_into_one_line() {
   local world out
   world=$(make_world foldedtree)
-  mkdir -p "$world/source/vendor/pkg/docs"
-  printf 'vendor/\n' >"$world/source/.gitignore"
-  printf 'third-party readme\n' >"$world/source/vendor/pkg/README.md"
-  printf 'third-party guide\n' >"$world/source/vendor/pkg/docs/guide.md"
+  mkdir -p "$world/source/terceros/pkg/docs"
+  printf 'terceros/\n' >"$world/source/.gitignore"
+  printf 'third-party readme\n' >"$world/source/terceros/pkg/README.md"
+  printf 'third-party guide\n' >"$world/source/terceros/pkg/docs/guide.md"
   git_q -C "$world/source" add .gitignore
   git_q -C "$world/source" commit -qm ignore
   publish "$world"
   record_source "$world"
   out=$(run_scan "$world")
-  assert_contains "$out" "IGNORED_KNOWLEDGE: none" "a vendored tree was reported file by file as knowledge"
-  assert_contains "$out" "vendor/" "the ignored tree was not listed for context"
-  assert_contains "$out" "VERDICT: parity" "a vendored tree alone turned the verdict into a leak"
+  assert_contains "$out" "IGNORED_KNOWLEDGE: none" "a third-party tree was reported file by file as knowledge"
+  assert_contains "$out" "terceros/" "the ignored tree was not listed for context"
+  assert_contains "$out" "VERDICT: parity" "a third-party tree alone turned the verdict into a leak"
   pass "fm-project-memory.sh: documents inside an ignored tree stay folded into one line"
 }
 
@@ -342,6 +342,46 @@ test_documentation_inside_a_dependency_tree_is_not_project_knowledge() {
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 1" "the dependency READMEs were counted as project knowledge"
   assert_contains "$out" "docs/audit.md" "the captain's own document was not reported"
   pass "fm-project-memory.sh: documentation inside a dependency tree is not project knowledge"
+}
+
+# A vendored dependency tree is the dependency's, not the captain's, whether or
+# not the project has got round to ignoring it. Counting it inflates the gap and
+# fills the bounded listing with files of no value to him.
+test_a_vendored_tree_is_not_project_knowledge() {
+  local world out
+  world=$(make_world vendored)
+  mkdir -p "$world/source/vendor/github.com/pkg/errors" "$world/source/docs"
+  printf 'third-party readme\n' >"$world/source/vendor/github.com/pkg/errors/README.md"
+  printf 'module list\n' >"$world/source/vendor/modules.txt"
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_not_contains "$out" "vendor/" "a vendored tree was reported as the project's own knowledge"
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 1" "the vendored files were counted as project knowledge"
+  assert_contains "$out" "docs/audit.md" "the captain's own document was not reported"
+  pass "fm-project-memory.sh: a vendored tree is not project knowledge"
+}
+
+# The one thing the cap can cost is the captain's own document never being
+# printed. A folder of captions sorts before `docs/` alphabetically and there
+# are more of them than the cap allows, so ordering by the alphabet buries the
+# audit the scan exists to surface.
+test_a_crowded_directory_never_buries_the_captains_own_document() {
+  local world out i
+  world=$(make_world crowded)
+  mkdir -p "$world/source/assets" "$world/source/docs"
+  i=1
+  while [ "$i" -le 45 ]; do
+    printf 'caption\n' >"$world/source/assets/caption-$i.txt"
+    i=$((i + 1))
+  done
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 46" "the count stopped being complete"
+  assert_contains "$out" "docs/audit.md" "a crowded directory buried the captain's own document"
+  assert_contains "$out" "assets/ (45 files)" "the crowded directory did not collapse into one counted line"
+  pass "fm-project-memory.sh: a crowded directory never buries the captain's own document"
 }
 
 test_scratch_is_counted_but_never_listed() {
@@ -468,7 +508,24 @@ test_scan_is_bounded_by_limit() {
   record_source "$world"
   out=$(run_scan "$world" --limit 3)
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 12" "the complete count was not reported"
-  assert_contains "$out" "... and 9 more" "the listing was not bounded by --limit"
+  assert_contains "$out" "docs/ (12 files)" "one crowded directory was not collapsed to fit the limit"
+  assert_not_contains "$out" "docs/note-7.md" "the listing printed past its limit"
+
+  # When the overflow is spread across directories there is nothing to collapse,
+  # so the omission line carries it - and says how much of what it hides is
+  # knowledge, which is what decides whether to re-run with a larger limit.
+  world=$(make_world boundedspread)
+  local d=0
+  while [ "$d" -lt 6 ]; do
+    mkdir -p "$world/source/area-$d"
+    printf 'finding %s\n' "$d" >"$world/source/area-$d/notes.md"
+    d=$((d + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world" --limit 3)
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 6" "the complete count was not reported"
+  assert_contains "$out" "... and 3 more (3 of them knowledge)" \
+    "the omission line did not say how much of what it hides is knowledge"
   pass "fm-project-memory.sh: counts stay complete while listings stay bounded"
 }
 
@@ -482,6 +539,8 @@ test_an_accented_path_is_classified_like_its_ascii_twin
 test_an_untracked_knowledge_directory_is_classified_by_what_is_inside_it
 test_a_knowledge_document_with_a_scratch_name_is_still_knowledge
 test_documentation_inside_a_dependency_tree_is_not_project_knowledge
+test_a_vendored_tree_is_not_project_knowledge
+test_a_crowded_directory_never_buries_the_captains_own_document
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak
