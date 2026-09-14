@@ -91,13 +91,23 @@ A `Send & End` close carrying the captain's own answer is a `feedback` response 
 The same published lifecycle above is the whole basis for the `silent` verdict, so no new source knowledge was needed.
 `Send & End` delivers the captain's final feedback once as a `feedback` response carrying `session_ended`, and every poll after it returns that empty ended response.
 A board the captain closes without saying anything therefore answers a poll with an empty ended session and nothing else, and announcing that put a wake in front of the handler whose entire content was that nothing happened.
-That is what the adapter's `silent` command answers, and the listener now consults that same command rather than restating the rule: a quiet absence is neither captured nor announced, and the registration stays armed for the board's next round.
+That is what the adapter's `silent` command answers, and the listener shares that same ended-no-content shape rather than restating the rule: a quiet absence is neither captured nor announced, and the registration stays armed for the board's next round.
 
 The verdict is confined to that one shape and fails closed everywhere else.
 A `Send & End` close carrying the captain's own answer classifies `feedback`, never `ended`, so it is delivered unchanged; so is any `ended` result that still carries a `prompts` or `feedback` block, which this lifecycle is not expected to produce but which must never be dropped on that expectation.
 A `waiting` session, an `unknown` or unreadable result, and every error all still reach the runner rather than being waited out, because none of them proves nothing was said.
 The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
 Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore delivered.
+
+## Why the hold-back bound is derived from PATH_MAX
+
+The listener must hold a quiet absence whole to recognize it, so it holds back at most `POLL_HOLD_LIMIT_BYTES` and streams anything larger.
+That bound used to be a fixed 4096, justified as sitting far above envelopes of a few hundred bytes, but the ended-session envelope repeats the artifact path four times - the `file:` field plus three mentions inside `next_step` - so its encoded size is `378 + 4 x len(realpath)`.
+Measured against the installed `lavish-axi` 0.1.67 and the real `@toon-format/toon` encoder, a 929-character path encodes to 4094 bytes and a 930-character one to 4098, so the old bound was already overrun by a path length the tool accepts.
+The bound is now `378 + 4 x PATH_MAX`, asked of the filesystem, which no artifact path can exceed.
+
+An over-bound response is the one pathological case left, and it is bounded and loud rather than silent: the listener never claims silence for a response it could not hold whole, so the runner announces it exactly once and then the terminal verdict retires the source.
+A real feedback payload above the bound is streamed, delivered, and announced unchanged and is never retired.
 
 ## The loss limitation this runner cannot close
 
@@ -133,6 +143,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | adapter-owned silence verdict | an armed Lavish source whose stand-in poll returns an empty ended session captures nothing and appends no wake, while the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler; the adapter's `silent` command is the listener's own rule for that shape |
 | Lavish source persistence | an armed Lavish source survives the end of its session, a browser end, a board with no active session at all, and a stopped server: each of those transcripts runs the real adapter and runner against a stand-in poll, captures nothing, appends no wake, and leaves the registration in place, and a board reopened afterwards still delivers its next round as sequence 2 |
 | quiet-absence determinism | the transcripts the routing above rests on were re-measured against the real installed `lavish-axi` 0.1.67 and a real board driven over a real review window: a captain browser end answers with the `status: ended` envelope and an artifact with no active session answers with the not-found envelope, both of which the listener waits out, while a deleted artifact answers with its own path-resolution refusal |
+| hold-back bound | a 930-character artifact path whose real ended-session envelope exceeds 4096 bytes is held whole and waited out - no capture, no wake, and the registration stays armed - while the adapter's derived bound is `378 + 4 x PATH_MAX`; re-running the same experiment against a copy of the adapter with the bound fixed back to 4096 makes the envelope over-bound, so it is announced once and the source is retired instead of looping |
 | the board file ends the source | a stand-in poll returning the published poll's own artifact-path refusal captures exactly one result, announces it, retires the registration, and releases the claim, while an ended session, a `Send & End` delivery, a missing session, and payload text imitating that refusal all keep the source armed |
 | deliberate break | the persistence suite re-runs its own scenario against a copy of the adapter with the listener's quiet-absence predicate and the terminal verdict disabled, and requires that copy to lose the registration, so a green persistence assertion cannot be an artefact of a test that never reached the rule |
 | silence fails closed | the adapter's published `silent` command suppresses only an `ended` session with no queued content block, and announces a real answer, freeform prose, any recognized content block regardless of its declared count, a malformed top-level content header, a `waiting` or `missing` session, a server error, an unreadable result, and indented payload text imitating an empty content block; the `remote-reply` and `when` adapters, which implement no `silent` command, announce every result |

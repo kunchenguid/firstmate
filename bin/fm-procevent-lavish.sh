@@ -45,11 +45,15 @@
 #            calls, and the only place Lavish's notion of "ended" is decided: a
 #            board FILE that no longer resolves ends the source, and a session
 #            ending does not, which is the subject of the source-tracks-the-board
-#            note below.
+#            note below. A quiet absence larger than the hold-back bound is the
+#            one other terminal shape, because the listener could not hold it
+#            whole to wait it out.
 # silent     Exit 0 when the captured result is a routine no-op the runner should
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
-#            only place Lavish's notion of "nothing was said" is decided.
+#            only place Lavish's notion of "nothing was said" is decided. A
+#            response larger than the hold-back bound is never silent, because
+#            the listener could not hold it whole to recognize it as one.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish
@@ -74,11 +78,13 @@
 # listener waits it out whole: it prints nothing and exits nonzero, the runner
 # records no result for the capture, and this registration stays armed. `silent`
 # is the adapter's single statement of the narrower shape - an ended session that
-# said nothing - and the listener consults that same command rather than
-# restating it, adding only the second shape: no active session at all, which is
-# what a stopped Lavish server and a board nobody has opened yet both return.
-# Printing either one instead would capture a fresh result on every supervision
-# cycle and grow the inbox without bound.
+# said nothing - and the listener shares that same shape rather than restating
+# it, adding only the second: no active session at all, which is what a stopped
+# Lavish server and a board nobody has opened yet both return. Waiting either
+# one out is what keeps a stale registration from capturing a fresh result on
+# every supervision cycle and growing the inbox without bound. An over-bound quiet
+# absence is the one exception, and the bound paragraph below makes it loud and
+# terminal rather than silent.
 #
 # THE SOURCE TRACKS THE BOARD FILE, NOT THE SESSION, and reading a session as
 # final is the defect this adapter used to have. `lavish-axi <file>` opens,
@@ -90,16 +96,27 @@
 # gone, the wake gone, and the board's next round of feedback reaching nobody. So
 # the board file itself is this source's lifetime. A missing artifact makes
 # `lavish-axi` refuse to resolve the path before it ever looks for a session, and
-# that refusal is the one thing `terminal` calls terminal.
+# that refusal is the one normal thing `terminal` calls terminal; the bound
+# paragraph below names the one pathological exception.
 #
 # The listener holds back at most POLL_HOLD_LIMIT_BYTES of a response, which is
 # what recognizing a quiet absence whole costs, and streams everything past that
 # bound straight through: a response too large to be a quiet absence needs no
-# decision, and the runner's own output bound applies to it unchanged. Both
-# quiet-absence envelopes are a few hundred bytes, so the bound sits far above
-# what it must hold and far below a real feedback payload. A quiet absence that
-# ever outgrew the bound would be delivered rather than waited out; that is the
-# one shape where a stale registration can still accumulate a result per cycle.
+# decision, and the runner's own output bound applies to it unchanged. The bound
+# is derived from the longest artifact path the OS can name rather than fixed,
+# because the largest quiet absence IS a path: lavish-axi's ended-session
+# envelope is 378 bytes of fixed text plus the artifact realpath four times (the
+# `file:` field and three mentions inside `next_step`), so 378 + 4 x PATH_MAX
+# covers every envelope that can exist. Measured against the real encoder, a
+# 929-character path encodes to 4094 bytes and a 930-character one to 4098 - the
+# cliff the fixed 4096-byte bound used to have - and since a path can never
+# exceed PATH_MAX, deriving the bound removes it. A response that still outgrows
+# the bound is not left as a silent no-op that stays armed: the listener never
+# claims silence for a response it could not hold whole, so the runner announces
+# it once and then retires the source, making the pathological case loud and
+# bounded instead of appending a result per supervision cycle. A real feedback
+# payload past the bound is still streamed, delivered, and announced exactly as
+# before, and never retired.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -223,8 +240,21 @@ POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
-# The hold-back bound described in the header.
-POLL_HOLD_LIMIT_BYTES=4096
+# The hold-back bound described in the header: the largest ended-session
+# envelope lavish-axi can emit, 378 fixed bytes plus the artifact realpath four
+# times, sized by the longest path this OS can name. PATH_MAX is asked of the
+# filesystem rather than assumed; a missing or non-numeric answer falls back to
+# the Linux ceiling.
+poll_hold_path_max() {
+  local path_max
+  path_max=$(getconf PATH_MAX / 2>/dev/null) || path_max=
+  case "$path_max" in
+    ''|*[!0-9]*) path_max=4096 ;;
+  esac
+  [ "$path_max" -gt 0 ] || path_max=4096
+  printf '%s\n' "$path_max"
+}
+POLL_HOLD_LIMIT_BYTES=$(( 378 + 4 * $(poll_hold_path_max) ))
 
 # What a waited-out quiet absence exits with. Its stdout is empty, which is what
 # makes the runner's no-result path leave the registration armed; the code itself
@@ -376,9 +406,11 @@ cmd_poll() {
 }
 
 # Whether a staged poll response is one the listener waits out rather than
-# delivers. It is the union of the two shapes the header describes, and it asks
-# the adapter's own `silent` command for the first of them rather than restating
-# that rule here.
+# delivers. It is the union of the two shapes the header describes: the published
+# not-found error, and the ended-no-content shape the runner's own `silent` seam
+# also names through result_is_silent_shape. It deliberately ignores the
+# hold-back bound, because its only caller in cmd_poll has already held the
+# response whole; the terminal verdict below checks the bound itself.
 poll_response_is_quiet_absence() {  # <result-file>
   local file=${1-}
   [ -n "$file" ] || return 1
@@ -386,7 +418,21 @@ poll_response_is_quiet_absence() {  # <result-file>
   case "$(cmd_classify "$file")" in
     missing) return 0 ;;
   esac
-  cmd_silent "$file"
+  result_is_silent_shape "$file"
+}
+
+# Whether a captured response is larger than the hold-back bound, and so was
+# streamed rather than held whole. A streamed response may still LOOK like a
+# quiet absence, but the listener never had it whole and must not decide it was
+# one: both the silence seam and the terminal verdict use this to keep the
+# pathological case loud and bounded.
+poll_response_exceeds_hold_bound() {  # <result-file>
+  local file=${1-} size
+  [ -n "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  size=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -gt "$POLL_HOLD_LIMIT_BYTES" ]
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
@@ -449,17 +495,21 @@ artifact_unresolvable() {  # <result-file>
 # Whether a captured result ends this source, for the generic runner's automatic
 # retirement. Lavish's notion of "ended" lives here and nowhere else, and it is
 # about the board file rather than the session: an artifact that no longer
-# resolves is the only thing that ends a source, because `lavish-axi <file>` can
-# open, resume, or reopen a session for it at any time. An ended session, a board
-# with no active session, and the final feedback of a `Send & End` review all
-# keep the source armed. The listener never delivers a missing or ended response
-# while the artifact file is still there, so the captures that reach this verdict
-# are a board's disappearance and real feedback.
+# resolves is the only normal thing that ends a source, because `lavish-axi <file>`
+# can open, resume, or reopen a session for it at any time. An ended session, a
+# board with no active session, and the final feedback of a `Send & End` review
+# all keep the source armed. The listener never delivers a missing or ended
+# response while the artifact file is still there, so the captures that reach
+# this verdict are a board's disappearance, real feedback, and the one
+# pathological shape it could not hold whole: a quiet absence larger than the
+# hold-back bound, which is announced once and then retired here rather than
+# left to loop.
 cmd_terminal() {
   local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
-  artifact_unresolvable "$file"
+  artifact_unresolvable "$file" && return 0
+  poll_response_exceeds_hold_bound "$file" && poll_response_is_quiet_absence "$file"
 }
 
 # Whether a completed result carries any queued content block at all. The
@@ -491,6 +541,24 @@ result_has_queued_content() {  # <result-file>
   ' "$1"
 }
 
+# The one shape Lavish calls a routine no-op: a session classified `ended` that
+# carries no queued content block at all. It is named once here because both the
+# listener's quiet-absence test and the runner's silence seam below need it, and
+# it says nothing about size; a caller that may hold only part of a response adds
+# the hold-back condition itself.
+result_is_silent_shape() {  # <result-file>
+  local file=${1-} content_rc
+  [ -n "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(cmd_classify "$file")" = ended ] || return 1
+  result_has_queued_content "$file"
+  content_rc=$?
+  # Only a completed check that proved the result carries nothing is a silent
+  # shape; a check that could not complete announces, like every other
+  # uncertainty here.
+  [ "$content_rc" -eq 1 ]
+}
+
 # Whether a captured result is a routine no-op the runner should record without
 # announcing, for the generic runner's silence seam. Lavish's notion of "nothing
 # was said" lives here and nowhere else: an ended session carrying no queued
@@ -498,18 +566,15 @@ result_has_queued_content() {  # <result-file>
 # handler learns nothing from being told. Every other shape stays announced: a
 # real answer, a waiting session, an unreadable result, and any error. A
 # `missing` session never reaches this seam at all, because the listener waits it
-# out before a capture can exist.
+# out before a capture can exist. A response larger than the hold-back bound is
+# never silent either, because the listener could not hold it whole to recognize
+# it as a quiet absence.
 cmd_silent() {
-  local file=${1-} content_rc
+  local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  [ "$(cmd_classify "$file")" = ended ] || return 1
-  result_has_queued_content "$file"
-  content_rc=$?
-  # Only a completed check that proved the result carries nothing declares
-  # silence; a check that could not complete announces, like every other
-  # uncertainty here.
-  [ "$content_rc" -eq 1 ]
+  poll_response_exceeds_hold_bound "$file" && return 1
+  result_is_silent_shape "$file"
 }
 
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the

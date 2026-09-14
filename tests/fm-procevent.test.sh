@@ -892,7 +892,7 @@ case "${plan[$i]}" in
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
   stream)
-    printf 'x%.0s' {1..16384}
+    printf 'x%.0s' {1..32768}
     printf 'ready\n' > "$LAVISH_STREAM_READY"
     while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
     printf '\n' ;;
@@ -1048,12 +1048,12 @@ mkdir -p "$STREAM_TMPDIR"
 printf '<h1>stream</h1>\n' > "$STREAM_ART"
 # The ceiling this test holds the adapter to, declared here rather than read
 # back from the adapter: deriving it from the implementation would let a widened
-# hold-back bound move the expectation with it and stay green. It is the
-# qualitative bound the adapter advertises - far above the few-hundred-byte
-# quiet-absence envelopes it must hold whole, far below a real feedback payload -
-# and the 16384-byte nonmatch the `stream` fixture writes stands in for the
-# latter, well past this ceiling.
-stream_hold_max=4096
+# hold-back bound move the expectation with it and stay green. The adapter
+# advertises a bound derived from the longest artifact path the OS can name, 378
+# fixed bytes plus the artifact path four times, so no POSIX PATH_MAX of 4096 can
+# push it above 16762; the 32768-byte nonmatch the `stream` fixture writes stands
+# in for a real payload well past that worst case.
+stream_hold_max=16762
 LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
   LAVISH_STREAM_READY="$LAVISH_STREAM_READY" LAVISH_STREAM_RELEASE="$LAVISH_STREAM_RELEASE" \
@@ -1079,6 +1079,101 @@ fi
 : > "$LAVISH_STREAM_RELEASE"
 wait "$STREAM_POLL_PID" || fail "the streaming poll did not exit cleanly"
 pass "a large nonmatch streams past the hold-back ceiling while its source is still open"
+
+# --- regression: a quiet absence larger than the old fixed bound -------------
+# The largest quiet absence is a path, and the ended-session envelope repeats the
+# artifact path four times, so the old fixed 4096-byte hold-back bound was
+# overrun by a board path the tool accepts: a 930-character path encodes to 4098
+# bytes. The bound is now derived from PATH_MAX. This builds a real artifact at
+# least that long, drives its ended session through the real runner, and proves
+# the listener still holds it whole and waits it out; the deliberate break below
+# then fixes the bound back at 4096 and requires the same envelope to be
+# announced once and retired rather than silently looped.
+HLONG="$TMP_ROOT/hlong"; new_home "$HLONG"
+LONG_BIN=$(fm_fakebin "$TMP_ROOT/lavish-long-stub")
+LONG_COUNT="$TMP_ROOT/lavish-long-count"
+cat > "$LONG_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` on an ended session, carrying the
+# published envelope's four mentions of the artifact realpath.
+n=$(cat "$LAVISH_LONG_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_LONG_COUNT"
+f=$2
+printf 'session:\n  file: %s\n  status: ended\n  ended_by: user\n' "$f"
+printf 'next_step: The user ended this Lavish Editor session. Stop polling %s - do not run `lavish-axi %s` to reopen it. Deliver any remaining updates directly in this conversation instead. Only reopen with `lavish-axi %s --reopen` if the user explicitly asks for further review or something genuinely important needs their visual attention.\n' "$f" "$f" "$f"
+SH
+chmod +x "$LONG_BIN/lavish-axi"
+LONG_DIR="$TMP_ROOT/long-path"
+mkdir -p "$LONG_DIR" || fail "could not create the long artifact path root"
+LONG_SEG="$(printf 'L%.0s' {1..60})"
+while [ "${#LONG_DIR}" -lt 930 ]; do
+  LONG_DIR="$LONG_DIR/$LONG_SEG"
+  mkdir -p "$LONG_DIR" || fail "could not extend the long artifact path"
+done
+LONG_ART="$LONG_DIR/board.html"
+printf '<h1>long</h1>\n' > "$LONG_ART"
+LONG_REAL=$(cd "$LONG_DIR" && pwd -P)/board.html
+[ "${#LONG_REAL}" -ge 930 ] \
+  || fail "the long artifact path is only ${#LONG_REAL} characters, so it does not exercise the old 4096-byte bound"
+LONG_ENVELOPE="$TMP_ROOT/long-envelope"
+PATH="$LONG_BIN:$PATH" LAVISH_LONG_COUNT="$LONG_COUNT" "$LONG_BIN/lavish-axi" poll "$LONG_REAL" > "$LONG_ENVELOPE" \
+  || fail "the long artifact's ended-session envelope could not be produced"
+[ "$(wc -c < "$LONG_ENVELOPE" | tr -d ' ')" -gt 4096 ] \
+  || fail "the long artifact's ended-session envelope is not over 4096 bytes, so it does not exercise the old bound"
+long_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LONG_ART")
+fm_test_track_procevent_home "$HLONG"
+PATH="$LONG_BIN:$PATH" LAVISH_LONG_COUNT="$LONG_COUNT" FM_HOME="$HLONG" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LONG_ART" >/dev/null \
+  || fail "the long-path source could not be armed"
+assert_present "$HLONG/state/procevent/$long_id.source" \
+  "test fixture error: the long-path source never registered"
+for _ in 1 2; do
+  PATH="$LONG_BIN:$PATH" LAVISH_LONG_COUNT="$LONG_COUNT" FM_HOME="$HLONG" \
+    pe "$HLONG" start "$long_id" >/dev/null
+done
+[ "$(count_results "$HLONG" "$long_id")" = 0 ] \
+  || fail "an over-4096-byte quiet absence captured $(count_results "$HLONG" "$long_id") results"
+[ -z "$(wake_payloads "$HLONG")" ] \
+  || fail "an over-4096-byte quiet absence woke the captain: $(wake_payloads "$HLONG")"
+[ -f "$HLONG/state/procevent/$long_id.source" ] \
+  || fail "an over-4096-byte quiet absence retired a registration whose board file is still there"
+PATH="$LONG_BIN:$PATH" FM_HOME="$HLONG" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$LONG_ART" >/dev/null
+pass "a quiet absence past the old 4096-byte bound is still held whole and waited out"
+
+# The deliberate break for that bound: the same envelope against a copy of the
+# adapter with the bound fixed back at 4096 is over-bound, so it must be
+# announced once and retired instead of looping. That is what makes the green
+# assertions above evidence the derivation rather than an accident of size.
+LONG_MUT_ROOT="$TMP_ROOT/lavish-long-mutant"
+mkdir -p "$LONG_MUT_ROOT/bin"
+for mutant_lib in fm-procevent.sh fm-pr-lib.sh fm-wake-lib.sh fm-procevent-lib.sh; do
+  ln -s "$ROOT/bin/$mutant_lib" "$LONG_MUT_ROOT/bin/$mutant_lib"
+done
+perl -0777 -pe 's/^POLL_HOLD_LIMIT_BYTES=.*$/POLL_HOLD_LIMIT_BYTES=4096/m;' \
+  "$ROOT/bin/fm-procevent-lavish.sh" > "$LONG_MUT_ROOT/bin/fm-procevent-lavish.sh"
+chmod +x "$LONG_MUT_ROOT/bin/fm-procevent-lavish.sh"
+cmp -s "$ROOT/bin/fm-procevent-lavish.sh" "$LONG_MUT_ROOT/bin/fm-procevent-lavish.sh" \
+  && fail "test fixture error: the deliberate-break bound mutation changed nothing"
+HLONGMUT="$TMP_ROOT/hlongmut"; new_home "$HLONGMUT"
+fm_test_track_procevent_home "$HLONGMUT"
+PATH="$LONG_BIN:$PATH" LAVISH_LONG_COUNT="$LONG_COUNT" FM_HOME="$HLONGMUT" \
+  "$LONG_MUT_ROOT/bin/fm-procevent-lavish.sh" arm "$LONG_ART" >/dev/null \
+  || fail "test fixture error: the deliberate-break long-path mutant could not arm its board"
+long_mut_id=$("$LONG_MUT_ROOT/bin/fm-procevent-lavish.sh" source-id "$LONG_ART")
+assert_present "$HLONGMUT/state/procevent/$long_mut_id.source" \
+  "test fixture error: the deliberate-break long-path mutant never registered its source"
+PATH="$LONG_BIN:$PATH" LAVISH_LONG_COUNT="$LONG_COUNT" FM_HOME="$HLONGMUT" \
+  "$LONG_MUT_ROOT/bin/fm-procevent.sh" start "$long_mut_id" >/dev/null \
+  || fail "test fixture error: the deliberate-break long-path mutant's round did not run"
+[ "$(count_results "$HLONGMUT" "$long_mut_id")" = 1 ] \
+  || fail "the 4096-bound mutant captured $(count_results "$HLONGMUT" "$long_mut_id") results for an over-bound quiet absence instead of one"
+[ "$(wake_payloads "$HLONGMUT" | grep -c .)" = 1 ] \
+  || fail "the 4096-bound mutant did not announce its over-bound quiet absence exactly once"
+assert_absent "$HLONGMUT/state/procevent/$long_mut_id.source" \
+  "the 4096-bound mutant left its over-bound quiet absence armed to loop instead of retiring it"
+pass "putting the hold-back bound back to 4096 makes the same quiet absence loud, bounded, and terminal"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
