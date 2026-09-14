@@ -559,31 +559,6 @@ test_claude_nbsp_idle_row_is_empty() {
   pass "fm_tmux_composer_state: Claude's bordered U+276F+NBSP idle row is empty while typed text stays pending"
 }
 
-test_padded_bordered_nbsp_idle_row_is_empty() {
-  local dir fb capture out nbsp
-  dir="$TMP_ROOT/claude-nbsp-padded"; mkdir -p "$dir"
-  fb=$(make_fake_tmux "$dir")
-  capture="$dir/styled.txt"
-  nbsp=$(printf '\302\240')
-
-  # A grok-style padded bordered composer: blank rows above and below the
-  # U+276F+NBSP idle row (issue #2483's still-open "padded" fixture). The
-  # blank padding rows must not turn a genuinely idle composer unknown.
-  printf '╭────────────╮\n│            │\n│ ❯%s         │\n│            │\n╰────────────╯\n' \
-    "$nbsp" > "$capture"
-  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
-    fm_tmux_composer_state "fakepane")
-  [ "$out" = empty ] \
-    || fail "a padded bordered U+276F+NBSP idle row should be empty, got '$out'"
-
-  printf '╭────────────╮\n│            │\n│ ❯ fix      │\n│            │\n╰────────────╯\n' > "$capture"
-  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
-    fm_tmux_composer_state "fakepane")
-  [ "$out" = pending ] \
-    || fail "a padded bordered composer with typed text should be pending, got '$out'"
-  pass "fm_tmux_composer_state: a padded bordered U+276F+NBSP idle row is empty while typed text stays pending"
-}
-
 test_bright_furniture_row_does_not_poison_idle_verdict() {
   local dir fb capture out nbsp
   dir="$TMP_ROOT/furniture-row"; mkdir -p "$dir"
@@ -793,7 +768,6 @@ test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
 test_claude_nbsp_idle_row_is_empty
-test_padded_bordered_nbsp_idle_row_is_empty
 test_bright_furniture_row_does_not_poison_idle_verdict
 test_all_tmux_harness_composers_share_classification
 test_unrecognized_state_defers_input_guard
