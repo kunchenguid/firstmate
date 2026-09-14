@@ -4,8 +4,9 @@
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. Promotion also writes the crewmate's ship instructions to
 # data/<task-id>/ship-instructions.md and prints the fm-send.sh command that
-# delivers them. Those instructions carry the scratch-state inventory, the clean
-# default-branch base, the fm/<task-id> branch, and - rendered from
+# delivers them. Those instructions carry the scratch-state inventory, the
+# clean base the task's own instructions recorded (its launch base, not
+# necessarily the default branch), the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -179,7 +180,7 @@ EOF
 ## Firstmate spec
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+3. Return to the clean base your instructions record before branching: it is the base named in your Setup section's launch statement - the project's recorded integration base when it records one, origin's default branch otherwise - then create your branch: \`git checkout -b fm/$ID\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.

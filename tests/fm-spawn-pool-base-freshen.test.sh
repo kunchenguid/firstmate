@@ -743,11 +743,256 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A repository whose integration branch is not its default branch is the failure
+# shape behind every conflicted direct-PR task: the worktree was cut from the
+# default branch, so the pull request conflicted with the integration branch.
+# The project directory is named `controller` because the recorded-base file is
+# keyed by the project path's own basename: config/project-base-controller.
+#
+# The fixture deliberately leaves the repository holding a LOCAL branch of the
+# integration name that is stale - it exists only at the pool's own base commit -
+# while origin's branch has advanced ahead of it. treehouse --base cuts from the
+# fetched remote-tracking ref in that situation (verified against the installed
+# treehouse, which used origin/dev while a local dev sat behind it), and a stale
+# base is exactly the defect this feature removes, so a spawn must use the fresh
+# remote tip rather than that local branch.
+make_integration_base_case() {  # <name> <id> [<integration-branch>]
+  local name=$1 id=$2 integration=${3:-dev} case_dir home project origin pool publisher fakebin initial integration_tip default_tip local_only_tip
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/controller"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$project" branch --quiet "$integration"
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  # A branch that exists only in this repository and was never pushed: the bare
+  # origin is cloned above without it, so the recorded name resolves to no
+  # remote-tracking ref and the launch must refuse this local-only branch.
+  git -C "$project" checkout --quiet --detach HEAD
+  printf 'local only base work\n' > "$project/local-only.txt"
+  git -C "$project" add local-only.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-only-base
+  local_only_tip=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" branch --quiet local-only "$local_only_tip"
+  git -C "$project" checkout --quiet main
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  git clone --quiet "file://$origin" "$publisher"
+  git -C "$publisher" checkout --quiet "$integration"
+  printf 'integration base work\n' > "$publisher/integration.txt"
+  git -C "$publisher" add integration.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-integration
+  git -C "$publisher" push --quiet origin "$integration"
+  integration_tip=$(git -C "$publisher" rev-parse HEAD)
+  git -C "$publisher" checkout --quiet main
+  printf 'default branch work\n' > "$publisher/default.txt"
+  git -C "$publisher" add default.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-default
+  git -C "$publisher" push --quiet origin main
+  default_tip=$(git -C "$publisher" rev-parse HEAD)
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$integration|$integration_tip|$default_tip|$local_only_tip"
+}
+
+read_integration_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA INTEGRATION_BRANCH INTEGRATION_TIP DEFAULT_TIP LOCAL_ONLY_TIP <<EOF
+$1
+EOF
+}
+
+test_recorded_integration_base_refreshes_before_branching() {
+  local rec id out status
+  id='pool-integration-base-r1'
+  rec=$(make_integration_base_case integration-base "$id")
+  read_integration_case "$rec"
+  printf '%s\n' "$INTEGRATION_BRANCH" > "$HOME_DIR/config/project-base-controller"
+  git -C "$PROJECT_DIR" config --replace-all remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+  git -C "$PROJECT_DIR" update-ref -d "refs/remotes/origin/$INTEGRATION_BRANCH"
+  [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$INTEGRATION_BRANCH")" = "$INITIAL_SHA" ] \
+    || fail "fixture did not leave a local branch of the recorded name behind origin"
+  git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/remotes/origin/$INTEGRATION_BRANCH" \
+    && fail "fixture already tracks the integration branch despite its restricted fetch refspec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a pooled worktree onto the recorded integration base"$'\n'"$out"
+  assert_contains "$out" "base=$INTEGRATION_BRANCH" \
+    "spawn did not print the resolved base on its launch line"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INTEGRATION_TIP" ] \
+    || fail "spawn did not reset the pooled worktree to the recorded base's fetched remote tip"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$DEFAULT_TIP" ] \
+    || fail "spawn reset to the default branch even though a base was recorded"
+  assert_grep 'integration base work' "$POOL_DIR/integration.txt" \
+    "the worktree does not carry the recorded base's content"
+  [ ! -e "$POOL_DIR/default.txt" ] \
+    || fail "the worktree carries content its recorded base does not contain"
+  # The property the captain needs is the base of the branch a worker creates, not
+  # the reset alone: a branch cut here must already contain the integration branch.
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  git -C "$POOL_DIR" diff --exit-code "$INTEGRATION_TIP...HEAD" >/dev/null \
+    || fail "a branch created after spawn is not based on the recorded integration base"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# recorded-base spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# HEAD=%s integration tip=%s default tip=%s stale local=%s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$INTEGRATION_TIP" "$DEFAULT_TIP" \
+      "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$INTEGRATION_BRANCH")"
+  fi
+  pass "a recorded integration base refreshes the pooled worktree from its fetched remote tip"
+}
+
+test_recorded_base_refuses_a_local_only_branch() {
+  local rec id out status before
+  id='pool-local-base-r1'
+  rec=$(make_integration_base_case local-base "$id")
+  read_integration_case "$rec"
+  printf 'local-only\n' > "$HOME_DIR/config/project-base-controller"
+  git -C "$PROJECT_DIR" show-ref --verify --quiet refs/remotes/origin/local-only \
+    && fail "fixture pushed the local-only branch, so this case cannot prove refusal"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a recorded base that exists only locally"
+  assert_contains "$out" "base branch 'local-only' does not exist on remote origin" \
+    "spawn did not name the missing remote branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a local-only recorded base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a recorded base that exists only locally refuses the pooled worktree"
+}
+
+test_unrecorded_project_still_uses_origin_default_branch() {
+  local rec id out status
+  id='pool-default-base-r1'
+  rec=$(make_integration_base_case default-base "$id")
+  read_integration_case "$rec"
+  [ ! -e "$HOME_DIR/config/project-base-controller" ] \
+    || fail "fixture unexpectedly recorded a base for the project"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a pooled worktree with no recorded base"$'\n'"$out"
+  assert_contains "$out" "base=main" \
+    "spawn did not print the default branch it resolved as the base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$DEFAULT_TIP" ] \
+    || fail "spawn did not reset to origin's default branch when no base was recorded"
+  assert_grep 'default branch work' "$POOL_DIR/default.txt" \
+    "the worktree does not carry the default branch's content"
+  pass "a project with no recorded base still resets to origin's default branch"
+}
+
+test_unresolvable_recorded_base_refuses_pool() {
+  local rec id out status before
+  id='pool-missing-base-r1'
+  rec=$(make_integration_base_case missing-base "$id")
+  read_integration_case "$rec"
+  printf 'ghost\n' > "$HOME_DIR/config/project-base-controller"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a recorded base that resolves to no ref"
+  assert_contains "$out" "base branch 'ghost' does not exist on remote origin" \
+    "spawn did not name the recorded base as unresolvable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing an unresolvable base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+
+  # A malformed file must refuse too rather than being truncated into a real name.
+  printf 'dev release\n' > "$HOME_DIR/config/project-base-controller"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a malformed recorded base"
+  assert_contains "$out" "$HOME_DIR/config/project-base-controller must hold one branch name" \
+    "spawn did not name the malformed recorded-base file"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a malformed recorded base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the malformed-base refusal published task metadata"
+  pass "an unresolvable or malformed recorded base refuses the pooled worktree"
+}
+
+test_brief_cannot_override_the_config_file() {
+  local rec id id2 out status
+  id='pool-brief-base-r1'
+  id2='pool-brief-base-precedence-r1'
+  rec=$(make_integration_base_case brief-base "$id")
+  read_integration_case "$rec"
+  printf '%s\n' "$INTEGRATION_BRANCH" > "$HOME_DIR/config/project-base-controller"
+  # The fixture's placeholder brief stands in for the scaffolded one; this test
+  # scaffolds the real thing, and fm-brief.sh refuses to overwrite a brief.
+  rm -f "$HOME_DIR/data/$id/brief.md"
+
+  # Scaffold a brief against the recorded base, then launch from project config.
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" controller --scout 2>&1)
+  status=$?
+  expect_code 0 "$status" "scaffolding a scout brief over a recorded base should succeed"$'\n'"$out"
+  if grep -q '^Launch base:' "$HOME_DIR/data/$id/brief.md"; then
+    fail "the scaffolded brief exposed a machine base override"
+  fi
+  assert_grep "detached HEAD on a clean \`$INTEGRATION_BRANCH\` tip" "$HOME_DIR/data/$id/brief.md" \
+    "the brief's Setup section did not state the recorded base"
+  # Firstmate fills both Task subsections after scaffolding, because a spawn
+  # refuses a brief that still carries the placeholders.
+  sed -e 's/^{TASK}$/Launch the task from the recorded base./' \
+      -e 's/^{FIRSTMATE_SPEC}$/Exercise the recorded base end to end./' \
+      "$HOME_DIR/data/$id/brief.md" > "$HOME_DIR/data/$id/brief.filled" \
+    && mv "$HOME_DIR/data/$id/brief.filled" "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should launch the recorded project base"$'\n'"$out"
+  assert_contains "$out" "base=$INTEGRATION_BRANCH" \
+    "spawn did not report the recorded project base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INTEGRATION_TIP" ] \
+    || fail "spawn did not reset to the recorded project base"
+
+  # A stray legacy machine line in a brief cannot override this home's config file.
+  fm_test_spawn_brief "$HOME_DIR" "$id2"
+  printf 'Launch base: main\n' >> "$HOME_DIR/data/$id2/brief.md"
+  out=$(run_spawn "$id2" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore a base line in its brief"$'\n'"$out"
+  assert_contains "$out" "base=$INTEGRATION_BRANCH" "spawn did not use the recorded project base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INTEGRATION_TIP" ] \
+    || fail "spawn let the brief override the recorded project base"
+
+  # A malformed config refuses the scaffold as well, so a bad file never renders a
+  # brief claiming a base that spawn would refuse to use.
+  printf 'dev release\n' > "$HOME_DIR/config/project-base-controller"
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-base-malformed controller --scout 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scaffolding succeeded despite a malformed recorded base"
+  assert_contains "$out" "must hold one branch name" \
+    "the scaffold refusal did not name the malformed recorded-base file"
+  [ ! -e "$HOME_DIR/data/brief-base-malformed/brief.md" ] \
+    || fail "the refused scaffold published a brief"
+  pass "a brief states its setup base but cannot override project configuration"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_recorded_integration_base_refreshes_before_branching
+test_recorded_base_refuses_a_local_only_branch
+test_unrecorded_project_still_uses_origin_default_branch
+test_unresolvable_recorded_base_refuses_pool
+test_brief_cannot_override_the_config_file
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

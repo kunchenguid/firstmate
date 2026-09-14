@@ -408,6 +408,30 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Task launch base (config/project-base-<project-name>)
+
+`config/project-base-<project-name>` is a local, gitignored file that records the branch every fresh ship or scout worktree for that project is reset to before its worker branches.
+`<project-name>` is the project directory's own basename - the same name `bin/fm-spawn.sh` derives from the project path and the same argument `bin/fm-brief.sh` receives as its repo name - so the file is named after the clone, not after a task, a host, or a remote.
+It exists for a repository whose integration branch is not its default branch: with default `main` and integration `dev`, an unrecorded base resets every worktree to `origin/main`, so each task's pull request is based on the default branch and conflicts with `dev`.
+The file holds exactly one token, the branch name, on one trimmed line; a trailing newline is fine.
+An absent file, or a file that is blank after trimming, means the project records no base and the launch falls through to origin's default branch.
+A file that holds embedded whitespace or a second nonblank line is malformed and refuses the launch with the file named, and so does a file that is not a readable regular file, rather than being silently truncated into some real branch name.
+
+The recording step for project intake is owned by [project-management](../.agents/skills/project-management/SKILL.md#preconditions-and-registry).
+The resolution order is owned by `bin/fm-spawn.sh` and is, in order:
+
+1. `config/project-base-<project-name>`, when that file exists and holds a branch name;
+2. origin's current default branch, resolved from the remote's `HEAD`.
+
+Spawn fetches origin and resets a recorded base only to the freshly fetched remote-tracking ref `origin/<branch>`.
+A recorded base that has no remote branch refuses the launch, even when a same-named local branch exists.
+An origin-less pool is unchanged: it has no remote to base a pull request on, so it launches from its own clean HEAD without consulting a recorded base.
+The resolved base is printed on the launch line as `base=<branch>` when spawn resets the worktree.
+The brief's Setup statement describes the intended base from the configuration at scaffold time; spawn does not read a base from the brief.
+Relaunch reuses the recorded worktree and never re-resolves the base.
+The file is local to each home and is not inherited by secondmate homes, because each home has its own project clones and its own integration-branch choices; a secondmate home that needs one records it there.
+`bin/fm-project-base-lib.sh` is the single owner of the file's parse and its refusal, so `bin/fm-brief.sh` and `bin/fm-spawn.sh` read one contract.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

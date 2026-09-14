@@ -49,6 +49,11 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# A ship or scout brief states the base it will be launched from when this home
+# records one in config/project-base-<repo-name>. bin/fm-spawn.sh resolves that
+# project file first, then origin's default branch. bin/fm-project-base-lib.sh
+# owns the file's parse and refusal, and docs/configuration.md owns the documented
+# resolution order. The Setup section states the default when no base is recorded.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -92,6 +97,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-project-base-lib.sh
+. "$SCRIPT_DIR/fm-project-base-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -313,6 +320,20 @@ fi
 
 REPO=${POS[1]}
 
+# The base this task will be launched from, stated here so the worker and the
+# spawn agree on it rather than the brief merely promising "a clean default
+# branch". bin/fm-project-base-lib.sh owns the config file's parse and its
+# refusal; an absent or blank file means this project records no base, and the
+# statement then falls back to the default branch bin/fm-spawn.sh will use. The
+# project file is also what bin/fm-spawn.sh reads when it cuts the worktree,
+# which keeps projects with a separate integration branch off the default base.
+BASE_BRANCH=$(fm_project_base_read "$FM_HOME/config/project-base-$REPO") || exit 1
+if [ -n "$BASE_BRANCH" ]; then
+  SETUP_BLOCK="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean \`$BASE_BRANCH\` tip - the integration branch this project records as its task base, not its default branch."
+else
+  SETUP_BLOCK="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch tip."
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -369,7 +390,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_BLOCK
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -455,7 +476,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_BLOCK
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.

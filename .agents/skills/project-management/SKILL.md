@@ -32,6 +32,9 @@ If the owning second mate cannot accept the route, report that concrete blocker 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
+During add, clone, create, or initialize intake, record a known integration branch that differs from the repository's default branch as one branch-name token in `config/project-base-<project-name>`.
+The file is local and gitignored, and each home records its own base because secondmate homes do not inherit it.
+A project with no recorded base launches from origin's default branch.
 
 ## Delivery posture
 
