@@ -742,10 +742,9 @@ __FM_BEARINGS_BOARD_DATA__
       aw.appendChild(row);
     });
   document.getElementById("bb-awaiting-sub").textContent =
-    !data.awaiting.length ? ""
-      : data.awaiting_nudge_days
-        ? "nudge-worthy after " + data.awaiting_nudge_days + " days"
-        : "no nudge threshold set - these rows will not escalate";
+    data.awaiting_nudge_days
+      ? "nudge-worthy after " + data.awaiting_nudge_days + " days"
+      : "no nudge threshold set - these rows will not escalate";
 
   /* Charted Next + dispatch picker */
   var ch = document.getElementById("bb-charted");

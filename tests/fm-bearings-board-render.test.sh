@@ -429,15 +429,23 @@ test_delivered_work_is_no_longer_counted_as_underway() {
 }
 
 test_an_empty_delivered_box_still_renders_its_state() {
-  local home out
+  local home out threshold regime
   home=$(make_home delivered-empty)
-  out=$(render_payload "$home" '{}')
-  printf '%s' "$out" | jq -e '
-    (.awaitingEmpty | length) == 1
-      and (.awaitingEmpty[0] | test("Nothing is waiting on a merge we do not control"))
-      and ([.stats[] | select(.label == "delivered") | .n] == [0])
-  ' >/dev/null || fail "the delivered section vanished when it was empty: $out"
-  pass "the delivered section always renders, with its own empty state"
+  for threshold in null 7; do
+    if [ "$threshold" = null ]; then
+      regime="no nudge threshold set - these rows will not escalate"
+    else
+      regime="nudge-worthy after 7 days"
+    fi
+    out=$(render_payload "$home" "$(jq -n --argjson threshold "$threshold" '{awaiting_nudge_days:$threshold}')")
+    printf '%s' "$out" | jq -e --arg regime "$regime" '
+      (.awaitingEmpty | length) == 1
+        and (.awaitingEmpty[0] | test("Nothing is waiting on a merge we do not control"))
+        and ([.stats[] | select(.label == "delivered") | .n] == [0])
+        and (.awaitingSub == $regime)
+    ' >/dev/null || fail "the empty delivered section lost its state or regime: $out"
+  done
+  pass "the delivered section always renders its empty state and configured regime"
 }
 
 test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
@@ -456,6 +464,8 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
       and ([.call[0].badges[] | .text] | index("waiting 23d") != null)
       and (.call[0].link == "https://github.com/o/r/pull/44")
       and ([.stats[] | select(.label == "need you") | .n] == [1])
+      and (.awaiting | length) == 0
+      and (.awaitingSub == "nudge-worthy after 7 days")
   ' >/dev/null || fail "an aged delivery did not surface as a needs-you nudge: $out"
   pass "an aged delivery rises into the captain's call carrying its wait and its link"
 }

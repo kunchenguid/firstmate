@@ -54,7 +54,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Repository merge ownership is a registered project posture tracked separately, never inferred from project descriptions, yolo, or any other proxy.
    The snapshot removes a qualifying row from `in_flight` and from `gates`, so the same work is counted once.
    `age_days` is how long this delivery has been waiting, measured from its own durable record and preserved when the same PR is re-recorded; `nudge` is the snapshot's own exit rule at `awaiting_nudge_days`: a row at or past it stops being a delivered row and becomes a Captain's Call nudge instead.
-That exit rule is opt-in and off unless `FM_BEARINGS_AWAITING_NUDGE_DAYS` is set, in which case `awaiting_nudge_days` is null and no row ever carries `nudge: true`, so a delivered row waits in place indefinitely with only its age to show for it.
+   That exit rule is opt-in and off unless `FM_BEARINGS_AWAITING_NUDGE_DAYS` is set.
+   When it is unset, `awaiting_nudge_days` is null and no row ever carries `nudge: true`, so a delivered row waits in place indefinitely with only its age to show for it.
    For the same still-eligible delivery and threshold, advancing time cannot clear `nudge`; answering it does not reset the clock.
    A fresh snapshot can reclassify work whose declared wait or current state changed; never preserve an old nudge in place of the task's current state.
    Every `in_flight`, `awaiting`, `landed`, and `gates` row carries a structured `owner`, and `pr_url` carries the recorded request link.
