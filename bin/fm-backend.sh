@@ -792,6 +792,22 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_submit_pending_is_proof: 0 when a `pending` verdict from
+# fm_backend_send_text_submit PROVES the submit was swallowed and the typed
+# text is stranded in the input line. Only backends whose submit core runs the
+# verdict through fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh)
+# qualify: that policy converts pending+busy to `empty`, so what survives as
+# `pending` is a genuine swallow rather than an Enter queued behind a busy
+# agent. Backends that return the shared fm_composer_submit_retry_core verdict
+# raw have no busy primitive to make that distinction, so their `pending`
+# stays advisory and callers must keep their neutral, self-healing behavior.
+fm_backend_submit_pending_is_proof() {  # <backend>
+  case "$1" in
+    tmux|herdr) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_kill: remove the task's session endpoint. An already-gone target
 # is NOT an error and returns 0 silently, so ordinary cleanup of an
 # already-exited session stays quiet. A nonzero return means the close could

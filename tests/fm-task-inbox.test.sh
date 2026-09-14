@@ -52,8 +52,10 @@ inbox_lib() {  # <state> <function> [args...]
 }
 
 # A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
-# display-message yields a numeric cursor row, and every literal send-keys is
-# logged to FM_SEND_LOG so a doorbell ring is observable. With
+# display-message yields a numeric cursor row, every literal send-keys is
+# logged to FM_SEND_LOG so a doorbell ring is observable, and every non-literal
+# send-keys key name is logged to FM_SEND_KEY_LOG so a clear, cancel, or submit
+# keystroke is observable too. With
 # FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
 # #{pane_current_command} answers with that value, so `zsh` makes
 # fm_backend_tmux_agent_state read the pane as a dead bare shell.
@@ -91,6 +93,13 @@ case "${1:-}" in
           "╭${FM_FAKE_BOX_RULE}╮" "${1:-x}" "╰${FM_FAKE_BOX_RULE}╯" \
           > "$FM_FAKE_TMUX_CAPTURE"
       fi
+    else
+      # Non-literal send-keys carry key NAMES (Enter, C-u, Escape, ...).
+      # Logging them separately is what lets a test prove this plane never
+      # reached for a clear or cancel key against text it did not type; a
+      # regression that did so leaves the replayed capture byte-identical and
+      # would otherwise be invisible here.
+      printf '%s\n' "$@" >> "${FM_SEND_KEY_LOG:-/dev/null}"
     fi
     exit 0 ;;
   display-message)
@@ -296,43 +305,101 @@ test_ring_skips_dead_agent() {
 # protects it forever. The ring must report that as a stranded delivery, not as
 # rung, and must never take the text back out.
 test_ring_reports_a_stranded_submit() {
-  local dir state rec log cap rc before after
+  local dir state rec log keys cap rc before after
   dir="$TMP_ROOT/ring-strand"
   state="$dir/state"
   mkdir -p "$state"
   make_watch_stubs "$dir" >/dev/null
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "begin validation")
   log="$dir/send.log"; : > "$log"
+  keys="$dir/send.keys"; : > "$keys"
   cap=$(idle_capture "$dir")
   # Baseline: the same ring against a composer whose submit lands reports 0.
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$cap" \
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_SEND_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$cap" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "a submit that lands should still report a rung doorbell, got $rc"
   # Now the swallowed Enter: the typed line stays in the composer across the
   # submit core's own Enter retries, so the post-submit verdict is `pending`.
   printf '╭────╮\n│    │\n╰────╯\n' > "$cap"
-  : > "$log"
+  : > "$log"; : > "$keys"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$cap" \
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_SEND_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$cap" \
     FM_FAKE_TMUX_STRAND=1 \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 4 ] || fail "a submit left pending must report a stranded delivery (4), got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" \
     || fail "the stranded attempt should still have typed the doorbell:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "a stranded delivery must leave the durable record unhandled"
+  # Retrying a swallowed submit means retrying Enter, never reaching for a
+  # clear or cancel key to tidy the line up first.
+  grep -qxF 'Enter' "$keys" \
+    || fail "the stranded attempt should have retried Enter:"$'\n'"$(cat "$keys")"
+  ! grep -qxE 'C-u|C-c|C-a|C-k|Escape|BSpace|DC' "$keys" \
+    || fail "the steering plane must never clear or cancel a composer it did not empty:"$'\n'"$(cat "$keys")"
   # The trap: the very next attempt is suppressed by the text this plane typed.
   before=$(cat "$cap")
-  : > "$log"
+  : > "$log"; : > "$keys"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$cap" \
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_SEND_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$cap" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "a stranded composer should suppress the next attempt (1), got $rc"
   [ ! -s "$log" ] || fail "a suppressed attempt must not type:"$'\n'"$(cat "$log")"
+  # A suppressed attempt sends NO keystroke of any kind. Without this the
+  # replayed capture stays byte-identical whether or not the plane pressed
+  # C-u or Escape, so the comparison below could not see such a regression.
+  [ ! -s "$keys" ] \
+    || fail "a suppressed attempt must not send any key at the stranded line:"$'\n'"$(cat "$keys")"
   after=$(cat "$cap")
   [ "$before" = "$after" ] \
     || fail "the steering plane must never clear, overwrite, or submit stranded composer text"
   pass "inbox: a submit left pending reports a stranded delivery, never a rung doorbell"
+}
+
+# Replay one post-submit verdict into fm_task_inbox_ring against any backend
+# name. Only the backend dispatchers the ring consumes are shimmed, so the
+# classification under test - including the real capability predicate - is the
+# production one, and no backend CLI is needed to drive a cursorless adapter.
+ring_with_verdict() {  # <state> <backend> <verdict> <record>
+  local state=$1 backend=$2 verdict=$3 rec=$4
+  FM_STATE_OVERRIDE="$state" FM_FAKE_VERDICT="$verdict" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf "alive"; }
+    fm_backend_composer_state() { printf "empty"; }
+    fm_backend_send_text_submit() { printf "%s" "$FM_FAKE_VERDICT"; }
+    fm_task_inbox_ring "$2" fakepane:0 "$3" fm-t1
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$backend" "$rec"
+}
+
+# The stranded-text verdict is a CAPABILITY, not a string match. Only a backend
+# whose submit core can tell a swallowed Enter from one queued behind a busy
+# agent may report 4; a cursorless adapter returns the shared retry core's raw
+# `pending`, which is not proof of anything, so it must keep the neutral
+# self-healing behavior it had before rc=4 existed rather than tell an operator
+# a doorbell is stranded when it is merely queued.
+test_ring_stranded_verdict_requires_backend_proof() {
+  local state rec b rc
+  state="$TMP_ROOT/ring-capability/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "begin validation")
+  for b in tmux herdr; do
+    rc=0; ring_with_verdict "$state" "$b" pending "$rec" || rc=$?
+    [ "$rc" = 4 ] || fail "$b resolves a queued Enter, so its pending is a stranded line (4), got $rc"
+  done
+  for b in cmux orca zellij; do
+    rc=0; ring_with_verdict "$state" "$b" pending "$rec" || rc=$?
+    [ "$rc" = 0 ] \
+      || fail "$b cannot prove a swallowed Enter, so its pending must stay advisory (0), got $rc"
+  done
+  # The verdicts that are backend-independent stay so on every backend.
+  for b in tmux herdr cmux orca zellij; do
+    rc=0; ring_with_verdict "$state" "$b" send-failed "$rec" || rc=$?
+    [ "$rc" = 2 ] || fail "$b should report a failed send as 2, got $rc"
+    rc=0; ring_with_verdict "$state" "$b" empty "$rec" || rc=$?
+    [ "$rc" = 0 ] || fail "$b should report a confirmed submit as 0, got $rc"
+    rc=0; ring_with_verdict "$state" "$b" pending-unproven "$rec" || rc=$?
+    [ "$rc" = 0 ] || fail "$b must never treat an unproven composer as stranded, got $rc"
+  done
+  pass "inbox: only a backend that can resolve a queued Enter reports a stranded line"
 }
 
 # Genuine styled Codex idle screens must keep ringing. The composer classifier
@@ -792,6 +859,15 @@ test_watcher_escalates_stranded_input_as_input_blocked() {
     || fail "the escalation should clear the worker:"$'\n'"$(cat "$state/.wake-queue")"
   grep -qF 'inspect the worker' "$state/.wake-queue" \
     && fail "an input-blocked budget must not send the reader at the worker:"$'\n'"$(cat "$state/.wake-queue")"
+  # This escalation MARKS the record, so the ladder is done with it: every
+  # later poll reads `quiet` and no watcher ring will reach it again. The wake
+  # must therefore hand over a delivery path instead of promising one.
+  grep -qF 'will not ring this record again' "$state/.wake-queue" \
+    || fail "the escalation must not imply another automatic ring:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'bin/fm-send.sh' "$state/.wake-queue" \
+    || fail "the escalation should name the direct delivery path:"$'\n'"$(cat "$state/.wake-queue")"
+  [ "$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = quiet ] \
+    || fail "an escalated record must be quiet, which is what makes the promise of a re-ring false"
   grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path"
   [ -f "$rec" ] || fail "the durable record must survive for recovery"
   pass "watcher: a budget spent on unsubmitted input escalates as a stranded input line, not an unresponsive worker"
@@ -853,6 +929,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_reports_a_stranded_submit
+test_ring_stranded_verdict_requires_backend_proof
 test_ring_rings_a_genuine_codex_idle_screen
 test_ladder_tracks_input_blocked_streak
 test_idempotent_write_dedups_exact_body
