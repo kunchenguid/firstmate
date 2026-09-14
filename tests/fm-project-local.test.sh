@@ -476,6 +476,27 @@ test_a_directory_read_only_halfway_is_never_counted_as_updated() {
 # a failed copy fail too, and a shared staging area would then hand the leftover
 # to whatever path came next - wrong material under a name the worker trusts,
 # with no error anywhere.
+# Staging reads the store while a `sync` of the same project may be replacing
+# it, so the read can end early. tar's extractor reports success over a
+# truncated stream, so only the producer's status says whether the whole store
+# travelled - and a worker handed a subset of a source-canonical project's
+# material would read it as the whole of it, unmarked.
+test_a_store_read_only_halfway_never_reaches_the_worker() {
+  local world out rc material
+  world=$(make_world partialstage)
+  material="$world/home/data/project-local/demo/material"
+  mkdir -p "$material/locked"
+  printf 'the production audit that must travel\n' >"$material/audit.md"
+  printf 'more of the captain material\n' >"$material/locked/notes.md"
+  chmod 000 "$material/locked"
+  out=$(local_cmd "$world" stage demo "$world/copy") && rc=0 || rc=$?
+  chmod 755 "$material/locked"
+  expect_code 1 "$rc" "a store that could only be read halfway was staged as though it were whole"
+  assert_contains "$out" "in full" "the refusal did not say the store could not be read whole"
+  assert_absent "$world/copy/.fm-local" "the refused stage left a partial copy for the worker"
+  pass "fm-project-local.sh: a store read only halfway never reaches the worker"
+}
+
 test_a_failed_copy_never_leaks_into_the_next_manifest_path() {
   local world out
   world=$(make_world crosstalk)
@@ -563,6 +584,7 @@ test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be
 test_a_failed_copy_leaves_the_stores_own_copy_standing
 test_a_directory_read_only_halfway_is_never_counted_as_updated
 test_a_failed_copy_never_leaks_into_the_next_manifest_path
+test_a_store_read_only_halfway_never_reaches_the_worker
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

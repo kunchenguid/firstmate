@@ -401,10 +401,12 @@ print_path_list() {  # <limit> < paths
         if (may_name[i] && lines < limit) {
           printf "    %s\n", path[i]
           lines++
-          if (last_name[d] == i && rest[d] > 0 && lines < limit) {
-            printf "    %s (%d more files)\n", d, rest[d]
-            lines++
-          }
+          # The count line rides along with the directory it belongs to and is
+          # not charged against the limit: --limit bounds how many PATHS a
+          # category lists, and a count is not a path. Charging it would cost
+          # one named place per crowded directory, which is the whole reason
+          # the ceiling exists.
+          if (last_name[d] == i && rest[d] > 0) printf "    %s (%d more files)\n", d, rest[d]
           continue
         }
         hidden++

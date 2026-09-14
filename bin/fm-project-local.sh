@@ -236,7 +236,7 @@ note_home_activity() {  # <home-dir>
 # --- staging ----------------------------------------------------------------
 
 stage_material() {  # <project> <worktree>
-  local project=$1 wt=$2 material dest excl seen empty=0 record marks= rel since reason
+  local project=$1 wt=$2 material dest excl seen status empty=0 record marks= rel since reason
   material=$(material_dir "$project")
   if [ ! -d "$material" ] ||
     [ -z "$(find "$material" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
@@ -280,7 +280,17 @@ stage_material() {  # <project> <worktree>
 
   dest="$wt/$STAGE_DIR_NAME"
   mkdir -p "$dest"
-  (cd "$material" && tar cf - .) | (cd "$dest" && tar xf -) || die "could not stage local material into $dest"
+  (cd "$material" && tar cf - .) | (cd "$dest" && tar xf -)
+  # The extractor succeeds over a truncated stream, so its status says nothing
+  # about whether the whole store was read - and the store can change under this
+  # read, because a `sync` of the same project is not serialised against a
+  # spawn. A worker handed a subset of the project's material would read it as
+  # the whole of it, which is exactly what the unverified marks exist to prevent.
+  status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
+  if [ "$status" != "0:0" ]; then
+    remove_tree "$dest"
+    die "could not read $project's local material in full while staging it into $dest; refusing to launch a worker over a partial copy"
+  fi
   record=$(unverified_file "$project")
   if [ -s "$record" ]; then
     while IFS="$(printf '\t')" read -r rel since reason; do

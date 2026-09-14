@@ -394,6 +394,49 @@ names_from() {  # <output> <directory prefix>
   printf '%s\n' "$1" | grep -c "^    $2" || true
 }
 
+# How many distinct directories the knowledge listing actually names - the count
+# lines and the omission line are not names, so they do not count as places.
+places_named() {  # <output>
+  printf '%s\n' "$1" |
+    awk '/^UNCOMMITTED_KNOWLEDGE:/ { inside = 1; next }
+         /^[A-Z_]+:/ { inside = 0 }
+         inside && /^    / && !/more files\)$/ && !/^    \.\.\. and / {
+           sub(/^ +/, "")
+           sub(/\/[^\/]*$/, "")
+           print
+         }' |
+    LC_ALL=C sort -u | grep -c . || true
+}
+
+# The ceiling of five names was chosen against the default cap of 40 so that a
+# project whose documents are spread over many crowded folders still shows at
+# least eight distinct places. A count line is not a path, so charging it
+# against `--limit` would cost one whole place per crowded directory and break
+# the guarantee the ceiling exists to provide.
+test_a_crowded_project_still_names_at_least_eight_distinct_places() {
+  local world out places d i
+  world=$(make_world eightplaces)
+  d=1
+  while [ "$d" -le 10 ]; do
+    mkdir -p "$world/source/area-$d"
+    i=1
+    while [ "$i" -le 10 ]; do
+      printf 'finding %s/%s\n' "$d" "$i" >"$world/source/area-$d/nota-$i.md"
+      i=$((i + 1))
+    done
+    d=$((d + 1))
+  done
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 100" "the count stopped being complete"
+  places=$(places_named "$out")
+  [ "$places" -ge 8 ] ||
+    fail "a crowded project named only $places distinct places, not the eight the ceiling promises: $out"
+  assert_equals "5" "$(names_from "$out" 'area-1/nota-')" \
+    "the per-directory ceiling changed while fixing what the limit charges for"
+  pass "fm-project-memory.sh: a crowded project still names at least eight distinct places"
+}
+
 # Rule two on its own, and the case the ordering cannot resolve: all three paths
 # are knowledge of the same rank, the session logs sort first AND outnumber the
 # cap. Only the fixed per-directory ceiling keeps the two documents visible.
@@ -695,6 +738,7 @@ test_a_vendored_tree_is_not_project_knowledge
 test_the_listing_names_the_knowledge_surface_before_anything_else
 test_no_single_directory_takes_every_listing_slot
 test_more_directories_than_slots_still_names_the_agent_memory
+test_a_crowded_project_still_names_at_least_eight_distinct_places
 test_a_directory_holding_agent_memory_does_not_take_another_directorys_names
 test_the_omission_line_counts_only_the_knowledge_it_hides
 test_a_crowded_directory_never_buries_the_captains_own_document
