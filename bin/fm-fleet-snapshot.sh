@@ -69,9 +69,11 @@
 #     without a probe, and other tasks use "not_checked".
 #     pr.merge_poll.armed is true only when fm_pr_poll_artifacts_valid in
 #     bin/fm-pr-lib.sh validates the complete poll against the captured task
-#     metadata. A registration alone is insufficient. armed_epoch is the valid
-#     registration's modification time, or null when unavailable; the clock's
-#     same-PR preservation is owned by bin/fm-pr-check.sh. Neither an armed poll
+#     metadata and supplies a numeric modification time from that same open
+#     registration observation as armed_epoch. A registration alone is
+#     insufficient; failed validation or an unavailable timestamp yields
+#     armed:false and armed_epoch:null. The clock's same-PR preservation is
+#     owned by bin/fm-pr-check.sh. Neither an armed poll
 #     nor its age establishes an outside wait without the eligibility contract
 #     in bin/fm-bearings-snapshot.sh.
 #   scout_reports[]: present data/<id>/report.md pointers.

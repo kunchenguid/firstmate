@@ -166,9 +166,8 @@ FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
-# The single exit-rule constant in fm-classify-lib.sh: how many days a PR may wait on
-# its maintainer before the row stops being "still normal" and becomes the
-# captain's to nudge. 7 is measured, not guessed: across the last 200 merged
+# The optional exit-rule setting is owned by fm-classify-lib.sh; it has no default.
+# Evidence for choosing 7 days when opting in: across the last 200 merged
 # pull requests in this fleet's own upstream repository the merge latency was
 # 0.1 days at the median, 0.3 at the 75th percentile, 0.8 at the 90th, and 10.2 at its single
 # extreme, so a full week is roughly nine times the 90th percentile, absorbs a

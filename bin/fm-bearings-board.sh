@@ -93,6 +93,8 @@
 # produced. That is a deliberate cost, stated so nobody has to rediscover it:
 # with the escalation off, a delivered row can wait indefinitely with only its
 # age to show for it. Set FM_BEARINGS_AWAITING_NUDGE_DAYS to switch it on.
+# The Delivered box always states the configured threshold or that escalation
+# is off, including when it is empty because all deliveries have escalated.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
