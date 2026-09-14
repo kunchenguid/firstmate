@@ -424,21 +424,31 @@ test_a_notice_with_no_writable_marker_is_never_pushed() {
   pass "fm-codex-stop-autoarm: an unwritable episode marker suppresses the notice instead of storming"
 }
 
-# A freshly exec'd process is reported by ps as "/usr/bin/env bash <script>" for
-# a moment and as "bash <script>" once the exec settles, so an identity read too
-# early never matches the one the predicate reads later. Wait for two identical
-# consecutive reads before recording, or the healthy case fails for a reason
-# that has nothing to do with the hook.
+# A `#!/usr/bin/env bash` script is exec'd twice: the kernel runs /usr/bin/env,
+# which then execs bash. For the moment in between, ps reports the process as
+# "/usr/bin/env bash <script>" rather than the settled "bash <script>". An
+# identity recorded in that window never matches the one the predicate reads
+# later, and the healthy case then fails for a reason that has nothing to do
+# with the hook.
+#
+# The launch below removes that window entirely by naming the interpreter, so
+# there is no second exec to race. This helper then waits on the NAMED condition
+# rather than on elapsed time: it refuses an identity that still shows the
+# transient env stage, so a platform that somehow produced one would fail loudly
+# here instead of recording a doomed identity. Waiting longer and hoping would
+# only turn a fast flake into a slow one.
 watcher_identity() {
-  local dir=$1 pid=$2 prev='' cur='' i=0
+  local dir=$1 pid=$2 cur='' i=0
   while [ "$i" -lt 50 ]; do
     cur=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid")
-    [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
-    prev=$cur
+    case "$cur" in
+      ''|*"/usr/bin/env "*) ;;
+      *) printf '%s' "$cur"; return 0 ;;
+    esac
     i=$((i + 1))
     sleep 0.1
   done
-  printf '%s' "$cur"
+  fail "watcher identity for pid $pid never settled out of the exec stage: '$cur'"
 }
 
 record_watcher_lock() {
@@ -457,8 +467,10 @@ test_a_healthy_watcher_is_not_announced() {
   need_supervision "$dir"
   write_arm_fixture "$dir" healthy
   # A real live watcher process for the strict predicate to verify, recorded the
-  # way the watcher itself records it.
-  "$dir/bin/fm-watch.sh" >/dev/null 2>&1 &
+  # way the watcher itself records it. Naming the interpreter is deliberate: it
+  # is a single exec, so ps reports the settled identity from the start and there
+  # is no env-stage window for the recording below to land in.
+  bash "$dir/bin/fm-watch.sh" >/dev/null 2>&1 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid")
   record_watcher_lock "$dir" "$pid" "$identity"
