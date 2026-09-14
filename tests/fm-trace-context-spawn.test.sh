@@ -67,8 +67,8 @@ case "${1:-}" in
       done
     fi
     # Capture the text payload of both send forms: the literal launch
-    # (`send-keys -t <target> -l <text>`) and a text line
-    # (`send-keys -t <target> <text> Enter`). Skip the flags, the target, and
+    # (`send-keys -t <target> -l <text>`) and an accepted launch shell line
+    # (`send-keys -t <target> <text> C-j`). Skip the flags, the target, and
     # the trailing key so only the payload is logged, one per line, in order.
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       shift
@@ -78,7 +78,7 @@ case "${1:-}" in
         case "$a" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
-          Enter|C-m) continue ;;
+          Enter|C-m|C-j) continue ;;
           *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done

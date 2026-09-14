@@ -726,6 +726,39 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+# fm_backend_launch_shell_line and fm_backend_launch_shell_accept are scoped to
+# fm-spawn.sh's interactive-shell setup and final worker command. Only tmux C-j
+# and Herdr ctrl+j have live-proved unconditional shell-accept mappings. The
+# unavailable experimental backends retain their existing physical-Enter
+# behavior and are not covered by this launch guarantee until proved live.
+fm_backend_launch_shell_line() {  # <backend> <target> <text> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_launch_shell_line "$@" ;;
+    herdr) fm_backend_herdr_launch_shell_line "$@" ;;
+    zellij) fm_backend_zellij_send_text_line "$@" ;;
+    orca) fm_backend_orca_send_text_line "$@" ;;
+    cmux) fm_backend_cmux_send_text_line "$@" ;;
+    *) echo "error: no launch-shell-line implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_launch_shell_accept() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_launch_shell_accept "$@" ;;
+    herdr) fm_backend_herdr_launch_shell_accept "$@" ;;
+    zellij) fm_backend_zellij_send_key "$1" Enter "${2:-}" ;;
+    orca) fm_backend_orca_send_key "$1" Enter ;;
+    cmux) fm_backend_cmux_send_key "$1" Enter "${2:-}" ;;
+    *) echo "error: no launch-shell-accept implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.

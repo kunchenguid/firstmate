@@ -105,20 +105,30 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
-# fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification - used for the fixed spawn-time commands
-# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
-# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
+# fm_backend_tmux_send_text_line: send one line of TEXT then physical Enter,
+# with no composer verification. This is the generic operation retained for
+# non-launch callers; fm-spawn.sh uses the launch-shell operation below.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
 }
 
-# fm_backend_tmux_send_literal: send TEXT as literal bytes with no
-# submission - the caller sends Enter separately (fm-spawn.sh's launch-command
-# send pauses between the literal send and Enter for the harness to settle).
-# Mirrors `tmux send-keys -t "$T" -l "<text>"`.
+# fm_backend_tmux_send_literal: send TEXT as literal bytes with no submission.
 fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
+}
+
+# fm_backend_tmux_launch_shell_accept: unconditionally accept one complete
+# shell command during worker launch. Native tmux C-j is the live-proved line
+# feed mapping; generic Enter remains physical Return for every other caller.
+fm_backend_tmux_launch_shell_accept() {  # <target>
+  fm_backend_tmux_send_key "$1" C-j
+}
+
+# fm_backend_tmux_launch_shell_line: type and accept one spawn-time shell
+# command in the same native tmux call, preserving the prior all-or-fail send
+# shape while replacing only physical Enter with the proved C-j mapping.
+fm_backend_tmux_launch_shell_line() {  # <target> <text>
+  tmux send-keys -t "$1" "$2" C-j
 }
 
 # fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
