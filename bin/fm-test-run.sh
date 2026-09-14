@@ -692,6 +692,7 @@ tests/fm-composer-ghost.test.sh 716
 tests/fm-composer-lib.test.sh 676
 tests/fm-composer-matrix-live-e2e.test.sh 220
 tests/fm-config-inherit-lib.test.sh 32
+tests/fm-config-inherit-preflight.test.sh 45
 tests/fm-config-push.test.sh 31
 tests/fm-control-herdr-smoke.test.sh 149
 tests/fm-control-relaunch.test.sh 1360

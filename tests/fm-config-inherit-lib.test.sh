@@ -9,13 +9,14 @@ set -u
 
 expected_items=$(cat <<'EOF'
 config/crew-dispatch.json
-config/model-catalog.json
 config/crew-harness
 config/backlog-backend
 config/backend
+config/disabled-adapters
 config/herdr-presentation-spaces
 config/startup-memory-budget
 config/trace-context
+config/launch-env-allowlist
 data/captain-shared.md
 EOF
 )

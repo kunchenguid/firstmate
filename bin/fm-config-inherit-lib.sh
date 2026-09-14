@@ -53,6 +53,8 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-model-catalog-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-model-catalog-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -446,6 +448,18 @@ propagate_secondmate_inheritance() {
   propagate_inheritable_config "$src_config" "$dest_home/config" || rc=1
   propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
   return "$rc"
+}
+
+fm_config_inherit_primary_preflight() {
+  local src_config=$1 src
+  src="$src_config/$FM_MODEL_CATALOG_FILE"
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    fm_model_catalog_config_dir_safe "$src_config" || return 1
+    fm_model_catalog_validate_primary "$src" || return 1
+  else
+    fm_model_catalog_absence_allowed "$src_config" || return 1
+  fi
+  return 0
 }
 
 propagate_inheritable_config() {
