@@ -2532,6 +2532,40 @@ test_remote_decision_context_and_missing_legacy_detail() {
   pass "remote and cached summaries preserve supplied context while legacy absence stays explicit"
 }
 
+test_malformed_remote_decision_context_stays_a_per_home_unknown() {
+  local parent remote_home fakebin json shape n=0
+  for shape in '"pasted text"' '["not","a","map"]' '{"remote-parked": 7}'; do
+    n=$((n + 1))
+    parent=$(make_home "remote-context-malformed-$n")
+    make_remote_ledger_fleet "$parent" 1
+    remote_home="$TMP_ROOT/remote-ledger-home-1"
+    fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+    jq --argjson shape "$shape" '.decision_context = $shape' \
+      "$remote_home/state/home-summary.json" > "$remote_home/state/new-summary.json"
+    mv "$remote_home/state/new-summary.json" "$remote_home/state/home-summary.json"
+    json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies) \
+      || fail "a malformed decision_context aborted the whole detailed snapshot: $json"
+    printf '%s' "$json" | jq -e '
+      (.secondmates | any(.id == "ledger-1" and .state == "unknown"))
+      and (.decisions_open | any(.owner == "ledger-1") | not)
+    ' >/dev/null || fail "a malformed decision_context was accepted as a complete summary: $json"
+  done
+  parent=$(make_home remote-context-null)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  jq '.decision_context = null' \
+    "$remote_home/state/home-summary.json" > "$remote_home/state/new-summary.json"
+  mv "$remote_home/state/new-summary.json" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies) \
+    || fail "a null decision_context aborted the detailed snapshot: $json"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .state != "unknown"))
+    and (.decisions_open | length) == 1 and (.decisions_open[0] | .owner == "ledger-1" and .context == null)
+  ' >/dev/null || fail "a null decision_context lost the legacy summary or invented detail: $json"
+  pass "malformed decision_context maps reject one home while null keeps the legacy summary with explicit absence"
+}
+
 test_newest_filed_gates_are_selected_before_snapshot_bounds() {
   local home mate fakebin json i
   home=$(make_home newest-before-bounds)
@@ -3448,6 +3482,7 @@ test_wide_decision_context_is_carried_once_within_the_summary_byte_guard
 test_active_children_project_independent_of_home_captain_hold
 test_nameless_legacy_summary_uses_its_durable_identifier
 test_remote_decision_context_and_missing_legacy_detail
+test_malformed_remote_decision_context_stays_a_per_home_unknown
 test_newest_filed_gates_are_selected_before_snapshot_bounds
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness

@@ -1387,6 +1387,7 @@ length == 1 and (.[0] |
   and (.holds | type) == "array" and (.queued | type) == "array"
   and (.landed | type) == "array" and (.endpoints | type) == "array"
   and (.counts | type) == "object" and (.omitted | type) == "array"
+  and ((.decision_context // {}) | type == "object" and all(.[]; type == "string"))
 )
 JQ
   snapshot_cache_prepare || true
