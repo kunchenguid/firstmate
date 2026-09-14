@@ -523,12 +523,15 @@ wait "$sticky_pid" || fail "sticky transfer failed after refused assign: $(cat "
 REAL_PY=$(command -v python3); SHIM_DIR="$TMP_ROOT/race-shim"; mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/python3" <<SH
 #!/usr/bin/env bash
+reserve() { "$REAL_PY" "$ROOT/bin/fm-fleet-registry.py" "$FROOT/fleet.json" transfer-reserve --secondmate "\$RACE_SECONDMATE" --manager "\$RACE_MANAGER" --transaction "race-\$RACE_SECONDMATE" >/dev/null; }
+case "\${1:-}:\${2:-}" in
+  "-:$FROOT/.health."*) if [ -n "\${RACE_DURING_HEALTH:-}" ] && [ ! -e "$SHIM_DIR/health-reserved" ]; then : > "$SHIM_DIR/health-reserved"; reserve; fi ;;
+esac
 if [ "\${2:-}" = "$FROOT/fleet.json" ] && [ "\${3:-}" = route ]; then
   count=\$(( \$(cat "$SHIM_DIR/routes" 2>/dev/null || echo 0) + 1 )); echo "\$count" > "$SHIM_DIR/routes"
-  reserve() { "$REAL_PY" "\$1" "\$2" transfer-reserve --secondmate "\$RACE_SECONDMATE" --manager "\$RACE_MANAGER" --transaction "race-\$RACE_SECONDMATE" >/dev/null; }
-  [ "\$count" != "\${RACE_BEFORE_ROUTE:-}" ] || reserve "\$@"
+  [ "\$count" != "\${RACE_BEFORE_ROUTE:-}" ] || reserve
   out=\$("$REAL_PY" "\$@"); rc=\$?
-  [ "\$count" != "\${RACE_AFTER_ROUTE:-}" ] || reserve "\$@"
+  [ "\$count" != "\${RACE_AFTER_ROUTE:-}" ] || reserve
   [ -z "\$out" ] || printf '%s\n' "\$out"; exit "\$rc"
 fi
 exec "$REAL_PY" "\$@"
@@ -552,5 +555,19 @@ out=$(PATH="$SHIM_DIR:$PATH" RACE_BEFORE_ROUTE=2 RACE_MANAGER=manager-1 RACE_SEC
 remove_lock "$FROOT/manager-3" "$recheck_live"
 [ "$rc" = 4 ] || fail "route recheck racing a transfer reserve exited $rc: $out"
 case "$out" in *'"state": "transfer-in-progress"'*'"transaction": "race-rechecker"'*) ;; *) fail "route recheck racing a transfer reserve hid transfer-in-progress: $out" ;; esac
+"$FLEET" owner register --secondmate healthracer --home "$FROOT/secondmates/healthracer" --projects health-app --domains health >/dev/null || fail "register healthracer owner"
+add_lock "$FROOT/manager-3"; health_live=$LAST_HOLDER
+rm -f "$SHIM_DIR/routes" "$SHIM_DIR/health-reserved"
+out=$(PATH="$SHIM_DIR:$PATH" RACE_DURING_HEALTH=1 RACE_MANAGER=manager-3 RACE_SECONDMATE=healthracer "$FLEET" route --project health-app --issue MIX-904 2>&1); rc=$?
+remove_lock "$FROOT/manager-3" "$health_live"
+[ -e "$SHIM_DIR/health-reserved" ] || fail "fixture: transfer was not reserved during health collection"
+[ "$rc" = 4 ] || fail "route with a transfer reserved during health collection exited $rc: $out"
+case "$out" in *'"state": "transfer-in-progress"'*'"transaction": "race-healthracer"'*) ;; *) fail "route with a transfer reserved during health collection hid transfer-in-progress: $out" ;; esac
+python3 - "$FROOT/fleet.json" <<'PY' || fail "route with a transfer reserved during health collection wrote an assignment or triage record"
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+assert not [row for row in reg["assignments"] if row["secondmate"] == "healthracer"], reg["assignments"]
+assert not [row for row in reg["unassigned"] if "health" in row["key"]], reg["unassigned"]
+PY
 
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

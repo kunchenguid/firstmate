@@ -555,9 +555,7 @@ def command_assign(args: argparse.Namespace) -> None:
     require_valid(reg)
     if args.secondmate not in owner_map(reg):
         raise ValueError(f"unknown SecondMate owner: {args.secondmate}")
-    transfer = in_flight_transfer(reg, args.secondmate)
-    if transfer:
-        raise ValueError(f"transfer {transfer.get('transaction')} is in flight for {args.secondmate}")
+    refuse_transfer_in_progress(reg, args.secondmate)
     assignments = assignment_map(reg)
     prior = assignments.get(args.secondmate)
     if prior:

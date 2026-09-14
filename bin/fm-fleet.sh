@@ -208,31 +208,27 @@ assignment_current() { python3 "$REGISTRY_BIN" "$REG" get assignment "$1" 2>/dev
 assignment_manager() { assignment_current "$1" | python3 -c 'import json,sys; data=sys.stdin.read(); print(json.loads(data).get("manager", "") if data else "")' 2>/dev/null || true; }
 
 assignment_locked() {
-  local selected home
+  local selected current current_manager home
+  python3 "$REGISTRY_BIN" "$REG" transfer-in-progress --secondmate "$ASSIGN_SECONDMATE" || return
   selected=$(choose_manager "$ASSIGN_HEALTH" "$ASSIGN_SECONDMATE")
-  [ -n "$selected" ] || { echo "fm-fleet: no healthy reasoning manager remains assignable" >&2; return 1; }
+  current=$(assignment_current "$ASSIGN_SECONDMATE")
+  if [ -n "$current" ]; then
+    current_manager=$(assignment_manager "$ASSIGN_SECONDMATE")
+    if [ "$selected" = "$current_manager" ]; then printf '%s\n' "$current"; return 0; fi
+    echo "fm-fleet: $ASSIGN_SECONDMATE remains assigned to unhealthy $current_manager; use recover" >&2
+    return 1
+  fi
+  [ -n "$selected" ] || { echo "fm-fleet: no healthy reasoning manager is assignable" >&2; return 1; }
   home=$(manager_home "$selected") || return 1
   reasoning_live "$home" || { echo "fm-fleet: selected manager $selected lost its live reasoning lock" >&2; return 1; }
   python3 "$REGISTRY_BIN" "$REG" assign --secondmate "$ASSIGN_SECONDMATE" --manager "$selected" --reason "$ASSIGN_REASON"
 }
 
 do_assign() {
-  local secondmate=$1 reason=$2 health selected current current_manager rc
-  python3 "$REGISTRY_BIN" "$REG" transfer-in-progress --secondmate "$secondmate" || return
+  local health rc
   health=$(mktemp "$FLEET_ROOT/.health.XXXXXX") || return 1
   health_json "$health" || { rm -f "$health"; return 1; }
-  current=$(assignment_current "$secondmate")
-  if [ -n "$current" ]; then
-    current_manager=$(assignment_manager "$secondmate")
-    selected=$(choose_manager "$health" "$secondmate")
-    rm -f "$health"
-    if [ "$selected" = "$current_manager" ]; then printf '%s\n' "$current"; return 0; fi
-    echo "fm-fleet: $secondmate remains assigned to unhealthy $current_manager; use recover" >&2
-    return 1
-  fi
-  selected=$(choose_manager "$health" "$secondmate")
-  [ -n "$selected" ] || { rm -f "$health"; echo "fm-fleet: no healthy reasoning manager is assignable" >&2; return 1; }
-  ASSIGN_SECONDMATE=$secondmate; ASSIGN_REASON=$reason; ASSIGN_HEALTH=$health
+  ASSIGN_SECONDMATE=$1; ASSIGN_REASON=$2; ASSIGN_HEALTH=$health
   with_lock assignment_locked
   rc=$?
   rm -f "$health"
