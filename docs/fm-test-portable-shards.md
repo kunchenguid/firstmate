@@ -57,7 +57,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The embedded hints include the slowest measurements retained from the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167), the completed-script measurements from [run 34342484144](https://github.com/kunchenguid/firstmate/actions/runs/34342484144), plus the 5121 ms native-Windows focused runner measurement for `tests/fm-pi-windows-shell-invocation.test.sh` from 2026-09-06T21:02Z.
+The serial hints were refreshed using the slowest measured `duration_ms` per script from the `fm-test-timing-portable-serial-*` artifacts of five CI runs on 2026-09-10 whose serial shards all passed: [34413640474](https://github.com/kunchenguid/firstmate/actions/runs/34413640474), [34413651260](https://github.com/kunchenguid/firstmate/actions/runs/34413651260), [34413670094](https://github.com/kunchenguid/firstmate/actions/runs/34413670094), [34439204619](https://github.com/kunchenguid/firstmate/actions/runs/34439204619), and [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385).
 Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
@@ -72,7 +72,6 @@ Refresh the hints whenever the serial lane gains scripts or measured durations d
 Run 34342484144 observed a shard reach about 20 minutes of passing work, so the 30-minute job cap keeps meaningful hang-tripwire margin for job setup and runner-speed spread.
 
 The largest assignment weight, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for the heaviest shard's estimated load at any shard count.
-At 9.88 min it is 10.3% of the whole lane's assignment weight.
 
 Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
 
@@ -113,7 +112,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
-| portable serial 1-5 | job `timeout-minutes: 30` | Each shard carries about 19.14 minutes of assignment weight and scores 13.58 to 16.95 minutes using held-out durations, leaving margin under the unchanged cap for job setup and runner-speed spread; a slow runner can still exceed the predicted weight and exhaust the cap while passing tests. |
+| portable serial 1-5 | job `timeout-minutes: 30` | The cap remains a hang tripwire with margin for job setup and runner-speed spread; a slow runner can still exceed the predicted weight and exhaust the cap while passing tests. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 Timeouts are intended as hang tripwires; a passing coverage guard does not establish a healthy job duration.
