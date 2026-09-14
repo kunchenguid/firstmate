@@ -1,0 +1,19 @@
+FM_TEST_BEGIN 2026-09-14T04:01:15Z tests/fm-spawn-worktree-settle.test.sh family=backend-dispatch expected_gate_skip=none
+ok - a single transient stale pane_current_path read is not accepted as the worktree
+ok - an already-settled pane confirms on the next read, not a whole extra cycle
+ok - a transient primary-checkout pane read is not accepted as the worktree
+ok - a pane stuck on the primary checkout fails loudly at the deadline
+ok - a swallowed first delivery is retried with one idempotent treehouse allocation token
+ok - a clean delivery failure retries and only the submitted line counts as accepted
+ok - unsafe partial input aborts before another command can be appended
+ok - bounded clean delivery failures retain a useful final diagnostic
+ok - treehouse-get retries stop at the configured attempt bound and retain the startup timeout
+ok - one monotonic deadline charges both backend probe time and bounded sleeps
+ok - retry settings accept normalized boundaries and reject malformed or overflowing values
+ok - the worker launch line removes the treehouse allocation token
+ok - case-insensitive spelling aliases remain the primary directory until a real worktree appears
+# all fm-spawn-worktree-settle tests passed
+FM_TEST_END 2026-09-14T04:02:35Z tests/fm-spawn-worktree-settle.test.sh exit=0 duration_ms=79085 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=79233
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=1 duration_ms=79085 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-spawn-worktree-settle.test.sh duration_ms=79085
