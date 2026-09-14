@@ -1062,9 +1062,11 @@ test_portable_shard_union_and_coverage_guard() {
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   # The guard sorts under C collation, so it must also compare under it: a
   # contributor's ambient locale that collates differently must not break it.
-  local collating_locale="" candidate
+  local collating_locale="" candidate sample c_order
+  sample=$(printf '%s\n' tests/fm-backend-herdr.test.sh tests/fm-backend-herdr-workspace-per-home-e2e.test.sh)
+  c_order=$(printf '%s\n' "$sample" | LC_ALL=C sort)
   while IFS= read -r candidate; do
-    [ "$(printf 'B\na\n' | LC_ALL=$candidate sort 2>/dev/null | head -n 1)" = "a" ] || continue
+    [ "$(printf '%s\n' "$sample" | LC_ALL=$candidate sort 2>/dev/null)" != "$c_order" ] || continue
     collating_locale=$candidate
     break
   done < <(locale -a 2>/dev/null)
@@ -1072,6 +1074,8 @@ test_portable_shard_union_and_coverage_guard() {
     out=$(LC_ALL=$collating_locale "$RUNNER" --check-coverage 2>&1) \
       || fail "coverage guard must pass under non-C collation $collating_locale: $out"
     assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $collating_locale"
+  else
+    echo "skip: coverage guard under non-C collation: no installed locale reorders test paths relative to C"
   fi
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
