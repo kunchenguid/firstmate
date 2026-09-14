@@ -1268,9 +1268,21 @@ fm_treehouse_state_identity() {
   fi
 }
 
+fm_treehouse_require_enumerable_state() {  # <state>
+  local state=$1
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    if [ ! -d "$state" ] \
+      || ! find "$state" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
+      echo "REFUSED: cannot enumerate local Firstmate state at $state; nothing was changed" >&2
+      return 1
+    fi
+  fi
+}
+
 fm_treehouse_collect_local_states() {  # <record-state>
   local record_state=$1 root home reg line child known existing candidate candidate_identity existing_identity i=0
   local -a homes
+  fm_treehouse_require_enumerable_state "$record_state" || return 1
   FM_TREEHOUSE_OWNER_STATES=("$record_state")
   root=$(fm_firstmate_root_home "$FM_HOME") || {
     echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
@@ -1285,20 +1297,16 @@ fm_treehouse_collect_local_states() {  # <record-state>
     home=${homes[$i]}
     i=$((i + 1))
     candidate="$home/state"
-    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-      if [ ! -d "$candidate" ] \
-        || ! find "$candidate" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
-        echo "REFUSED: cannot enumerate local Firstmate state at $candidate; nothing was changed" >&2
-        return 1
-      fi
-    fi
     candidate_identity=$(fm_treehouse_state_identity "$candidate")
     known=0
     for existing in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
       existing_identity=$(fm_treehouse_state_identity "$existing")
       [ "$existing_identity" != "$candidate_identity" ] || known=1
     done
-    [ "$known" = 1 ] || FM_TREEHOUSE_OWNER_STATES+=("$candidate")
+    if [ "$known" != 1 ]; then
+      fm_treehouse_require_enumerable_state "$candidate" || return 1
+      FM_TREEHOUSE_OWNER_STATES+=("$candidate")
+    fi
     reg="$home/data/secondmates.md"
     [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
     [ -f "$reg" ] && [ ! -L "$reg" ] || {

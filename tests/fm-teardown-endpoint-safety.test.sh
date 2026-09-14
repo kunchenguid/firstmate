@@ -576,6 +576,37 @@ test_unreadable_child_state_refuses_before_cleanup() {
   pass "fm-teardown refuses when a reachable state directory cannot be enumerated"
 }
 
+test_unreadable_override_state_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task override_state rc
+
+  dir=$(make_case slot-unreadable-override-state)
+  mark_case_as_treehouse_pool "$dir"
+  override_state="$dir/alternate-state"
+  mkdir -p "$override_state"
+  fm_write_meta "$override_state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$override_state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 300 "$override_state"
+
+  set +e
+  FM_STATE_OVERRIDE="$override_state" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 700 "$override_state"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after its alternate state directory could not be enumerated"
+  assert_contains "$(cat "$dir/stderr")" "cannot enumerate local Firstmate state at $override_state" \
+    "alternate state enumeration failure did not explain the safety refusal"
+  assert_present "$override_state/$id.meta" "alternate state enumeration failure removed stale metadata"
+  assert_present "$override_state/$other.meta" "alternate state enumeration failure removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "alternate state enumeration failure changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "alternate state enumeration failure ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when its alternate state directory cannot be enumerated"
+}
+
 test_unreadable_task_record_refuses_before_cleanup() {
   local dir id=stale-task other=hidden-task rc
 
@@ -1326,6 +1357,7 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_unreadable_child_state_refuses_before_cleanup
+test_unreadable_override_state_refuses_before_cleanup
 test_unreadable_task_record_refuses_before_cleanup
 test_sole_slot_record_still_tears_down
 test_other_task_branch_refuses_before_cleanup

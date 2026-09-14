@@ -851,6 +851,38 @@ test_unreadable_nested_state_refuses_pool_allocation() {
   pass "an unreadable nested Firstmate state refuses pooled allocation"
 }
 
+test_unreadable_override_state_refuses_pool_allocation() {
+  local rec id out status before override_state other
+
+  id='pool-slot-unreadable-override-state-r1'
+  rec=$(make_case unreadable-override-state "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  override_state="$CASE_DIR/alternate-state"
+  other="$override_state/older-task.meta"
+  mkdir -p "$override_state"
+  : > "$override_state/.last-watcher-beat"
+  fm_write_meta "$other" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 300 "$override_state"
+
+  out=$(FM_TEST_STATE_OVERRIDE="$override_state" run_spawn "$id" --scout)
+  status=$?
+  chmod 700 "$override_state"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after its alternate state directory could not be enumerated: $out"
+  assert_contains "$out" "cannot enumerate local Firstmate state at $override_state" \
+    "alternate state enumeration failure did not refuse allocation explicitly"
+  [ ! -e "$override_state/$id.meta" ] || fail "alternate state enumeration failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "alternate state enumeration failure claimed the retained slot"
+  [ -e "$other" ] || fail "alternate state enumeration failure removed the holding task record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "alternate state enumeration failure changed the held slot"
+  pass "an unreadable alternate state refuses pooled allocation"
+}
+
 test_unreadable_task_record_refuses_pool_allocation() {
   local rec id out status before other
 
@@ -987,6 +1019,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_unreadable_nested_registry_refuses_pool_allocation
 test_unreadable_nested_state_refuses_pool_allocation
+test_unreadable_override_state_refuses_pool_allocation
 test_unreadable_task_record_refuses_pool_allocation
 test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
