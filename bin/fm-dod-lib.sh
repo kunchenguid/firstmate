@@ -151,6 +151,7 @@ fm_brief_intent_overlay() {  # <captain-intent>
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+The commit-attribution ban is the one standing exception to that supersession: carry into `--intent` the rule that no commit on this branch may carry an agent name as a co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`), because the pipeline commits on your branch and only you can tell it that rule.
 
 ## Captain intent authorized for --intent
 EOF
@@ -181,6 +182,66 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
+# fm_commit_attribution_block <task-id> <mode> prints the hard, standing
+# prohibition on an agent co-author commit trailer. Sourced into fm_dod_block
+# below so every rendered mode - including a promoted scout's ship instructions
+# from bin/fm-promote.sh - carries the same text; this is the single owner, so a
+# change here reaches both callers without a second copy to drift.
+# The prohibition is identical in every mode; only the check point, the remedy
+# and the pipeline clause differ, because branch ownership does. Only
+# no-mistakes runs a pipeline that commits on the worker's behalf, so only its
+# arm carries the ban to that pipeline. no-mistakes mode is the one that
+# changes hands mid-flight, so its arm is phased: the worker strips the trailer
+# while the branch is still its own, must not touch the branch while a run owns
+# it, and reports rather than rewriting a pushed PR head afterwards.
+# Never touching the default branch is absolute in every mode.
+# A scout sits at a detached HEAD and a secondmate supervises a domain; neither
+# has a branch to ship and neither drives the pipeline, so each gets its own
+# subject line covering every commit it writes, with no branch clause, no
+# pipeline clause and no check point or remedy.
+fm_commit_attribution_block() {  # <task-id> <mode>
+  local id=$1 mode=$2 checkpoint=''
+  cat <<'EOF'
+## Commit attribution - HARD RULE, no exceptions
+EOF
+  if [ "$mode" = scout ]; then
+    cat <<'EOF'
+NEVER put an agent name as a commit co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`) on any commit you write here, including the scratch commits discarded at teardown.
+EOF
+  elif [ "$mode" = secondmate ]; then
+    cat <<'EOF'
+NEVER put an agent name as a commit co-author trailer (for example `Co-Authored-By: Claude ... <noreply@anthropic.com>`) on any commit you write, including a merge you perform yourself under standing merge authority.
+EOF
+  else
+    cat <<EOF
+NEVER put an agent name as a commit co-author trailer (for example \`Co-Authored-By: Claude ... <noreply@anthropic.com>\`) on any commit on this branch.
+EOF
+    case "$mode" in
+      no-mistakes)
+        cat <<EOF
+The pipeline commits on your behalf, so carry this ban to it through the two channels you already drive: state it in the \`--intent\` you pass \`no-mistakes axi run\`, and restate it in every fix instruction you send with \`no-mistakes axi respond\`.
+Before you start a no-mistakes run, while \`fm/$id\` is still yours alone, check every commit on this branch for that trailer; if you find one, rewrite ONLY this task's own unmerged branch to strip it, and say in your report that you did.
+While a run is active the pipeline owns \`fm/$id\`: never rebase, amend, filter, force-push, or hand-commit on it, not even to strip a trailer.
+Once the run is terminal, check the branch again and report a surviving trailer instead of rewriting the pushed PR head: append a \`note:\` line naming those commits immediately before your terminal \`done:\` line, leave that \`done:\` line in its exact required shape, and let firstmate decide before merge.
+EOF
+        ;;
+      direct-PR)
+        checkpoint='Before you push this branch and before you open or update its PR' ;;
+      local-only)
+        checkpoint='Before you report this branch ready for the merge authority' ;;
+    esac
+  fi
+  if [ -n "$checkpoint" ]; then
+    cat <<EOF
+$checkpoint, check this branch's commits for that trailer.
+If you find one, rewrite ONLY this task's own unmerged branch (\`fm/$id\`) to strip it, and say in your report that you did.
+EOF
+  fi
+  cat <<'EOF'
+Never rewrite a commit that has already reached the default branch; that is the captain's call, not yours.
+EOF
+}
+
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
@@ -201,6 +262,8 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+
+$(fm_commit_attribution_block "$id" "$mode")
 EOF
       ;;
     local-only)
@@ -212,6 +275,8 @@ The task is complete only when committed on your branch \`fm/$id\`. Do NOT push,
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+
+$(fm_commit_attribution_block "$id" "$mode")
 EOF
       ;;
     no-mistakes)
@@ -219,12 +284,15 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
+
+$(fm_commit_attribution_block "$id" "$mode")
+
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection, plus any later words the captain actually said, plus the standing commit-attribution ban above, which belongs in every run's intent because the pipeline commits on your branch and only you can tell it that rule.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.

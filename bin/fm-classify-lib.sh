@@ -150,16 +150,19 @@ status_is_terminal_verb() {
 
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
-# (working, resolved, captain-held) and paused never match from free-text prose;
-# only lines without those leading verbs may still match free-text tokens for
-# legacy bare lines such as "merged" or "PR ready".
+# (working, resolved, captain-held, note) and paused never match from free-text
+# prose; only lines without those leading verbs may still match free-text tokens
+# for legacy bare lines such as "merged" or "PR ready".
+# `note:` is an informational disclosure with its own unread-status surface
+# (status_line_is_unread_surface), never a state change, so a note whose prose
+# happens to say "merged" must not clear a pane's possible-wedge aging.
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working|resolved|captain-held|note|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac

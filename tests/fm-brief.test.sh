@@ -221,6 +221,154 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The captain has banned an agent co-author commit trailer outright, and
+# nothing else enforces that ban, so every ship mode's Definition of done
+# must carry a hard, unmissable prohibition (bin/fm-dod-lib.sh's
+# fm_commit_attribution_block, the single owner shared with bin/fm-promote.sh).
+# Assert the shape - a standing rule, that it reaches pipeline-authored
+# commits too, and that a worker already carrying one may strip it from its own
+# unmerged branch - not the exact sentence, so the wording stays free to
+# improve. The check point is mode-specific, so each mode must also name an
+# event that happens in it, and no-mistakes must separate the pre-run window it
+# owns from the active run the pipeline owns.
+test_ship_briefs_forbid_agent_coauthor_trailer() {
+  local home id mode brief block checkpoint disclosure intent_rule
+  home="$TMP_ROOT/coauthor-home"
+  write_registry "$home"
+
+  while IFS='~' read -r id mode checkpoint; do
+    [ -n "$id" ] || continue
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$id: --mode $mode scaffold failed"
+    brief="$home/data/$id/brief.md"
+    # Scope every assertion to the rendered attribution block, so unrelated
+    # brief prose cannot stand in for a clause that went missing.
+    block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
+    assert_contains "$block" "co-author" "$id: brief did not mention the co-author trailer ban at all"
+    assert_contains "$block" "HARD RULE" "$id: co-author ban was not phrased as a hard, unmissable rule"
+    assert_contains "$block" "own unmerged branch" \
+      "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
+    printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
+      || fail "$id: co-author ban did not forbid touching commits already on the default branch"
+    printf '%s\n' "$block" | grep -Eiq "$checkpoint" \
+      || fail "$id: co-author ban named no check point belonging to mode $mode"
+  done <<'ROWS'
+brief-coauthor-nm~no-mistakes~before you start a no-mistakes run
+brief-coauthor-dp~direct-PR~before you push|open or update its PR
+brief-coauthor-lo~local-only~before you report this branch ready
+ROWS
+
+  # no-mistakes is the only mode whose branch changes hands mid-flight, so its
+  # arm must permit the worker's own pre-run rewrite, forbid any rewrite while
+  # the run owns the branch, and route the post-run disclosure off the terminal
+  # `done:` line that firstmate parses.
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$home/data/brief-coauthor-nm/brief.md")
+  printf '%s\n' "$block" | grep -Eiq "pipeline.*on your behalf" \
+    || fail "no-mistakes: co-author ban did not cover pipeline-authored commits on the worker's own branch"
+  for id in brief-coauthor-dp brief-coauthor-lo; do
+    printf '%s\n' "$(sed -n '/^#* *Commit attribution/,/default branch/p' "$home/data/$id/brief.md")" \
+      | grep -Eiq "pipeline" \
+      && fail "$id: co-author ban invokes a pipeline this mode's own Definition of done says never runs"
+  done
+  printf '%s\n' "$block" | grep -Eiq "while a run is active.*(never|not)|(never|not).*while a run is active" \
+    || fail "no-mistakes: co-author ban did not forbid rewriting while a run owns the branch"
+  printf '%s\n' "$block" | grep -Eiq "force-push" \
+    || fail "no-mistakes: co-author ban did not name force-push among the forbidden active-run rewrites"
+  disclosure=$(printf '%s\n' "$block" | grep -i 'note:')
+  printf '%s\n' "$disclosure" | grep -Eiq "note:[^.]*immediately (before|preceding)[^.]*done:" \
+    || fail "no-mistakes: post-run disclosure did not go on its own note: line immediately before the terminal done: line"
+  printf '%s\n' "$disclosure" | grep -Eiq "note:[^.]*(never|not)[^.]*(before|preceding)[^.]*done:" \
+    && fail "no-mistakes: post-run disclosure ordering is stated as a negation, so it does not precede the done: line"
+  # The worker cannot amend a pipeline-authored commit while the run owns the
+  # branch, so its only lever is the two channels it drives itself: the run's
+  # `--intent` and the fix instructions it sends back through a gate response.
+  printf '%s\n' "$block" | grep -Eq '\-\-intent' \
+    || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via --intent"
+  printf '%s\n' "$block" | grep -Eiq "respond|fix instruction|gate" \
+    || fail "no-mistakes: ban gave the worker no lever over pipeline-authored commits via its fix responses"
+  # That lever must not contradict the sentence in the same brief that actually
+  # restricts what goes into `--intent`, which otherwise admits only the
+  # captain's own words; it has to admit the ban affirmatively, not merely
+  # mention it.
+  intent_rule=$(sed -n '/pass .--intent. as only/p' "$home/data/brief-coauthor-nm/brief.md")
+  [ -n "$intent_rule" ] || fail "no-mistakes: brief no longer states which content may go into --intent"
+  printf '%s\n' "$intent_rule" | grep -Eiq "plus[^.]*attribution ban|and[^.]*attribution ban" \
+    || fail "no-mistakes: the sentence restricting --intent content does not admit the attribution ban the block tells the worker to pass"
+  printf '%s\n' "$intent_rule" | grep -Eiq "(never|do not|don't|not)[^.]*attribution ban" \
+    && fail "no-mistakes: the sentence restricting --intent content names the attribution ban only to exclude it"
+
+  # The attribution block lands mid-section in the no-mistakes arm, so it must
+  # be a subsection: everything after it - the `--intent` provenance rules, the
+  # ask-user escalation, the `--yes` ban, the do-not-hand-edit rule and the
+  # terminal done gate - still belongs to Definition of done, and a level-1
+  # heading there would file the pipeline contract under commit attribution.
+  brief="$home/data/brief-coauthor-nm/brief.md"
+  sed -n '/^#* *Commit attribution/,/checks green/p' "$brief" | grep -q '^# ' \
+    && fail "no-mistakes: the attribution heading is level-1, so it swallows the rest of the Definition of done"
+  sed -n '/^#* *Commit attribution/,$p' "$brief" | grep -Eq '^done: PR|append .done: PR .url. checks green' \
+    || fail "no-mistakes: terminal done gate no longer renders after the attribution block"
+  sed -n '/default branch; that is the captain/{n;p;}' "$brief" | grep -q '^$' \
+    || fail "no-mistakes: attribution block does not end with a blank line before the rest of the contract"
+  pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
+}
+
+# The ban is on the trailer, not on shipping, so it must reach EVERY generated
+# brief - a scout's scratch commits can be promoted in place. A scout has no
+# delivery mode and no branch to ship, so its brief carries the prohibition and
+# the default-branch absolute and must not borrow a ship mode's check point.
+test_scout_brief_forbids_agent_coauthor_trailer() {
+  local home brief block
+  home="$TMP_ROOT/coauthor-scout-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-coauthor-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold failed"
+  brief="$home/data/brief-coauthor-scout/brief.md"
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
+  assert_contains "$block" "co-author" "scout brief did not mention the co-author trailer ban at all"
+  assert_contains "$block" "HARD RULE" "scout brief did not phrase the ban as a hard, unmissable rule"
+  printf '%s\n' "$block" | grep -Eiq "scratch commit" \
+    || fail "scout brief's ban did not reach the scratch commits a scout actually writes"
+  # A scout sits at a detached HEAD and never drives the pipeline, so its arm
+  # must not borrow ship prose; the default-branch absolute is the one line
+  # allowed to say "branch", so drop it before checking.
+  printf '%s\n' "$block" | grep -v 'default branch' | grep -Eiq "branch" \
+    && fail "scout brief's ban talks about a branch a scout does not have"
+  printf '%s\n' "$block" | grep -Eiq "pipeline|no-mistakes|--intent" \
+    && fail "scout brief's ban talks about a pipeline a scout never runs"
+  printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
+    || fail "scout brief's ban did not forbid touching commits already on the default branch"
+  printf '%s\n' "$block" | grep -Eiq "before you push|open or update its PR|report this branch ready|no-mistakes run" \
+    && fail "scout brief borrowed a ship mode's check point despite having no delivery mode"
+  assert_no_grep "EOF" "$brief" "scout brief leaked a heredoc EOF marker"
+  pass "fm-brief.sh: a scout brief forbids an agent co-author commit trailer too"
+}
+
+# A secondmate charter is a generated brief too, and a secondmate authors real
+# commits - including a merge it performs itself under standing merge authority.
+# It has no delivery mode and no task branch, so its arm must carry the ban with
+# no branch clause, no pipeline clause and no ship-path check point.
+test_secondmate_charter_forbids_agent_coauthor_trailer() {
+  local home brief block
+  home="$TMP_ROOT/coauthor-secondmate-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-coauthor-sm --secondmate some-proj >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold failed"
+  brief="$home/data/brief-coauthor-sm/brief.md"
+  block=$(sed -n '/^#* *Commit attribution/,/default branch/p' "$brief")
+  assert_contains "$block" "co-author" "secondmate charter did not mention the co-author trailer ban at all"
+  assert_contains "$block" "HARD RULE" "secondmate charter did not phrase the ban as a hard, unmissable rule"
+  printf '%s\n' "$block" | grep -Eiq "merge you perform" \
+    || fail "secondmate charter's ban did not reach the merges a secondmate authors itself"
+  printf '%s\n' "$block" | grep -Eiq "(never|not|forbid).*default branch|default branch.*(never|not|captain)" \
+    || fail "secondmate charter's ban did not forbid touching commits already on the default branch"
+  printf '%s\n' "$block" | grep -v 'default branch' | grep -Eiq "branch" \
+    && fail "secondmate charter's ban talks about a task branch a secondmate does not have"
+  printf '%s\n' "$block" | grep -Eiq "pipeline|no-mistakes|--intent|before you push|report this branch ready" \
+    && fail "secondmate charter's ban borrowed ship-path pipeline or check-point prose"
+  assert_no_grep "EOF" "$brief" "secondmate charter leaked a heredoc EOF marker"
+  pass "fm-brief.sh: a secondmate charter forbids an agent co-author commit trailer too"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -782,7 +930,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed" "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -906,6 +1054,9 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_briefs_forbid_agent_coauthor_trailer
+test_scout_brief_forbids_agent_coauthor_trailer
+test_secondmate_charter_forbids_agent_coauthor_trailer
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
