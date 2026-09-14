@@ -287,6 +287,7 @@ case "$*" in
   'lease --help') echo 'lease <name> --lease-holder --json'; exit 0 ;;
   'return --help') echo 'return --force --if-lease-id --if-lease-holder'; exit 0 ;;
 esac
+if [ "${1:-}" = --root ]; then shift 2; fi
 cmd=${1:-}; shift || true
 path=${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
 holder= expected_id= expected_holder=
@@ -322,7 +323,7 @@ trap 'rm -f "$scratch"' EXIT
 case "$cmd" in
   get|lease)
     [ -f "$state" ] || printf '{"worktrees":[]}\n' > "$state"
-    jq --arg p "$path" 'if any(.worktrees[]; .path == $p) then . else .worktrees += [{name:"1",path:$p}] end' "$state" > "$scratch"
+    jq --arg p "$path" --arg n "$(basename "$(dirname "$path")")" 'if any(.worktrees[]; .path == $p) then . else .worktrees += [{name:$n,path:$p}] end' "$state" > "$scratch"
     cat "$scratch" > "$state"
     jq -e --arg p "$path" 'any(.worktrees[]; .path == $p and .leased == true)' "$state" >/dev/null \
       && { echo 'fixture slot is already leased' >&2; exit 1; }
@@ -345,6 +346,26 @@ TOOL
   chmod +x "$fakebin/treehouse"
 }
 
+fm_test_fake_treehouse_identity() {
+  local fakebin=$1 real_python
+  real_python=$(command -v python3)
+  {
+    printf '#!/usr/bin/env bash\nreal_python=%q\n' "$real_python"
+    cat <<'SH'
+if [[ "${1:-}" == */fm-treehouse-identity.py ]]; then
+  path=${3:-${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-${FM_FAKE_TREEHOUSE_HOME:-}}}}
+  [ -n "$path" ] || exit 1
+  resolved=$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path")
+  pool=$(dirname "$(dirname "$resolved")")
+  jq -nc --arg pool "$pool" --arg root "${TREEHOUSE_ROOT:-$(dirname "$pool")}" '{pool:$pool,root:$root}'
+  exit
+fi
+exec "$real_python" "$@"
+SH
+  } > "$fakebin/python3"
+  chmod +x "$fakebin/python3"
+}
+
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
 # Creates <dir>/fakebin with the spawn tmux stub, the native lease model, and any
 # extra exit-0 tools. Echoes the fakebin path.
@@ -354,6 +375,7 @@ fm_test_make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
   fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_treehouse_identity "$fakebin"
   fm_fake_exit0 "$fakebin" "$@"
   printf '%s\n' "$fakebin"
 }

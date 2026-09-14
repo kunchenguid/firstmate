@@ -1292,8 +1292,9 @@ fm_treehouse_collect_states() {
       }
       [ "$(fm_meta_get "$meta" kind)" = secondmate ] || continue
       [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
-      child=$(fm_treehouse_real_dir "$(fm_meta_get "$meta" home)") || {
-        echo "REFUSED: recorded local secondmate home is unavailable in $meta" >&2; return 1;
+      child=$(fm_meta_get "$meta" home)
+      child=$(fm_treehouse_real_dir "$child") || {
+        echo "REFUSED: recorded local secondmate home '$(fm_meta_get "$meta" home)' is unavailable in $meta; restore its recorded path or reconcile the exact record and registry through secondmate-provisioning, then retry guarded fm-teardown.sh $(basename "$meta" .meta) in $home; do not delete ownership records to bypass this refusal" >&2; return 1;
       }
       known=0
       for existing in "${homes[@]}"; do [ "$existing" != "$child" ] || known=1; done
@@ -1348,13 +1349,51 @@ fm_treehouse_supports_reservations() {
   printf '%s\n' "$status_help" | grep -Eq -- '(^|[^[:alnum:]_-])--json([^[:alnum:]_-]|$)'
 }
 
+fm_treehouse_select_pool() {
+  local selection
+  selection=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-identity.py" "$@") || return 1
+  FM_TREEHOUSE_ROOT=$(printf '%s\n' "$selection" | jq -er '.root') || return 1
+  FM_TREEHOUSE_POOL_DIR=$(printf '%s\n' "$selection" | jq -er '.pool') || return 1
+}
+
+fm_treehouse_selected_slot() {
+  local slot entry
+  slot=$(fm_treehouse_real_dir "$1") || return 1
+  [ "$slot" = "$1" ] && [ "$(dirname "$(dirname "$slot")")" = "$FM_TREEHOUSE_POOL_DIR" ] || return 1
+  entry=$(fm_treehouse_slot_entry "$slot") || return 1
+  [ "$(printf '%s\n' "$entry" | jq -r '.name')" = "$(basename "$(dirname "$slot")")" ]
+}
+
+fm_treehouse_acquisition_begin() {
+  local id=$1 receipt="$STATE/$1.treehouse-acquisition" tmp
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $receipt; inspect its exact pool and lease before retrying, even with a changed root" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$receipt.tmp.XXXXXX") || return 1
+  jq -n --arg pool "$FM_TREEHOUSE_POOL_DIR" --arg root "$FM_TREEHOUSE_ROOT" \
+    --arg holder "$(fm_treehouse_lease_holder "$id" "$FM_HOME")" \
+    '{pool:$pool,root:$root,holder:$holder}' > "$tmp" && mv "$tmp" "$receipt"
+}
+
+fm_treehouse_acquisition_complete() {
+  local slot=$1 id=$2 home=${3:-$FM_HOME} receipt holder
+  receipt="$home/state/$id.treehouse-acquisition"
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
+  fm_pr_regular_destination_or_absent "$receipt" || return 1
+  holder=$(fm_treehouse_lease_holder "$id" "$home") || return 1
+  jq -e --arg pool "$(dirname "$(dirname "$slot")")" --arg holder "$holder" \
+    '.pool == $pool and .holder == $holder' "$receipt" >/dev/null || return 1
+  rm -f "$receipt"
+}
+
 # Native status is read through the supported CLI, never written by Firstmate.
 fm_treehouse_pool_status() { # <project>
   command -v jq >/dev/null 2>&1 || {
     echo "REFUSED: jq is required to verify Treehouse reservations" >&2
     return 1
   }
-  FM_TREEHOUSE_POOL=$(cd "$1" && treehouse status --json) || return 1
+  FM_TREEHOUSE_POOL=$(cd "$1" && treehouse --root "$FM_TREEHOUSE_ROOT" status --json) || return 1
   FM_TREEHOUSE_POOL=$(printf '%s\n' "$FM_TREEHOUSE_POOL" | jq -ce '
     select(type == "array") | map(. + {leased: (.status == "leased")})') || return 1
   printf '%s\n' "$FM_TREEHOUSE_POOL" | jq -e '
@@ -1386,12 +1425,22 @@ fm_treehouse_slot_entry() { # <worktree>
 # any prior acquisition by this task. The caller holds the project lock through
 # publication; native leases keep exclusion after that lock or process exits.
 fm_treehouse_acquire_preflight() { # <project> <task-id>
-  local project=$1 id=$2 holder state meta field path slot entry leased marker
+  local project=$1 id=$2 holder state meta field path slot entry leased marker selection other_pool recorded_project
   fm_treehouse_supports_reservations || {
     echo "REFUSED: Treehouse requires lease JSON, status JSON and conditional lease-id return support" >&2
     return 1
   }
+  fm_treehouse_select_pool "$project" || return 1
+  if [ -e "$STATE/$id.treehouse-acquisition" ] || [ -L "$STATE/$id.treehouse-acquisition" ]; then
+    echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $STATE/$id.treehouse-acquisition; inspect it before retrying, even with a changed root" >&2
+    return 1
+  fi
   fm_treehouse_pool_status "$project" || return 1
+  while IFS= read -r slot; do
+    fm_treehouse_selected_slot "$slot" || {
+      echo "REFUSED: status returned a slot outside the selected native pool: $slot" >&2; return 1;
+    }
+  done < <(printf '%s\n' "$FM_TREEHOUSE_POOL" | jq -r '.[].path')
   holder=$(fm_treehouse_lease_holder "$id" "$FM_HOME") || return 1
   if printf '%s\n' "$FM_TREEHOUSE_POOL" | jq -e --arg h "$holder" \
       'any(.[]; .lease_holder == $h)' >/dev/null; then
@@ -1414,7 +1463,13 @@ fm_treehouse_acquire_preflight() { # <project> <task-id>
         if [ -z "$entry" ]; then
           # Ordinary standalone copies are outside Treehouse. A managed copy
           # omitted from status is ambiguous, not authority to call get.
-          if fm_treehouse_pool_slot "$project" "$slot"; then
+          if fm_treehouse_pool_slot "$project" "$slot" \
+             || [ "$(basename "$(dirname "$(dirname "$(dirname "$slot")")")")" = .treehouse ]; then
+            recorded_project=$(fm_meta_get "$meta" project)
+            [ -n "$recorded_project" ] || recorded_project=$project
+            selection=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-identity.py" "$recorded_project" "$slot") || return 1
+            other_pool=$(printf '%s\n' "$selection" | jq -er '.pool') || return 1
+            [ "$other_pool" = "$FM_TREEHOUSE_POOL_DIR" ] || continue
             echo "REFUSED: retained pool copy $slot is missing from Treehouse status" >&2
             return 1
           fi
@@ -1509,7 +1564,8 @@ fm_treehouse_slot_owner_claim() { # <worktree> <task-id> <home>
 # existing exclusive-record and landed-work checks, but a native lease always
 # requires its matching home/task claim. Sets the exact conditional-return id.
 fm_treehouse_require_owned_slot() { # <worktree> <task-id> [home]
-  local slot=$1 id=$2 home=${3:-$FM_HOME} entry holder lease leased
+  local slot=$1 id=$2 home=${3:-$FM_HOME} allow_returned=${4:-0} legacy_home=${5:-0} entry holder lease leased
+  FM_TREEHOUSE_RETURNED=0
   fm_treehouse_slot_owner_state "$slot" "$id" "$home"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) ;;
@@ -1524,13 +1580,77 @@ fm_treehouse_require_owned_slot() { # <worktree> <task-id> [home]
     holder=$(fm_treehouse_lease_holder "$id" "$home") || return 1
     lease=$(printf '%s\n' "$entry" | jq -er --arg h "$holder" '
       select(.lease_holder == $h) | .lease_id | select(type == "string" and length > 0)') || lease=
+    if [ "$legacy_home" = 1 ] && [ "$FM_TREEHOUSE_SLOT_OWNER" = absent ] \
+       && [ "$(printf '%s\n' "$entry" | jq -r '.lease_holder')" = "$id" ] \
+       && [ -f "$slot/.fm-secondmate-home" ] && [ ! -L "$slot/.fm-secondmate-home" ] \
+       && [ "$(cat "$slot/.fm-secondmate-home")" = "$id" ] \
+       && [ "$(fm_meta_get "$home/state/$id.meta" kind)" = secondmate ] \
+       && [ "$(fm_treehouse_real_dir "$(fm_meta_get "$home/state/$id.meta" home)")" = "$(fm_treehouse_real_dir "$slot")" ]; then
+      FM_TREEHOUSE_SLOT_OWNER_LEASE=$(printf '%s\n' "$entry" | jq -er '.lease_id | select(type == "string" and length > 0)') || return 1
+      return 0
+    fi
     if [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || [ -z "$lease" ] \
        || [ "$FM_TREEHOUSE_SLOT_OWNER_LEASE" != "$lease" ]; then
       echo "REFUSED: $slot has no matching task/home/lease binding; use fm-control.sh $id reserve only after proving its recorded ownership" >&2
       return 1
     fi
   elif [ "$leased" != false ] || [ -n "$FM_TREEHOUSE_SLOT_OWNER_LEASE" ]; then
-    echo "REFUSED: $slot lost its recorded lease; preserving task $id" >&2; return 1
+    if [ "$leased" = false ] && [ "$allow_returned" = 1 ] && fm_treehouse_return_receipt_valid "$slot" "$id" "$home"; then
+      FM_TREEHOUSE_RETURNED=1
+      return 0
+    fi
+    echo "REFUSED: $slot lost its recorded lease without exact return success evidence; preserving task $id" >&2; return 1
+  fi
+}
+
+fm_treehouse_return_snapshot() {
+  local slot=$1 id=$2 home=$3 marker state gitdir
+  slot=$(fm_treehouse_real_dir "$slot") || return 1
+  home=$(fm_treehouse_real_dir "$home") || return 1
+  marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
+  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  fm_pr_regular_destination_or_absent "$marker" && [ -f "$marker" ] || return 1
+  fm_treehouse_slot_entry "$slot" >/dev/null || return 1
+  gitdir=$(git -C "$slot" rev-parse --absolute-git-dir) || return 1
+  jq -nc --arg slot "$slot" --arg task "$id" --arg home "$home" \
+    --arg slot_identity "$(fm_pr_file_identity "$slot")" --arg git_identity "$(fm_pr_file_identity "$gitdir")" \
+    --arg state_identity "$(fm_pr_file_identity "$state")" --arg state_hash "$(fm_pr_sha256 "$state")" \
+    --arg claim_hash "$(fm_pr_sha256 "$marker")" \
+    '{slot:$slot,task:$task,home:$home,slot_identity:$slot_identity,git_identity:$git_identity,state_identity:$state_identity,state_hash:$state_hash,claim_hash:$claim_hash} | select(all(.[]; length > 0))'
+}
+
+fm_treehouse_return_receipt_valid() {
+  local marker receipt snapshot
+  marker=$(fm_treehouse_slot_owner_marker "$1") || return 1
+  receipt="$marker.returned"
+  fm_pr_private_file_valid "$receipt" 600 "$(fm_pr_file_device "$marker")" || return 1
+  snapshot=$(fm_treehouse_return_snapshot "$@") || return 1
+  jq -e --argjson current "$snapshot" '. == $current' "$receipt" >/dev/null
+}
+
+fm_treehouse_guarded_return() {
+  local slot=$1 id=$2 home=${3:-$FM_HOME} legacy_home=${4:-0} marker before after tmp receipt
+  fm_treehouse_require_owned_slot "$slot" "$id" "$home" 1 "$legacy_home" || return 1
+  [ "$FM_TREEHOUSE_RETURNED" != 1 ] || return 0
+  marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
+  receipt="$marker.returned"
+  fm_pr_regular_destination_or_absent "$receipt" || return 1
+  if [ -n "$FM_TREEHOUSE_SLOT_OWNER_LEASE" ]; then
+    before=$(fm_treehouse_return_snapshot "$slot" "$id" "$home") || {
+      [ "$legacy_home" = 1 ] && [ "$FM_TREEHOUSE_SLOT_OWNER" = absent ] || return 1
+      before=
+    }
+    treehouse return --force --if-lease-id "$FM_TREEHOUSE_SLOT_OWNER_LEASE" "$slot" || return $?
+    if [ -n "$before" ]; then
+      after=$(fm_treehouse_return_snapshot "$slot" "$id" "$home") || return 1
+      jq -en --argjson a "$before" --argjson b "$after" \
+        '($a | del(.state_identity,.state_hash)) == ($b | del(.state_identity,.state_hash))' >/dev/null || return 1
+      fm_treehouse_slot_entry "$slot" | jq -e '(.leased // false) == false and (.lease_id // "") == ""' >/dev/null || return 1
+      tmp=$(mktemp "$receipt.tmp.XXXXXX") || return 1
+      printf '%s\n' "$after" > "$tmp" && mv "$tmp" "$receipt" || return 1
+    fi
+  else
+    treehouse return --force "$slot" || return $?
   fi
 }
 
@@ -1539,7 +1659,8 @@ fm_treehouse_slot_owner_release() { # <worktree> <task-id> [home]
   fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
-  rm -f "$marker"
+  rm -f "$marker" "$marker.returned"
+  fm_treehouse_acquisition_complete "$worktree" "$id" "$home"
 }
 
 # In-place adoption owned by fm-control reserve. All locks are nonblocking and
@@ -1583,6 +1704,7 @@ fm_treehouse_reserve_record() ( # <task-id>
       exit 1
     fi
   fi
+  fm_treehouse_select_pool "$project" "$slot" || exit 1
   fm_treehouse_pool_status "$project" || exit 1
   entry=$(fm_treehouse_slot_entry "$slot") || exit 1
   name=$(printf '%s\n' "$entry" | jq -er '.name') || exit 1
@@ -1618,7 +1740,7 @@ fm_treehouse_reserve_record() ( # <task-id>
   else
     [ -z "$FM_TREEHOUSE_SLOT_OWNER_LEASE" ] || { echo "REFUSED: slot lost its bound lease; inspect before adoption" >&2; exit 1; }
     name=$(printf '%s\n' "$entry" | jq -er '.name | select(type == "string" and length > 0)') || exit 1
-    output=$(cd "$project" && treehouse lease "$name" --lease-holder "$holder" --json) || exit 1
+    output=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" lease "$name" --lease-holder "$holder" --json) || exit 1
     printf '%s\n' "$output" | jq -e --arg p "$slot" --arg h "$holder" \
       '.path == $p and .lease_holder == $h and (.lease_id | type == "string" and length > 0)' >/dev/null || {
       echo "REFUSED: native lease response did not match the recorded copy; reservation retained for inspection" >&2; exit 1;

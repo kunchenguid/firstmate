@@ -116,7 +116,7 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
     # The assertion concerns identity, not how long an unchanged cwd is polled.
     fm_test_fake_sleep_noop "$FAKEBIN_DIR"
 
-    out=$(run_spawn "$id" --scout)
+    out=$(FM_FAKE_POOL_STATUS='[]' run_spawn "$id" --scout)
     status=$?
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# evidence begin: linked-home spawn, returned=%s\n' "$returned"
@@ -149,9 +149,13 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
       # own project comparison, and the repository primary (named directly or
       # through a symlink) fails the isolation screen the poll shares with the
       # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "isolated worktree" \
-        "spawn did not explain its isolation refusal"
-      assert_contains "$out" "resolved" "refusal did not name the path the pane reported"
+      case "$out" in
+        *"outside the selected native pool"*) assert_contains "$out" "$POOL_DIR" 'pool refusal did not name the unexpected slot' ;;
+        *)
+          assert_contains "$out" "isolated worktree" "spawn did not explain its isolation refusal"
+          assert_contains "$out" "resolved" "refusal did not name the path the pane reported"
+          ;;
+      esac
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
@@ -879,7 +883,7 @@ test_retained_records_and_interrupted_acquisitions() {
 # unlanded commits: a clean/landed task copy is still reserved by its metadata.
 test_native_process_exit_vs_durable_reservation() (
   local native lab project ready get_pid='' shell_pid='' slot native_slot other_slot json n out status before
-  native=$(command -v treehouse || true)
+  native=${FM_TREEHOUSE_TEST_BIN:-}
   if [ -z "$native" ] || ! "$native" get --help 2>&1 | grep -q -- '--json'; then
     printf 'skip - native Treehouse lease JSON unavailable; portable reservation fixtures still run\n'
     return
@@ -936,6 +940,213 @@ HOLD
   pass "real Treehouse: stopped process-only copy is reissued; durable reservation remains owned with zero processes while a free copy is assigned"
 )
 
+
+test_pinned_pool_identity_and_recovery() (
+  set -eu
+  local native=${FM_TREEHOUSE_TEST_BIN:-} lab="$TMP_ROOT/pinned-review" project a b c pool_a slot_a state_a before head_a meta_a json out id expected root pool slot marker state returned
+  [ -n "$native" ] && [ -x "$native" ] || fail 'FM_TREEHOUSE_TEST_BIN must name the isolated pinned build'
+  mkdir -p "$lab/user" "$lab/home/state" "$lab/home/config" "$lab/home/data" "$lab/fakebin"
+  export HOME="$lab/user" FM_HOME="$lab/home" FM_STATE_OVERRIDE="$lab/home/state" TREEHOUSE_NO_UPDATE_CHECK=1
+  export FM_ROOT_OVERRIDE="$ROOT" PATH="$lab/fakebin:$PATH" TMUX=fake,1,0 FM_SPAWN_NO_GUARD=1
+  export FM_CONFIG_OVERRIDE="$FM_HOME/config" FM_DATA_OVERRIDE="$FM_HOME/data" FM_PROJECTS_OVERRIDE="$FM_HOME/projects"
+  unset TREEHOUSE_VCS TREEHOUSE_ROOT
+  project="$lab/project"; a="$lab/A"; b="$lab/B"; c="$lab/C"
+  fm_git_init_commit "$project"
+  mkdir -p "$project/bin"
+  printf '# Firstmate fixture\n' > "$project/AGENTS.md"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/bin/fm-guard.sh"
+  printf '/data/\n/state/\n/config/\n/projects/\n.fm-secondmate-*\n' > "$project/.gitignore"
+  git -C "$project" add AGENTS.md bin .gitignore
+  git -C "$project" -c user.name=test -c user.email=test@example.invalid commit -qm template
+  fm_test_fake_tmux_spawn "$lab/fakebin"
+  mv "$lab/fakebin/tmux" "$lab/fakebin/terminal"
+  cat > "$lab/fakebin/tmux" <<'TERMINAL'
+#!/usr/bin/env bash
+export TREEHOUSE_ROOT="$FM_BACKEND_CONFLICT_ROOT"
+printf '%s\n' "$TREEHOUSE_ROOT" >> "$FM_BACKEND_ROOT_LOG"
+exec "$(dirname "$0")/terminal" "$@"
+TERMINAL
+  chmod +x "$lab/fakebin/tmux"
+  export FM_BACKEND_CONFLICT_ROOT="$a" FM_BACKEND_ROOT_LOG="$lab/backend-roots.log"
+
+  fm_fake_exit0 "$lab/fakebin" codex gh gh-axi no-mistakes
+  cp "$native" "$lab/fakebin/treehouse"
+  . "$ROOT/bin/fm-pr-lib.sh"
+  . "$ROOT/bin/fm-backend.sh"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  json=$(cd "$project" && treehouse --root "$a" get --lease --json --lease-holder setup)
+  slot_a=$(printf '%s\n' "$json" | jq -r .path)
+  treehouse return --force --if-lease-id "$(printf '%s\n' "$json" | jq -r .lease_id)" "$slot_a"
+  git -C "$slot_a" checkout -qb retained-work
+  printf 'preserved result\n' > "$slot_a/result.txt"
+  git -C "$slot_a" add result.txt
+  git -C "$slot_a" -c user.name=test -c user.email=test@example.invalid commit -qm preserved
+  head_a=$(git -C "$slot_a" rev-parse HEAD)
+  pool_a=$(dirname "$(dirname "$slot_a")"); state_a="$pool_a/treehouse-state.json"
+  fm_write_meta "$FM_HOME/state/preserved.meta" "window=isolated:fm-preserved" "endpoint_task_id=preserved" \
+    "kind=ship" "harness=codex" "project=$project" "worktree=$slot_a"
+  before=$(cat "$state_a"); meta_a=$(cat "$FM_HOME/state/preserved.meta")
+  export TREEHOUSE_ROOT="$b"
+  mv "$state_a" "$state_a.saved"
+  if fm_treehouse_acquire_preflight "$project" missing-state > "$lab/missing-state.out" 2>&1; then fail 'unknown retained pool state was excluded'; fi
+  assert_contains "$(cat "$lab/missing-state.out")" "$state_a" 'unknown-state refusal did not name the preserved pool'
+  mv "$state_a.saved" "$state_a"
+  [ "$(cat "$state_a")" = "$before" ] || fail 'missing-state refusal altered preserved state'
+
+  export TREEHOUSE_ROOT="$a"
+  if fm_treehouse_acquire_preflight "$project" blocked > "$lab/same.out" 2>&1; then fail 'same-pool retained copy was offered'; fi
+  assert_contains "$(cat "$lab/same.out")" 'without a durable lease' 'same-pool refusal reason'
+  ln -s "$a" "$lab/alias"
+  export TREEHOUSE_ROOT="$lab/alias"
+  if fm_treehouse_acquire_preflight "$project" alias > "$lab/alias.out" 2>&1; then fail 'root alias was accepted'; fi
+  for root in "$b" "$c"; do
+    id="review-$(basename "$root")"
+    export TREEHOUSE_ROOT="$root"
+    expected=$(python3 "$ROOT/bin/fm-treehouse-identity.py" "$project" | jq -r '.pool + "/1/project"')
+    fm_test_spawn_brief "$FM_HOME" "$id"
+    export FM_FAKE_PANE_PATH="$expected" FM_FAKE_LAUNCH_LOG="$lab/launch.log"
+    out=$("$ROOT/bin/fm-spawn.sh" "$id" "$project" --scout --harness codex 2>&1) || fail "separate-root spawn failed: $out"
+    assert_grep "worktree=$expected" "$FM_HOME/state/$id.meta" 'spawn published wrong root'
+    [ ! -e "$FM_HOME/state/$id.treehouse-acquisition" ] || fail 'published spawn retained its pending acquisition receipt'
+    assert_grep "$a" "$FM_BACKEND_ROOT_LOG" 'backend root conflict was not exercised'
+    [ "$(cat "$state_a")" = "$before" ] && [ "$(cat "$FM_HOME/state/preserved.meta")" = "$meta_a" ] || fail 'separate-root spawn changed preserved state'
+    [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] && [ "$(cat "$slot_a/result.txt")" = 'preserved result' ] || fail 'separate-root spawn reset retained work'
+  done
+  export TREEHOUSE_ROOT="$c"
+  out=$("$ROOT/bin/fm-control.sh" preserved reserve 2>&1) || fail "exact-copy adoption followed ambient root: $out"
+  [ "$(git -C "$slot_a" rev-parse HEAD)" = "$head_a" ] && [ "$(cat "$slot_a/result.txt")" = 'preserved result' ] || fail 'native in-place adoption reset the copy'
+  before=$(cat "$state_a")
+  "$ROOT/bin/fm-control.sh" preserved reserve >/dev/null || fail 'adoption retry failed'
+  [ "$(cat "$state_a")" = "$before" ] || fail 'adoption retry replaced lease'
+  pass 'pinned native adoption preserves content; explicit B/C spawns preserve pool A and its records'
+
+  unset TREEHOUSE_ROOT
+  fm_treehouse_acquire_preflight "$project" default
+  [ "$FM_TREEHOUSE_ROOT" = "$HOME" ] || fail 'default root was not captured'
+  json=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json --lease-holder default)
+  fm_treehouse_selected_slot "$(printf '%s\n' "$json" | jq -r .path)" || fail 'default native pool mismatched resolver'
+  mkdir -p "$HOME/.config/treehouse"
+  printf 'root = "%s"\n' "$lab/config-root" > "$HOME/.config/treehouse/config.toml"
+  fm_treehouse_select_pool "$project"
+  [ "$FM_TREEHOUSE_ROOT" = "$lab/config-root" ] || fail 'user root config was ignored'
+  printf 'root = "%s"\n' "$lab/repo-root" > "$project/treehouse.toml"
+  fm_treehouse_select_pool "$project"
+  [ "$FM_TREEHOUSE_ROOT" = "$lab/repo-root" ] || fail 'project root config precedence failed'
+  rm "$project/treehouse.toml"
+  export TREEHOUSE_ROOT="$lab/interrupted"
+  fm_treehouse_acquire_preflight "$project" interrupted
+  fm_treehouse_acquisition_begin interrupted
+  json=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json --lease-holder "$(fm_treehouse_lease_holder interrupted "$FM_HOME")")
+  slot=$(printf '%s\n' "$json" | jq -r .path)
+  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  before=$(cat "$state")
+  for root in "$lab/interrupted" "$lab/changed-retry"; do
+    export TREEHOUSE_ROOT="$root"
+    if fm_treehouse_acquire_preflight "$project" interrupted > "$lab/retry.out" 2>&1; then fail 'interrupted acquisition was hidden by root change'; fi
+    assert_contains "$(cat "$lab/retry.out")" 'retained Treehouse acquisition' 'retry lost prior operation'
+    [ "$(cat "$state")" = "$before" ] || fail 'retry changed interrupted lease'
+  done
+  fm_treehouse_slot_owner_claim "$slot" interrupted "$FM_HOME"
+  if fm_treehouse_acquire_preflight "$project" interrupted >/dev/null 2>&1; then fail 'claim publication hid interrupted operation'; fi
+  fm_write_meta "$FM_HOME/state/missing.meta" "kind=secondmate" "home=$lab/missing-home"
+  if fm_treehouse_acquire_preflight "$project" unrelated > "$lab/missing.out" 2>&1; then fail 'unavailable recorded home was ignored'; fi
+  assert_contains "$(cat "$lab/missing.out")" "$lab/missing-home" 'missing-home path was omitted'
+  assert_contains "$(cat "$lab/missing.out")" 'secondmate-provisioning' 'missing-home recovery route was omitted'
+  rm "$FM_HOME/state/missing.meta"
+  pass 'default/configured pools agree with native allocation; interrupted acquisitions and missing homes refuse safely'
+
+  for id in returned uncertain replaced foreign state-replaced; do
+    export TREEHOUSE_ROOT="$lab/$id"
+    fm_treehouse_acquire_preflight "$project" "$id"
+    fm_treehouse_acquisition_begin "$id"
+    json=$(cd "$project" && treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json --lease-holder "$(fm_treehouse_lease_holder "$id" "$FM_HOME")")
+    slot=$(printf '%s\n' "$json" | jq -r .path)
+    fm_treehouse_slot_owner_claim "$slot" "$id" "$FM_HOME"
+    marker=$(fm_treehouse_slot_owner_marker "$slot")
+    state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+    if [ "$id" = uncertain ]; then
+      treehouse return --force --if-lease-id "$(printf '%s\n' "$json" | jq -r .lease_id)" "$slot"
+    else
+      fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" || fail 'guarded return failed'
+      [ -f "$marker.returned" ] || fail 'native success was not recorded'
+    fi
+    before=$(cat "$state")
+    case "$id" in
+      returned)
+        fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" || fail 'successful return replay refused'
+        [ "$(cat "$state")" = "$before" ] || fail 'return replay called native cleanup twice'
+        if fm_treehouse_require_owned_slot "$slot" "$id" "$FM_HOME" >/dev/null 2>&1; then fail 'returned success authorized relaunch'; fi
+        fm_treehouse_slot_owner_release "$slot" "$id" "$FM_HOME"
+        [ ! -e "$marker" ] && [ ! -e "$FM_HOME/state/$id.treehouse-acquisition" ] || fail 'completed cleanup left operation ownership'
+        continue ;;
+      replaced) mv "$slot" "$slot.previous"; mkdir "$slot"; cp "$slot.previous/.git" "$slot/.git" ;;
+      foreign) printf 'task=other\nhome=%s\nlease_id=other\n' "$FM_HOME" > "$marker" ;;
+      state-replaced) cp "$state" "$state.next"; mv "$state.next" "$state" ;;
+    esac
+    if fm_treehouse_guarded_return "$slot" "$id" "$FM_HOME" > "$lab/$id.out" 2>&1; then fail "$id incorrectly reused return evidence"; fi
+    [ "$(cat "$state")" = "$before" ] || fail "$id refusal changed native state"
+  done
+  pass 'return replay requires exact success evidence and refuses uncertainty, replaced slots/state, and foreign claims'
+
+  export TREEHOUSE_ROOT="$lab/seed"
+  mkdir -p "$FM_HOME/data/mate"
+  printf '# Mate\n# Charter\nFixture home.\n# Routing scope\nFixture only.\n# Project clones\nNone. This is a project-less domain\n' > "$FM_HOME/data/mate/brief.md"
+  out=$(FM_ROOT_OVERRIDE="$project" "$ROOT/bin/fm-home-seed.sh" mate - --no-projects 2>&1) || fail "native home seed failed: $out"
+  slot=$(printf '%s\n' "$out" | sed -n 's/^home=//p' | tail -1)
+  fm_treehouse_require_owned_slot "$slot" mate "$FM_HOME" || fail 'seed did not publish canonical ownership'
+  [ "$FM_TREEHOUSE_SLOT_OWNER_LEASE" != "" ] || fail 'seed lacks exact native lease identity'
+  fm_treehouse_guarded_return "$slot" mate "$FM_HOME" 1 || fail 'seed return did not use canonical holder'
+  fm_treehouse_slot_owner_release "$slot" mate "$FM_HOME"
+  rm "$FM_HOME/data/secondmates.md"
+  export TREEHOUSE_ROOT="$lab/legacy-home"
+  json=$(cd "$project" && treehouse --root "$TREEHOUSE_ROOT" get --lease --json --lease-holder legacy-mate)
+  slot=$(printf '%s\n' "$json" | jq -r .path)
+  printf 'legacy-mate\n' > "$slot/.fm-secondmate-home"
+  if fm_treehouse_guarded_return "$slot" legacy-mate "$FM_HOME" 1 >/dev/null 2>&1; then fail 'unrecorded legacy home was released'; fi
+  fm_write_meta "$FM_HOME/state/legacy-mate.meta" 'kind=secondmate' "home=$slot"
+  fm_treehouse_guarded_return "$slot" legacy-mate "$FM_HOME" 1 || fail 'recorded legacy home conditional return refused'
+  rm "$FM_HOME/state/legacy-mate.meta"
+  cat > "$lab/fakebin/treehouse" <<'WRAPPER'
+#!/usr/bin/env bash
+"$FM_TREEHOUSE_TEST_BIN" "$@"
+rc=$?
+if [[ " $* " == *' get '* && " $* " != *' --help '* ]]; then exit 17; fi
+exit "$rc"
+WRAPPER
+  chmod +x "$lab/fakebin/treehouse"
+  export FM_TREEHOUSE_TEST_BIN="$native" TREEHOUSE_ROOT="$lab/seed-lost"
+  out=$(FM_ROOT_OVERRIDE="$project" "$ROOT/bin/fm-home-seed.sh" lost-mate - --no-projects 2>&1) && fail 'lost seed response reported success'
+  state=$(python3 "$ROOT/bin/fm-treehouse-identity.py" "$project" | jq -r '.pool + "/treehouse-state.json"')
+  before=$(cat "$state")
+  export TREEHOUSE_ROOT="$lab/seed-lost-retry"
+  out=$(FM_ROOT_OVERRIDE="$project" "$ROOT/bin/fm-home-seed.sh" lost-mate - --no-projects 2>&1) && fail 'seed retry hid retained lease in different root'
+  assert_contains "$out" 'retained Treehouse acquisition' 'seed retry lost interrupted acquisition'
+  [ "$(cat "$state")" = "$before" ] || fail 'seed retry changed retained lease'
+  pass 'native seeding and return share canonical identity; legacy and interrupted seeds preserve ownership'
+
+  export TREEHOUSE_ROOT="$lab/wrong-response"
+  fm_test_spawn_brief "$FM_HOME" wrong-response
+  before=$(cat "$state_a")
+  cat > "$lab/fakebin/treehouse" <<'WRAPPER'
+#!/usr/bin/env bash
+if [[ " $* " == *' get '* && " $* " != *' --help '* ]]; then
+  "$FM_TREEHOUSE_TEST_BIN" --root "$FM_WRONG_ROOT" get --lease --json --lease-holder "firstmate:$FM_HOME:wrong-response"
+else
+  exec "$FM_TREEHOUSE_TEST_BIN" "$@"
+fi
+WRAPPER
+  chmod +x "$lab/fakebin/treehouse"
+  export FM_WRONG_ROOT="$lab/wrong-allocator" FM_TREEHOUSE_TEST_BIN="$native"
+  out=$("$ROOT/bin/fm-spawn.sh" wrong-response "$project" --scout --harness codex 2>&1) && fail 'wrong returned pool was accepted'
+  assert_contains "$out" 'outside the selected native pool' 'wrong returned pool was not diagnosed'
+  [ ! -e "$FM_HOME/state/wrong-response.meta" ] && [ "$(cat "$state_a")" = "$before" ] || fail 'wrong-pool response published or changed preserved state'
+  pass 'unexpected native response pool refuses before refresh or publication'
+)
+
+if [ "${FM_TREEHOUSE_REPAIR_ONLY:-0}" = 1 ]; then
+  test_pinned_pool_identity_and_recovery
+  exit $?
+fi
 
 test_retained_records_and_interrupted_acquisitions
 test_native_process_exit_vs_durable_reservation || exit $?

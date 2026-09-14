@@ -7,8 +7,8 @@
 # init/doctor), so they live here rather than in the generic tests/lib.sh. The
 # generic git/identity/meta primitives come from lib.sh, which this file pulls in.
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
@@ -16,9 +16,14 @@
 # to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
 # FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
 make_fake_tmux() {
-  local dir=$1 fakebin capture
+  local dir=$1 fakebin capture slot pool
   fakebin=$(fm_fakebin "$dir")
   capture="$dir/pane.txt"
+  fm_test_fake_treehouse_identity "$fakebin"
+  while IFS= read -r -d '' slot; do
+    pool=$(dirname "$(dirname "$slot")")
+    [ -e "$pool/treehouse-state.json" ] || jq -n --arg p "$slot" '{worktrees:[{name:"1",path:$p}]}' > "$pool/treehouse-state.json"
+  done < <(find "$TMP_ROOT" -type d -path '*/1/firstmate' -print0)
   # A real, positively identified empty agent composer. A blank capture is
   # deliberately unknown under the fleet-wide strict blank-row posture.
   printf '❯\n' > "$capture"
@@ -76,6 +81,7 @@ if [ "${2:-}" = --help ]; then
   printf '%s\n' 'get --lease --json --lease-holder; status --json; return --if-lease-id'
   exit 0
 fi
+if [ "${1:-}" = --root ]; then shift 2; fi
 case "${1:-}" in
   status) printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS:-[]}"; exit 0 ;;
   get)
@@ -95,7 +101,12 @@ case "${1:-}" in
       mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
       [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
-      printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
+      if [ "$(basename "$(dirname "$FM_FAKE_TREEHOUSE_HOME")")" = 1 ]; then
+        state="$(dirname "$(dirname "$FM_FAKE_TREEHOUSE_HOME")")/treehouse-state.json"
+        jq -n --arg p "$FM_FAKE_TREEHOUSE_HOME" --arg h "$holder" \
+          '{worktrees:[{name:"1",path:$p,leased:true,lease_holder:$h,lease_id:"seed-fixture"}]}' > "$state"
+      fi
+      jq -nc --arg p "$FM_FAKE_TREEHOUSE_HOME" --arg h "$holder" '{path:$p,lease_holder:$h,lease_id:"seed-fixture"}'
     fi
     exit 0
     ;;
@@ -105,13 +116,23 @@ case "${1:-}" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --if-lease-id|--if-lease-holder) shift ;;
         *) target=$1 ;;
       esac
       shift
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
-    [ -n "$target" ] && rm -rf -- "$target"
+    if [ -n "$target" ]; then
+      state="$(dirname "$(dirname "$target")")/treehouse-state.json"
+      if [ -f "$state" ] && [ -f "$(dirname "$target")/.fm-slot-owner" ]; then
+        scratch=$(mktemp "$state.XXXXXX")
+        jq '(.worktrees[]) |= del(.leased,.lease_id,.lease_holder)' "$state" > "$scratch"
+        mv "$scratch" "$state"
+      else
+        rm -rf -- "$target"
+      fi
+    fi
     exit 0
     ;;
 esac

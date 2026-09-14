@@ -318,8 +318,12 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
-  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
-     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+  if [ "$TEARDOWN_LOCK_KIND" = secondmate ]; then
+    TEARDOWN_LOCK_PROJECT=$FM_ROOT
+    TEARDOWN_LOCK_WT=$(fm_meta_get "$META" home)
+    [ -n "$TEARDOWN_LOCK_WT" ] || TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
+  fi
+  if { [ "$TEARDOWN_LOCK_BACKEND" != orca ] || [ "$TEARDOWN_LOCK_KIND" = secondmate ]; } \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
@@ -918,9 +922,15 @@ CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-   && fm_treehouse_pool_slot "$PROJ" "$WT"; then
-  EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+TEARDOWN_LOCK_PROJECT=$PROJ
+TEARDOWN_LOCK_WT=$WT
+if [ "$KIND" = secondmate ]; then
+  TEARDOWN_LOCK_PROJECT=$FM_ROOT
+  TEARDOWN_LOCK_WT=${HOME_PATH:-$WT}
+fi
+if { [ "$KIND" = secondmate ] || [ "$BACKEND" != orca ]; } \
+   && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+  EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
     echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
     exit 1
   }
@@ -1559,16 +1569,12 @@ cleanup_stale_lock_for_safety_check() {
 }
 
 teardown_treehouse_return_once() { # <dir> <project> <task-id|empty> <home>
-  local dir=$1 project=$2 task=$3 home=$4
-  local -a args
-  args=(return --force)
-  if [ -n "$task" ] && fm_treehouse_pool_slot "$project" "$dir"; then
-    require_owned_worktree_slot_record "$task" "$dir" "$home" || return 1
-    if [ -n "$FM_TREEHOUSE_SLOT_OWNER_LEASE" ]; then
-      args+=(--if-lease-id "$FM_TREEHOUSE_SLOT_OWNER_LEASE")
-    fi
+  local dir=$1 project=$2 task=$3 home=$4 legacy_home=${5:-0}
+  if [ -n "$task" ] && { [ "$legacy_home" = 1 ] || fm_treehouse_pool_slot "$project" "$dir"; }; then
+    (cd "$project" && fm_treehouse_guarded_return "$dir" "$task" "$home" "$legacy_home")
+  else
+    (cd "$project" && treehouse return --force "$dir")
   fi
-  (cd "$project" && treehouse "${args[@]}" "$dir")
 }
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
@@ -1576,12 +1582,12 @@ teardown_treehouse_return_once() { # <dir> <project> <task-id|empty> <home>
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
-  local task=${5:-} home=${6:-$FM_HOME}
+  local task=${5:-} home=${6:-$FM_HOME} legacy_home=${7:-0}
   if [ -z "$task" ] && [ "$label" = worktree ]; then task=$ID; fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" 2>&1 ); then
+  if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" "$legacy_home" 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1606,7 +1612,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" 2>&1 ); then
+    if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" "$legacy_home" 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1633,7 +1639,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" 2>&1 ); then
+      if out=$( teardown_treehouse_return_once "$dir" "$cd_dir" "$task" "$home" "$legacy_home" 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2130,7 +2136,7 @@ require_exclusive_task_worktree_slot() {
 # The shared claim/lease owner proves exact task and home identity. Neither
 # --force nor a vanished endpoint authorizes returning another reservation.
 require_owned_worktree_slot_record() { # <task-id> <worktree> [home]
-  fm_treehouse_require_owned_slot "$2" "$1" "${3:-$FM_HOME}"
+  fm_treehouse_require_owned_slot "$2" "$1" "${3:-$FM_HOME}" 1
 }
 
 # Refuse before any task cleanup if its native reservation changed hands.
@@ -2329,11 +2335,14 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} owner_home=${4:-$FM_HOME} abs_home_path process_event_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  if firstmate_home_has_treehouse_slot "$abs_home_path"; then
+    fm_treehouse_require_owned_slot "$abs_home_path" "$expected_id" "$owner_home" 1 1 || return 1
+  fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -2345,11 +2354,12 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" "$owner_home" 1 || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    fm_treehouse_slot_owner_release "$abs_home_path" "$expected_id" "$owner_home" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -2881,8 +2891,11 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+        if firstmate_home_has_treehouse_slot "$child_home"; then
+          fm_treehouse_require_owned_slot "$child_home" "$child_id" "$home" 1 1 || return 1
+        fi
         cleanup_firstmate_home_children "$child_home" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -2964,6 +2977,9 @@ if [ "$KIND" = secondmate ]; then
   LOCAL_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
   fm_lock_acquire_wait "$LOCAL_HANDOFF_LOCK" || exit 1
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  if [ -d "$HOME_PATH" ] && firstmate_home_has_treehouse_slot "$HOME_PATH"; then
+    fm_treehouse_require_owned_slot "$HOME_PATH" "$ID" "$FM_HOME" 1 1 || exit 1
+  fi
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1

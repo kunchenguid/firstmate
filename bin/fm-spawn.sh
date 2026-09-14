@@ -3297,7 +3297,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_LEASE_HOLDER=$(fm_treehouse_lease_holder "$ID" "$FM_HOME") || exit 1
   # Acquire synchronously, bounded by the shared process-group timeout owner.
   # The response, not an incidental pane cwd, identifies the reservation.
-  lease_json=$(cd "$PROJ_ABS" && fm_run_timed 60 treehouse get --lease --json \
+  fm_treehouse_acquisition_begin "$ID" || exit 1
+  lease_json=$(cd "$PROJ_ABS" && fm_run_timed 60 treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json \
     --lease-holder "$SPAWN_LEASE_HOLDER") || exit 1
   WT=$(printf '%s\n' "$lease_json" | jq -er --arg h "$SPAWN_LEASE_HOLDER" '
     select(.lease_holder == $h and (.lease_id | type == "string" and length > 0)) |
@@ -3310,6 +3311,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "REFUSED: leased path $WT is not this project's registered Treehouse copy" >&2
     exit 1
   }
+  fm_treehouse_selected_slot "$WT" || { echo "REFUSED: leased path is outside the selected native pool; reservation retained" >&2; exit 1; }
   lease_entry=$(fm_treehouse_slot_entry "$WT") || exit 1
   if [ "$(printf '%s\n' "$lease_entry" | jq -r '.lease_id')" != \
        "$(printf '%s\n' "$lease_json" | jq -r '.lease_id')" ] \
@@ -4295,6 +4297,9 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   trap - HUP INT TERM
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
+fi
+if [ -n "$SPAWN_LEASE_HOLDER" ] || [ "$KIND" = secondmate ]; then
+  fm_treehouse_acquisition_complete "$WT" "$ID" "$FM_HOME" || exit 1
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0

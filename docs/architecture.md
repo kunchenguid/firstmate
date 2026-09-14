@@ -220,6 +220,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
 Treehouse reservations survive process and presentation closure; [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns the native lease binding and retained-copy guards, with in-place adoption exposed by [`fm-control.sh reserve`](../bin/fm-control.sh).
+The same owner records each acquisition before calling the allocator and retires that operation receipt after launch publication or guarded return, so an interrupted attempt remains visible when the caller changes its root.
+[`fm-treehouse-identity.py`](../bin/fm-treehouse-identity.py) resolves the pinned native Git pool layout and configuration precedence without modifying native state; status, acquisition, response validation, and exact-copy adoption share that selection.
+Guarded return records success against the exact slot, claim, Git directory, and native state identity; uncertainty or later pool-state replacement refuses replay.
+Home seeding uses the canonical task/home holder and exact lease-id return, while a legacy bare holder requires its matching secondmate identity marker and parent record.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation, base freshness, and durable reservation recovery, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

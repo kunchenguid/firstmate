@@ -49,6 +49,7 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -388,7 +389,7 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() (
-  local id=$1 home project_lock
+  local id=$1 home project_lock holder lease_json entry
   # Home seeding uses the same pool: protect retained worker records before
   # native get can reset a slot, under the shared allocation/return lock.
   # shellcheck source=bin/fm-backend.sh
@@ -397,15 +398,19 @@ acquire_treehouse_home() (
   fm_lock_try_acquire "$project_lock" || { echo "REFUSED: Treehouse project is being changed" >&2; exit 1; }
   trap 'fm_lock_release "$project_lock"' EXIT
   fm_treehouse_acquire_preflight "$FM_ROOT" "$id" || exit 1
-  # Durably lease a firstmate worktree from the pool. The lease persists with no
-  # live process and is skipped by later get/prune, so the home survives restarts
-  # until teardown or rollback returns it. treehouse prints only the worktree path
-  # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
-    echo "error: treehouse get --lease failed to lease a firstmate home" >&2
+  holder=$(fm_treehouse_lease_holder "$id" "$FM_HOME") || exit 1
+  fm_treehouse_acquisition_begin "$id" || exit 1
+  lease_json=$(cd "$FM_ROOT" && treehouse --root "$FM_TREEHOUSE_ROOT" get --lease --json --lease-holder "$holder") || {
+    echo "error: treehouse get --lease failed; any acquisition remains reserved for inspection" >&2
     return 1
   }
-  [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
+  home=$(printf '%s\n' "$lease_json" | jq -er --arg h "$holder" \
+    'select(.lease_holder == $h and (.lease_id | type == "string" and length > 0)) | .path') || return 1
+  refuse_active_home_path "$home" || return 1
+  fm_treehouse_selected_slot "$home" || { echo "REFUSED: acquired home is outside the selected native pool; reservation retained" >&2; return 1; }
+  entry=$(fm_treehouse_slot_entry "$home") || return 1
+  [ "$(printf '%s\n' "$entry" | jq -r '.lease_id')" = "$(printf '%s\n' "$lease_json" | jq -r '.lease_id')" ] || return 1
+  fm_treehouse_slot_owner_claim "$home" "$id" "$FM_HOME" || return 1
   printf '%s\n' "$home"
 )
 
@@ -590,7 +595,7 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  ( cd "$FM_ROOT" && fm_treehouse_guarded_return "$abs_home" "$SEED_ID" "$FM_HOME" >/dev/null && fm_treehouse_slot_owner_release "$abs_home" "$SEED_ID" "$FM_HOME" ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
@@ -842,6 +847,7 @@ seed_home() {
     validate_seed_project "$project"
   done
 
+  SEED_ID=$id
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
   SEED_HOME=

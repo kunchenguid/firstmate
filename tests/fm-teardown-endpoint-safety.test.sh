@@ -29,6 +29,13 @@ SH
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [[ " $* " == *' --if-lease-id '* ]]; then
+  path=${!#}
+  state="$(dirname "$(dirname "$(cd "$path" && pwd -P)")")/treehouse-state.json"
+  tmp=$(mktemp "$state.XXXXXX")
+  jq '(.worktrees[]) |= del(.leased,.lease_id,.lease_holder)' "$state" > "$tmp"
+  mv "$tmp" "$state"
+fi
 exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"

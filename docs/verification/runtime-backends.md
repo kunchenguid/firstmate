@@ -8,7 +8,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Preserved Treehouse reservations
 
-Verified on Linux on 2026-09-14 with Treehouse v2.2.1 and isolated Git projects, `FM_HOME`, and `TREEHOUSE_ROOT`:
+The process-exit counterfactual was verified on Linux on 2026-09-14 with Treehouse v2.2.1 and isolated Git projects, `FM_HOME`, and `TREEHOUSE_ROOT`:
 
 ```sh
 bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh tests/fm-spawn-worktree-settle.test.sh
@@ -27,11 +27,37 @@ ok - real Treehouse: stopped process-only copy is reissued; durable reservation 
 ```
 
 The portable native model additionally exercises duplicate records across homes, the same task id with a foreign home claim, native lease publication before claim publication, and claim publication before task metadata.
-It tests the in-place lease contract without certifying an installed build of that newer native command.
+The isolated-build regression uses the immutable upstream source pinned by `bin/fm-install-treehouse.sh`; it does not certify or change the installed tool.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../../tests/fm-teardown-endpoint-safety.test.sh) retains dirty/unlanded refusal tests and verifies that safely landed own work reaches conditional return with its exact lease id.
 It also refuses a surviving claim with missing or symlinked native state before cleanup.
 [`tests/fm-test-fixtures.test.sh`](../../tests/fm-test-fixtures.test.sh) verifies that the native model refuses shallow or escaping paths before any state read/write, while an owned lease/status/return cycle succeeds.
 The reservation mechanism and recovery boundaries are owned by [`bin/fm-wake-lib.sh`](../../bin/fm-wake-lib.sh), with executable entry points in spawn, control, home seeding, and guarded teardown.
+
+The focused repair regression passed on Linux on 2026-09-14 using Go 1.26.8 to build the pinned source in an isolated destination.
+It requires an explicit isolated binary and never probes an installed Treehouse:
+
+```sh
+bin/fm-install-treehouse.sh "$PWD/.no-mistakes/review-treehouse/bin"
+FM_TREEHOUSE_TEST_BIN="$PWD/.no-mistakes/review-treehouse/bin/treehouse" FM_TREEHOUSE_REPAIR_ONLY=1 bash tests/fm-spawn-pool-base-freshen.test.sh
+FM_TREEHOUSE_REPAIR_ONLY=1 bash tests/fm-secondmate-safety.test.sh
+```
+
+The build pin is upstream commit `b227e59cf73fd15d69f00b580da0f5bee6b38fce`, with source-archive SHA-256 `6aacdf5e75bd4145660bb47c732e128342ea621ec0ab37b802ddc780b4226c06`.
+The installer requires Go 1.25.5 or newer and writes only to its supplied destination and temporary build directory.
+Observed native output, with exit status 0:
+
+```text
+ok - pinned native adoption preserves content; explicit B/C spawns preserve pool A and its records
+ok - default/configured pools agree with native allocation; interrupted acquisitions and missing homes refuse safely
+ok - return replay requires exact success evidence and refuses uncertainty, replaced slots/state, and foreign claims
+ok - native seeding and return share canonical identity; legacy and interrupted seeds preserve ownership
+ok - unexpected native response pool refuses before refresh or publication
+```
+
+The seven focused secondmate cases also passed, covering acquisition, rollback, unsafe home targets, ordinary retirement, and nested return failures.
+The portable spawn and teardown suites passed through `bash tests/fm-spawn-pool-base-freshen.test.sh` and `bash tests/fm-teardown-endpoint-safety.test.sh`.
+A receipt is deliberately invalidated by any subsequent write or replacement of its native pool state; recovery then requires inspection.
+No live migration, existing-copy cleanup, or global installation is implied by these fixture results.
 
 | Integration surface | Scope of this evidence |
 |---|---|
