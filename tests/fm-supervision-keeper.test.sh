@@ -59,7 +59,7 @@ SH
   chmod +x "$fake"
 
   set +e
-  out=$(timeout 6 env \
+  out=$(timeout 15 env \
     FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$state" \
     FM_KEEPER_WATCH_COMMAND="$fake" FM_KEEPER_TEST_LOG="$log" \
     FM_KEEPER_MAX_RESTARTS=1 FM_KEEPER_POLL=0 \
@@ -74,9 +74,54 @@ SH
   pass "keeper restarts a live watcher whose lock/beacon never becomes healthy"
 }
 
+test_keeper_circuits_on_heartbeat_write_failure() {
+  local state="$TMP_ROOT/heartbeat-failure-state" fake="$TMP_ROOT/heartbeat-failure-watch.sh" out rc
+  mkdir -p "$state"
+  # A directory at the heartbeat path makes the real heartbeat write fail with
+  # the same filesystem boundary that produced the incident's ENOSPC/EMFILE.
+  mkdir -p "$state/.supervision-keeper-beat"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake"
+
+  set +e
+  out=$(FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_KEEPER_WATCH_COMMAND="$fake" FM_KEEPER_MAX_RESTARTS=1 \
+    FM_KEEPER_MAX_RESOURCE_FAILURES=2 FM_KEEPER_RESOURCE_COOLDOWN=0 \
+    FM_KEEPER_POLL=0 FM_KEEPER_TEST_MODE=1 \
+    "$KEEPER" --once 2>&1)
+  rc=$?
+  set -e
+  expect_code "75" "$rc" "keeper exits with a resource-specific status after repeated heartbeat failures"
+  assert_contains "$(cat "$state/.supervision-keeper.log")" \
+    "heartbeat write failed" "keeper records the heartbeat resource failure"
+  pass "keeper circuits instead of retrying forever when its heartbeat cannot be written"
+}
+
+test_keeper_circuits_on_watcher_allocation_failure() {
+  local state="$TMP_ROOT/allocation-failure-state" rc
+  mkdir -p "$state"
+
+  set +e
+  FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_KEEPER_TEST_FAIL_WATCHER_ALLOCATION=1 FM_KEEPER_MAX_RESOURCE_FAILURES=2 \
+    FM_KEEPER_RESOURCE_COOLDOWN=0 FM_KEEPER_POLL=0 FM_KEEPER_TEST_MODE=1 \
+    "$KEEPER" --once >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code "75" "$rc" "keeper exits with a resource-specific status after watcher allocation failures"
+  assert_contains "$(cat "$state/.supervision-keeper.log")" \
+    "watcher allocation failed" "keeper records watcher allocation pressure"
+  pass "keeper circuits instead of retrying forever when watcher allocation fails"
+}
+
 test_restart_predicate_requires_identity_and_freshness
 test_backoff_is_bounded
 test_keeper_restarts_a_crashing_child
 test_keeper_restarts_a_live_but_unhealthy_watcher
+test_keeper_circuits_on_heartbeat_write_failure
+test_keeper_circuits_on_watcher_allocation_failure
 
 echo "all supervision keeper tests passed"

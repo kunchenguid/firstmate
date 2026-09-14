@@ -16,6 +16,7 @@ POLL="${FM_KEEPER_POLL:-5}"
 STARTUP_GRACE="${FM_KEEPER_STARTUP_GRACE:-15}"
 MAX_BACKOFF="${FM_KEEPER_MAX_BACKOFF:-60}"
 MAX_RESTARTS="${FM_KEEPER_MAX_RESTARTS:-0}" # 0 = unlimited in normal mode
+RESOURCE_COOLDOWN="${FM_KEEPER_RESOURCE_COOLDOWN:-60}"
 LOG="$STATE/.supervision-keeper.log"
 LOCK="$STATE/.supervision-keeper.lock"
 PIDFILE="$STATE/.supervision-keeper.pid"
@@ -27,17 +28,68 @@ CHILD_OUT=""
 CHILD_ERR=""
 BACKOFF=1
 RESTARTS=0
+HEARTBEAT_FAILURES=0
+ALLOCATION_FAILURES=0
+MAX_RESOURCE_FAILURES="${FM_KEEPER_MAX_RESOURCE_FAILURES:-3}"
+
+case "$MAX_RESOURCE_FAILURES" in
+  ''|*[!0-9]*|0) MAX_RESOURCE_FAILURES=3 ;;
+esac
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 fm_keeper_log() {
+  local line
   mkdir -p "$STATE"
-  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG" 2>/dev/null || true
+  line=$(printf '[%s] %s' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*")
+  if ! printf '%s\n' "$line" >> "$LOG" 2>/dev/null; then
+    printf '%s\n' "$line" >&2 2>/dev/null || true
+    return 1
+  fi
   if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" | tr -d ' ')" -gt 262144 ]; then
     tail -n 2000 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null || true
     rm -f "$LOG.tmp" 2>/dev/null || true
   fi
+}
+
+fm_keeper_write_beat() {
+  local now
+  now=$(date +%s 2>/dev/null) || return 1
+  printf '%s\n' "$now" > "$BEAT" 2>/dev/null
+}
+
+fm_keeper_resource_snapshot() {
+  local current max
+  if command -v sysctl >/dev/null 2>&1; then
+    current=$(sysctl -n kern.num_files 2>/dev/null || true)
+    max=$(sysctl -n kern.maxfiles 2>/dev/null || true)
+    case "$current" in ''|*[!0-9]*) printf ' open_files=unknown'; return 0 ;; esac
+    case "$max" in ''|*[!0-9]*) printf ' open_files=unknown'; return 0 ;; esac
+    printf ' open_files=%s/%s' "$current" "$max"
+    return 0
+  fi
+  printf ' open_files=unknown'
+}
+
+fm_keeper_resource_failure() {
+  local kind=${1:-resource} delay failures
+  case "$kind" in
+    heartbeat*) HEARTBEAT_FAILURES=$((HEARTBEAT_FAILURES + 1)); failures=$HEARTBEAT_FAILURES ;;
+    *) ALLOCATION_FAILURES=$((ALLOCATION_FAILURES + 1)); failures=$ALLOCATION_FAILURES ;;
+  esac
+  fm_keeper_log "$kind failed count=$failures$(fm_keeper_resource_snapshot)"
+  if [ "$failures" -ge "$MAX_RESOURCE_FAILURES" ]; then
+    fm_keeper_log "resource circuit open after $failures failures; exiting for supervisor restart"
+    case "$RESOURCE_COOLDOWN" in
+      ''|*[!0-9]*) RESOURCE_COOLDOWN=60 ;;
+    esac
+    [ "$RESOURCE_COOLDOWN" -eq 0 ] || sleep "$RESOURCE_COOLDOWN"
+    return 75
+  fi
+  delay=$(fm_keeper_backoff "$HEARTBEAT_FAILURES")
+  sleep "$delay"
+  return 0
 }
 
 fm_keeper_backoff() {
@@ -111,6 +163,7 @@ fm_keeper_signal_exit() {
 }
 
 fm_keeper_start_watcher() {
+  [ "${FM_KEEPER_TEST_FAIL_WATCHER_ALLOCATION:-0}" = 1 ] && return 1
   CHILD_OUT=$(mktemp "$STATE/.supervision-keeper-watch.XXXXXX") || return 1
   CHILD_ERR="$CHILD_OUT.err"
   "$WATCH" >"$CHILD_OUT" 2>"$CHILD_ERR" &
@@ -177,9 +230,19 @@ fm_keeper_main() {
   trap fm_keeper_cleanup EXIT
   fm_keeper_log "keeper started pid=$$ home=$FM_HOME state=$STATE"
   while :; do
-    date +%s > "$BEAT" 2>/dev/null || true
+    if fm_keeper_write_beat; then
+      HEARTBEAT_FAILURES=0
+    elif ! fm_keeper_resource_failure "heartbeat write"; then
+      return 75
+    fi
     if [ -z "$WATCHER_PID" ]; then
-      fm_keeper_start_watcher || { fm_keeper_log "watcher start failed; retrying"; sleep "$BACKOFF"; continue; }
+      if ! fm_keeper_start_watcher; then
+        if ! fm_keeper_resource_failure "watcher allocation"; then
+          return 75
+        fi
+        continue
+      fi
+      ALLOCATION_FAILURES=0
       BACKOFF=1
     elif ! fm_pid_alive "$WATCHER_PID"; then
       fm_keeper_reap_watcher

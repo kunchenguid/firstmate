@@ -30,3 +30,21 @@ The keeper is deliberately home-scoped and never uses broad process matching.
 `launchd` is the outer restart boundary; the keeper is the inner restart
 boundary for the one-cycle watcher. If launchd cannot bootstrap the job, the
 installer exits non-zero and leaves the plist in place for diagnosis.
+
+## Resource exhaustion behavior
+
+macOS can report `No space left on device` when a process cannot allocate a
+file descriptor. The message does not prove that the filesystem is full.
+Long-lived TypeScript servers, Git upload-pack processes, and worktree tools
+can consume the host-wide descriptor budget first.
+
+The keeper treats a failed heartbeat write as a resource incident. It records
+the current `kern.num_files/kern.maxfiles` ratio when available, backs off, and
+opens a circuit after three consecutive failures. The default 60-second
+cooldown gives launchd a quiet restart boundary instead of a five-second
+retry storm. Override `FM_KEEPER_MAX_RESOURCE_FAILURES` or
+`FM_KEEPER_RESOURCE_COOLDOWN` only for tests or controlled diagnosis.
+
+After recovery, inspect the processes that own the descriptors. Do not delete
+Firstmate state to hide the symptom. Recycle the owning long-lived process or
+fix its watcher lifecycle, then verify a fresh `.last-watcher-beat`.
