@@ -221,7 +221,13 @@ source_git() {  # <repo> <read-only subcommand> [args...]
       return 99
       ;;
   esac
-  GIT_OPTIONAL_LOCKS=0 git --no-optional-locks -C "$repo" --no-pager "$sub" "$@"
+  # core.quotePath=false: with git's default every non-ASCII byte comes back
+  # C-quoted, and the surrounding quotes make an accented document fail every
+  # extension and directory test the classifier runs, so the captain's own file
+  # names would be the ones this scan is blind to. Control characters, quotes,
+  # and backslashes are still quoted, which is what keeps a hostile name from
+  # printing as if it were the real one.
+  GIT_OPTIONAL_LOCKS=0 git --no-optional-locks -c core.quotePath=false -C "$repo" --no-pager "$sub" "$@"
 }
 
 is_git_worktree_root() {  # <path>
@@ -532,8 +538,9 @@ scan_project() {  # <project> <limit>
     [ -n "$line" ] || continue
     code=${line:0:2}
     path=${line:3}
-    # Porcelain quotes a path holding unusual bytes; keep the quoted form so the
-    # report never prints a half-decoded path as if it were the real name.
+    # Porcelain still quotes a path holding control characters, a quote, or a
+    # backslash; keep that form so the report never prints a half-decoded path
+    # as if it were the real name.
     case $code in
       '??')
         if looks_like_scratch "$path"; then
@@ -645,6 +652,14 @@ scan_project() {  # <project> <limit>
     [ -n "$root" ] || continue
     grep -qxF "${root%/}" "$tmp/agentmem_paths" 2>/dev/null && continue
     looks_like_scratch "$root" && continue
+    # What the project's own ignore rules keep out of every clone is the same
+    # leak as something uncommitted, and no other pass sees it: porcelain
+    # without --ignored never lists it, and the agent-memory scan only knows a
+    # fixed set of names. The same classifier decides on both shapes - a
+    # `notes/` the project ignores is knowledge exactly as `notes/audit.md` is -
+    # so knowledge counts in the gap whether the ignore rule named a file or
+    # the whole directory. The fold above is what keeps an ignored tree to one
+    # line instead of every file under it.
     case $root in
       */)
         [ -d "$source/$root" ] || continue
@@ -652,14 +667,12 @@ scan_project() {  # <project> <limit>
         case $count in
           0) continue ;;
         esac
-        printf '%s (%s files)\n' "$root" "$count" >>"$tmp/ignored_material"
+        if looks_like_knowledge "$root"; then
+          printf '%s (%s files)\n' "$root" "$count" >>"$tmp/ignored_knowledge"
+        else
+          printf '%s (%s files)\n' "$root" "$count" >>"$tmp/ignored_material"
+        fi
         ;;
-      # A document the project's own ignore rules keep out of every clone is
-      # the same leak as an uncommitted one, and no other pass sees it:
-      # porcelain without --ignored never lists it, and the agent-memory scan
-      # only knows a fixed set of names. The fold above is what keeps this to
-      # the files the project singles out rather than every file under an
-      # ignored tree.
       *)
         looks_like_knowledge "$root" || continue
         printf '%s\n' "$root" >>"$tmp/ignored_knowledge"
@@ -669,11 +682,11 @@ scan_project() {  # <project> <limit>
   local ignored_knowledge
   ignored_knowledge=$(wc -l <"$tmp/ignored_knowledge" | tr -d ' ')
   if [ "$ignored_knowledge" -gt 0 ]; then
-    printf 'IGNORED_KNOWLEDGE_FILES: %s\n' "$ignored_knowledge"
+    printf 'IGNORED_KNOWLEDGE: %s\n' "$ignored_knowledge"
     print_capped_list "$limit" <"$tmp/ignored_knowledge"
     gap=$((gap + ignored_knowledge))
   else
-    printf 'IGNORED_KNOWLEDGE_FILES: none\n'
+    printf 'IGNORED_KNOWLEDGE: none\n'
   fi
   local ignored_material
   ignored_material=$(wc -l <"$tmp/ignored_material" | tr -d ' ')

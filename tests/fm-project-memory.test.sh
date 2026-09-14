@@ -201,7 +201,7 @@ test_scan_reports_a_knowledge_file_the_project_ignores() {
   printf 'the production bug findings\n' >"$world/source/docs/bugs-internal.md"
   record_source "$world"
   out=$(run_scan "$world")
-  assert_contains "$out" "IGNORED_KNOWLEDGE_FILES: 2" "the ignored knowledge documents were not reported"
+  assert_contains "$out" "IGNORED_KNOWLEDGE: 2" "the ignored knowledge documents were not reported"
   assert_contains "$out" "docs/audit-internal.md" "the report did not name the production audit"
   assert_contains "$out" "docs/bugs-internal.md" "the report did not name the bug findings"
   assert_not_contains "$out" "VERDICT: parity" "knowledge that stayed behind still read as parity"
@@ -225,10 +225,66 @@ test_documents_inside_an_ignored_tree_stay_folded_into_one_line() {
   publish "$world"
   record_source "$world"
   out=$(run_scan "$world")
-  assert_contains "$out" "IGNORED_KNOWLEDGE_FILES: none" "a vendored tree was reported file by file as knowledge"
+  assert_contains "$out" "IGNORED_KNOWLEDGE: none" "a vendored tree was reported file by file as knowledge"
   assert_contains "$out" "vendor/" "the ignored tree was not listed for context"
   assert_contains "$out" "VERDICT: parity" "a vendored tree alone turned the verdict into a leak"
   pass "fm-project-memory.sh: documents inside an ignored tree stay folded into one line"
+}
+
+# An ignore rule naming a whole knowledge directory leaks exactly what a rule
+# naming one document leaks. The classifier already knows `notes/` from
+# `vendor/`, so the shape of the rule must not decide whether the verdict sees
+# it: the one thing a false parity costs is the intake deciding there is
+# nothing to recover.
+test_an_ignored_knowledge_directory_counts_as_a_leak_not_as_material() {
+  local world out
+  world=$(make_world ignoreddir)
+  mkdir -p "$world/source/notes" "$world/source/herramientas"
+  printf 'notes/\nherramientas/\n' >"$world/source/.gitignore"
+  git_q -C "$world/source" add .gitignore
+  git_q -C "$world/source" commit -qm ignore
+  publish "$world"
+  printf 'the production audit of 500 conversations\n' >"$world/source/notes/audit.md"
+  printf 'the production bug findings\n' >"$world/source/notes/bugs.md"
+  printf 'tool\n' >"$world/source/herramientas/replay.py"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "IGNORED_KNOWLEDGE: 1" "the ignored knowledge directory was not reported as knowledge"
+  assert_contains "$out" "notes/ (2 files)" "the report did not name the ignored knowledge directory"
+  assert_not_contains "$out" "KNOWLEDGE_GAP: 0" "the ignored knowledge directory did not count in the gap"
+  assert_not_contains "$out" "VERDICT: parity" "a whole knowledge directory left behind still read as parity"
+  assert_contains "$out" "IGNORED_DIRS_WITH_MATERIAL: 1" "the ignored tooling directory stopped being working material"
+  assert_contains "$out" "herramientas/" "the ignored tooling directory was not listed for context"
+  pass "fm-project-memory.sh: an ignored knowledge directory counts as a leak, not as material"
+}
+
+# The captain names his files in Spanish. git C-quotes every non-ASCII path by
+# default, and the quotes make an accented document fail every extension and
+# directory test the classifier runs, so the scan would be blind to exactly the
+# documents this capability exists for. Each accented path here has an ASCII
+# twin that must land in the same category.
+test_an_accented_path_is_classified_like_its_ascii_twin() {
+  local world out
+  world=$(make_world accented)
+  mkdir -p "$world/source/docs"
+  printf 'docs/*-interno.md\n' >"$world/source/.gitignore"
+  printf 'the public one\n' >"$world/source/docs/publico.md"
+  git_q -C "$world/source" add .gitignore docs/publico.md
+  git_q -C "$world/source" commit -qm docs
+  publish "$world"
+  printf 'the simulator realism analysis\n' >"$world/source/docs/análisis-simulador.md"
+  printf 'the plain twin\n' >"$world/source/docs/analisis-simulador.md"
+  printf 'the production audit\n' >"$world/source/docs/auditoría-interno.md"
+  printf 'the plain twin\n' >"$world/source/docs/auditoria-interno.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 2" "the accented analysis was not counted as knowledge beside its ASCII twin"
+  assert_contains "$out" "docs/análisis-simulador.md" "the report did not name the accented document readably"
+  assert_contains "$out" "IGNORED_KNOWLEDGE: 2" "the accented ignored audit was not counted beside its ASCII twin"
+  assert_contains "$out" "docs/auditoría-interno.md" "the report did not name the accented ignored document readably"
+  assert_not_contains "$out" '\303' "the report printed a C-quoted path instead of the real name"
+  assert_not_contains "$out" "VERDICT: parity" "knowledge with accented names still read as parity"
+  pass "fm-project-memory.sh: an accented path is classified like its ASCII twin"
 }
 
 test_scratch_is_counted_but_never_listed() {
@@ -364,6 +420,8 @@ test_scan_reports_uncommitted_knowledge_and_excluded_agent_memory
 test_scan_reports_a_clean_project_as_parity
 test_scan_reports_a_knowledge_file_the_project_ignores
 test_documents_inside_an_ignored_tree_stay_folded_into_one_line
+test_an_ignored_knowledge_directory_counts_as_a_leak_not_as_material
+test_an_accented_path_is_classified_like_its_ascii_twin
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak

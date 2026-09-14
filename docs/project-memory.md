@@ -36,7 +36,9 @@ bin/fm-project-memory.sh scan <project>
 bin/fm-project-memory.sh scan --all
 ```
 
-The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, knowledge documents the project's own ignore rules keep out of every clone (`IGNORED_KNOWLEDGE_FILES` - a `docs/*-internal.md` rule over a production audit is the ordinary case, and no other category sees it), and ignored directories that actually hold material.
+The scan reports, in bounded lists, what the source checkout holds that the clone does not: commits never pushed to any remote, uncommitted and untracked documents that look like durable knowledge, tracked knowledge files modified but not committed, agent-memory paths the project excludes from its own history, knowledge the project's own ignore rules keep out of every clone (`IGNORED_KNOWLEDGE`, and no other category sees it), and ignored directories that hold working material rather than knowledge.
+`IGNORED_KNOWLEDGE` covers both shapes an ignore rule takes, because the leak is the same either way: a `docs/*-internal.md` rule over a production audit, and a plain `notes/` rule over the whole directory.
+The same classifier decides which of the two an ignored directory is, so `notes/` and `docs/` count in the gap while `vendor/` and `herramientas/` stay working material.
 Working material and modified source are counted separately from knowledge and never drive the verdict, so a project whose only divergence is media assets or build output reads as parity rather than as a problem.
 Scratch is counted and not listed at all.
 
