@@ -712,11 +712,16 @@ mut_id=$("$MUT_ROOT/bin/fm-procevent-lavish.sh" source-id "$MUT_ART")
 HMUT="$TMP_ROOT/hmut"; new_home "$HMUT"
 fm_test_track_procevent_home "$HMUT"
 PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
-  "$MUT_ROOT/bin/fm-procevent-lavish.sh" arm "$MUT_ART" >/dev/null
-for _ in 1 2; do
-  PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
-    "$MUT_ROOT/bin/fm-procevent.sh" start "$mut_id" >/dev/null 2>&1 || true
-done
+  "$MUT_ROOT/bin/fm-procevent-lavish.sh" arm "$MUT_ART" >/dev/null \
+  || fail "test fixture error: the deliberate-break mutant could not arm its board"
+assert_present "$HMUT/state/procevent/$mut_id.source" \
+  "test fixture error: the deliberate-break mutant never registered its source, so its loss proves nothing"
+PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
+  "$MUT_ROOT/bin/fm-procevent.sh" start "$mut_id" >/dev/null \
+  || fail "test fixture error: the deliberate-break mutant's first supervision round did not run"
+PATH="$MUT_BIN:$PATH" LAVISH_MUT_COUNT="$MUT_COUNT" FM_HOME="$HMUT" \
+  "$MUT_ROOT/bin/fm-procevent.sh" start "$mut_id" >/dev/null 2>&1 \
+  && fail "test fixture error: the deliberate-break mutant's registration survived its first round"
 assert_absent "$HMUT/state/procevent/$mut_id.source" \
   "the deliberate-break mutant did not lose the registration, so the persistence assertions above prove nothing"
 assert_absent "$HMUT/state/procevent-inbox/$mut_id.2.result" \
