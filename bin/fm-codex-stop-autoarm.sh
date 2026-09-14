@@ -220,11 +220,14 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # a newer generation already owns the ledger.
 #
 # That correction is the one write here whose failure cannot be shrugged off, so
-# its status is never discarded: a contended micro-mutex is retried over the same
-# bounded budget fm_autoarm_write_owned itself uses, because the alternative is a
-# row claiming a delivery that did not happen. Return 3 says exactly that - the
-# push was rejected AND the row still claims recovery - so the state is named
-# rather than silently indistinguishable from an ordinary rejected push.
+# a contended micro-mutex is retried over the same bounded budget
+# fm_autoarm_write_owned itself uses, because the alternative is a row claiming a
+# delivery that did not happen. A correction that exhausts even that budget has
+# no honest consumer to report to: this hook is async, its exit status is
+# discarded, and the synchronous guard for this Stop has already run. The retry
+# is the whole mitigation, and the residual - a rewake row outliving a rejected
+# push through a mutex held for the entire budget - is accepted rather than
+# signalled.
 autoarm_deliver() {  # <outcome> <banner> [marker-file]
   local outcome=$1 banner=$2 marker=${3:-} session_pid='' recovery='' fixed i=0
   fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
@@ -250,7 +253,6 @@ autoarm_deliver() {  # <outcome> <banner> [marker-file]
       sleep 0.02
       i=$((i + 1))
     done
-    [ "$fixed" -eq 1 ] && return 3
     return 1
   fi
   return 0

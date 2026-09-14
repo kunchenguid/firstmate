@@ -194,6 +194,27 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  # The guard resolves its cooperative mode from ambient process ancestry, and
+  # harness_ancestry climbs EIGHT parents, so a flagless invocation run directly
+  # from this suite inherits whatever harness the DEVELOPER is running under: a
+  # suite run from a Codex primary would flip default-mode cases into
+  # cooperative mode and invert their verdicts. Every flagless case therefore
+  # runs the guard at the end of this chain, which interposes more non-matching
+  # shells than the walk can climb, so the walk provably exhausts before
+  # reaching anything real and each case means the same thing on every host.
+  cat > "$dir/bin/fm-depth-chain.sh" <<'SH'
+#!/usr/bin/env bash
+depth=$1
+guard=$2
+payload=$(cat)
+if [ "$depth" -le 0 ]; then
+  printf '%s' "$payload" | bash "$guard"
+  exit $?
+fi
+printf '%s' "$payload" | bash "$0" "$((depth - 1))" "$guard"
+exit $?
+SH
+  chmod +x "$dir/bin/fm-depth-chain.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -270,7 +291,7 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -384,7 +405,7 @@ test_hook_non_claude_health_ignores_claude_budget_contention() {
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   while IFS='|' read -r harness payload; do
-    out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+    out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
     expect_code 0 "$status" "$harness healthy path must ignore Claude budget-lock contention"
     [ -z "$out" ] || fail "$harness healthy path produced output: $out"
     [ "$(cat "$dir/state/.turnend-claude-blocks")" = $'session=claude-episode\ncount=3\nepoch=9' ] \
@@ -448,7 +469,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -494,7 +515,7 @@ test_hook_ignores_repo_state_when_fm_home_set() {
   home="$TMP_ROOT/hook-fm-home-quiet"
   mkdir -p "$home/state"
   : > "$dir/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | FM_HOME="$home" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 0 "$status" "hook must ignore repo-root state when FM_HOME selects another state dir"
   [ -z "$out" ] || fail "hook produced output from stale repo-root state despite FM_HOME: $out"
   pass "fm-turnend-guard: ignores stale repo-root state when FM_HOME is set"
@@ -507,7 +528,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-depth-chain.sh" 12 "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -2038,30 +2059,6 @@ test_hook_unflagged_under_codex_enters_the_cooperative_mode() {
   pass "fm-turnend-guard: the flagless Codex registration resolves its cooperative mode from the running harness"
 }
 
-# Naming the immediate parent is not enough to establish "unresolved":
-# harness_ancestry climbs EIGHT parents and returns the first match, so a suite
-# run from a real Codex primary - the platform this change is for - would find
-# that codex above the fake parent and the case would stop proving anything.
-# This chain interposes more non-matching shells than the walk can climb, so the
-# walk provably exhausts before it can reach whatever the suite itself runs
-# under, and the case means the same thing on every host.
-write_depth_chain() {  # <dir>
-  local dir=$1
-  cat > "$dir/bin/fm-depth-chain.sh" <<'SH'
-#!/usr/bin/env bash
-depth=$1
-guard=$2
-payload=$(cat)
-if [ "$depth" -le 0 ]; then
-  printf '%s' "$payload" | bash "$guard"
-  exit $?
-fi
-printf '%s' "$payload" | bash "$0" "$((depth - 1))" "$guard"
-exit $?
-SH
-  chmod +x "$dir/bin/fm-depth-chain.sh"
-}
-
 run_hook_unflagged_deep() {  # <dir> <stop-active>
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
@@ -2077,7 +2074,6 @@ test_hook_unflagged_under_an_unresolved_harness_never_cooperates() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-unresolved")
   : > "$dir/state/task1.meta"
-  write_depth_chain "$dir"
   seed_open_generation_claim "$dir" .codex-autoarm-epoch
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_unflagged_deep "$dir" false); status=$?
   kill "$CLAIM_PID" 2>/dev/null || true

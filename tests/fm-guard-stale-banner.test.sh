@@ -65,12 +65,19 @@ run_guard_case_read_only() {
 
 # The Claude Stop auto-arm model: the watcher runs only between turns, so a fresh
 # beacon with no live watcher process is the healthy mid-turn state.
+# Every ledger this suite seeds is a CLAUDE one, so the prefix is pinned next to
+# the model rather than left to detection. Without the pin, the autoarm branch
+# asks bin/fm-harness.sh which ledger the running primary writes, and a suite run
+# from a Codex primary resolves .codex-autoarm - the seeded .claude-autoarm-epoch
+# becomes invisible and the mid-turn assertions invert for a reason that has
+# nothing to do with the product.
 run_guard_case_autoarm() {
   local dir=$1
   FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=999 \
     FM_SUPERVISION_MODEL=autoarm \
+    FM_AUTOARM_PREFIX=.claude-autoarm \
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
