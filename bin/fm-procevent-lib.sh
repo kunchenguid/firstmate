@@ -960,7 +960,10 @@ fm_procevent_private_directory_valid() {
 # would not help.
 fm_procevent_private_directory_diagnose() {  # <directory> <exact-mode>
   local directory=$1 exact_mode=$2 canonical normalized mode
-  if ! { [ -d "$directory" ] && [ ! -L "$directory" ]; }; then
+  if [ -L "$directory" ]; then
+    directory=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && pwd -P) || { printf 'missing\n'; return 0; }
+  fi
+  if [ ! -d "$directory" ]; then
     printf 'missing\n'
     return 0
   fi
