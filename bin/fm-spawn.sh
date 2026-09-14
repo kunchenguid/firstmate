@@ -3202,12 +3202,15 @@ rovo_endpoint_cleanup() {
 # shared fm_busy_lines_match - before the spawn reports success. A trust
 # surface that is not the complete verified menu is never answered, so a
 # changed or ambiguous one is refused by the readiness deadline rather than
-# guessed at. The gate runs on the fresh-worktree launch only: a relaunch
-# adopts an endpoint whose directory Codex already trusts, and a secondmate
-# runs in the project itself, so neither creates the first-run dialog.
+# guessed at. The gate runs on the fresh-worktree launch Firstmate creates the
+# directory for; a relaunch onto codex or a codex secondmate is out of its
+# scope, so a first-run dialog on those paths is still the captain's to answer.
+# The poll budget covers the whole envelope the live guard was written against
+# (tests/fm-codex-trust-live-e2e.test.sh: up to 30s for the menu on a cold
+# start plus a further 60s for the first working turn), because a budget that
+# expires kills the endpoint.
 CODEX_TRUST_DIALOG='Do you trust the contents of this directory?'
 CODEX_TRUST_OPTION='› 1. Yes, continue'
-CODEX_TRUST_REJECT_OPTION='2. No, quit'
 CODEX_TRUST_ANSWERED=0
 
 codex_capture() {
@@ -3215,16 +3218,15 @@ codex_capture() {
 }
 
 # The brief travels on the launch command and Codex echoes it into the pane, so
-# the dialog is recognized by the menu SHAPE on its own rows - the preselected
-# safe option and the reject option exactly once each - not by counting how
-# often its prose appears in the scrollback.
+# the dialog is recognized by the menu SHAPE on its own row - the preselected
+# safe option, exactly once - not by counting how often its prose appears in
+# the scrollback.
 codex_pane_shows_trust_dialog() {  # <plain-pane-capture>
   printf '%s\n' "$1" | awk -v dialog="$CODEX_TRUST_DIALOG" \
-    -v option="$CODEX_TRUST_OPTION" -v reject="$CODEX_TRUST_REJECT_OPTION" '
+    -v option="$CODEX_TRUST_OPTION" '
     index($0, dialog) { dialog_count++ }
     index($0, option) && $0 ~ /^[[:space:]]*›[[:space:]]*1[.] Yes, continue[[:space:]]*$/ { option_count++ }
-    index($0, reject) && $0 ~ /^[[:space:]]*2[.] No, quit[[:space:]]*$/ { reject_count++ }
-    END { exit !(dialog_count >= 1 && option_count == 1 && reject_count == 1) }
+    END { exit !(dialog_count >= 1 && option_count == 1) }
   '
 }
 
@@ -3232,15 +3234,16 @@ codex_pane_is_working() {  # <plain-pane-capture>
   printf '%s' "$1" | fm_busy_lines_match codex
 }
 
+# The choice is offered once. After it is answered the dialog matcher is never
+# consulted again, so an echo of the menu in the brief Codex is processing
+# cannot starve the working check that proves the turn is running.
 codex_wait_for_working() {
-  local pane i=0 max=${FM_CODEX_READY_POLLS:-60} interval=${FM_CODEX_POLL_INTERVAL:-0.5}
+  local pane i=0 max=${FM_CODEX_READY_POLLS:-180} interval=${FM_CODEX_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(codex_capture)
-    if codex_pane_shows_trust_dialog "$pane"; then
-      if [ "$CODEX_TRUST_ANSWERED" -eq 0 ]; then
-        spawn_send_key "$T" Enter
-        CODEX_TRUST_ANSWERED=1
-      fi
+    if [ "$CODEX_TRUST_ANSWERED" -eq 0 ] && codex_pane_shows_trust_dialog "$pane"; then
+      spawn_send_key "$T" Enter
+      CODEX_TRUST_ANSWERED=1
     elif codex_pane_is_working "$pane"; then
       return 0
     fi

@@ -20,7 +20,7 @@ A fresh repository root can show the exact directory-trust dialog: "Do you trust
 `../../../bin/fm-spawn.sh` answers that choice on a fresh-worktree launch only when the complete verified menu is present, then requires the shared codex busy signature (`esc to interrupt`) before reporting spawn success.
 A changed, ambiguous, persistent, or failed trust/readiness surface is never answered and the spawn is refused at the readiness deadline, with no repeated key presses.
 The decision persists for the repository, so later worktrees of the same project may skip the dialog; the readiness gate still requires a working turn.
-A relaunch adopts an endpoint whose directory Codex already trusts and a secondmate runs in the project itself, so neither runs this gate.
+The gate is scoped to that fresh-worktree launch: `relaunch --harness codex` onto a task that ran another harness, and a codex secondmate in a project root Codex has never run in, can both still park on an unanswered dialog, and neither is covered yet.
 
 ## Skill popup
 
