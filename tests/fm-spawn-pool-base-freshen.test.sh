@@ -788,6 +788,45 @@ test_pool_slot_refuses_existing_ownership() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "child record collision changed the held slot"
 
+  id='pool-slot-same-id-child-record-r1'
+  rec=$(make_case same-id-child-record "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/state" "$child_home/data" "$child_home/config" "$child_home/projects"
+  printf '%s\n' "- mate - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  printf 'task=%s\nhome=%s\n' "$id" "$child_home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a same-named child task's retained slot"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task '$id'" \
+    "same-named child record refusal did not name the holding task and slot"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "same-named child task's slot claim was overwritten"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "same-named child collision published parent metadata"
+
+  id='pool-slot-same-id-foreign-claim-r1'
+  rec=$(make_case same-id-foreign-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'task=%s\nhome=%s\n' "$id" "$CASE_DIR/other-home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a same-named foreign-home slot claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "same-named foreign-home claim refusal did not name the slot claim failure"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "same-named foreign-home claim was overwritten"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "same-named foreign claim refusal published metadata"
+
   id='pool-slot-claim-collision-r1'
   rec=$(make_case claim-collision "$id")
   read_case_record "$rec"

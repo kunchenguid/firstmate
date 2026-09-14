@@ -1078,7 +1078,7 @@ spawn_abort_cleanup() {
      && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_treehouse_slot_owner_release "$WT" "$ID" "$FM_HOME" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
@@ -3353,7 +3353,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # refreshing or publishing additional state for this task. This is the migration path
   # for slots whose older holder predates Firstmate's slot-owner claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    fm_treehouse_refuse_if_recorded_collision "$ID" "$WT" || exit 1
+    fm_treehouse_refuse_if_recorded_collision "$WT" || exit 1
   fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to

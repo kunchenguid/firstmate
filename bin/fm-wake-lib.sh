@@ -1305,15 +1305,14 @@ fm_treehouse_collect_local_states() {  # <record-state>
 
 # Refuse a fresh spawn when another local task record still names the selected
 # pool slot. This covers records created before slot-owner claims existed.
-fm_treehouse_refuse_if_recorded_collision() {  # <task-id> <worktree>
-  local task_id=$1 worktree=$2 target_real state_dir other other_id field other_path other_real line
+fm_treehouse_refuse_if_recorded_collision() {  # <worktree>
+  local worktree=$1 target_real state_dir other other_id field other_path other_real line
   target_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   fm_treehouse_collect_local_states "$STATE" || return 1
   for state_dir in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       other_id=$(basename "$other" .meta)
-      [ "$other_id" != "$task_id" ] || continue
       for field in worktree home; do
         other_path=
         if ! while IFS= read -r line || [ -n "$line" ]; do
@@ -1377,7 +1376,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
     return 1
   fi
   if [ -f "$marker" ]; then
-    fm_treehouse_slot_owner_state "$worktree" "$id"
+    fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
     case "$FM_TREEHOUSE_SLOT_OWNER" in
       mine) ;;
       *) return 1 ;;
@@ -1392,17 +1391,16 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-# Read the claim on a pool slot and compare it with a task id.
+# Read the claim on a pool slot and compare it with a task owner.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
-#   mine   - the claim names this task
-#   other  - the claim names a different task, so the slot was reassigned
+#   mine   - the claim names this task and home
+#   other  - the claim names a different owner, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
-fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+# claimant as evidence.
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 marker line owner_id='' owner_home=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1418,12 +1416,12 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
       home=*) owner_home=${line#home=} ;;
     esac
   done < "$marker" || return 0
-  [ -n "$owner_id" ] || return 0
+  [ -n "$owner_id" ] && [ -n "$owner_home" ] || return 0
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ]; then
+  if [ "$owner_id" = "$id" ] && [ "$owner_home" = "$home" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other
@@ -1433,9 +1431,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$id"
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 marker
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true

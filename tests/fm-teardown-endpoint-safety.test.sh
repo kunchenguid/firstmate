@@ -613,6 +613,40 @@ test_own_task_branch_still_tears_down() {
   pass "fm-teardown still cleans up a copy checked out on its own task branch"
 }
 
+test_forced_secondmate_refuses_descendant_on_other_task_branch() {
+  local dir id=domain child=stale-child subhome branch rc
+
+  dir=$(make_case descendant-branch-collision)
+  mark_case_as_treehouse_pool "$dir"
+  subhome="$dir/secondmate-home"
+  mkdir -p "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf '%s\n' "- $id - fixture (home: $subhome; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$subhome" "home=$subhome" "project=$subhome" "kind=secondmate"
+  fm_write_meta "$subhome/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a descendant on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "descendant branch refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "descendant branch refusal removed the secondmate record"
+  assert_present "$subhome/state/$child.meta" "descendant branch refusal removed the child record"
+  assert_present "$dir/worktree/sentinel" "descendant branch refusal reset the child slot"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "descendant branch refusal changed the branch to $branch"
+  [ ! -s "$dir/runtime.log" ] || fail "descendant branch refusal ran cleanup: $(cat "$dir/runtime.log")"
+  pass "forced secondmate teardown refuses a descendant checked out on another task's branch"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -1031,6 +1065,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_other_task_branch_refuses_before_cleanup
 test_own_task_branch_still_tears_down
+test_forced_secondmate_refuses_descendant_on_other_task_branch
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
