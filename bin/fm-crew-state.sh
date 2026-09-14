@@ -51,9 +51,10 @@
 #      before it having ended at exactly this worktree's head - so an active fix
 #      round never reads as an older failed run (rule owned by
 #      fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh).
-#      The AXI overview selects a run identity under fm_nm_select_run in
-#      bin/fm-nm-run-lib.sh; its full status is then read by id. Competing live
-#      runs or an unverifiable selection report unknown with candidate ids.
+#      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
+#      and ambiguity reporting. The selected run's id-addressed status must
+#      agree on id, branch, and live/terminal class before attribution;
+#      disagreement reports unknown with available candidate ids.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -85,8 +86,9 @@
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the resolved status declaration
+#   4. No current run for this crew (pre-validation, uninitialized repository,
+#      proven historical head, or kind=scout): fall back to the recorded
+#      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
