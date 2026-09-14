@@ -198,11 +198,11 @@ class Bridge:
     def decision_answer(self, request, mid, body):
         match = re.fullmatch(r"(?:aprovar|aprovo) ([A-Fa-f0-9]{16})", body.strip(), re.IGNORECASE)
         ambiguous = body.strip().lower() in ("sim", "ok", "aprovo", "pode", "👍", "✅")
-        pending = self.s.rows("SELECT * FROM decisions WHERE state='pending'")
+        pending = self.s.rows("SELECT * FROM decisions WHERE state='pending' AND expires>=?", (self.s.now(),))
         if not match and not (ambiguous and pending):
             return False
         decision = next((d for d in pending if match and d["id"] == match[1].lower()), None)
-        if decision and decision["expires"] >= self.s.now():
+        if decision:
             self.s.db.execute("UPDATE decisions SET state='answered',answer_wamid=? WHERE id=?",
                               (mid, decision["id"]))
             # Main consumes this exact binding once, using its ordinary decision

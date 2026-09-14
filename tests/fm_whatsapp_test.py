@@ -599,7 +599,12 @@ for line in sys.stdin:
         second, _ = self.claim(self.receive(self.message("Outra tarefa")))
         self.emit(second, "decision", "Autoriza a outra revisão?", task=self.task("other"),
                   action="revisar outro arquivo", expires=time.time() + 300)
-        self.receive(self.message("sim"))
+        for text in ("sim", "ok", "aprovo", "pode", "👍", "✅"):
+            with self.subTest(text=text):
+                ambiguous = self.receive(self.message(text))
+                self.assertEqual(ambiguous["state"], "answered")
+                self.assertIsNone(ambiguous["note_id"])
+                self.assertIn("Nenhuma ação", self.store.snapshot()["responses"][-1]["body"])
         self.assertEqual(len(self.store.rows("SELECT * FROM decisions WHERE state='answered'")), 0)
         self.receive(self.message("aprovar " + question["decision"], **{"from": "user:stranger"}))
         self.assertEqual(len(self.store.rows("SELECT * FROM decisions WHERE state='answered'")), 0)
@@ -635,6 +640,34 @@ for line in sys.stdin:
         self.assertIn("expired", self.main(args, ok=False)["error"])
         self.receive(self.message("aprovar " + question["decision"]))
         self.assertIn("Nenhuma ação", self.store.snapshot()["responses"][-1]["body"])
+
+    def test_expired_pending_decision_preserves_conversational_confirmations(self):
+        row, _ = self.claim()
+        expires = self.now + 300
+        question = self.emit(row, "decision", "Autoriza a revisão?", task=self.task(),
+                             action="revisar fixture", expires=expires)
+        self.now = expires
+        boundary = self.receive(self.message("sim"))
+        self.assertEqual(boundary["state"], "answered")
+        self.now = expires + 1
+        conversation, _ = self.claim(self.receive(self.message("Explique o resultado")))
+        self.emit(conversation, "reply", "Quer um resumo?")
+        for text in ("sim", "ok", "aprovo", "pode", "👍", "✅"):
+            with self.subTest(text=text):
+                answer = self.receive(self.message(text))
+                self.assertEqual(answer["state"], "received")
+                self.assertEqual(self.store.rows("SELECT kind FROM responses WHERE request=?",
+                                                 (answer["request"],)), [{"kind": "received"}])
+                _, claimed = self.claim(answer)
+                self.assertTrue(claimed["fresh_claim"])
+                self.assertEqual(claimed["text"], text)
+        explicit = self.receive(self.message("aprovar " + question["decision"]))
+        self.assertEqual(explicit["state"], "answered")
+        self.bridge.forward()
+        self.assertIsNone(self.store.request(explicit["request"])["note_id"])
+        self.assertIn("Nenhuma ação", self.store.snapshot()["responses"][-1]["body"])
+        self.assertEqual(self.store.rows("SELECT state,answer_wamid FROM decisions WHERE id=?",
+                                         (question["decision"],)), [{"state": "pending", "answer_wamid": None}])
 
     def test_atomic_ingest_rollback_and_retry_cursor(self):
         incoming = self.message()
