@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Firstmate's argv-level no-mistakes dispatch boundary.
+#
+# Put this directory before the upstream no-mistakes executable on PATH.
+# Ship and scout workers receive FM_TASK_ID from fm-spawn.sh and run in a linked
+# task worktree. Invocations whose first two arguments are `axi run` or
+# `axi respond` are refused unless the task marker, private launch capability,
+# and current worktree match that task's durable metadata. Only a hash of the
+# capability is recorded, so a caller that merely knows the task id and
+# worktree is not accepted. Every other invocation is
+# forwarded unchanged to the first other executable on PATH; absence of an
+# upstream executable is an error.
+set -u
+
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 127
+FIRSTMATE_ROOT=$(CDPATH='' cd -- "$SELF_DIR/.." 2>/dev/null && pwd -P) || exit 127
+
+meta_value() {
+  local key=$1 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$2" 2>/dev/null || return 1
+  printf '%s' "$value"
+}
+
+is_task_worker_checkout() {
+  local top git_dir common_dir meta recorded_top kind capability_hash
+  case "${FM_TASK_ID:-}" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "${FM_TASK_CAPABILITY:-}" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  [ "${#FM_TASK_CAPABILITY}" -eq 32 ] || return 1
+  meta=$FIRSTMATE_ROOT/state/$FM_TASK_ID.meta
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(meta_value endpoint_task_id "$meta")" = "$FM_TASK_ID" ] || return 1
+  capability_hash=$(printf '%s' "$FM_TASK_CAPABILITY" | git -C / hash-object --stdin 2>/dev/null) || return 1
+  [ "$(meta_value worker_capability_hash "$meta")" = "$capability_hash" ] || return 1
+  kind=$(meta_value kind "$meta") || return 1
+  case "$kind" in ship|scout) ;; *) return 1 ;; esac
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  recorded_top=$(meta_value worktree "$meta") || return 1
+  recorded_top=$(CDPATH='' cd -- "$recorded_top" 2>/dev/null && pwd -P) || return 1
+  [ "$top" = "$recorded_top" ] || return 1
+  git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$git_dir" != "$common_dir" ]
+}
+
+if [ "${1:-}" = axi ]; then
+  case "${2:-}" in
+    run|respond)
+      if ! is_task_worker_checkout; then
+        echo "REFUSED: no-mistakes axi $2 is worker-owned; send the request to the task worker" >&2
+        exit 2
+      fi
+      ;;
+  esac
+fi
+
+TARGET=
+IFS=: read -r -a PATH_DIRS <<< "${PATH:-}"
+for dir in "${PATH_DIRS[@]}"; do
+  [ -n "$dir" ] || dir=.
+  candidate=$dir/no-mistakes
+  [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+  [ "$candidate" -ef "${BASH_SOURCE[0]}" ] && continue
+  candidate_dir=$(CDPATH='' cd -- "$(dirname -- "$candidate")" 2>/dev/null && pwd -P) || continue
+  [ "$candidate_dir" = "$SELF_DIR" ] && continue
+  TARGET=$candidate
+  break
+done
+
+if [ -z "$TARGET" ]; then
+  echo "error: no upstream no-mistakes executable found after $SELF_DIR on PATH" >&2
+  exit 127
+fi
+exec "$TARGET" "$@"

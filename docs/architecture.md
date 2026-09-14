@@ -230,7 +230,8 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
-Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task id as `FM_TASK_ID` into every ship and scout pane, and `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout while that marker is set; the runner's header owns the predicate and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pins it.
+Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task id as `FM_TASK_ID` into every ship and scout pane.
+The task id and private per-launch capability authorize worker-owned `no-mistakes axi run` and `no-mistakes axi respond` through `bin/no-mistakes` only when the capability matches its durable hash and the current linked worktree is that task's recorded worktree; metadata contains no reusable capability, so a task id and worktree alone authorize nothing. `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout when the task-id marker is set; the scripts' headers own their predicates, and [`tests/fm-no-mistakes-dispatch.test.sh`](../tests/fm-no-mistakes-dispatch.test.sh) and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pin them.
 
 ## No-mistakes gate authority boundary
 
