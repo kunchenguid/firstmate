@@ -2969,7 +2969,9 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 # shell command during worker launch. Herdr ctrl+j is the live-proved line-feed
 # mapping; generic Enter remains physical Return for every other caller.
 fm_backend_herdr_launch_shell_accept() {  # <target>
-  fm_backend_herdr_send_key "$1" ctrl+j
+  fm_backend_herdr_send_key "$1" ctrl+j && return 0
+  fm_backend_herdr_send_key "$1" C-c >/dev/null 2>&1 && return 1
+  return 2
 }
 
 # fm_backend_herdr_launch_shell_line: pane run hardcodes physical Enter, so the
@@ -2978,9 +2980,7 @@ fm_backend_herdr_launch_shell_accept() {  # <target>
 # the same way as the generic pane-run operation.
 fm_backend_herdr_launch_shell_line() {  # <target> <text>
   fm_backend_herdr_send_literal "$1" "$2" || return $?
-  fm_backend_herdr_launch_shell_accept "$1" && return 0
-  fm_backend_herdr_send_key "$1" C-c >/dev/null 2>&1 && return 1
-  return 2
+  fm_backend_herdr_launch_shell_accept "$1"
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
