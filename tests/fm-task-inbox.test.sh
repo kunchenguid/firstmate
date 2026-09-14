@@ -384,6 +384,7 @@ SH
 ring_with_verdict() {  # <state> <backend> <verdict> <record> [env=val...]
   local state=$1 backend=$2 verdict=$3 rec=$4
   shift 4
+  # shellcheck disable=SC2016 # The child shell expands its own $1..$3 and $FM_FAKE_VERDICT.
   env FM_STATE_OVERRIDE="$state" FM_FAKE_VERDICT="$verdict" "$@" bash -c '
     . "$1"
     fm_backend_agent_state() { printf "alive"; }
@@ -417,7 +418,7 @@ test_ring_stranded_verdict_requires_endpoint_proof() {
   # herdr answers per pane. A legibly idle/done pane is the baseline that lets
   # the rendered busy footer supply the queued-Enter signal, so a pending
   # surviving that read is a genuine swallow. This is the Codex case.
-  for b in idle done; do
+  for b in idle 'done'; do
     rc=0
     ring_with_verdict "$state" herdr pending "$rec" \
       PATH="$fb:$PATH" FM_FAKE_HERDR_STATUS="$b" || rc=$?
