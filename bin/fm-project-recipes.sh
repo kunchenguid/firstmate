@@ -34,10 +34,11 @@
 # It never renames, converts, or reconciles those files - a project that keeps
 # both as distinct real files is left exactly as it is apart from the pointer -
 # and it calls bin/fm-ensure-agents-md.sh only when the project has neither.
-# It never writes through a symlink: a CLAUDE.md that is a symlink to AGENTS.md
-# is already served by the pointer in AGENTS.md and is left alone, and one that
-# points anywhere else is refused, because writing through it would land the
-# pointer outside the directory this command was given.
+# It never writes through a symlink that leaves the directory: the only link it
+# accepts between the two memory files is one pointing at the other, which is
+# one file that gets the pointer once. A memory file linked anywhere else is
+# refused, because writing through it would land the pointer outside the
+# directory this command was given.
 # `digest` and `check` never write anything.
 #
 # `digest --absolute` names the catalog by its absolute path instead of the
@@ -270,6 +271,7 @@ unverified_notes() {  # <recipes file> <out file>
 # always at least the first one. Prints the body, then one FM_RECIPE_SHOWN=<n>
 # line, so `digest` renders and `check` measures the very same packing.
 pack_blocks() {  # <blocks file> <limit bytes>
+  local LC_ALL=C
   local used=0 shown=0 block= block_bytes=0 line
   while IFS= read -r line; do
     if [ "$line" = "$RECIPE_BREAK" ]; then
@@ -371,6 +373,9 @@ case "$CMD" in
     if [ -L "$DIR/CLAUDE.md" ] && ! { [ -f "$DIR/AGENTS.md" ] && [ ! -L "$DIR/AGENTS.md" ] && [ "$DIR/CLAUDE.md" -ef "$DIR/AGENTS.md" ]; }; then
       die "$DIR/CLAUDE.md is a symlink that does not point to $DIR/AGENTS.md; refusing to write the pointer through it"
     fi
+    if [ -L "$DIR/AGENTS.md" ] && ! { [ -f "$DIR/CLAUDE.md" ] && [ ! -L "$DIR/CLAUDE.md" ] && [ "$DIR/AGENTS.md" -ef "$DIR/CLAUDE.md" ]; }; then
+      die "$DIR/AGENTS.md is a symlink that does not point to $DIR/CLAUDE.md; refusing to write the pointer through it"
+    fi
     if [ ! -e "$RECIPES" ]; then
       mkdir -p "$DIR/.agents"
       skeleton "$(basename "$DIR")" >"$RECIPES"
@@ -425,7 +430,6 @@ case "$CMD" in
     printf 'run `fm-project-recipes.sh init %s` to start this project'"'"'s catalog\n' "$DIR"
       exit 0
     fi
-    [ -L "$RECIPES" ] && die "$RECIPES is a symlink; expected a regular file"
     TOTAL=$(grep -c '^## ' "$RECIPES" || true)
     TOTAL=${TOTAL:-0}
     SHOWN=0
@@ -446,6 +450,9 @@ case "$CMD" in
     RC=0
     if [ "$SHOWN" -lt "$TOTAL" ]; then
       printf 'OVER_BUDGET: the start-of-work digest can carry only %s of %s entries; consolidate entries rather than raising the ceiling\n' "$SHOWN" "$TOTAL"
+      RC=1
+    elif [ "$TOKENS" -gt "$BUDGET" ]; then
+      printf 'OVER_BUDGET: the start-of-work digest costs %s estimated tokens against a budget of %s; consolidate entries rather than raising the ceiling\n' "$TOKENS" "$BUDGET"
       RC=1
     fi
     STALE=0

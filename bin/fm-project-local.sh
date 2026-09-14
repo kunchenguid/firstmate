@@ -33,6 +33,10 @@
 # work going - so sync reports when the folder was being written while the copy
 # was taken instead of presenting a possibly torn file as clean, and says so
 # separately when that could not be determined at all.
+# The store holds regular files only, so a manifest path that is a symlink or a
+# directory holding one is not transportable. `sync` names it on stderr, skips
+# it, and carries the rest of the manifest: one untransportable path must never
+# keep the material a worker does need from reaching it.
 #
 # `stage` is the spawn-time step, called by bin/fm-spawn.sh once a task copy is
 # known to be isolated. It is idempotent and self-cleaning: a pool slot reused by
@@ -110,9 +114,13 @@ require_project() {  # <project>
 # poisoned store behind that would block every later stage - and with it every
 # spawn of the project - until someone removes it by hand. The store itself is
 # checked again before it is staged.
+first_symlink() {  # <dir>; prints the first symlink under it, empty when there is none
+  find "$1" -type l -print -quit 2>/dev/null || true
+}
+
 refuse_symlinks() {  # <dir> <what>
   local found
-  found=$(find "$1" -type l -print -quit 2>/dev/null || true)
+  found=$(first_symlink "$1")
   [ -z "$found" ] || die "refusing symlink in $2: $found"
 }
 
@@ -315,6 +323,7 @@ case "$CMD" in
     mkdir -p "$MATERIAL"
     COPIED=0
     MISSING=0
+    SKIPPED=0
     while IFS= read -r REL; do
       case "$REL" in
         '' | \#*) continue ;;
@@ -324,6 +333,7 @@ case "$CMD" in
       fi
       if [ -L "$HOME_DIR/$REL" ]; then
         echo "project-local: skipping symlink $REL" >&2
+        SKIPPED=$((SKIPPED + 1))
         continue
       fi
       if [ ! -e "$HOME_DIR/$REL" ]; then
@@ -331,7 +341,14 @@ case "$CMD" in
         MISSING=$((MISSING + 1))
         continue
       fi
-      [ -d "$HOME_DIR/$REL" ] && refuse_symlinks "$HOME_DIR/$REL" "$HOME_DIR/$REL"
+      if [ -d "$HOME_DIR/$REL" ]; then
+        NESTED=$(first_symlink "$HOME_DIR/$REL")
+        if [ -n "$NESTED" ]; then
+          echo "project-local: skipping $REL: it holds the symlink $NESTED, and a directory with symlinks is not transportable" >&2
+          SKIPPED=$((SKIPPED + 1))
+          continue
+        fi
+      fi
       mkdir -p "$MATERIAL/$(dirname "$REL")"
       if [ -d "$HOME_DIR/$REL" ]; then
         chmod -R u+w "${MATERIAL:?}/$REL" 2>/dev/null || true
@@ -345,7 +362,7 @@ case "$CMD" in
       COPIED=$((COPIED + 1))
     done <"$MANIFEST"
     note_home_activity "$HOME_DIR"
-    printf 'synced: %s from %s (%s paths copied, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$MISSING"
+    printf 'synced: %s from %s (%s paths copied, %s skipped, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$SKIPPED" "$MISSING"
     if [ "$HOME_ACTIVE" -eq 1 ]; then
       printf 'warning: %s was being worked in while this copy was taken, so a file may have been caught mid-write; re-run sync once it is quiet if anything looks truncated\n' "$HOME_DIR" >&2
     elif [ "$HOME_ACTIVITY_UNKNOWN" -eq 1 ]; then

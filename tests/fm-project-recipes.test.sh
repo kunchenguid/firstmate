@@ -327,6 +327,90 @@ test_init_never_writes_through_a_symlinked_claude_md() {
   pass "fm-project-recipes.sh: init never writes through a symlinked CLAUDE.md"
 }
 
+# The sibling of the CLAUDE.md rule: AGENTS.md is the other memory file init
+# writes into, and -f follows a symlink, so a link out of the project would
+# carry the pointer to a file init was never given.
+test_init_never_writes_through_a_symlinked_agents_md() {
+  local world out rc outside_before
+  world=$(make_project agentslink)
+  printf '# Operating context\n\nThe captain'"'"'s own words.\n' >"$world/project/CLAUDE.md"
+  ln -s CLAUDE.md "$world/project/AGENTS.md"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed on the conventional AGENTS.md -> CLAUDE.md link: $out"
+  assert_grep ".agents/recipes.md" "$world/project/CLAUDE.md" "the project's one memory file does not point at the catalog"
+  [ -L "$world/project/AGENTS.md" ] || fail "init replaced the AGENTS.md link"
+  [ "$(grep -c '\.agents/recipes\.md' "$world/project/CLAUDE.md")" = 1 ] ||
+    fail "init wrote the pointer twice through the AGENTS.md link"
+
+  world=$(make_project agentsaway)
+  mkdir -p "$world/elsewhere"
+  printf '# Someone else'"'"'s file\n' >"$world/elsewhere/AGENTS.md"
+  outside_before=$(cat "$world/elsewhere/AGENTS.md")
+  ln -s "$world/elsewhere/AGENTS.md" "$world/project/AGENTS.md"
+  out=$(recipes_cmd "$world/home" init "$world/project") && rc=0 || rc=$?
+  expect_code 1 "$rc" "init wrote through an AGENTS.md that links outside the project"
+  assert_contains "$out" "symlink" "the refusal did not name the cause"
+  [ "$(cat "$world/elsewhere/AGENTS.md")" = "$outside_before" ] ||
+    fail "init wrote the pointer into a file outside the project"
+  assert_absent "$world/project/.agents/recipes.md" "the refused init still created a catalog"
+  pass "fm-project-recipes.sh: init never writes through a symlinked AGENTS.md"
+}
+
+# The budget is a byte allowance - ceil(UTF-8 bytes / 3) - so the packer has to
+# count bytes too. A catalog in Spanish is the case that separates the two:
+# accented prose costs two bytes a letter, and counting characters would let a
+# digest 60% past its ceiling through unremarked.
+test_the_digest_budget_is_spent_in_bytes_not_characters() {
+  local world out accents i
+  world=$(make_project accents)
+  mkdir -p "$world/project/.agents"
+  accents=$(printf 'á%.0s' $(seq 1 100))
+  printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
+  i=1
+  while [ "$i" -le 2 ]; do
+    cat >>"$world/project/.agents/recipes.md" <<EOF
+
+## Capacidad $i
+- when: $accents
+- ask: \`correr\`
+<!--r:$(today)-->
+EOF
+    i=$((i + 1))
+  done
+  # Two 240-byte blocks against a 390-byte allowance: only the first fits. Read
+  # as 140 characters each, both would.
+  set_budget "$world" 130
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
+  assert_contains "$out" "## Capacidad 1" "the digest dropped its first entry"
+  assert_not_contains "$out" "## Capacidad 2" "the digest spent its byte budget on characters and overran it"
+  assert_contains "$out" "1 of 2 capabilities shown" "the digest did not say what it left out"
+  pass "fm-project-recipes.sh: the digest budget is spent in bytes, not characters"
+}
+
+# The packer always shows the first entry, whatever it costs - a digest that
+# carried nothing would be worse - so shown-vs-total alone cannot tell that a
+# one-entry catalog is over the ceiling. check is the gate; it has to.
+test_check_fails_a_lone_entry_the_digest_cannot_afford() {
+  local world out rc long
+  world=$(make_project loneoversize)
+  mkdir -p "$world/project/.agents"
+  long=$(printf 'a long situation that keeps going %.0s' 1 2 3 4 5 6 7 8 9 10)
+  printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
+  cat >>"$world/project/.agents/recipes.md" <<EOF
+
+## One capability nobody trimmed
+- when: $long
+- ask: \`replay\`
+<!--r:$(today)-->
+EOF
+  set_budget "$world" 100
+  out=$(recipes_cmd "$world/home" check "$world/project") && rc=0 || rc=$?
+  expect_code 1 "$rc" "a lone entry the digest cannot afford passed the gate"
+  assert_contains "$out" "OVER_BUDGET" "the over-budget digest was not reported"
+  assert_contains "$out" "against a budget of 100" "the report did not say what the digest costs against its budget"
+  assert_contains "$out" "consolidate" "the report did not say what to do about it"
+  pass "fm-project-recipes.sh: check fails a lone entry the digest cannot afford"
+}
+
 test_init_creates_the_catalog_and_points_agents_md_at_it
 test_init_points_an_existing_claude_md_without_renaming_it
 test_init_succeeds_when_agents_and_claude_are_both_real_files
@@ -341,5 +425,8 @@ test_check_names_an_undated_entry
 test_check_reports_a_catalog_that_outgrew_its_budget
 test_check_agrees_with_digest_when_only_the_full_entries_are_long
 test_init_never_writes_through_a_symlinked_claude_md
+test_init_never_writes_through_a_symlinked_agents_md
+test_the_digest_budget_is_spent_in_bytes_not_characters
+test_check_fails_a_lone_entry_the_digest_cannot_afford
 test_digest_marks_an_entry_nobody_reverified
 test_init_refuses_while_a_git_operation_is_in_flight

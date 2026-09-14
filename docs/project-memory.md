@@ -83,7 +83,9 @@ bin/fm-project-local.sh list <project>
 
 `sync` reads its paths, one per line, from `data/project-local/<project>/manifest`.
 It says when the home was being worked in while the copy was taken, and says separately when that could not be determined, so a possibly torn file is never presented as clean.
-The store holds regular files only: a symlink anywhere under a path being added or synced is refused before anything is copied, so a refusal never leaves the store in a state that blocks every later spawn of the project.
+The store holds regular files only, so **a directory holding symlinks is not transportable** - a `herramientas/` with a Python venv inside it is the ordinary case, since a venv keeps links like `bin/python`.
+`add` refuses such a path before anything is copied, so a refusal never leaves the store in a state that blocks every later spawn of the project.
+`sync` names that path and the symlink it found on stderr, skips it, and carries the rest of the manifest, because one untransportable path must not keep the material a worker does need from reaching it; list the symlink-free subdirectories instead, or move what has to travel out from under the venv.
 
 Every spawn stages the store into the task copy at `.fm-local/` before the worker starts.
 Staging adds that path to the repository's exclude file and then **verifies that git reports nothing under it**; if git can still see the material, the staged copy is removed and the spawn is refused, because a worker cannot be told not to commit something git is offering it.

@@ -217,7 +217,11 @@ test_a_nested_symlink_is_refused_before_it_poisons_the_store() {
   pass "fm-project-local.sh: a nested symlink is refused before anything enters the store"
 }
 
-test_sync_refuses_a_manifest_directory_holding_a_symlink_before_copying() {
+# A directory holding a symlink is not transportable - herramientas/ with a
+# Python venv inside is the real case - but it must not take the rest of the
+# manifest down with it: everything listed after it still has to reach the
+# worker, and the store must stay clean enough to stage.
+test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest() {
   local world out rc
   world=$(make_world nestedsync)
   mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
@@ -225,20 +229,26 @@ test_sync_refuses_a_manifest_directory_holding_a_symlink_before_copying() {
   printf 'x\n' >"$world/canonical/README.md"
   git_q -C "$world/canonical" add README.md
   git_q -C "$world/canonical" commit -qm initial
-  mkdir -p "$world/canonical/herramientas/venv/bin"
+  mkdir -p "$world/canonical/herramientas/venv/bin" "$world/canonical/docs"
   printf 'tool\n' >"$world/canonical/herramientas/replay.py"
   printf 'interp\n' >"$world/canonical/herramientas/venv/bin/python3"
   ln -s python3 "$world/canonical/herramientas/venv/bin/python"
+  printf 'the production audit\n' >"$world/canonical/docs/audit.md"
   FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
     fail "source set failed"
-  printf 'herramientas\n' >"$world/home/data/project-local/demo/manifest"
+  printf 'herramientas\ndocs\n' >"$world/home/data/project-local/demo/manifest"
   out=$(local_cmd "$world" sync demo) && rc=0 || rc=$?
-  expect_code 1 "$rc" "sync copied a manifest directory holding a nested symlink"
-  assert_contains "$out" "symlink" "the refusal did not name the symlink"
+  expect_code 0 "$rc" "one untransportable manifest path killed the whole sync"
+  assert_contains "$out" "skipping herramientas" "the skip did not name the manifest path"
+  assert_contains "$out" "symlink" "the skip did not name the symlink it found"
   [ -z "$(find "$world/home/data/project-local" -type l 2>/dev/null)" ] ||
-    fail "the refused sync left a symlink in the store"
-  out=$(local_cmd "$world" stage demo "$world/copy") || fail "a later stage failed after the refused sync: $out"
-  pass "fm-project-local.sh: sync refuses a manifest directory holding a symlink before copying it"
+    fail "the skipped path still left a symlink in the store"
+  out=$(local_cmd "$world" list demo)
+  assert_not_contains "$out" "herramientas" "the directory holding a symlink was copied anyway"
+  assert_contains "$out" "docs/audit.md" "a clean path listed after the skipped one never reached the store"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "a later stage failed after the skip: $out"
+  assert_present "$world/copy/.fm-local/docs/audit.md" "the staged copy is missing the material that could travel"
+  pass "fm-project-local.sh: sync skips a directory holding a symlink and carries the rest of the manifest"
 }
 
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
@@ -288,7 +298,7 @@ test_sync_pulls_the_manifest_from_the_canonical_home_without_writing_to_it
 test_sync_refuses_an_escaping_manifest_path
 test_a_symlink_never_enters_the_store
 test_a_nested_symlink_is_refused_before_it_poisons_the_store
-test_sync_refuses_a_manifest_directory_holding_a_symlink_before_copying
+test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address
