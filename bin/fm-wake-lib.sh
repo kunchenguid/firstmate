@@ -1333,26 +1333,40 @@ fm_treehouse_collect_local_states() {  # <record-state>
   done
 }
 
+FM_TREEHOUSE_RECORD_WORKTREE=
+FM_TREEHOUSE_RECORD_HOME=
+fm_treehouse_read_task_slot_paths() {  # <meta-file>
+  local meta=$1 content line
+  FM_TREEHOUSE_RECORD_WORKTREE=
+  FM_TREEHOUSE_RECORD_HOME=
+  content=$(< "$meta") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree=*) FM_TREEHOUSE_RECORD_WORKTREE=${line#*=} ;;
+      home=*) FM_TREEHOUSE_RECORD_HOME=${line#*=} ;;
+    esac
+  done <<< "$content"
+}
+
 # Refuse a fresh spawn when another local task record still names the selected
 # pool slot. This covers records created before slot-owner claims existed.
 fm_treehouse_refuse_if_recorded_collision() {  # <worktree>
-  local worktree=$1 target_real state_dir other other_id field other_path other_real line
+  local worktree=$1 target_real state_dir other other_id field other_path other_real
   target_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   fm_treehouse_collect_local_states "$STATE" || return 1
   for state_dir in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       other_id=$(basename "$other" .meta)
+      if ! fm_treehouse_read_task_slot_paths "$other"; then
+        echo "REFUSED: cannot read local task record $other; refusing to hand out worktree '$worktree'" >&2
+        return 1
+      fi
       for field in worktree home; do
-        other_path=
-        if ! while IFS= read -r line || [ -n "$line" ]; do
-          case "$line" in
-            "$field="*) other_path=${line#*=} ;;
-          esac
-        done < "$other"; then
-          echo "REFUSED: cannot read local task record $other; refusing to hand out worktree '$worktree'" >&2
-          return 1
-        fi
+        case "$field" in
+          worktree) other_path=$FM_TREEHOUSE_RECORD_WORKTREE ;;
+          home) other_path=$FM_TREEHOUSE_RECORD_HOME ;;
+        esac
         [ -n "$other_path" ] || continue
         other_real=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
         [ "$other_real" = "$target_real" ] || continue

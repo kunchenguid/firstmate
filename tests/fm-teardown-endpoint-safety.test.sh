@@ -576,6 +576,35 @@ test_unreadable_child_state_refuses_before_cleanup() {
   pass "fm-teardown refuses when a reachable state directory cannot be enumerated"
 }
 
+test_unreadable_task_record_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task rc
+
+  dir=$(make_case slot-unreadable-task-record)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 000 "$dir/home/state/$other.meta"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 600 "$dir/home/state/$other.meta"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after a reachable task record could not be read"
+  assert_contains "$(cat "$dir/stderr")" "cannot read local task record $dir/home/state/$other.meta" \
+    "unreadable task record did not explain the ownership refusal"
+  assert_present "$dir/home/state/$id.meta" "unreadable task record removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "unreadable task record removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "unreadable task record changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unreadable task record ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when a reachable task record cannot be read"
+}
+
 test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
@@ -1297,6 +1326,7 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_unreadable_child_state_refuses_before_cleanup
+test_unreadable_task_record_refuses_before_cleanup
 test_sole_slot_record_still_tears_down
 test_other_task_branch_refuses_before_cleanup
 test_branch_inspection_error_refuses_before_cleanup

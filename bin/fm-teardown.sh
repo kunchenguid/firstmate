@@ -2121,8 +2121,15 @@ require_exclusive_worktree_slot_record() {
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       [ "$other" != "$record_meta" ] || continue
       other_id=$(basename "$other" .meta)
+      if ! fm_treehouse_read_task_slot_paths "$other"; then
+        echo "REFUSED: cannot read local task record $other; refusing teardown because slot ownership is unproven." >&2
+        return 1
+      fi
       for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
+        case "$field" in
+          worktree) other_path=$FM_TREEHOUSE_RECORD_WORKTREE ;;
+          home) other_path=$FM_TREEHOUSE_RECORD_HOME ;;
+        esac
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue

@@ -851,6 +851,35 @@ test_unreadable_nested_state_refuses_pool_allocation() {
   pass "an unreadable nested Firstmate state refuses pooled allocation"
 }
 
+test_unreadable_task_record_refuses_pool_allocation() {
+  local rec id out status before other
+
+  id='pool-slot-unreadable-task-record-r1'
+  rec=$(make_case unreadable-task-record "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  other="$HOME_DIR/state/older-task.meta"
+  fm_write_meta "$other" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 000 "$other"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 600 "$other"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a reachable task record could not be read: $out"
+  assert_contains "$out" "cannot read local task record $other" \
+    "unreadable task record did not refuse allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unreadable task record published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "unreadable task record claimed the retained slot"
+  [ -e "$other" ] || fail "unreadable task record was removed"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "unreadable task record changed the held slot"
+  pass "an unreadable task record refuses pooled allocation"
+}
+
 # Fresh allocation must not replace ownership evidence or an older task record
 # when Treehouse returns a slot that is still retained by another task.
 test_pool_slot_refuses_existing_ownership() {
@@ -958,6 +987,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_unreadable_nested_registry_refuses_pool_allocation
 test_unreadable_nested_state_refuses_pool_allocation
+test_unreadable_task_record_refuses_pool_allocation
 test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
