@@ -14,7 +14,7 @@
 # stores it verbatim as a link, which lifecycle transitions record relative to
 # that same root.
 #
-# Why it exists: a bare `tasks-axi` resolves the tracked `.tasks.toml` paths
+# Why it exists: a bare `tasks-axi` resolves a home's `.tasks.toml` paths
 # against its working directory, so from the code root it forks the queue
 # whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
 # owns that rationale.

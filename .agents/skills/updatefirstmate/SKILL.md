@@ -45,6 +45,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `restart-secondmates: fm-<id>...|none`
    - `nudge-secondmates: fm-<id>...|none`
 
+   Any target whose advance would have destroyed its per-home `.tasks.toml` also prints a `TASKS_CONFIG: <what happened>` line before the action lines.
+   `.agents/skills/bootstrap-diagnostics/SKILL.md` owns how to handle it: a restore is a fact to report and nothing more, and anything else means that home is unaddressed until it is fixed.
+
    The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
    `restart-secondmates:` carries every live mate the pass left on the latest commit, whether it advanced or was already there.
    A mate reaches neither set only because its home was skipped, because it has no live endpoint recorded here, or because its endpoint was positively classified as dead or missing - none of those need any action from you.

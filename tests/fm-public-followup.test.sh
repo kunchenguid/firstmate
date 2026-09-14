@@ -115,7 +115,7 @@ SH
 make_home() {  # <name> [relay-on|relay-off]
   local home="$TMP_ROOT/$1" relay=${2:-relay-on}
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
