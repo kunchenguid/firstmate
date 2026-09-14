@@ -217,7 +217,16 @@ assignment_locked() {
 }
 
 do_assign() {
-  local secondmate=$1 reason=$2 health selected current current_manager rc
+  local secondmate=$1 reason=$2 health selected current current_manager rc inflight
+  inflight=$(python3 - "$REG" "$secondmate" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
+row = next((item for item in reg.get("transfers", []) if item.get("secondmate") == sys.argv[2]), None)
+if row:
+    print(json.dumps({"state": "transfer-in-progress", "secondmate": sys.argv[2], "transaction": row.get("transaction")}, sort_keys=True))
+PY
+)
+  if [ -n "$inflight" ]; then printf '%s\n' "$inflight"; return 4; fi
   health=$(mktemp "$FLEET_ROOT/.health.XXXXXX") || return 1
   health_json "$health" || { rm -f "$health"; return 1; }
   current=$(assignment_current "$secondmate")

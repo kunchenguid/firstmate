@@ -496,4 +496,26 @@ wait "$initial_pid" || fail "initial transfer failed after refused intake: $(cat
 out=$("$FLEET" route --project legacy-app --issue MIX-901 2>&1) || fail "route after initial transfer activation: $out"
 case "$out" in *"-> legacy -> manager-3 (generation 1)"*) ;; *) fail "route after activation did not resolve to manager-3: $out" ;; esac
 
+# A healthy sticky assignment still resolves, and a later transfer for the
+# assigned SecondMate blocks the sticky assign path with the same explicit result.
+add_lock "$FROOT/manager-3"; printf 'test:test\n' > "$FROOT/manager-3/state/.fleet-herdr-target"; sticky_live=$LAST_HOLDER
+out=$("$FLEET" assign --secondmate legacy 2>&1) || fail "healthy sticky assign failed: $out"
+case "$out" in *'"manager": "manager-3"'*) ;; *) fail "healthy sticky assign did not return manager-3: $out" ;; esac
+remove_lock "$FROOT/manager-3" "$sticky_live"
+if [ -f "$FROOT/manager-3/state/.lock" ]; then remove_lock "$FROOT/manager-3" "$(cat "$FROOT/manager-3/state/.lock")"; fi
+if [ -f "$FROOT/manager-1/state/.lock" ]; then remove_lock "$FROOT/manager-1" "$(cat "$FROOT/manager-1/state/.lock")"; fi
+rm -f "$TMP_ROOT/gated.ready" "$TMP_ROOT/gated.release"
+FM_FLEET_TRANSFER_STOP_HOOK=$GATED_STOP "$FLEET" transfer begin --secondmate legacy --to manager-1 > "$TMP_ROOT/sticky.out" 2>&1 & sticky_pid=$!
+i=0; while [ ! -e "$TMP_ROOT/gated.ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+[ -e "$TMP_ROOT/gated.ready" ] || fail "sticky transfer never stopped the SecondMate: $(cat "$TMP_ROOT/sticky.out")"
+sticky_tx=$(python3 -c 'import json,sys; print(next(r["transaction"] for r in json.load(open(sys.argv[1]))["transfers"] if r["secondmate"]=="legacy"))' "$FROOT/fleet.json")
+out=$("$FLEET" assign --secondmate legacy 2>&1); rc=$?
+[ "$rc" = 4 ] || fail "sticky assign during transfer exited $rc: $out"
+case "$out" in *'"state": "transfer-in-progress"'*) ;; *) fail "sticky assign during transfer was not transfer-in-progress: $out" ;; esac
+case "$out" in *"$sticky_tx"*) ;; *) fail "sticky assign hid the in-flight transaction: $out" ;; esac
+[ "$(manager_for legacy):$(generation_for legacy):$(active_rows_for legacy)" = manager-3:1:1 ] || fail "sticky assign during transfer mutated the assignment"
+: > "$TMP_ROOT/gated.release"
+wait "$sticky_pid" || fail "sticky transfer failed after refused assign: $(cat "$TMP_ROOT/sticky.out")"
+[ "$(manager_for legacy):$(generation_for legacy)" = manager-1:2 ] || fail "sticky transfer did not publish manager-1 generation 2"
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"
