@@ -1,0 +1,4 @@
+# Optional local decoder environment; text-only bridge remains stdlib-only.
+Pillow==12.3.0
+pypdfium2==5.13.0
+faster-whisper==1.2.1
