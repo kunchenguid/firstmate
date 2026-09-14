@@ -195,7 +195,9 @@ grep -q "$FROOT/homes/manager-1|paperclip|start-secondmate" "$TMP_ROOT/recover-h
 
 # Duplicate recovery: a slow loser that prepared at the same generation must not move records after the winner relaunched.
 DUP_STOP="$TMP_ROOT/dup-stop.sh"; DUP_START="$TMP_ROOT/dup-start.sh"
+# shellcheck disable=SC2016 # $FM_DUP_SLOW expands inside the generated hook script.
 printf '#!/usr/bin/env bash\n[ "${FM_DUP_SLOW:-0}" = 1 ] && sleep 3\nexit 0\n' > "$DUP_STOP"
+# shellcheck disable=SC2016 # $1 and $2 expand inside the generated hook script.
 printf '#!/usr/bin/env bash\nprintf "kind=secondmate\\nwindow=NEW-LIVE-PANE\\n" > "$1/state/$2.meta"\n' > "$DUP_START"
 chmod +x "$DUP_STOP" "$DUP_START"
 dup_hooks() { FM_FLEET_TRANSFER_STOP_HOOK=$DUP_STOP FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$DUP_START "$@"; }
@@ -333,8 +335,8 @@ grep -q "$TROOT/manager-2|harness|start-secondmate" "$FM_HOOK_LOG" || fail "Seco
 printf '%s\n' '- later - Later (home: /tmp/later; scope: later; projects: later; added 2026-09-13)' >> "$TROOT/manager-2/data/secondmates.md"
 printf '%s\n' '- sibling - Sibling (home: /tmp/sibling; scope: sibling; projects: sibling; added 2026-09-13)' >> "$TROOT/manager-1/data/secondmates.md"
 FM_FLEET_ROOT=$TROOT "$FLEET" transfer rollback --transaction "$tx" >/dev/null || fail "rollback transfer"
-grep -q '^- later ' "$TROOT/manager-2/data/secondmates.md" && ! grep -q '^- harness ' "$TROOT/manager-2/data/secondmates.md" || fail "rollback clobbered the destination registry"
-grep -q '^- sibling ' "$TROOT/manager-1/data/secondmates.md" && grep -q '^- harness ' "$TROOT/manager-1/data/secondmates.md" || fail "rollback clobbered the source registry"
+{ grep -q '^- later ' "$TROOT/manager-2/data/secondmates.md" && ! grep -q '^- harness ' "$TROOT/manager-2/data/secondmates.md"; } || fail "rollback clobbered the destination registry"
+{ grep -q '^- sibling ' "$TROOT/manager-1/data/secondmates.md" && grep -q '^- harness ' "$TROOT/manager-1/data/secondmates.md"; } || fail "rollback clobbered the source registry"
 grep -q "$TROOT/manager-2|harness|stop-secondmate" "$FM_HOOK_LOG" || fail "rollback did not stop the destination-bound SecondMate"
 grep -q "parent_home=$TROOT/manager-1" "$SMHOME/.fm-secondmate-parent" || fail "rollback did not restore parent binding"
 [ -f "$TROOT/manager-1/state/harness.meta" ] && [ ! -f "$TROOT/manager-2/state/harness.meta" ] || fail "rollback did not restore parent records"
