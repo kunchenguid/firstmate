@@ -325,6 +325,25 @@ test_a_knowledge_document_with_a_scratch_name_is_still_knowledge() {
   pass "fm-project-memory.sh: a knowledge document with a scratch name is still knowledge"
 }
 
+# A dependency's own README is the dependency's, not the captain's. Listing
+# every untracked path one by one must not turn a node_modules/ the project has
+# not ignored yet into a leak: a false `divergent` buries the real documents
+# under files of no value, and the listing is capped.
+test_documentation_inside_a_dependency_tree_is_not_project_knowledge() {
+  local world out
+  world=$(make_world deptree)
+  mkdir -p "$world/source/node_modules/react" "$world/source/node_modules/lodash" "$world/source/docs"
+  printf 'react readme\n' >"$world/source/node_modules/react/README.md"
+  printf 'lodash readme\n' >"$world/source/node_modules/lodash/README.md"
+  printf 'the production audit of 500 conversations\n' >"$world/source/docs/audit.md"
+  record_source "$world"
+  out=$(run_scan "$world")
+  assert_not_contains "$out" "node_modules" "a dependency tree was listed as the project's own knowledge"
+  assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 1" "the dependency READMEs were counted as project knowledge"
+  assert_contains "$out" "docs/audit.md" "the captain's own document was not reported"
+  pass "fm-project-memory.sh: documentation inside a dependency tree is not project knowledge"
+}
+
 test_scratch_is_counted_but_never_listed() {
   local world out
   world=$(make_world scratch)
@@ -462,6 +481,7 @@ test_an_ignored_knowledge_directory_counts_as_a_leak_not_as_material
 test_an_accented_path_is_classified_like_its_ascii_twin
 test_an_untracked_knowledge_directory_is_classified_by_what_is_inside_it
 test_a_knowledge_document_with_a_scratch_name_is_still_knowledge
+test_documentation_inside_a_dependency_tree_is_not_project_knowledge
 test_scratch_is_counted_but_never_listed
 test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak

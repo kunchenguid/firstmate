@@ -404,6 +404,73 @@ test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be() {
   pass "fm-project-local.sh: a path that became a file replaces the directory it used to be"
 }
 
+# The copy in the store can be the last one left of the captain's material, so a
+# read of his home that fails - a OneDrive placeholder that will not hydrate, a
+# file Windows has open - must leave it standing. A failed sync that emptied the
+# store would destroy exactly what this capability exists to preserve.
+test_a_failed_copy_leaves_the_stores_own_copy_standing() {
+  local world out
+  world=$(make_world failedcopy)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  printf 'the only surviving copy of the audit\n' >"$world/canonical/audit.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'audit.md\n' >"$world/home/data/project-local/demo/manifest"
+  local_cmd "$world" sync demo >/dev/null || fail "the first sync failed"
+
+  chmod 000 "$world/canonical/audit.md"
+  out=$(local_cmd "$world" sync demo) || fail "a sync that could not read the home failed outright: $out"
+  chmod 644 "$world/canonical/audit.md"
+  assert_grep "the only surviving copy of the audit" "$world/home/data/project-local/demo/material/audit.md" \
+    "a failed copy destroyed the copy the store already had"
+  assert_contains "$out" "0 paths updated, 1 kept from an earlier sync and marked UNVERIFIED" \
+    "the unreadable path was counted as updated"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  assert_grep "the only surviving copy of the audit" "$world/copy/.fm-local/audit.md" \
+    "the kept copy never reached the worker"
+  assert_grep "audit.md" "$world/copy/.fm-local/.fm-unverified.md" \
+    "the kept copy reached the worker without a mark"
+  pass "fm-project-local.sh: a failed copy leaves the store's own copy standing"
+}
+
+# tar reports the extractor's status, and an extractor happily succeeds over a
+# truncated stream, so a directory the home could only be read halfway would be
+# counted as updated and handed to the worker as the project's current material.
+test_a_directory_read_only_halfway_is_never_counted_as_updated() {
+  local world out
+  world=$(make_world partialtree)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas"
+  printf 'the replay tool\n' >"$world/canonical/herramientas/replay.py"
+  printf 'the production audit of 500 conversations\n' >"$world/canonical/herramientas/audit.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\n' >"$world/home/data/project-local/demo/manifest"
+  local_cmd "$world" sync demo >/dev/null || fail "the first sync failed"
+
+  chmod 000 "$world/canonical/herramientas/audit.md"
+  out=$(local_cmd "$world" sync demo) || fail "the sync over a partly unreadable directory failed outright: $out"
+  chmod 644 "$world/canonical/herramientas/audit.md"
+  assert_contains "$out" "0 paths updated, 1 kept from an earlier sync and marked UNVERIFIED" \
+    "a directory read only halfway was reported as updated"
+  assert_grep "the production audit of 500 conversations" \
+    "$world/home/data/project-local/demo/material/herramientas/audit.md" \
+    "the half-read copy replaced the whole one the store already had"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "stage failed: $out"
+  assert_present "$world/copy/.fm-local/herramientas/audit.md" "the worker received a store missing the audit"
+  assert_grep "herramientas" "$world/copy/.fm-local/.fm-unverified.md" \
+    "the worker was handed the kept copy as though it were current"
+  pass "fm-project-local.sh: a directory read only halfway is never counted as updated"
+}
+
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
   local world out rc
   world=$(make_world visible)
@@ -455,6 +522,8 @@ test_sync_skips_a_manifest_directory_holding_a_symlink_and_carries_the_rest
 test_a_path_sync_could_not_refresh_reaches_the_worker_marked_unverified
 test_the_unverified_date_survives_a_change_of_reason
 test_a_path_that_became_a_file_replaces_the_directory_it_used_to_be
+test_a_failed_copy_leaves_the_stores_own_copy_standing
+test_a_directory_read_only_halfway_is_never_counted_as_updated
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

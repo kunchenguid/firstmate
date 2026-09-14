@@ -163,6 +163,45 @@ refuse_symlinks() {  # <dir> <what>
   [ -z "$found" ] || die "refusing symlink in $2: $found"
 }
 
+# The store never loses the copy it already holds to a copy that failed: the new
+# one is built beside the store and swapped in only once it is whole. For a
+# project whose knowledge lives outside git, what is in the store can be the
+# last copy left of the captain's material, and a half-finished read of his home
+# - a OneDrive placeholder that will not hydrate offline, a file Windows has
+# open, an I/O error on /mnt/c - must never be what replaces it. The swap also
+# settles the shape: a path that was a directory and is a file now lands in its
+# place rather than inside the directory it used to be.
+copy_into_store() {  # <project> <source> <destination under material>
+  local staging status
+  staging="$(store_dir "$1")/.incoming.$$"
+  mkdir -p "$(dirname "$staging")" || return 1
+  rm -rf -- "$staging"
+  if [ -d "$2" ]; then
+    mkdir -p "$staging" || return 1
+    (cd "$2" && tar cf - .) | (cd "$staging" && tar xf -)
+    # The pipeline's own status is the extractor's, and tar extracts a truncated
+    # stream without complaining, so the reader's status is the one that says
+    # whether the whole tree was actually read.
+    status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
+    if [ "$status" != "0:0" ]; then
+      rm -rf -- "$staging"
+      return 1
+    fi
+  elif ! cp -- "$2" "$staging"; then
+    rm -rf -- "$staging"
+    return 1
+  fi
+  mkdir -p "$(dirname "$3")"
+  chmod -R u+w "$3" 2>/dev/null || true
+  rm -rf -- "$3"
+  if ! mv -- "$staging" "$3"; then
+    rm -rf -- "$staging"
+    return 1
+  fi
+  chmod -R u+w "$3" 2>/dev/null || true
+  return 0
+}
+
 canonical_home() {  # <project>
   "$SCRIPT_DIR/fm-project-memory.sh" home "$1"
 }
@@ -303,16 +342,7 @@ case "$CMD" in
     valid_relative_path "$AS" || die "invalid destination path: $AS"
     [ -d "$SRC" ] && refuse_symlinks "$SRC" "$SRC"
     MATERIAL=$(material_dir "$NAME")
-    mkdir -p "$MATERIAL/$(dirname "$AS")"
-    chmod -R u+w "${MATERIAL:?}/$AS" 2>/dev/null || true
-    rm -rf -- "${MATERIAL:?}/$AS"
-    if [ -d "$SRC" ]; then
-      mkdir -p "$MATERIAL/$AS"
-      (cd "$SRC" && tar cf - .) | (cd "$MATERIAL/$AS" && tar xf -) || die "could not copy $SRC"
-    else
-      cp -- "$SRC" "$MATERIAL/$AS" || die "could not copy $SRC"
-    fi
-    chmod -R u+w "$MATERIAL/$AS" 2>/dev/null || true
+    copy_into_store "$NAME" "$SRC" "$MATERIAL/$AS" || die "could not copy $SRC in full; the store keeps what it already had"
     echo "added: $NAME <- $AS"
     ;;
   remove)
@@ -387,20 +417,10 @@ case "$CMD" in
           continue
         fi
       fi
-      mkdir -p "$MATERIAL/$(dirname "$REL")"
-      # The old copy goes before the new one lands, whatever shape either has:
-      # a path that was a directory last sync and is a file now would otherwise
-      # have the file copied INSIDE the stale directory, and the run would
-      # report it as updated while the worker read the old material as current.
-      chmod -R u+w "${MATERIAL:?}/$REL" 2>/dev/null || true
-      rm -rf -- "${MATERIAL:?}/$REL"
-      if [ -d "$HOME_DIR/$REL" ]; then
-        mkdir -p "$MATERIAL/$REL"
-        (cd "$HOME_DIR/$REL" && tar cf - .) | (cd "$MATERIAL/$REL" && tar xf -) || die "could not copy $REL"
-      else
-        cp -- "$HOME_DIR/$REL" "$MATERIAL/$REL" || die "could not copy $REL"
+      if ! copy_into_store "$NAME" "$HOME_DIR/$REL" "$MATERIAL/$REL"; then
+        not_updated "$REL" "it could not be read in full from the project's home"
+        continue
       fi
-      chmod -R u+w "$MATERIAL/$REL" 2>/dev/null || true
       UPDATED=$((UPDATED + 1))
     done <"$MANIFEST"
     if [ -s "$RECORD_NEW" ]; then

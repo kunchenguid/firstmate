@@ -261,20 +261,33 @@ looks_like_knowledge() {  # <relative path>
 
 # Scratch: build output, caches, editor state, and per-run artifacts. Reported
 # as a count only, because listing it is what turns a report into noise.
-looks_like_scratch() {  # <relative path>
-  local p=$1 base=${1##*/}
-  case $base in
-    .DS_Store | Thumbs.db) return 0 ;;
-    *.pyc | *.pyo | *.class | *.o | *.so | *.a | *.log | *.tmp | *.swp | *.bak | *.orig | *.rej) return 0 ;;
-  esac
-  case "/$p" in
+# Scratch by LOCATION: the path lives inside a build, cache, or dependency tree,
+# and nothing it is named can make it this project's own knowledge - a
+# dependency's own README is the dependency's, not the captain's.
+looks_like_scratch_tree() {  # <relative path>
+  case "/$1" in
     */node_modules/* | */__pycache__/* | */.venv/* | */venv/* | */.pytest_cache/* | */.mypy_cache/* | */.ruff_cache/* | */.gradle/* | */.idea/* | */.vscode/* | */dist/* | */build/* | */target/* | */coverage/* | */.next/* | */.turbo/*) return 0 ;;
   esac
-  case $p in
+  case $1 in
     node_modules/ | __pycache__/ | .venv/ | venv/ | .pytest_cache/ | .mypy_cache/ | .ruff_cache/ | .gradle/ | .idea/ | .vscode/ | dist/ | build/ | target/ | coverage/ | .next/ | .turbo/) return 0 ;;
     *.egg-info/) return 0 ;;
   esac
   return 1
+}
+
+# Scratch by NAME: only the file's own name or extension says build output, and
+# a document in an ordinary tree can carry such a name and still be exactly what
+# this scan exists to find, so knowledge is asked before this one.
+looks_like_scratch_name() {  # <relative path>
+  case ${1##*/} in
+    .DS_Store | Thumbs.db) return 0 ;;
+    *.pyc | *.pyo | *.class | *.o | *.so | *.a | *.log | *.tmp | *.swp | *.bak | *.orig | *.rej) return 0 ;;
+  esac
+  return 1
+}
+
+looks_like_scratch() {  # <relative path>
+  looks_like_scratch_tree "$1" || looks_like_scratch_name "$1"
 }
 
 # Agent memory paths a project's own .gitignore commonly excludes. Each is
@@ -533,9 +546,11 @@ scan_project() {  # <project> <limit>
   # one entry, and the classifier reading `informes/` never sees the production
   # audit inside it - the same content counted 0 or 2 in the gap depending only
   # on whether some unrelated tracked file sat beside it. Every untracked path
-  # reaches the classifier one by one instead. The walk is still one git call,
-  # and what it costs on /mnt/c is bounded by the project's own ignore rules,
-  # which is where a vendored tree belongs anyway.
+  # reaches the classifier one by one instead. It is still one git call, but a
+  # dependency tree the project has not ignored yet is now enumerated rather
+  # than folded, so on /mnt/c the cheap scan is the one whose .gitignore is in
+  # order; the report stays bounded either way, because such a tree is scratch
+  # by location and never reaches a list.
   source_git "$source" status --porcelain --untracked-files=all >"$tmp/status" 2>/dev/null || : >"$tmp/status"
   : >"$tmp/modified_knowledge"
   : >"$tmp/knowledge"
@@ -549,14 +564,17 @@ scan_project() {  # <project> <limit>
     # backslash; keep that form so the report never prints a half-decoded path
     # as if it were the real name.
     case $code in
-      # Knowledge is asked first: a document can carry a scratch name and still
-      # be the thing this scan exists to find - `docs/conversaciones.log` is a
-      # conversation dump, not build output - and counted as scratch it would
-      # appear in no category at all.
+      # Scope, not precedence. Inside a dependency or build tree scratch wins
+      # whatever the file is called, so `node_modules/react/README.md` stays
+      # out of the report. In an ordinary tree knowledge wins over a scratch
+      # NAME, so `docs/conversaciones.log` - a conversation dump, not build
+      # output - is counted rather than disappearing into a number.
       '??')
-        if looks_like_knowledge "$path"; then
+        if looks_like_scratch_tree "$path"; then
+          scratch=$((scratch + 1))
+        elif looks_like_knowledge "$path"; then
           printf '%s\n' "$path" >>"$tmp/knowledge"
-        elif looks_like_scratch "$path"; then
+        elif looks_like_scratch_name "$path"; then
           scratch=$((scratch + 1))
         else
           printf '%s\n' "$path" >>"$tmp/other"
