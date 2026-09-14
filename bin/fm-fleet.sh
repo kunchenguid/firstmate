@@ -217,16 +217,8 @@ assignment_locked() {
 }
 
 do_assign() {
-  local secondmate=$1 reason=$2 health selected current current_manager rc inflight
-  inflight=$(python3 - "$REG" "$secondmate" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle: reg = json.load(handle)
-row = next((item for item in reg.get("transfers", []) if item.get("secondmate") == sys.argv[2]), None)
-if row:
-    print(json.dumps({"state": "transfer-in-progress", "secondmate": sys.argv[2], "transaction": row.get("transaction")}, sort_keys=True))
-PY
-)
-  if [ -n "$inflight" ]; then printf '%s\n' "$inflight"; return 4; fi
+  local secondmate=$1 reason=$2 health selected current current_manager rc
+  python3 "$REGISTRY_BIN" "$REG" transfer-in-progress --secondmate "$secondmate" || return
   health=$(mktemp "$FLEET_ROOT/.health.XXXXXX") || return 1
   health_json "$health" || { rm -f "$health"; return 1; }
   current=$(assignment_current "$secondmate")
@@ -606,7 +598,13 @@ case "$CMD" in
     if [ "$rc" -ne 0 ]; then [ -z "$routed" ] || printf '%s\n' "$routed"; exit "$rc"; fi
     state=$(printf '%s' "$routed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
     sm=$(printf '%s' "$routed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["secondmate"])')
-    if [ "$state" = needs-assignment ]; then do_assign "$sm" "intake assignment" >/dev/null || exit 1; routed=$(with_lock python3 "$REGISTRY_BIN" "$REG" route "${flags[@]}") || exit 1; fi
+    if [ "$state" = needs-assignment ]; then
+      assigned=$(do_assign "$sm" "intake assignment"); rc=$?
+      if [ "$rc" -eq 4 ]; then printf '%s\n' "$assigned"; exit 4; fi
+      [ "$rc" -eq 0 ] || exit 1
+      routed=$(with_lock python3 "$REGISTRY_BIN" "$REG" route "${flags[@]}"); rc=$?
+      if [ "$rc" -ne 0 ]; then [ -z "$routed" ] || printf '%s\n' "$routed"; exit "$rc"; fi
+    fi
     manager=$(printf '%s' "$routed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["manager"])')
     generation=$(printf '%s' "$routed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')
     echo "${flags[*]} -> $sm -> $manager (generation $generation)"

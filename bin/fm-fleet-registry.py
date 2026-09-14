@@ -457,6 +457,20 @@ def in_flight_transfer(reg: dict, secondmate: str) -> dict | None:
     return next((row for row in reg["transfers"] if row.get("secondmate") == secondmate), None)
 
 
+def refuse_transfer_in_progress(reg: dict, secondmate: str, **extra: object) -> None:
+    transfer = in_flight_transfer(reg, secondmate)
+    if transfer:
+        print(json.dumps({"state": "transfer-in-progress", "secondmate": secondmate,
+                          "transaction": transfer.get("transaction"), **extra}, sort_keys=True))
+        raise SystemExit(4)
+
+
+def command_transfer_in_progress(args: argparse.Namespace) -> None:
+    reg = load(Path(args.registry))
+    require_valid(reg)
+    refuse_transfer_in_progress(reg, args.secondmate)
+
+
 def upsert_triage(reg: dict, dimensions: dict[str, str], reason: str) -> dict:
     parts = [f"{key}:{dimensions[key]}" for key in sorted(dimensions) if dimensions[key]]
     key = "|".join(parts)
@@ -524,11 +538,7 @@ def command_route(args: argparse.Namespace) -> None:
         print(json.dumps({"state": "unassigned", "claims": claims, "triage": row}, sort_keys=True))
         raise SystemExit(3)
     secondmate = next(iter(claims.values()))
-    transfer = in_flight_transfer(reg, secondmate)
-    if transfer:
-        print(json.dumps({"state": "transfer-in-progress", "secondmate": secondmate,
-                          "transaction": transfer.get("transaction"), "by": sorted(claims)}, sort_keys=True))
-        raise SystemExit(4)
+    refuse_transfer_in_progress(reg, secondmate, by=sorted(claims))
     assignment = assignment_map(reg).get(secondmate)
     print(json.dumps({
         "state": "assigned" if assignment else "needs-assignment",
@@ -815,6 +825,9 @@ def parser() -> argparse.ArgumentParser:
     reserve.add_argument("--transaction", required=True)
     reserve.add_argument("--failover", type=int, choices=(0, 1), default=0)
     reserve.set_defaults(function=command_transfer_reserve)
+    in_progress = commands.add_parser("transfer-in-progress")
+    in_progress.add_argument("--secondmate", required=True)
+    in_progress.set_defaults(function=command_transfer_in_progress)
     reserved = commands.add_parser("transfer-reserved")
     reserved.add_argument("--failover", type=int, choices=(0, 1), default=0)
     reserved.set_defaults(function=command_transfer_reserved)

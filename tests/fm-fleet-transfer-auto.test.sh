@@ -518,4 +518,39 @@ case "$out" in *"$sticky_tx"*) ;; *) fail "sticky assign hid the in-flight trans
 wait "$sticky_pid" || fail "sticky transfer failed after refused assign: $(cat "$TMP_ROOT/sticky.out")"
 [ "$(manager_for legacy):$(generation_for legacy)" = manager-1:2 ] || fail "sticky transfer did not publish manager-1 generation 2"
 
+# A transfer reserved between route's needs-assignment result and its assign,
+# or between assign and the route recheck, still surfaces transfer-in-progress.
+REAL_PY=$(command -v python3); SHIM_DIR="$TMP_ROOT/race-shim"; mkdir -p "$SHIM_DIR"
+cat > "$SHIM_DIR/python3" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = "$FROOT/fleet.json" ] && [ "\${3:-}" = route ]; then
+  count=\$(( \$(cat "$SHIM_DIR/routes" 2>/dev/null || echo 0) + 1 )); echo "\$count" > "$SHIM_DIR/routes"
+  reserve() { "$REAL_PY" "\$1" "\$2" transfer-reserve --secondmate "\$RACE_SECONDMATE" --manager "\$RACE_MANAGER" --transaction "race-\$RACE_SECONDMATE" >/dev/null; }
+  [ "\$count" != "\${RACE_BEFORE_ROUTE:-}" ] || reserve "\$@"
+  out=\$("$REAL_PY" "\$@"); rc=\$?
+  [ "\$count" != "\${RACE_AFTER_ROUTE:-}" ] || reserve "\$@"
+  [ -z "\$out" ] || printf '%s\n' "\$out"; exit "\$rc"
+fi
+exec "$REAL_PY" "\$@"
+SH
+chmod +x "$SHIM_DIR/python3"
+"$FLEET" owner register --secondmate racer --home "$FROOT/secondmates/racer" --projects race-app --domains race >/dev/null || fail "register racer owner"
+"$FLEET" owner register --secondmate rechecker --home "$FROOT/secondmates/rechecker" --projects recheck-app --domains recheck >/dev/null || fail "register rechecker owner"
+rm -f "$SHIM_DIR/routes"
+out=$(PATH="$SHIM_DIR:$PATH" RACE_AFTER_ROUTE=1 RACE_MANAGER=manager-2 RACE_SECONDMATE=racer "$FLEET" route --project race-app --issue MIX-902 2>&1); rc=$?
+[ "$rc" = 4 ] || fail "route racing a transfer reserve exited $rc: $out"
+case "$out" in *'"state": "transfer-in-progress"'*'"transaction": "race-racer"'*) ;; *) fail "route racing a transfer reserve hid transfer-in-progress: $out" ;; esac
+python3 - "$FROOT/fleet.json" <<'PY' || fail "route racing a transfer reserve wrote an assignment or triage record"
+import json, sys
+with open(sys.argv[1]) as handle: reg = json.load(handle)
+assert not [row for row in reg["assignments"] if row["secondmate"] == "racer"], reg["assignments"]
+assert not [row for row in reg["unassigned"] if "race" in row["key"]], reg["unassigned"]
+PY
+add_lock "$FROOT/manager-3"; recheck_live=$LAST_HOLDER
+rm -f "$SHIM_DIR/routes"
+out=$(PATH="$SHIM_DIR:$PATH" RACE_BEFORE_ROUTE=2 RACE_MANAGER=manager-1 RACE_SECONDMATE=rechecker "$FLEET" route --project recheck-app --issue MIX-903 2>&1); rc=$?
+remove_lock "$FROOT/manager-3" "$recheck_live"
+[ "$rc" = 4 ] || fail "route recheck racing a transfer reserve exited $rc: $out"
+case "$out" in *'"state": "transfer-in-progress"'*'"transaction": "race-rechecker"'*) ;; *) fail "route recheck racing a transfer reserve hid transfer-in-progress: $out" ;; esac
+
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"
