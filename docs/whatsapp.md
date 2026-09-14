@@ -15,11 +15,11 @@ Esta versão integra o principal no seu próximo checkpoint, usando a prova de s
 Uma sessão viva não prova que existe supervisão contínua, e nenhum comando da ponte inicia uma sessão ausente.
 O diagnóstico informa `checkpoint` ou `unavailable`, e sempre `unattended_wake_verified:false`.
 Pedidos ficam preservados enquanto o principal está ausente; confirmações de execução só vêm de eventos explícitos do principal.
-Consultar `/status`, `/tarefas` e algumas perguntas naturais seleciona pedidos pelos estados persistidos antes de limitar a apresentação, incluindo recebidos, enfileirados e reivindicados sem início confirmado.
-Respostas conversacionais encerradas não contam como trabalho ativo; havendo mais de um pedido ativo, a ponte pede desambiguação.
+Consultar `/status` ou `/tarefas` seleciona pedidos pelos estados persistidos antes de limitar a apresentação, incluindo recebidos, enfileirados e reivindicados sem início confirmado.
+Respostas conversacionais encerradas não contam como trabalho ativo; havendo mais de um pedido ativo, a consulta segue ao principal pelo mesmo fluxo durável dos demais pedidos.
 Cada resumo de pedido tem no máximo 180 caracteres, incluindo o rótulo de estado e reticências quando necessário; o resultado integral persistido e suas partes de envio permanecem intactos.
 Uma consulta citada segue ao principal com correlação por `context.id`, sem substituir a tarefa citada pelo andamento global.
-Outras perguntas naturais chegam ao principal com histórico e correlação; ambiguidade entre tarefas exige uma pergunta.
+Perguntas naturais de andamento chegam ao principal com histórico e correlação; cabe ao principal esclarecer a ambiguidade entre tarefas.
 Por decisão explícita, `/tarefas` permanece como alias de `/status`, e `/ajuda` e `ajuda` mantêm a resposta local curta, disponível sem modelo mesmo quando o principal está indisponível.
 
 ## Configuração local

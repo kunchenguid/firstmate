@@ -155,15 +155,85 @@ for line in sys.stdin:
         self.assertTrue(all(r["state"] == "accepted" for r in self.store.snapshot()["outbox"]))
         self.assertEqual(self.store.request(row["request"])["state"], "completed")
 
-    def test_status_during_long_task_and_ambiguity(self):
+    def test_explicit_status_during_long_task(self):
         first, _ = self.claim()
         self.emit(first, "started", "Analisando formulário", task=self.task())
-        self.receive(self.message("e aquela tarefa?"))
-        self.assertIn("Analisando formulário", self.store.snapshot()["responses"][-1]["body"])
-        second, _ = self.claim(self.receive(self.message("Investigue o outro problema")))
-        self.emit(second, "started", "Analisando login", task=self.task("login"))
-        self.receive(self.message("e aquela tarefa?"))
-        self.assertIn("Qual deles?", self.store.snapshot()["responses"][-1]["body"])
+        for command in ("/status", "/tarefas"):
+            row = self.receive(self.message(command))
+            self.assertEqual(row["state"], "answered")
+            self.assertIsNone(row["note_id"])
+            self.assertEqual(self.store.snapshot()["responses"][-1]["body"], "Iniciado: Analisando formulário")
+
+    def test_natural_status_preserves_completed_task_context_with_another_active(self):
+        first, _ = self.claim(self.receive(self.message("Analise o formulário da tarefa A")))
+        self.emit(first, "completed", "Tarefa A concluída", evidence=["fixture"], task=self.task("task-a"))
+        second, _ = self.claim(self.receive(self.message("Investigue o login da tarefa B")))
+        self.emit(second, "started", "Tarefa B em andamento", task=self.task("task-b"))
+        for text in ("e aquela tarefa?", "e aquela tarefa", "como está o andamento?",
+                     "qual o andamento?", "como estão as tarefas?"):
+            with self.subTest(text=text):
+                row = self.receive(self.message(text))
+                self.assertEqual(row["state"], "received")
+                self.assertEqual(self.store.rows("SELECT kind,actor FROM responses WHERE request=?", (row["request"],)),
+                                 [{"kind": "received", "actor": "bridge"}])
+                _, result = self.claim(row)
+                self.assertTrue(result["fresh_claim"])
+                self.assertEqual(result["text"], text)
+                self.assertIsNone(result["related_request"])
+                history = {r["request"]: r for r in result["history"]}
+                self.assertEqual(history[first["request"]]["state"], "completed")
+                self.assertEqual(history[first["request"]]["body"], first["body"])
+                self.assertEqual(history[second["request"]]["state"], "started")
+                self.assertEqual({r["request"] for r in result["tasks"]}, {first["request"], second["request"]})
+                if text == "e aquela tarefa?":
+                    responses = {r["request"]: r for r in result["responses"] if r["actor"] != "bridge"}
+                    self.assertEqual(responses[first["request"]]["body"], "Tarefa A concluída")
+                    self.assertEqual(responses[second["request"]]["body"], "Tarefa B em andamento")
+                self.emit(row, "reply", "Você se refere ao formulário da tarefa A ou ao login da tarefa B?")
+
+    def test_ambiguous_queued_status_reaches_main_durably_without_numbered_dialogue(self):
+        first = self.receive(self.message("Analise o formulário"))
+        second = self.receive(self.message("Investigue o login"))
+        self.bridge.forward()
+        for text in ("/status", "/tarefas", "e aquela tarefa?", "a segunda"):
+            with self.subTest(text=text):
+                message = self.message(text)
+                row = self.receive(message)
+                self.assertEqual(row["state"], "received")
+                self.bridge.forward()
+                stored = self.store.request(row["request"])
+                self.assertEqual(stored["state"], "queued")
+                reopened = Store(self.config, clock=lambda: self.now)
+                try:
+                    bridge = Bridge(reopened, Simulator(reopened, self.fixture))
+                    bridge.recover()
+                    bridge.ingest(poll([message], offset=int(reopened.get("cursor")) + 1))
+                    bridge.forward()
+                    self.assertEqual(reopened.request(row["request"])["envelope"], stored["envelope"])
+                    self.assertEqual(reopened.rows("SELECT kind,actor FROM responses WHERE request=?", (row["request"],)),
+                                     [{"kind": "received", "actor": "bridge"}])
+                finally:
+                    reopened.db.close()
+                notes = self.home / "state/inbox"
+                self.assertEqual(len(list(notes.glob(stored["note_id"] + ".note"))), 1)
+                _, result = self.claim(row)
+                self.assertTrue(result["fresh_claim"])
+                self.assertEqual(result["text"], text)
+                self.assertIsNone(result["related_request"])
+                history = {r["request"]: r for r in result["history"]}
+                for candidate in (first, second):
+                    self.assertEqual(history[candidate["request"]]["state"], "queued")
+                    self.assertEqual(history[candidate["request"]]["body"], candidate["body"])
+                _, replay = self.claim(row)
+                self.assertFalse(replay["fresh_claim"])
+                answer = "Você se refere ao formulário ou ao login?"
+                event = self.emit(row, "reply", answer)["event"]
+                while self.bridge.send_one():
+                    pass
+                outbound = self.store.rows("SELECT * FROM outbox WHERE event=?", (event,))
+                self.assertEqual(len(outbound), 1)
+                self.assertEqual(outbound[0]["state"], "accepted")
+                self.assertEqual(outbound[0]["body"], answer)
 
     def test_status_selects_active_state_before_history_limit(self):
         active, _ = self.claim()
@@ -180,11 +250,12 @@ for line in sys.stdin:
         queued = self.receive(self.message("Outro pedido aguardando"))
         self.bridge.forward()
         self.assertEqual(self.store.request(queued["request"])["state"], "queued")
-        self.receive(self.message("/status"))
-        body = self.store.snapshot()["responses"][-1]["body"]
-        self.assertIn("Qual deles?", body)
-        self.assertIn("Enfileirado", body)
-        self.assertIn("Análise longa original", body)
+        row = self.receive(self.message("/status"))
+        self.assertEqual(row["state"], "received")
+        _, result = self.claim(row)
+        self.assertEqual(result["text"], "/status")
+        self.assertIn(active["request"], {r["request"] for r in result["tasks"]})
+        self.assertIn(queued["request"], {r["request"] for r in result["history"]})
 
     def test_status_includes_received_queued_and_claimed_requests(self):
         row = self.receive()
@@ -232,13 +303,14 @@ for line in sys.stdin:
         mid = self.store.rows("SELECT wamid FROM outbox WHERE request=? ORDER BY seq DESC", (first["request"],))[0]["wamid"]
         second, _ = self.claim()
         self.emit(second, "started", "Tarefa B em andamento", task=self.task())
-        for quoted, related in ((mid, first["request"]), ("wamid.unknown", None)):
-            row = self.receive(self.message("e aquela tarefa?", context={"id": quoted, "from": "agent:123"}))
-            self.assertEqual(row["state"], "received")
-            _, result = self.claim(row)
-            self.assertEqual(result["related_request"], related)
-            self.assertEqual(result["text"], "e aquela tarefa?")
-            self.assertFalse(self.store.rows("SELECT * FROM responses WHERE event=?", (row["request"] + ".status",)))
+        for text in ("e aquela tarefa?", "/status", "/tarefas"):
+            for quoted, related in ((mid, first["request"]), ("wamid.unknown", None)):
+                row = self.receive(self.message(text, context={"id": quoted, "from": "agent:123"}))
+                self.assertEqual(row["state"], "received")
+                _, result = self.claim(row)
+                self.assertEqual(result["related_request"], related)
+                self.assertEqual(result["text"], text)
+                self.assertFalse(self.store.rows("SELECT * FROM responses WHERE event=?", (row["request"] + ".status",)))
 
     def test_note_gap_recovery_dedup_and_ack(self):
         message = self.message("texto literal $(touch NEVER) `whoami` ; fim")

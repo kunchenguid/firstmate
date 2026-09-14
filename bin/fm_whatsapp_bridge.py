@@ -152,12 +152,10 @@ class Bridge:
             return
         if self.decision_answer(request, mid, body):
             return
-        status_words = ("/status", "/tarefas", "como está o andamento?", "qual o andamento?",
-                        "e aquela tarefa?", "e aquela tarefa", "como estão as tarefas?")
         quote = message.get("context")
-        if body.strip().lower() in status_words and not (isinstance(quote, dict) and isinstance(quote.get("id"), str)):
-            self.status_answer(request)
-            return
+        if body.strip().lower() in ("/status", "/tarefas") and not (isinstance(quote, dict) and isinstance(quote.get("id"), str)):
+            if self.status_answer(request):
+                return
         if body.strip().lower() in ("/ajuda", "ajuda"):
             self.s.emit(request + ".help", request, "notice",
                         "Envie seu pedido em português. /status consulta registros de andamento. "
@@ -176,7 +174,9 @@ class Bridge:
           WHERE x.request=i.request AND x.actor!='bridge')
           WHERE i.sender=? AND i.request!=? AND """
         active = self.s.rows(query + """i.state IN ('received','queued','claimed','started','decision','blocked')
-          ORDER BY i.received DESC,i.rowid DESC LIMIT 11""", (self.c.creator, request))
+          ORDER BY i.received DESC,i.rowid DESC LIMIT 2""", (self.c.creator, request))
+        if len(active) > 1:
+            return False
         names = {"received": "Recebido e preservado", "queued": "Enfileirado", "claimed": "Reivindicado, início não confirmado",
                  "started": "Iniciado", "decision": "Aguardando decisão", "completed": "Concluído",
                  "failed": "Falhou", "answered": "Resposta", "blocked": "Bloqueado"}
@@ -185,12 +185,7 @@ class Bridge:
             summary = f"{names[row['state']]}: {row['body']}" if row["body"] else names[row["state"]]
             return summary[:179] + "…" if len(summary) > 180 else summary
 
-        if len(active) > 1:
-            body = "Há mais de um pedido em andamento. Qual deles?\n" + "\n".join(
-                f"{i+1}. {describe(r)}" for i, r in enumerate(active[:10]))
-            if len(active) > 10:
-                body += "\nHá outros pedidos em andamento além destes."
-        elif active:
+        if active:
             body = describe(active[0])
         else:
             latest = self.s.rows(query + """i.state IN ('answered','completed','failed') AND r.rowid IS NOT NULL
@@ -198,6 +193,7 @@ class Bridge:
             body = describe(latest[0]) if latest else "Nenhum pedido em andamento ou resultado confirmado pelo Firstmate."
         self.s.emit(request + ".status", request, "notice", body, "bridge")
         self.s.db.execute("UPDATE inbound SET state='answered' WHERE request=?", (request,))
+        return True
 
     def decision_answer(self, request, mid, body):
         match = re.fullmatch(r"(?:aprovar|aprovo) ([A-Fa-f0-9]{16})", body.strip(), re.IGNORECASE)
