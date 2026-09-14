@@ -171,8 +171,18 @@ refuse_symlinks() {  # <dir> <what>
 # open, an I/O error on /mnt/c - must never be what replaces it. The swap also
 # settles the shape: a path that was a directory and is a file now lands in its
 # place rather than inside the directory it used to be.
+# The one place a tree is copied, and the only place the pipeline's two statuses
+# are read. tar's extractor succeeds over a truncated stream, so the reader's
+# status is what says whether the whole tree was actually read. Callers reach
+# this through a condition, which is what keeps `set -e` from ending the script
+# on the pipeline itself and leaving the cleanup and the explanation unrun.
+copy_tree() {  # <source dir> <destination dir>
+  (cd "$1" && tar cf - .) | (cd "$2" && tar xf -)
+  [ "${PIPESTATUS[0]}:${PIPESTATUS[1]}" = "0:0" ]
+}
+
 copy_into_store() {  # <project> <source> <destination under material>
-  local staging payload status rc=1
+  local staging payload rc=1
   mkdir -p "$(store_dir "$1")" || return 1
   # A name of its own per call, not per process: a cleanup that cannot finish -
   # the source made a directory read-only, so the copy is stuck there - must
@@ -181,13 +191,8 @@ copy_into_store() {  # <project> <source> <destination under material>
   staging=$(mktemp -d "$(store_dir "$1")/.incoming.XXXXXX") || return 1
   payload="$staging/payload"
   if [ -d "$2" ]; then
-    if mkdir -p "$payload"; then
-      (cd "$2" && tar cf - .) | (cd "$payload" && tar xf -)
-      # The pipeline's own status is the extractor's, and tar extracts a
-      # truncated stream without complaining, so the reader's status is the one
-      # that says whether the whole tree was actually read.
-      status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
-      [ "$status" = "0:0" ] && rc=0
+    if mkdir -p "$payload" && copy_tree "$2" "$payload"; then
+      rc=0
     fi
   elif cp -- "$2" "$payload"; then
     rc=0
@@ -236,7 +241,7 @@ note_home_activity() {  # <home-dir>
 # --- staging ----------------------------------------------------------------
 
 stage_material() {  # <project> <worktree>
-  local project=$1 wt=$2 material dest excl seen status empty=0 record marks= rel since reason
+  local project=$1 wt=$2 material dest excl seen empty=0 record marks= rel since reason
   material=$(material_dir "$project")
   if [ ! -d "$material" ] ||
     [ -z "$(find "$material" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
@@ -280,14 +285,11 @@ stage_material() {  # <project> <worktree>
 
   dest="$wt/$STAGE_DIR_NAME"
   mkdir -p "$dest"
-  (cd "$material" && tar cf - .) | (cd "$dest" && tar xf -)
-  # The extractor succeeds over a truncated stream, so its status says nothing
-  # about whether the whole store was read - and the store can change under this
-  # read, because a `sync` of the same project is not serialised against a
-  # spawn. A worker handed a subset of the project's material would read it as
-  # the whole of it, which is exactly what the unverified marks exist to prevent.
-  status="${PIPESTATUS[0]}:${PIPESTATUS[1]}"
-  if [ "$status" != "0:0" ]; then
+  # The store can change under this read, because a `sync` of the same project
+  # is not serialised against a spawn. A worker handed a subset of the project's
+  # material would read it as the whole of it, which is exactly what the
+  # unverified marks exist to prevent.
+  if ! copy_tree "$material" "$dest"; then
     remove_tree "$dest"
     die "could not read $project's local material in full while staging it into $dest; refusing to launch a worker over a partial copy"
   fi

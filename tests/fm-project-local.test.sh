@@ -497,6 +497,41 @@ test_a_store_read_only_halfway_never_reaches_the_worker() {
   pass "fm-project-local.sh: a store read only halfway never reaches the worker"
 }
 
+# The other half of the same guard. The test above ends with the reader
+# succeeding, so the pipeline's own status is zero and nothing stops the check
+# from running; when the READER is the one that fails, a bare pipeline under
+# `set -e` ends the script on that line instead, and neither the cleanup nor the
+# explanation ever runs. Injecting a failing extractor is the only way to hold
+# that branch open.
+test_a_write_that_fails_halfway_leaves_no_partial_copy_and_says_why() {
+  local world out rc fake realtar
+  world=$(make_world partialwrite)
+  mkdir -p "$world/home/data/project-local/demo/material"
+  printf 'the production audit that must travel\n' \
+    >"$world/home/data/project-local/demo/material/audit.md"
+  fake="$world/fakebin"
+  mkdir -p "$fake"
+  realtar=$(command -v tar)
+  cat >"$fake/tar" <<EOF
+#!/usr/bin/env bash
+case \$1 in
+  xf)
+    cat >/dev/null
+    echo "tar: Unexpected EOF in archive" >&2
+    exit 2
+    ;;
+esac
+exec "$realtar" "\$@"
+EOF
+  chmod +x "$fake/tar"
+  out=$(PATH="$fake:$PATH" FM_HOME="$world/home" "$ROOT/bin/fm-project-local.sh" \
+    stage demo "$world/copy" 2>&1) && rc=0 || rc=$?
+  expect_code 1 "$rc" "a store that could not be written in full was staged as though it were whole"
+  assert_contains "$out" "in full" "the refusal did not explain what went wrong, only tar's own error"
+  assert_absent "$world/copy/.fm-local" "the refused stage left a partial copy for the worker"
+  pass "fm-project-local.sh: a write that fails halfway leaves no partial copy and says why"
+}
+
 test_a_failed_copy_never_leaks_into_the_next_manifest_path() {
   local world out
   world=$(make_world crosstalk)
@@ -585,6 +620,7 @@ test_a_failed_copy_leaves_the_stores_own_copy_standing
 test_a_directory_read_only_halfway_is_never_counted_as_updated
 test_a_failed_copy_never_leaks_into_the_next_manifest_path
 test_a_store_read_only_halfway_never_reaches_the_worker
+test_a_write_that_fails_halfway_leaves_no_partial_copy_and_says_why
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address
