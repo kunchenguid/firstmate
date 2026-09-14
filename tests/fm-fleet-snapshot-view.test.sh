@@ -1141,8 +1141,8 @@ SH
         ;;
     esac
     [ "$mode" = stable ] || [ -f "$home/observed" ] || fail "$mode fault was not exercised"
-    pass "$mode poll observation preserves timestamp identity or leaves delivery unavailable"
   done
+  pass "poll observations preserve timestamp identity or leave delivery unavailable"
 }
 
 test_merge_poll_timestamp_shares_the_validated_registration
