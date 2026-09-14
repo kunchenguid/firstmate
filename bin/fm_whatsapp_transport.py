@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """WhatsApp Agent Platform v1 HTTP and credential-free scripted simulator.
 
-Only fixed HTTPS api.whatsapp.com/agent/v1 endpoints are reachable. Redirects
-and environment proxies are disabled, credentials are read privately per call,
+API requests use fixed HTTPS api.whatsapp.com/agent/v1 endpoints; media download
+URLs must pass fm_whatsapp_media.validate_download_url before credentials are read.
+Redirects and environment proxies are disabled, credentials are read privately per call,
 and untrusted HTTP error strings are never diagnostics. A simulator script is
 an array of {endpoint,http,body,headers} or {endpoint,fault}; its position is
 durable. It never instantiates the HTTP client or reads a credential file.

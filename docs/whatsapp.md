@@ -1,6 +1,6 @@
 # Ponte local WhatsApp
 
-A ponte de texto recebe pedidos da WhatsApp Agent Platform, preserva entradas e respostas em SQLite e usa a entrada suportada do Firstmate.
+A ponte recebe pedidos da WhatsApp Agent Platform, preserva entradas e respostas em SQLite e usa a entrada suportada do Firstmate.
 O serviço é separado das sessões e não controla o Herdr, os agentes ou os projetos.
 Python 3 com biblioteca padrão acompanha os registros Python existentes, mantém inteiros de 64 bits exatos e oferece SQLite transacional sem servidor ou dependências de nuvem.
 Não há AWS, TTS ou modelo adicional na etapa de texto.

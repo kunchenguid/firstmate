@@ -28,7 +28,7 @@ For video, inspect every sampled frame with its `timestamp_seconds`, combine tha
 Never claim complete temporal coverage from sampled video frames.
 For Office files, extraction includes text and cached spreadsheet values, not calculated formulas, embedded media or visual layout.
 If the current harness cannot read images, report that capability gap and retain the request; a path in a prompt is not image input.
-Do not guess from a path or caption, and do not treat a missing transcript or extracted text as a completed analysis.
+Do not guess from a path or caption; verify the evidence required for that attachment type under the [media coverage contract](../../../docs/whatsapp.md#recebimento-de-anexos), including its video audio-state rules, before treating analysis as complete.
 `fresh_claim:false` requires reconciliation with existing work, never another dispatch merely because the message reappeared.
 A fresh claim alone also does not prove the task started; establish canonical intake and task ownership through the existing Firstmate procedures.
 Then acknowledge the exact note with the existing `fm-inbox.sh drain --ack` owner.

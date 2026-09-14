@@ -517,6 +517,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "bin/requirements-whatsapp-media.txt",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/whatsapp.md",
       "audience": "operator-current"
     },
