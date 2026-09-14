@@ -16,6 +16,8 @@
 # Each invoked owner also prints owner=<script> exit_code=<n> ms=<n>.
 # Exact owner exits and durations are retained in evidence/owners.jsonl under
 # the printed private evidence directory; stage results include local checks.
+# The complete session-start stdout is retained there so diagnostic evidence is
+# not lost to an evidence bound; other owner captures remain bounded.
 # Failed prerequisites skip downstream mutation but still attempt cleanup.
 # Budgets bound owner calls via fm-timeout-lib; setup and cleanup overhead are
 # measured, not a hard end-to-end deadline. Success requires cleanup.
@@ -90,9 +92,10 @@ sanitize() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -cd '[:print:]' | tr -s ' ' | cut -c1-80 | sed 's/^ *//; s/ *$//'
 }
 receipt() {
-  # Exclude only the mutable registration fields owned by fm-pr-check.sh.
+  # Exclude mutable registration fields owned by fm-pr-check.sh and the
+  # unresolved-decision inventory added by startup reconciliation.
   # All other spawn metadata must survive both successful and failed owners.
-  LC_ALL=C awk -F= '$1 !~ /^(pr|pr_head|missing_review_override_ts|red_override_ts|red_override_pr|red_override_head|red_override_condition)$/ {print}' \
+  LC_ALL=C awk -F= '$1 !~ /^(pr|pr_head|missing_review_override_ts|red_override_ts|red_override_pr|red_override_head|red_override_condition|decisions_reviewed|decision_keys)$/ {print}' \
     "$LAB_STATE/$TASK.meta" 2>/dev/null | cksum | awk '{print $1":"$2}'
 }
 owned_task() {
@@ -154,11 +157,15 @@ remaining() { # <stage-start> <budget>
   printf '%s\n' "$(( $2 - used ))"
 }
 
-capture() { # <name> <file> - retain bounded redacted private evidence.
+capture() { # <name> <file> - retain redacted private evidence.
   local name=$1 file=$2 target
   target="$LAB_ROOT/evidence/$name"
   mkdir -p "$LAB_ROOT/evidence" || return 1
-  tr '\000' '?' < "$file" | sed -E 's/(token|password|secret)=[^[:space:]]+/\1=[REDACTED]/Ig' | head -c 4096 > "$target" || return 1
+  if [ "$name" = session-start.out ]; then
+    tr '\000' '?' < "$file" | sed -E 's/(token|password|secret)=[^[:space:]]+/\1=[REDACTED]/Ig' > "$target" || return 1
+  else
+    tr '\000' '?' < "$file" | sed -E 's/(token|password|secret)=[^[:space:]]+/\1=[REDACTED]/Ig' | head -c 4096 > "$target" || return 1
+  fi
 }
 
 run_stage() { # <name> <budget>
@@ -185,15 +192,21 @@ run_stage() { # <name> <budget>
   emit "$name" "$result" "$elapsed" "$budget" "$detail"
 }
 
-actionable_bootstrap() { grep -Eq '(^|[[:space:]])(MISSING|MISSING_MANUAL|BACKEND_INVALID|NEEDS_GH_AUTH|TANGLE|STARTUP_MEMORY_BUDGET|MEMORY_DOCTOR|CREW_DISPATCH|FLEET_SYNC|NETWORK_CHECKS|HOME_SUMMARY|BACKLOG_RECONCILE|SECONDMATE_SYNC|SECONDMATE_LIVENESS|SECONDMATE_HANDOFF|NUDGE_SECONDMATES|FMX)(:|[[:space:]]|$)' "$1"; }
+actionable_bootstrap() {
+  grep -Eq '^(MISSING|MISSING_MANUAL|BACKEND_INVALID|TANGLE|STARTUP_MEMORY_BUDGET|MEMORY_DOCTOR|CREW_DISPATCH|FLEET_SYNC|NETWORK_CHECKS|HOME_SUMMARY|BACKLOG_RECONCILE|SECONDMATE_SYNC|SECONDMATE_LIVENESS|SECONDMATE_HANDOFF|NUDGE_SECONDMATES|FMX):|^NEEDS_GH_AUTH$' "$1"
+}
+refusal_banner() {
+  grep -Eq '^●  (READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED|STARTUP TRUNCATED - SESSION START HIT ITS [0-9]+s RUNTIME BOUND)$' "$1"
+}
 stage_session_start() {
   local start=$1 budget=$2 out err rc
   out=$(mktemp "$LAB_ROOT/session-start.out.XXXXXX") || return 1; err="$out.err"
   run_to "$(remaining "$start" "$budget")" "$out" "$err" owner "$LAB_BIN/fm-session-start.sh" || rc=$?
   capture session-start.out "$out"; capture session-start.err "$err"
   [ "${rc:-0}" -eq 0 ] || { printf 'session-start-exit-%s\n' "${rc:-1}"; return 1; }
-  if ! grep -Eq 'SESSION START|FLEET STATE|CONTEXT' "$out" || actionable_bootstrap "$out" ||
-    grep -Eiq 'truncated|read.only|lock refusal|lock refused' "$out"; then
+  if ! grep -Eq '^SESSION START( \(CONTEXT RE-EMIT\))? - .+$' "$out" ||
+    ! grep -Fxq 'FLEET STATE' "$out" || ! grep -Fxq 'CONTEXT' "$out" ||
+    actionable_bootstrap "$out" || refusal_banner "$out"; then
     printf 'startup-not-owned-or-complete\n'
     return 1
   fi
@@ -305,6 +318,13 @@ cp -R "$SOURCE_BIN/." "$LAB_BIN/" || exit 2
 env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
   -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
   git -C "$LAB_HOME" init -q --initial-branch=main || exit 2
+env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+  -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  git -C "$LAB_HOME" add -A || exit 2
+env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+  -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  git -C "$LAB_HOME" -c user.name='fm-smoke' -c user.email='fm-smoke@invalid' \
+    -c commit.gpgsign=false commit -qm 'archive smoke checkout' || exit 2
 trap '
   rc=$?
   if [ "$SCOUT_TORN" -eq 0 ] && owned_task; then

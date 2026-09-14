@@ -30,7 +30,9 @@ SH
   cat > "$bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' 'SESSION START' 'BOOTSTRAP' 'FLEET STATE' 'CONTEXT'
+printf '%s\n' "SESSION START - $FM_HOME" 'BOOTSTRAP' 'FLEET STATE' 'CONTEXT'
+printf '%s\n' "${FM_TEST_START_PROSE:-}"
+[ "${FM_TEST_START_BARE_AUTH:-0}" = 1 ] && printf '%s\n' 'NEEDS_GH_AUTH'
 printf '%s\n' "${FM_TEST_START_BANNER:-}"
 if [ "${FM_TEST_REJECT_TELEMETRY:-0}" = 1 ]; then
   mkdir -p "$FM_DATA_OVERRIDE/telemetry"
@@ -43,6 +45,8 @@ if [ "${FM_TEST_SCOPE:-0}" = 1 ]; then
 fi
 if [ "${FM_TEST_GIT_HOME:-0}" = 1 ]; then
   [ "$(git -C "$FM_HOME" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$FM_HOME" && pwd -P)" ] || exit 73
+  [ "$(git -C "$FM_HOME" symbolic-ref --short HEAD 2>/dev/null)" = main ] || exit 74
+  git -C "$FM_HOME" rev-parse HEAD >/dev/null 2>&1 || exit 75
 fi
 exit "${FM_TEST_START_RC:-0}"
 SH
@@ -75,6 +79,9 @@ mkdir -p "$FM_STATE_OVERRIDE/$id.inbox/handled"
 printf '%s\n' "$message" > "$FM_STATE_OVERRIDE/$id.inbox/handled/001.msg"
 if [ "${FM_SMOKE_WAKE_MODE:-}" = ok ]; then
   printf 'working: %s\n' "$message" > "$FM_STATE_OVERRIDE/$id.status"
+fi
+if [ "${FM_SMOKE_MUTATE_DECISIONS:-0}" = 1 ]; then
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$FM_STATE_OVERRIDE/$id.meta"
 fi
 SH
   cat > "$bin/fm-wake-drain.sh" <<'SH'
@@ -218,6 +225,40 @@ test_passing_lab_run() {
   pass "passing stub lab run exits 0 with no caller-home artifacts"
 }
 
+test_bare_auth_diagnostic_fails_startup() {
+  local home rc
+  home="$TMP_ROOT/bare-auth"
+  mkdir -p "$home"
+  rc=$(FM_TEST_START_BARE_AUTH=1 run_smoke "$home" ok)
+  expect_code 1 "$rc" "bare auth diagnostic must fail startup"
+  grep -E '^stage=session-start result=fail ' "$home/out" >/dev/null || fail "bare auth diagnostic was accepted"
+  grep -E '^stage=spawn result=skipped .*detail=prior-stage-failed$' "$home/out" >/dev/null || fail "bare auth diagnostic allowed spawn"
+  pass "bare auth diagnostic blocks startup without prose matching"
+}
+
+test_worker_metadata_updates_preserve_receipt() {
+  local home rc
+  home="$TMP_ROOT/worker-metadata"
+  mkdir -p "$home"
+  rc=$(FM_SMOKE_MUTATE_DECISIONS=1 run_smoke "$home" ok)
+  expect_code 0 "$rc" "worker-owned metadata update must preserve smoke receipt"
+  grep -E '^stage=steer result=pass ' "$home/out" >/dev/null || fail "worker metadata update lost receipt"
+  grep -E '^stage=teardown result=pass ' "$home/out" >/dev/null || fail "worker metadata update blocked teardown"
+  pass "worker-owned decision metadata does not invalidate smoke receipt"
+}
+
+test_archive_commit_ignores_global_signing() {
+  local home rc global
+  home="$TMP_ROOT/global-signing"
+  global="$home/gitconfig"
+  mkdir -p "$home"
+  printf '[commit]\n\tgpgsign = true\n' > "$global"
+  rc=$(GIT_CONFIG_GLOBAL="$global" FM_TEST_GIT_HOME=1 run_smoke "$home" ok)
+  expect_code 0 "$rc" "archive setup must ignore global signing"
+  grep -E '^stage=session-start result=pass ' "$home/out" >/dev/null || fail "global signing blocked archive setup"
+  pass "archive commit is independent of global signing configuration"
+}
+
 test_start_failure_stops_mutation() {
   local home rc
   home="$TMP_ROOT/start-failure"
@@ -245,12 +286,23 @@ test_real_pr_registration() {
   pass "smoke composes the real PR registration owner without fabricated test evidence"
 }
 
+test_prose_does_not_trigger_startup_failure() {
+  local home rc
+  home="$TMP_ROOT/prose"
+  mkdir -p "$home"
+  rc=$(FM_TEST_START_PROSE=$'The CONTEXT section is complete.\nNo FLEET_SYNC diagnostics were emitted.\nThe digest remains read-only safe.' run_smoke "$home" ok)
+  expect_code 0 "$rc" "session-start prose must not fail smoke"
+  grep -E '^stage=session-start result=pass ' "$home/out" >/dev/null || fail "prose triggered startup failure"
+  grep -E '^stage=spawn result=pass ' "$home/out" >/dev/null || fail "prose prevented spawn"
+  pass "session-start ignores diagnostic words in prose"
+}
+
 test_start_banner_and_scope() {
   local home rc
   home="$TMP_ROOT/banner-scope"
   mkdir -p "$home"
   rc=$(FM_BACKEND=tmux TMUX=foreign FM_WAKE_QUEUE="$home/foreign-queue" \
-    FM_TEST_SCOPE=1 FM_TEST_START_BANNER='STARTUP TRUNCATED - SESSION START HIT ITS RUNTIME BOUND' \
+    FM_TEST_SCOPE=1 FM_TEST_START_BANNER='●  STARTUP TRUNCATED - SESSION START HIT ITS 120s RUNTIME BOUND' \
     run_smoke "$home" ok)
   expect_code 1 "$rc" "uppercase startup refusal"
   grep -E '^owner=fm-session-start.sh exit_code=0 ms=[0-9]+$' "$home/out" >/dev/null || fail "owner received inherited operational selectors"
@@ -365,8 +417,12 @@ test_rejected_telemetry_keeps_all_stage_outcomes() {
 test_help
 test_broken_wake_fails
 test_passing_lab_run
+test_bare_auth_diagnostic_fails_startup
+test_worker_metadata_updates_preserve_receipt
+test_archive_commit_ignores_global_signing
 test_start_failure_stops_mutation
 test_real_pr_registration
+test_prose_does_not_trigger_startup_failure
 test_start_banner_and_scope
 test_git_home_is_self_contained
 test_foreign_git_archive
