@@ -1251,7 +1251,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           #   exit 3: rollback reset failed AND sentinel write ALSO failed
           #           (next poll will re-fire; operator-visible heartbeat /
           #           wedge-cap-fail log lines surface every retry)
-          if ! date +%s > "$permanent_marker" 2>/dev/null; then
+          if ! { date +%s > "$permanent_marker"; } 2>/dev/null; then
             _rm_status=0
             _wedge_cap_rollback "$win" "$key" "$escalation_file" "$since_file" || _rm_status=$?
             if [ "$_rm_status" -eq 2 ]; then
