@@ -22,20 +22,21 @@
 #
 # SCOPE. fm_backlog_transition_applies is the single gate. It excludes
 # secondmates (persistent agents are never backlog items, AGENTS.md section 10),
-# homes whose configured backlog backend is manual and homes that keep no
-# backlog file at all. Those return-1 exemptions are never errors; an
-# unresolvable configured data directory or incompatible tasks-axi instead
-# returns 2 so callers refuse before mutation.
+# homes whose configured backlog backend is manual and markdown homes that keep
+# no backlog file. Those return-1 exemptions are never errors; an
+# unresolvable configured data directory, a backend resolution error, or
+# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
 #
-# ADDRESSING. Every mutation call passes `--file <data>/backlog.md` so the
-# change lands in the home that owns the task regardless of the caller's
-# working directory, and runs from that data directory's parent so the same
-# home's `.tasks.toml` supplies done_keep and the archive path. Row probes pass
-# `--file` only for the markdown backend and otherwise run from the addressing
-# root so backend-owned state remains discoverable. The parent of the data
-# directory is the addressing root rather than FM_HOME, so a home whose data
-# directory is relocated keeps its backlog and its archive together. A root
+# ADDRESSING. Every call runs from the configured data directory's parent so
+# that home's `.tasks.toml` supplies the adapter selection, done_keep, and the
+# archive path. A markdown backlog also passes `--file <data>/backlog.md` so the
+# change lands in the home that owns the task regardless of the caller's working
+# directory. A configured non-markdown adapter is addressed by that root alone,
+# because `--file` would override the adapter's own workspace path. The parent of
+# the data directory is the addressing root rather than FM_HOME, so a home whose
+# data directory is relocated keeps its backlog and its archive together. A root
 # with no `.tasks.toml` gets tasks-axi's built-in defaults.
+# bin/fm-tasks-axi-lib.sh owns backend precedence and configuration failures.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -51,8 +52,9 @@
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that closed the row
-# first simply retires the record.
+# closes a row that reads as an open captain call. An answer that closes the row
+# first applies any supported retained artifact from the validated record, then
+# replay simply retires the record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -70,6 +72,17 @@ FM_BACKLOG_ROW_HOLD_KIND=
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
+
+# Bounded execution is fm-timeout-lib.sh's alone; source it rather than
+# re-deriving a deadline here. It is stateless, so the memoisation reason this
+# library does not source fm-tasks-axi-lib.sh does not apply.
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+
+# Latched when a row read hits its bound. fm_backlog_row_show runs inside a
+# command substitution, so the subshell can READ this latch but cannot set it;
+# the callers that capture its status own the write.
+FM_BACKLOG_ROW_SHOW_WEDGED=0
 
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
@@ -174,8 +187,98 @@ fm_backlog_data_relative() {  # <data-dir>
   esac
 }
 
+
+# The parent an authorized data directory was named from, kept in the caller's
+# own path shape. fm_backlog_record_parent_authorized only applies its FM_HOME
+# containment guard to a root that still spells out `$FM_HOME`, so a root
+# already resolved through `pwd -P` would skip that guard whenever the data
+# directory is a symlink.
+fm_backlog_authorized_root() {  # <authorized-data-dir>
+  local data=$1 parent
+  while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do
+    data=${data%/}
+  done
+  case "$data" in
+    /) parent=/ ;;
+    */*)
+      parent=${data%/*}
+      [ -n "$parent" ] || parent=/
+      ;;
+    *) parent=. ;;
+  esac
+  printf '%s\n' "$parent"
+}
+
+# Any adapter selection or exemption derived from a home's `.tasks.toml` is only
+# as safe as that file, so validate it before reading it.
+fm_backlog_config_present() {  # <root> <authorized-root>
+  local root=$1 authorized_root=$2 tasks_config="$1/.tasks.toml"
+  if [ -e "$tasks_config" ] || [ -L "$tasks_config" ]; then
+    # Leave a dangling config symlink for the backend resolver to diagnose as
+    # unreadable; reject an existing special file through the home-bound
+    # validator before any backend parser can touch it.
+    if [ -L "$tasks_config" ] && [ ! -e "$tasks_config" ]; then
+      return 0
+    fi
+    fm_backlog_record_present "$tasks_config" "tasks-axi config" "$authorized_root" || return 1
+  fi
+  return 0
+}
+
+# Every home is bound to its own data directory, whichever adapter it configures,
+# so the boundary is authorized first and unconditionally. Only the markdown
+# backlog's regular-file requirement is adapter-specific: another adapter keeps
+# its rows in its own workspace and need not carry <data>/backlog.md at all.
+fm_backlog_source_present() {  # <data-dir> <authorized-data-dir> [root authorized-root]
+  local data=$1 authorized_data=$2 root=${3:-} authorized_root=${4:-} file backend
+  if [ -z "$root" ]; then
+    root=$(fm_backlog_root "$data") || return 1
+    authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+  fi
+  if [ -z "$authorized_root" ]; then
+    authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+  fi
+  fm_backlog_config_present "$root" "$authorized_root" || return 1
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  file=$(fm_backlog_file "$data") || return 1
+  if [ "$backend" = markdown ]; then
+    fm_backlog_record_present "$file" "backlog file" "$authorized_data"
+    return $?
+  fi
+  fm_backlog_record_parent_authorized "$file" "backlog data directory" "$authorized_data" parent-only
+}
+
+# Resolve how the owning home's backlog is addressed, for reads and mutations
+# alike: sets FM_BACKLOG_AXI_ROOT to the cd target and FM_BACKLOG_AXI_FILE to
+# the markdown --file path, empty for every other backend. This is the single
+# place that decision is made. A markdown backlog is addressed as
+# <data>/backlog.md so the change lands in the home that owns the task
+# regardless of the caller's working directory; any other configured adapter
+# is addressed by that root alone, because --file would override the adapter's
+# own workspace path. The caller invokes fm_tasks_axi inside its own subshell
+# - the bound wrapper execs, so a nested subshell here would add a process
+# layer between tasks-axi and the caller, which the lock-holding callers'
+# interruption contract counts on not existing.
+fm_backlog_tasks_axi_addressing() {  # <data-dir>
+  FM_BACKLOG_AXI_FILE=
+  local data root backend
+  data=$(fm_backlog_data_absolute "$1") || return $?
+  root=$(fm_backlog_root "$data") || return $?
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  FM_BACKLOG_AXI_ROOT=$root
+  if [ "$backend" = markdown ]; then
+    FM_BACKLOG_AXI_FILE=$(fm_backlog_file "$data") || return 1
+  fi
+}
+
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file
+  local config=$1 data authorized_data=$2 kind=$3 file root backend authorized_root
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
@@ -189,50 +292,185 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $2"
     return 2
   fi
-  file=$(fm_backlog_file "$data")
-  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
-    return 1
+  root=$(fm_backlog_root "$data") || return 2
+  authorized_root=$(fm_backlog_authorized_root "$authorized_data")
+  fm_backlog_config_present "$root" "$authorized_root" || return 2
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" = markdown ]; then
+    file=$(fm_backlog_file "$data") || return 2
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      FM_BACKLOG_TRANSITION_SKIP="this home keeps no markdown backlog at $file"
+      return 1
+    fi
   fi
-  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
+  if ! fm_backlog_source_present "$data" "$authorized_data" "$root" "$authorized_root"; then
     return 2
   fi
   if ! fm_tasks_axi_compatible; then
-    FM_BACKLOG_TRANSITION_ERROR="automatic backlog transitions require tasks-axi $FM_TASKS_AXI_MIN or newer with the required update and mv features"
+    FM_BACKLOG_TRANSITION_ERROR="automatic backlog transitions require tasks-axi ${FM_TASKS_AXI_MIN:-(unknown minimum)} or newer with the required update and mv features"
     return 2
   fi
   return 0
 }
 
-# Print one row's `tasks-axi show` output (plus stderr) from the backlog root,
-# with `--file` only for the markdown backend; the exit status is tasks-axi's.
-# Extra flags (such as --full) are passed through.
-fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 file root
-  shift 2
-  file=$(fm_backlog_file "$data") || return 1
-  root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" --file "$file" 2>&1)
-  else
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" 2>&1)
+# Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound. A caller that
+# holds a lock across the call - the spawn commit and its preservation
+# read-back run under the per-task meta lock - sets the bound, so an
+# unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
+# call exits 124, or 137 when the kill-after had to fire (GNU timeout's own
+# status for a KILL-forced expiry), and the callers treat either as the bound
+# expiring and report the timeout as the reason through their existing error
+# plumbing. GNU timeout is used where it exists,
+# gtimeout where coreutils ships under that name, and a small perl watchdog
+# elsewhere (a stock macOS host has perl but no timeout variant; perl is
+# already a hard dependency of this library's byte validators, so the
+# fallback adds no new tool). Every bounded path forces termination: a
+# tasks-axi that ignores SIGTERM must not outlive the bound, since an
+# unbounded call under the lock is exactly the hang the bound exists to
+# prevent - so the GNU variants carry a kill-after of one further bound
+# (TERM at the bound, KILL after that grace) and the watchdog kills the
+# same way. When a bound was requested but no bounding mechanism exists at
+# all, the call fails closed instead of running unbounded. Must be the last
+# command of a subshell: the exec keeps the tasks-axi process exactly where
+# the plain call sat, and the bound kills the child, not the caller.
+fm_tasks_axi_timeout_expired() {  # <status>
+  case $1 in
+    124 | 137) return 0 ;;
+  esac
+  return 1
+}
+
+fm_tasks_axi() {
+  local bound=${FM_TASKS_AXI_TIMEOUT:-}
+  if [ -z "$bound" ]; then
+    exec tasks-axi "$@"
   fi
+  if command -v timeout >/dev/null 2>&1; then
+    exec timeout -k "$bound" "$bound" tasks-axi "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout -k "$bound" "$bound" tasks-axi "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
+    # child exits or the bound expires: the same contract as
+    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
+    # one further bound of grace, then KILL, and exits 124 so the callers'
+    # timeout plumbing reports it. Polling rather than alarm+die keeps the
+    # bound off perl's platform-dependent syscall-restart signal semantics.
+    exec perl -MPOSIX=WNOHANG -e '
+      my $bound = shift;
+      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
+      my $pid = fork;
+      exit 127 unless defined $pid;
+      if ($pid == 0) { exec @ARGV; exit 127 }
+      my $step = 0.05;
+      my $elapsed = 0;
+      while (1) {
+        my $done = waitpid $pid, WNOHANG;
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
+        exit 127 if $done == -1;
+        if ($elapsed >= $bound) {
+          kill "TERM", $pid;
+          my $grace = 0;
+          my $gone = waitpid $pid, WNOHANG;
+          while ($gone == 0 && $grace < $bound) {
+            select undef, undef, undef, $step;
+            $grace += $step;
+            $gone = waitpid $pid, WNOHANG;
+          }
+          kill "KILL", $pid if $gone == 0;
+          waitpid $pid, 0;
+          exit 124;
+        }
+        select undef, undef, undef, $step;
+        $elapsed += $step;
+      }
+    ' -- "$bound" tasks-axi "$@"
+  fi
+  printf 'fm_tasks_axi: cannot bound tasks-axi within %ss: none of timeout, gtimeout, or perl is available\n' "$bound" >&2
+  exit 127
+}
+
+# Print one row's `tasks-axi show` output (plus stderr) from the addressing
+# fm_backlog_tasks_axi_addressing resolved, with `--file` only for the markdown
+# backend. Addressing or backend-resolution errors return before tasks-axi runs;
+# otherwise its exit status is preserved. Extra flags (--full) pass through.
+#
+# Every read is bounded, because a wedged backend read here is what blinds a
+# whole session start: bin/fm-bootstrap.sh's reconcile and close-replay sweeps
+# call this once per item, and one unbounded read consumes the entire
+# FM_SESSION_START_TIMEOUT and truncates the digest before the wake queue,
+# supervision instructions, fleet state and context sections ever print. The
+# bound turns that into a loud partial reconcile: the caller reports the item it
+# could not read and moves to the next one.
+#
+# A per-item bound alone is not enough on a home carrying a large fleet, because
+# N wedged items still cost N bounds and the digest is truncated anyway. So the
+# first bound hit latches FM_BACKLOG_ROW_SHOW_WEDGED and every later read in the
+# same sweep returns immediately, still naming its own item so nothing is
+# silently skipped. This function only READS that latch: it runs inside a
+# command substitution, and a write here would die with the subshell, so the
+# callers that capture its status set it. The latch is deliberately
+# process-wide because these scripts are short-lived and a backend that wedged
+# once will wedge again within the same run.
+fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
+  local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  shift 2
+  # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
+  # such as 00 is still zero, so the digits test alone would let the very read
+  # this bound exists to prevent back in. Compare arithmetically, tolerating a
+  # value too large for the shell to compare at all.
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
+  fm_backlog_tasks_axi_addressing "$data"
+  addressing_status=$?
+  if [ "$addressing_status" -ne 0 ]; then
+    [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    return "$addressing_status"
+  fi
+  if [ "$FM_BACKLOG_ROW_SHOW_WEDGED" = 1 ]; then
+    printf 'tasks-axi show %s skipped: the backlog backend already exceeded its %ss read bound\n' "$id" "$secs"
+    return 124
+  fi
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    set -- "$@" --file "$FM_BACKLOG_AXI_FILE"
+  fi
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+    _ "$FM_BACKLOG_AXI_ROOT" "$id" "$@" 2>&1)
+  status=$?
+  # A backend that wrote a header or a progress line before wedging leaves that
+  # fragment as the first output line, and every caller reads the first line as
+  # the failure reason. Whatever a timed-out read managed to emit is incomplete
+  # by definition, so the bound speaks for it instead.
+  if [ "$status" -eq 124 ]; then
+    printf 'tasks-axi show %s exceeded its %ss backlog read bound\n' "$id" "$secs"
+  else
+    printf '%s\n' "$out"
+  fi
+  return "$status"
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
-  local data=$1 file root
+  local data=$1 addressing_status
   shift
-  file=$(fm_backlog_file "$data") || return 1
-  root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
-    (cd "$root" 2>/dev/null && tasks-axi list "$@" --file "$file" 2>&1)
+  fm_backlog_tasks_axi_addressing "$data"
+  addressing_status=$?
+  if [ "$addressing_status" -ne 0 ]; then
+    [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    return "$addressing_status"
+  fi
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi list "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
   else
-    (cd "$root" 2>/dev/null && tasks-axi list "$@" 2>&1)
+    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi list "$@" 2>&1)
   fi
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status
+  local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -243,27 +481,27 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
   FM_BACKLOG_ROW_ERROR=
-  file=$(fm_backlog_file "$data") || {
+  fm_backlog_source_present "$data" "$authorized_data"
+  source_status=$?
+  if [ "$source_status" -ne 0 ]; then
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
-  }
-  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
+    return "$source_status"
   fi
-  fm_backlog_root "$data" >/dev/null || {
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
-  }
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
       FM_BACKLOG_ROW_RESULT=not_found
     else
       FM_BACKLOG_ROW_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_ROW_ERROR" ] \
-        || FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+      if [ -z "$FM_BACKLOG_ROW_ERROR" ]; then
+        if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+        else
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+        fi
+      fi
     fi
     return "$command_status"
   fi
@@ -285,24 +523,38 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 }
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
-# output line in FM_BACKLOG_TRANSITION_ERROR on failure.
+# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The home boundary is
+# authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
+# how the selected adapter is addressed (ADDRESSING above).
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data authorized_data=$1 file verb=$2 id=$3 out command_status
+  local data authorized_data=$1 verb=$2 id=$3 out command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
-  file=$(fm_backlog_file "$data") || return 1
-  fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
-  out=$(cd "$(fm_backlog_root "$data")" 2>/dev/null && tasks-axi "$verb" "$id" \
-      --file "$file" "$@" 2>&1)
+  fm_backlog_source_present "$data" "$authorized_data"
+  source_status=$?
+  [ "$source_status" -eq 0 ] || return "$source_status"
+  fm_backlog_tasks_axi_addressing "$data"
+  source_status=$?
+  [ "$source_status" -eq 0 ] || return "$source_status"
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
+  else
+    out=$(cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
+  fi
   command_status=$?
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-  [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-    || FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+  if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
+    if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+    else
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+    fi
+  fi
   return "$command_status"
 }
 
@@ -316,17 +568,26 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
+fm_backlog_row_artifact_supported() {
+  local id=$1 flag=${2:-} value=${3:-}
+  case "$flag" in
+    --pr) return 0 ;;
+    --report) [ "$value" = "data/$id/report.md" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
-# of the task body (a line already present is left alone) and return the row to
-# Queued, which is the shape every other captain call has and what
-# bin/fm-fleet-snapshot.sh's captain_actionable requires. The hold itself is
-# untouched; only bin/fm-captain-hold.sh answer closes the call. The links are
-# written into the body rather than through `tasks-axi update --report`,
-# because that flag rewrites the title of a row that is not Done.
+# of the task body (a line already present is left alone), preserve supported
+# artifacts on the row, and return it to Queued, the conventional post-cleanup
+# shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp
+  local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -335,8 +596,16 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
     case "$previous_arg" in
-      --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
-      --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
+      --report)
+        deliverable="${deliverable:+$deliverable; }report $arg"
+        if fm_backlog_row_artifact_supported "$id" --report "$arg"; then
+          row_args=(--report "$arg")
+        fi
+        ;;
+      --pr)
+        deliverable="${deliverable:+$deliverable; }PR $arg"
+        row_args=(--pr "$arg")
+        ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
     previous_arg=$arg
@@ -344,6 +613,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   if [ -n "$deliverable" ]; then
     out=$(fm_backlog_row_show "$data" "$id" --full)
     command_status=$?
+    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
     if [ "$command_status" -ne 0 ]; then
       FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
       [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
@@ -385,6 +655,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         ;;
     esac
   fi
+  if [ "${#row_args[@]}" -gt 0 ]; then
+    fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
+  fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
 }
 
@@ -396,9 +669,9 @@ fm_backlog_canonical_existing() {
   ' "$1" 2>/dev/null
 }
 
-fm_backlog_record_parent_authorized() {
-  local path=$1 label=$2 root=$3 parent base parent_resolved expected_path
-  local path_resolved root_resolved home_resolved final_matches=1
+fm_backlog_record_parent_authorized() {  # <path> <label> <root> [parent-only]
+  local path=$1 label=$2 root=$3 parent_only=${4:-} parent base parent_resolved expected_path
+  local path_resolved root_resolved root_prefix home_resolved final_matches=1
   parent=${path%/*}
   [ "$parent" != "$path" ] || parent=.
   base=${path##*/}
@@ -432,7 +705,7 @@ fm_backlog_record_parent_authorized() {
     return 1
   }
   expected_path=${parent_resolved%/}/$base
-  if [ -e "$path" ] || [ -L "$path" ]; then
+  if [ -z "$parent_only" ] && { [ -e "$path" ] || [ -L "$path" ]; }; then
     path_resolved=$(fm_backlog_canonical_existing "$path") || {
       FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path"
       return 1
@@ -441,8 +714,9 @@ fm_backlog_record_parent_authorized() {
   else
     path_resolved=$expected_path
   fi
+  root_prefix=${root_resolved%/}/
   case "$path_resolved" in
-    "$root_resolved"/*) ;;
+    "$root_prefix"*) ;;
     *)
       FM_BACKLOG_TRANSITION_ERROR="$label resolves outside its authorized directory at $path"
       return 1
@@ -515,6 +789,24 @@ fm_backlog_meta_spawn_gen() {
       ;;
   esac
   FM_BACKLOG_META_SPAWN_GEN=$value
+}
+
+# The same incarnation, read for a caller that only needs to notice a CHANGE.
+# A record predating the field carries no incarnation to compare, so it yields
+# an empty value and proceeds instead of refusing; comparing that empty value
+# across a wait still catches a record that gained, lost, or altered one. An
+# ambiguous or unreadable field is still an error, because a record that cannot
+# name one exact incarnation cannot be compared at all.
+fm_backlog_meta_spawn_gen_optional() {  # <meta> <state>
+  local meta=$1 state=$2 count
+  FM_BACKLOG_META_SPAWN_GEN=
+  fm_backlog_record_present "$meta" "task record" "$state" || return 1
+  count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable spawn generation in task record $meta"
+    return 1
+  }
+  [ "$count" -ne 0 ] || return 0
+  fm_backlog_meta_spawn_gen "$meta" "$state"
 }
 
 fm_backlog_row_dispatchable() {

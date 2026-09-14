@@ -24,19 +24,15 @@
 # path and is the only state left outside the temp dir.
 set -u
 
-if [ "${FM_CURSOR_PRIMARY_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_CURSOR_PRIMARY_LIVE_E2E=1 to run the live Cursor primary guard"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_live_gate opt-in FM_CURSOR_PRIMARY_LIVE_E2E tmux jq
+
+REAL_TMUX=$(command -v tmux)
 CURSOR_BIN=${FM_CURSOR_BIN:-$(command -v cursor-agent || true)}
 [ -n "$CURSOR_BIN" ] && [ -x "$CURSOR_BIN" ] \
   || fail "cursor-agent not found; install it or set FM_CURSOR_BIN. This guard refuses to pass without checking the real harness."
-REAL_TMUX=$(command -v tmux) || fail "tmux not found"
-command -v jq >/dev/null 2>&1 || fail "jq not found"
 CURSOR_VERSION=$("$CURSOR_BIN" --version 2>/dev/null | head -1)
 [ -n "$CURSOR_VERSION" ] || fail "cursor-agent did not report a version; refusing to claim a verified result"
 printf 'harness: cursor-agent %s\n' "$CURSOR_VERSION"

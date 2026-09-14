@@ -288,16 +288,10 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
-    # End the fixture through an ordinary actionable status transition so this
-    # failing pre-fix path leaves no child behind.
-    printf 'done: fixture cleanup\n' > "$state/cleanup.status"
-    wait_for_exit "$ARM_PID" 80 || true
-    fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"
-  fi
-  wait "$ARM_PID"
+  wait_for_exit "$ARM_PID" 80
   status=$?
+  [ "$status" -ne 124 ] \
+    || fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"
   expect_code 0 "$status" "re-arm re-surface wake must close successfully"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "re-arm did not report the durable recovery wake: $(cat "$armout")"
@@ -805,8 +799,51 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+# The watcher validates FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS when it arms and
+# refuses to arm on an unusable value. Under a running watcher that value would
+# make every per-cycle reconcile refuse by name into a discarded stdout, so no
+# source would ever start and the home would sit disarmed while presenting as
+# supervised; refusing to arm is loud through the liveness guard instead. This
+# drives the real arm entry and asserts the arm STOPPED - non-zero exit, no
+# started line, no lock holder, no beacon - and that its refusal names the
+# variable, so a validator that merely returned false somewhere would not pass.
+test_arm_refuses_an_unusable_launch_confirm_window() {
+  local dir home state fakebin armout status lock_pid
+  dir=$(make_case confirm-window-refusal)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=5 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5s \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm with an unusable confirm window never stopped: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "arm reported success with an unusable confirm window: $(cat "$armout")"
+  grep -q '^watcher: FAILED' "$armout" \
+    || fail "arm did not report the typed failure line: $(cat "$armout")"
+  grep -qF 'FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS' "$armout" \
+    || fail "the refusal did not name the variable: $(cat "$armout")"
+  grep -qF "must be whole seconds from 1 to 600" "$armout" \
+    || fail "the refusal did not name the accepted range: $(cat "$armout")"
+  ! grep -q '^watcher: started' "$armout" \
+    || fail "arm reported a started watcher despite the refusal: $(cat "$armout")"
+  [ ! -e "$state/.last-watcher-beat" ] \
+    || fail "a refused watcher still published a liveness beacon"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null \
+    || fail "a refused watcher is still running as pid $lock_pid"
+  pass "watch-arm: an unusable launch confirm window refuses to arm by name"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_arm_refuses_an_unusable_launch_confirm_window
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence

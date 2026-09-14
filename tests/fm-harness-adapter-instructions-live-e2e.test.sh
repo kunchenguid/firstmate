@@ -7,13 +7,10 @@
 # unconfigured native harness loaded the references itself.
 set -u
 
-if [ "${FM_HARNESS_ADAPTER_INSTRUCTION_EVAL:-0}" != 1 ]; then
-  echo "skip: set FM_HARNESS_ADAPTER_INSTRUCTION_EVAL=1 and FM_HARNESS_ADAPTER_LOCAL_MODEL=<model> to run the local instruction evaluation"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_HARNESS_ADAPTER_INSTRUCTION_EVAL curl jq
 
 ROUTER="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 TMP_ROOT=$(fm_test_tmproot fm-harness-adapter-instructions)
@@ -21,8 +18,6 @@ EXPECTED_JSON="$TMP_ROOT/expected.json"
 PROMPT_FILE="$TMP_ROOT/prompt.txt"
 RESPONSE_JSON="$TMP_ROOT/response.json"
 
-command -v curl >/dev/null 2>&1 || fail "curl is required for the local instruction evaluation"
-command -v jq >/dev/null 2>&1 || fail "jq is required for the local instruction evaluation"
 curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags > "$TMP_ROOT/tags.json" \
   || fail "local Ollama is unavailable at 127.0.0.1:11434; no remote provider fallback is allowed"
 

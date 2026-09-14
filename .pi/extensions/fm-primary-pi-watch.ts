@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
@@ -606,7 +607,26 @@ export default function (pi: ExtensionAPI) {
     // also let a check-kind trigger itself slip past main's delivery.
     const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
-    const eligible = !isCheckTrigger && scope.eligible;
+    // A signal close containing a needs-decision status file, or a stale close
+    // for a captain-held task, gets the identical main-only treatment as a
+    // check-kind trigger. The cross-reference deliberately includes every
+    // unread decision row: until that row is read, a later signal or stale
+    // trigger for the same task stays on main. Other tasks and heartbeat
+    // handling remain independent.
+    const triggerKeys = /^signal:/.test(message)
+      ? message
+        .slice("signal:".length)
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((path) => path.split("/").pop() ?? path)
+      : /^stale:/.test(message)
+        ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
+        : [];
+    const taskIdentity = (key: string): string =>
+      scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
+    const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
+    const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
+    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
@@ -1099,7 +1119,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool?.({
+  registerFirstmateTool(pi, {
     name: "fm_watch_arm_pi",
     label: "Arm firstmate watcher",
     description: "Start the first required Pi watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the Pi extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.",

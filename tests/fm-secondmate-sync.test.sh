@@ -96,6 +96,9 @@ bump_primary() {
     printf 'echo %s\n' "$mode" > "$w/main/bin/tool.sh"
     printf 's-%s\n' "$mode" > "$w/main/.agents/skills/note.md"
   fi
+  if [ "$mode" = bin ]; then
+    printf 'echo %s-%s\n' "$mode" "$RANDOM" > "$w/main/bin/tool.sh"
+  fi
   git -C "$w/main" add -A
   git -C "$w/main" commit -qm "bump-$mode"
 }
@@ -1017,6 +1020,42 @@ test_remote_sync_targets_primary_not_host_copy() {
 }
 
 # --- R2: the target is imported from the host's copy when the home lacks it ----
+# --- R1b: a remote sync reports WHICH instruction paths its advance changed ----
+# The parent cannot diff a checkout it cannot read, so the host's own result is
+# the only place that fact can come from. /updatefirstmate needs it to decide
+# whether the running remote agent must be replaced to reload, or whether the
+# advance reloads itself.
+test_remote_sync_reports_the_changed_instruction_surface() {
+  local w c_instr c_bin c_readme
+  w=$(new_remote_world remote-instr)
+  add_remote_home "$w" sm "$w/coderoot" "$(head_of "$w/main")"
+
+  bump_primary "$w" instr
+  c_instr=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_instr"
+  remote_sync "$w" sm "$c_instr"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the instruction advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=AGENTS.md,bin,.agents/skills" \
+    "the sync result did not name the changed instruction paths"
+
+  bump_primary "$w" bin
+  c_bin=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_bin"
+  remote_sync "$w" sm "$c_bin"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the bin-only advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=bin" "a bin-only advance must be reported as bin only"
+  assert_not_contains "$REMOTE_SYNC_OUT" "AGENTS.md" "a bin-only advance must not claim AGENTS.md changed"
+
+  bump_primary "$w" readme
+  c_readme=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_readme"
+  remote_sync "$w" sm "$c_readme"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the README-only advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=" "an advance with no instruction change must still report the field"
+  assert_not_contains "$REMOTE_SYNC_OUT" "instr=bin" "a README-only advance must not claim bin changed"
+  pass "R1b a remote sync names exactly which instruction paths its advance changed"
+}
+
 test_remote_sync_imports_from_host_copy() {
   local w c1 c2 coderoot_before
   w=$(new_remote_world remote-import-host)
@@ -1325,6 +1364,7 @@ test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
 test_remote_sync_targets_primary_not_host_copy
+test_remote_sync_reports_the_changed_instruction_surface
 test_remote_sync_imports_from_host_copy
 test_remote_sync_imports_from_origin
 test_remote_sync_uses_present_objects

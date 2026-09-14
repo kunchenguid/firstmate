@@ -397,6 +397,20 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+#
+# Two optional caller hooks fire from here, each at most once per resolved home:
+#   fm_ff_after_instruction_update <id> <home> <window> <instr>
+#     the nudge-shaped hook: only for an advance that changed the instruction
+#     surface, and only under nudge_requires_instr=yes.
+#   fm_ff_after_secondmate_settled <id> <home> <window> <status> <instr>
+#     the settled-state hook: for every home this sweep left AT the base with a
+#     live window, whether it advanced (status=updated) or was already there
+#     (status=current). A home that was SKIPPED is never settled, so a dirty,
+#     diverged, offline, or unsafe home never reaches this hook and nothing here
+#     forces, stashes, or discards its work. /updatefirstmate uses this hook to
+#     reach every live mate that is genuinely on the new bytes, including the
+#     ones that needed no advance to get there.
+# An undefined hook is simply not called.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0
@@ -415,6 +429,10 @@ process_secondmate() {
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
+    && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
+    fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"
+  fi
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
