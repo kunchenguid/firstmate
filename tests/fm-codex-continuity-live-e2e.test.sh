@@ -38,7 +38,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate default-on FM_CODEX_LIVE_E2E codex
+fm_live_gate default-on FM_CODEX_LIVE_E2E,FM_CODEX_LIVE_STOP_E2E,FM_CODEX_LIVE_CHECKPOINT_E2E codex
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEX_VERSION=$(codex --version 2>/dev/null || printf 'unknown')
