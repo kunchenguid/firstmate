@@ -142,9 +142,10 @@
 # generic runner capture it and wake the whole fleet. `poll` therefore re-runs
 # the published poll up to POLL_RETRY_LIMIT times for that exact response, with
 # attempt starts at least POLL_RETRY_DELAY_DEFAULT seconds apart. The match is exact and
-# deliberately narrow: real feedback, ended and missing sessions, any other
-# SERVER_ERROR, and the same interruption still standing after the bound is
-# spent are all printed straight through and captured normally. The retry is a
+# deliberately narrow: real feedback, any other SERVER_ERROR, and the same
+# interruption still standing after the bound is spent are all printed straight
+# through and captured normally, while a quiet absence is instead waited out by
+# the listener as the paragraphs above describe. The retry is a
 # Lavish fact, so the generic runner in bin/fm-procevent.sh stays
 # adapter-agnostic and learns nothing about it.
 #
@@ -494,8 +495,10 @@ result_has_queued_content() {  # <result-file>
 # announcing, for the generic runner's silence seam. Lavish's notion of "nothing
 # was said" lives here and nowhere else: an ended session carrying no queued
 # content block is a board the captain closed without saying anything, and the
-# handler learns nothing from being told. Anything else - a real answer, a
-# missing or waiting session, an unreadable result - is announced.
+# handler learns nothing from being told. Every other shape stays announced: a
+# real answer, a waiting session, an unreadable result, and any error. A
+# `missing` session never reaches this seam at all, because the listener waits it
+# out before a capture can exist.
 cmd_silent() {
   local file=${1-} content_rc
   [ -n "$file" ] || usage
