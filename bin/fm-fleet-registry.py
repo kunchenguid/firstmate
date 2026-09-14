@@ -601,19 +601,74 @@ def require_expected_generation(reg: dict, args: argparse.Namespace) -> None:
         raise ValueError("assignment generation changed during transfer")
 
 
+IN_FLIGHT_TRANSFER = ("preparing", "records-ready")
+
+
+def current_transfer(reg: dict, secondmate: str, transaction: str, states: tuple[str, ...]) -> dict:
+    """Return the SecondMate's one transfer row when it is exactly this transaction in an eligible state."""
+    rows = [row for row in reg["transfers"] if row.get("secondmate") == secondmate]
+    if len(rows) != 1 or rows[0].get("transaction") != transaction or rows[0].get("state") not in states:
+        raise ValueError(f"transfer {transaction} is not the current {'/'.join(states)} transfer for {secondmate}")
+    return rows[0]
+
+
+def reserved_managers(reg: dict, failover: bool) -> set[str]:
+    """Managers held by in-flight transfer rows; a failover shares live managers, so it honors only planned rows."""
+    return {
+        row["destination_manager"] for row in reg["transfers"]
+        if row.get("state") in IN_FLIGHT_TRANSFER and row.get("destination_manager")
+        and (not failover or not row.get("failover"))
+    }
+
+
+def command_transfer_reserve(args: argparse.Namespace) -> None:
+    """Admit one transfer per SecondMate and reserve its destination manager."""
+    path = Path(args.registry)
+    reg = load(path)
+    require_valid(reg)
+    if args.manager not in {row["id"] for row in reg["managers"]}:
+        raise ValueError(f"unknown destination manager {args.manager}")
+    for row in reg["transfers"]:
+        if row.get("secondmate") == args.secondmate and row.get("state") in IN_FLIGHT_TRANSFER:
+            raise ValueError(f"transfer {row.get('transaction')} is already in flight for {args.secondmate}")
+    if args.manager in reserved_managers(reg, bool(args.failover)):
+        raise ValueError(f"destination manager {args.manager} is reserved by an unfinished transfer")
+    reg["transfers"] = [
+        row for row in reg["transfers"] if row.get("secondmate") != args.secondmate
+    ] + [{"secondmate": args.secondmate, "transaction": args.transaction, "state": "preparing",
+          "destination_manager": args.manager, "failover": bool(args.failover)}]
+    require_valid(reg)
+    write_atomic(path, reg)
+
+
+def command_transfer_reserved(args: argparse.Namespace) -> None:
+    print(" ".join(sorted(reserved_managers(load(Path(args.registry)), bool(args.failover)))))
+
+
+def command_transfer_release(args: argparse.Namespace) -> None:
+    """Retire this transaction's unclaimed reservation; print whether it still owned the SecondMate."""
+    path = Path(args.registry)
+    reg = load(path)
+    require_valid(reg)
+    rows = [row for row in reg["transfers"] if row.get("transaction") == args.transaction]
+    if rows and rows[0].get("state") not in ("preparing", "abandoned"):
+        raise ValueError(f"transfer {args.transaction} claimed its record move or finished")
+    current = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
+    owned = len(current) == 1 and current[0].get("transaction") == args.transaction
+    if owned and current[0]["state"] == "preparing":
+        current[0]["state"] = "abandoned"
+        require_valid(reg)
+        write_atomic(path, reg)
+    print("owned" if owned else "superseded")
+
+
 def command_transfer_claim(args: argparse.Namespace) -> None:
     """Claim the record move for one transaction before any owner record changes."""
     path = Path(args.registry)
     reg = load(path)
     require_valid(reg)
     require_expected_generation(reg, args)
-    for row in reg["transfers"]:
-        if (row.get("secondmate") == args.secondmate and row.get("transaction") != args.transaction
-                and row.get("state") == "records-ready"):
-            raise ValueError(f"transfer {row.get('transaction')} is already moving {args.secondmate}")
-    reg["transfers"] = [
-        row for row in reg["transfers"] if row.get("secondmate") != args.secondmate
-    ] + [{"secondmate": args.secondmate, "transaction": args.transaction, "state": "records-ready"}]
+    current_transfer(reg, args.secondmate, args.transaction, IN_FLIGHT_TRANSFER)["state"] = "records-ready"
     require_valid(reg)
     write_atomic(path, reg)
 
@@ -623,6 +678,7 @@ def command_transfer_publish(args: argparse.Namespace) -> None:
     reg = load(path)
     require_valid(reg)
     require_expected_generation(reg, args)
+    transfer = current_transfer(reg, args.secondmate, args.transaction, ("records-ready",))
     row = {
         "secondmate": args.secondmate,
         "manager": args.manager,
@@ -635,14 +691,7 @@ def command_transfer_publish(args: argparse.Namespace) -> None:
         item for item in reg["assignments"] if item["secondmate"] != args.secondmate
     ] + [row]
     reg["assignments"].sort(key=lambda value: value["secondmate"])
-    reg["transfers"] = [
-        item for item in reg["transfers"] if item.get("secondmate") != args.secondmate
-    ] + [{
-        "secondmate": args.secondmate,
-        "transaction": args.transaction,
-        "state": "published",
-        "generation": row["generation"],
-    }]
+    transfer.update(state="published", generation=row["generation"])
     require_valid(reg)
     write_atomic(path, reg)
     print(json.dumps(row, sort_keys=True))
@@ -652,21 +701,15 @@ def command_transfer_state(args: argparse.Namespace) -> None:
     path = Path(args.registry)
     reg = load(path)
     require_valid(reg)
-    rows = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
-    if (len(rows) != 1 or rows[0].get("transaction") != args.transaction
-            or rows[0].get("state") not in ("published", "active") or args.state != "active"):
-        raise ValueError(f"transfer {args.transaction} is not the current published transfer for {args.secondmate}")
-    rows[0]["state"] = args.state
+    if args.state != "active":
+        raise ValueError("transfer-state only activates a published transfer")
+    current_transfer(reg, args.secondmate, args.transaction, ("published", "active"))["state"] = "active"
     require_valid(reg)
     write_atomic(path, reg)
 
 
 def transfer_rollback_valid(reg: dict, args: argparse.Namespace) -> dict | None:
-    rows = [row for row in reg["transfers"] if row.get("secondmate") == args.secondmate]
-    transfer = rows[0] if len(rows) == 1 else None
-    if (not transfer or transfer.get("transaction") != args.transaction
-            or transfer.get("state") not in ("records-ready", "published", "active")):
-        raise ValueError(f"transfer {args.transaction} is not the current transfer for {args.secondmate}; rollback refused")
+    transfer = current_transfer(reg, args.secondmate, args.transaction, ("records-ready", "published", "active"))
     current = assignment_map(reg).get(args.secondmate)
     if transfer.get("generation"):
         if not current or current.get("generation") != transfer["generation"]:
@@ -745,6 +788,19 @@ def parser() -> argparse.ArgumentParser:
     publish.add_argument("--transaction", required=True)
     publish.add_argument("--reason", required=True)
     publish.set_defaults(function=command_transfer_publish)
+    reserve = commands.add_parser("transfer-reserve")
+    reserve.add_argument("--secondmate", required=True)
+    reserve.add_argument("--manager", required=True)
+    reserve.add_argument("--transaction", required=True)
+    reserve.add_argument("--failover", type=int, choices=(0, 1), default=0)
+    reserve.set_defaults(function=command_transfer_reserve)
+    reserved = commands.add_parser("transfer-reserved")
+    reserved.add_argument("--failover", type=int, choices=(0, 1), default=0)
+    reserved.set_defaults(function=command_transfer_reserved)
+    release = commands.add_parser("transfer-release")
+    release.add_argument("--secondmate", required=True)
+    release.add_argument("--transaction", required=True)
+    release.set_defaults(function=command_transfer_release)
     claim = commands.add_parser("transfer-claim")
     claim.add_argument("--secondmate", required=True)
     claim.add_argument("--expected-generation", type=int, required=True)

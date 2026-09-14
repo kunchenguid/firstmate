@@ -302,7 +302,7 @@ start_claimed_transfer() {  # <secondmate> -> sets claim_pid and claim_tx once t
     [ -n "$claim_tx" ] && python3 - "$FROOT/fleet.json" "$claim_tx" <<'PY' && return 0
 import json, sys
 with open(sys.argv[1]) as handle: reg = json.load(handle)
-sys.exit(0 if any(row.get("transaction") == sys.argv[2] for row in reg.get("transfers", [])) else 1)
+sys.exit(0 if any(row.get("transaction") == sys.argv[2] and row.get("state") == "records-ready" for row in reg.get("transfers", [])) else 1)
 PY
     sleep 0.05; i=$((i + 1))
   done
@@ -373,7 +373,7 @@ if "$FLEET" transfer recover --transaction "$stale_tx" >/dev/null 2>&1; then fai
 : > "$FM_HOOK_LOG"
 out=$("$FLEET" transfer abandon --transaction "$stale_tx" 2>&1) || fail "abandon of stale journal: $out"
 ! grep -q 'paperclip|start-secondmate' "$FM_HOOK_LOG" || fail "abandon relaunched a SecondMate that a newer transfer owns: $(cat "$FM_HOOK_LOG")"
-case "$out" in *"newer transfer owns SecondMate paperclip"*) ;; *) fail "stale abandon did not report the newer owner: $out" ;; esac
+case "$out" in *"no longer holds the current transfer for paperclip"*) ;; *) fail "stale abandon did not report the newer owner: $out" ;; esac
 [ "$(tx_state "$stale_journal")" = abandoned ] || fail "abandon did not retire the stale reservation"
 [ "$(records_digest)" = "$before" ] || fail "abandon rewrote owner records"
 if "$FLEET" transfer abandon --transaction "$claim_tx" >/dev/null 2>&1; then fail "abandon accepted a claimed transfer"; fi
@@ -402,6 +402,7 @@ relaunch_tx=relaunch-fail
 relaunch_journal="$FROOT/transactions/$relaunch_tx.json"
 python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$FROOT/fleet.json" --secondmate paperclip --manager "$newer" \
   --source-home "$FROOT/manager-2" --transaction "$relaunch_tx" --journal "$relaunch_journal" >/dev/null || fail "prepare relaunch fixture"
+python3 "$ROOT/bin/fm-fleet-registry.py" "$FROOT/fleet.json" transfer-reserve --secondmate paperclip --manager "$newer" --transaction "$relaunch_tx" || fail "reserve relaunch fixture"
 python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$relaunch_journal" --destination-stopped 1 --secondmate-stopped 1 >/dev/null
 out=$(FM_FLEET_TRANSFER_MANAGER_START_HOOK=$FAIL_HOOK "$FLEET" transfer abandon --transaction "$relaunch_tx" 2>&1) && fail "abandon hid a destination relaunch failure: $out"
 case "$out" in *"retry transfer abandon --transaction $relaunch_tx"*) ;; *) fail "relaunch failure printed no retry command: $out" ;; esac
@@ -436,8 +437,23 @@ with open(sys.argv[1]) as handle: reg = json.load(handle)
 rows = [row for row in reg["transfers"] if row["secondmate"] == "paperclip"]
 assert [(row["transaction"], row["state"]) for row in rows] == [(sys.argv[2], "active")], rows
 PY
+[ "$(tx_state "$FROOT/transactions/$tx_old.json")" = superseded ] || fail "superseded failover journal was not marked superseded"
+case "$(cat "$TMP_ROOT/old.out")" in *"recover or rollback"*|*"recover $tx_old"*) fail "superseded failover advertised recovery: $(cat "$TMP_ROOT/old.out")" ;; esac
 remove_lock "$FROOT/manager-3" "$new_live"
-out=$("$FLEET" transfer rollback --transaction "$tx_new" 2>&1) || fail "newer recovery was wedged after a superseded activation: $out"
-[ "$(manager_for paperclip)" = manager-1 ] || fail "rollback of the newer recovery did not restore its prior assignment"
+out=$("$FLEET" transfer begin --secondmate paperclip --to manager-1 2>&1) || fail "superseded failover leaked its manager-1 reservation: $out"
+[ "$(manager_for paperclip)" = manager-1 ] || fail "transfer after a superseded activation did not publish manager-1"
+
+# Two transfers for the same SecondMate: the second is refused before it stops anything.
+SLOW_SM_STOP="$TMP_ROOT/slow-sm-stop.sh"
+# shellcheck disable=SC2016 # $1-$3 and $FM_HOOK_LOG expand inside the generated hook script.
+printf '#!/usr/bin/env bash\nprintf "%%s|%%s|%%s\\n" "$1" "$2" "$3" >> "$FM_HOOK_LOG"\nsleep 2\n' > "$SLOW_SM_STOP"; chmod +x "$SLOW_SM_STOP"
+: > "$FM_HOOK_LOG"
+FM_FLEET_TRANSFER_STOP_HOOK=$SLOW_SM_STOP "$FLEET" transfer begin --secondmate paperclip --to manager-2 > "$TMP_ROOT/first.out" 2>&1 & first_pid=$!
+i=0; while ! python3 -c 'import json,sys; sys.exit(0 if any(r["secondmate"]=="paperclip" and r["state"]=="preparing" for r in json.load(open(sys.argv[1]))["transfers"]) else 1)' "$FROOT/fleet.json" && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+out=$(FM_FLEET_TRANSFER_STOP_HOOK=$SLOW_SM_STOP "$FLEET" transfer begin --secondmate paperclip --to manager-3 2>&1) && fail "second same-SecondMate transfer was admitted: $out"
+case "$out" in *"already in flight for paperclip"*) ;; *) fail "second same-SecondMate transfer refused for the wrong reason: $out" ;; esac
+wait "$first_pid" || fail "first same-SecondMate transfer failed: $(cat "$TMP_ROOT/first.out")"
+[ "$(grep -c 'paperclip|stop-secondmate' "$FM_HOOK_LOG")" = 1 ] || fail "refused same-SecondMate transfer stopped an endpoint: $(cat "$FM_HOOK_LOG")"
+[ "$(manager_for paperclip)" = manager-2 ] || fail "admitted same-SecondMate transfer did not publish manager-2"
 
 pass "automatic planned transfer reserves, stays exclusive, refuses races, and restarts on failure"

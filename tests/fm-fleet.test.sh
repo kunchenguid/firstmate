@@ -203,10 +203,10 @@ chmod +x "$DUP_STOP" "$DUP_START"
 dup_hooks() { FM_FLEET_TRANSFER_STOP_HOOK=$DUP_STOP FM_FLEET_TRANSFER_SECONDMATE_START_HOOK=$DUP_START "$@"; }
 remove_lock "$FROOT/homes/manager-1" "$holder_1"
 FM_DUP_SLOW=1 dup_hooks "$FLEET" recover --secondmate paperclip >/dev/null 2>&1 & dup_slow=$!
-sleep 1
-dup_hooks "$FLEET" recover --secondmate paperclip >/dev/null || fail "winning duplicate recovery failed"
+i=0; while ! python3 -c 'import json,sys; sys.exit(0 if any(r["secondmate"]=="paperclip" and r["state"]=="preparing" for r in json.load(open(sys.argv[1]))["transfers"]) else 1)' "$FROOT/fleet.json" && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+if dup_hooks "$FLEET" recover --secondmate paperclip >/dev/null 2>&1; then fail "duplicate recovery was admitted while another transfer was in flight"; fi
+wait "$dup_slow" || fail "first duplicate recovery failed"
 dup_manager=$(manager_for paperclip)
-if wait "$dup_slow"; then fail "losing duplicate recovery succeeded"; fi
 [ "$(generation_for paperclip)" = 3 ] || fail "duplicate recovery did not publish exactly one generation"
 grep -q 'window=NEW-LIVE-PANE' "$FROOT/homes/$dup_manager/state/paperclip.meta" || fail "losing recovery overwrote the relaunched SecondMate metadata"
 [ "$(grep -c '^- paperclip ' "$FROOT/homes/$dup_manager/data/secondmates.md")" = 1 ] || fail "duplicate recovery duplicated the route"
@@ -348,6 +348,8 @@ records_journal="$TROOT/transactions/$records_tx.json"
 python3 "$ROOT/bin/fm-fleet-transfer.py" prepare "$TROOT/fleet.json" --secondmate harness \
   --manager manager-2 --source-home "$TROOT/manager-1" --transaction "$records_tx" \
   --journal "$records_journal" >/dev/null || fail "prepare records-ready recovery fixture"
+python3 "$ROOT/bin/fm-fleet-registry.py" "$TROOT/fleet.json" transfer-reserve --secondmate harness --manager manager-2 \
+  --transaction "$records_tx" || fail "reserve records-ready recovery fixture"
 python3 "$ROOT/bin/fm-fleet-registry.py" "$TROOT/fleet.json" transfer-claim --secondmate harness --transaction "$records_tx" \
   --expected-generation "$(python3 "$ROOT/bin/fm-fleet-transfer.py" state --journal "$records_journal" | json_value 'json.load(sys.stdin)["expected_generation"]')" || fail "claim records-ready recovery fixture"
 python3 "$ROOT/bin/fm-fleet-transfer.py" apply --journal "$records_journal" || fail "apply records-ready recovery fixture"
