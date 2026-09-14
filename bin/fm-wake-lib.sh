@@ -1298,7 +1298,7 @@ fm_treehouse_collect_local_states() {  # <record-state>
       echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
       return 1
     }
-    while IFS= read -r line || [ -n "$line" ]; do
+    if while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         "- "*)
           secondmate_registry_parse_line "$line" || {
@@ -1317,7 +1317,12 @@ fm_treehouse_collect_local_states() {  # <record-state>
           [ "$known" = 1 ] || homes+=("$child")
           ;;
       esac
-    done < "$reg"
+    done < "$reg"; then
+      :
+    else
+      echo "REFUSED: cannot read local Firstmate registry at $reg; nothing was changed" >&2
+      return 1
+    fi
   done
 }
 

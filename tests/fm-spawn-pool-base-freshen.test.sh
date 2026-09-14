@@ -691,10 +691,11 @@ lay_out_as_pool_slot() {
 
 # The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
 # a launched task's claim names it, a slot that cannot be claimed refuses before
-# anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
+# anything is published, an abort while the allocation lock is still held
+# leaves no claim naming a task with no record, and a later abort explains its
+# retained claim.
 test_pool_slot_claim_follows_the_spawn_outcome() {
-  local rec id out status before
+  local rec id retry_id out retry_out status retry_status before
 
   id='pool-slot-claim-r1'
   rec=$(make_case slot-claim "$id")
@@ -740,7 +741,80 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
   [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
     || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+
+  id='pool-slot-claim-retained-r1'
+  retry_id='pool-slot-claim-retained-retry-r1'
+  rec=$(make_case slot-claim-retained "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-real"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = send-keys ] && [ -e "$HOME_DIR/state/$id.meta" ]; then
+  exit 1
+fi
+exec "$FAKEBIN_DIR/tmux-real" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after launch delivery failed"
+  assert_contains "$out" "reconcile the retained claim before spawning a different task" \
+    "post-publication abort did not explain how to reconcile its retained slot claim"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "post-publication abort retained rolled-back metadata"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "post-publication abort lost its retained slot claim: $(cat "$SLOT_CLAIM")"
+  mv "$FAKEBIN_DIR/tmux-real" "$FAKEBIN_DIR/tmux"
+  fm_test_spawn_brief "$HOME_DIR" "$retry_id"
+  retry_out=$(run_spawn "$retry_id" --scout)
+  retry_status=$?
+  [ "$retry_status" -ne 0 ] || fail "a different task replaced the retained post-publication claim"
+  assert_contains "$retry_out" "could not claim Treehouse pool slot" \
+    "different-task retry did not refuse the retained post-publication claim"
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
+test_unreadable_nested_registry_refuses_pool_allocation() {
+  local rec id out status before child_a child_b grandchild registry
+
+  id='pool-slot-unreadable-nested-registry-r1'
+  rec=$(make_case unreadable-nested-registry "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_a="$CASE_DIR/child-a"
+  child_b="$CASE_DIR/child-b"
+  grandchild="$CASE_DIR/grandchild"
+  mkdir -p "$child_a/data" "$child_a/state" "$child_b/data" "$child_b/state" \
+    "$grandchild/data" "$grandchild/state"
+  printf '%s\n%s\n' \
+    "- child-a - fixture (home: $child_a; scope: test; projects: project; added 2026-01-01)" \
+    "- child-b - fixture (home: $child_b; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  registry="$child_a/data/secondmates.md"
+  printf '%s\n' \
+    "- grandchild - fixture (home: $grandchild; scope: test; projects: project; added 2026-01-01)" \
+    > "$registry"
+  : > "$child_b/data/secondmates.md"
+  fm_write_meta "$grandchild/state/older-grandchild-task.meta" \
+    "window=firstmate:fm-older-grandchild-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 000 "$registry"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 600 "$registry"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a nested registry read failed: $out"
+  assert_contains "$out" "cannot read local Firstmate registry at $registry" \
+    "nested registry read failure did not refuse the allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "nested registry read failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "nested registry read failure claimed the retained slot"
+  [ -e "$grandchild/state/older-grandchild-task.meta" ] \
+    || fail "nested registry read failure removed the holding grandchild record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "nested registry read failure changed the held slot"
+  pass "an unreadable nested Firstmate registry refuses pooled allocation"
 }
 
 # Fresh allocation must not replace ownership evidence or an older task record
@@ -832,7 +906,7 @@ test_pool_slot_refuses_existing_ownership() {
   rec=$(make_case claim-collision "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
-  printf 'task=older-task\\nhome=%s\\n' "$CASE_DIR/older-home" > "$SLOT_CLAIM"
+  printf 'task=older-task\nhome=%s\n' "$CASE_DIR/older-home" > "$SLOT_CLAIM"
   before=$(cat "$SLOT_CLAIM")
 
   out=$(run_spawn "$id" --scout)
@@ -848,6 +922,7 @@ test_pool_slot_refuses_existing_ownership() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_unreadable_nested_registry_refuses_pool_allocation
 test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
