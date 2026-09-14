@@ -921,11 +921,19 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
+#
+# The optional <captain-bound-hash> is supplied only by a stable non-terminal
+# hash whose first sight already recorded a backlog captain call. At the alarm
+# boundary, that path reuses the existing call predicate and declaration-scoped
+# throttle: the same call resets this short probe without alarming, an elapsed
+# long window or a newly re-held call surfaces through the first-sight owner,
+# and a missing or unreadable call proceeds to the wedge alarm unchanged.
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [captain-bound-hash]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 captain_hash=${6-}
+  local since age n reason key throttle
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -938,6 +946,23 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if [ -n "$captain_hash" ]; then
+          key=$(window_key "$win")
+          throttle=$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)
+          case "$throttle" in
+            captain-hold:*)
+              if captain_call_stale_bound "$key" "$task"; then
+                clear_write_tracking "$key"
+                date +%s > "$since_file"
+                triage_log "absorbed $label (open captain call still inside its long re-surface window): $win"
+                return 0
+              elif [ -n "$STALE_WAIT_DECLARATION" ]; then
+                surface_nonterminal_stale "$win" "$captain_hash"
+                return 0
+              fi
+              ;;
+          esac
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1192,11 +1217,12 @@ pause_state_class() {  # <window> <task>
 # a wait this watcher cannot prove is not a wait.
 #
 # The read costs one subprocess and runs only where the watcher is about to
-# alarm, so at most once per distinct stale hash per window, beside the crew-state
-# read the same paths already pay. The secondmate stale gate deliberately runs
-# before this bound and admits only status-declared waits: a backlog-only hold
-# whose mate still says `working:` or `done:` does not reach this read. Reaching
-# it would put backlog reads into windows deliberately skipped on ordinary polls.
+# alarm: on a distinct stale hash, or at the short timer boundary for a stable
+# non-terminal hash whose first sight already proved a backlog hold. It never
+# joins every ordinary poll. The secondmate stale gate deliberately runs before
+# this bound and admits only status-declared waits: a backlog-only hold whose mate
+# still says `working:` or `done:` does not reach this read. Reaching it would put
+# backlog reads into windows deliberately skipped on ordinary polls.
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
@@ -2383,7 +2409,12 @@ EOF
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              # A backlog-only captain call leaves no .paused-* flag because it
+              # is not a worker-declared pause. Its first sight did record the
+              # declaration-scoped long throttle, so pass this stable hash to the
+              # timer owner: at the due boundary it can re-check that exact call
+              # before emitting a short-cadence wedge alarm.
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi
           fi
         fi

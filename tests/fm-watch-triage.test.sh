@@ -2664,6 +2664,132 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
 }
 
+# A backlog-only captain hold can accompany a final routine note after the
+# worker intentionally exits. The first stable-hash sight correctly finds and
+# surfaces that hold, but repeat polls must keep using the same declaration-
+# scoped long cadence rather than falling into the short wedge timer merely
+# because the status line itself does not declare the wait.
+test_open_captain_call_bounds_stable_nonterminal_hash() {
+  local dir state out capture key throttle timer pid wakes i old_identity new_identity mode fakebin
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (stable-hash captain-hold bound)"; return 0; }
+
+  dir=$(make_hold_home stable-held-note 'note: Setup accepted. Stopping work.' hold) \
+    || fail "could not build the stable-hash captain-held fixture"
+  case "$dir" in
+    "$TMP_ROOT"/*) ;;
+    *) fail "the stable-hash hold fixture escaped its task-owned temporary root: $dir" ;;
+  esac
+  [ "$dir" != /home/justin/firstmate ] \
+    || fail "the stable-hash hold fixture resolved to the live Firstmate home"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
+  throttle="$state/.paused-resurfaced-$key"; timer="$state/.stale-since-$key"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'bare shell prompt' \
+    || fail "first sight of the stopped held worker did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight of the stopped held worker produced $wakes wakes instead of one"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "first sight of the stopped held worker was mislabeled as a wedge"
+  old_identity=$(cat "$throttle" 2>/dev/null || true)
+  case "$old_identity" in captain-hold:*) ;; *) fail "first sight did not record the captain-call declaration" ;; esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the held worker's first surface"
+
+  # Drive more than one alarm boundary with an already-due short timer. A passing
+  # watcher remains alive, emits no queue row, and reschedules only its local probe.
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$timer"
+  [ "$(cat "$timer")" -lt "$(( $(date +%s) - 240 ))" ] \
+    || fail "the stable-hash wedge timer was not actually past its deadline"
+  : > "$out"
+  hold_watch_launch "$dir" "$out" "$capture"
+  pid=$HOLD_WATCH_PID
+  i=0
+  while [ "$i" -lt 2 ]; do
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "a held stable hash renewed a possible-wedge alarm inside the long re-surface window: $(cat "$out")"; }
+    case "$(cat "$timer" 2>/dev/null || true)" in
+      ''|*[!0-9]*) reap "$pid"; fail "the held stable-hash check did not leave a valid next probe time" ;;
+    esac
+    [ "$(cat "$timer")" -ge "$(( $(date +%s) - 10 ))" ] \
+      || { reap "$pid"; fail "the held stable-hash check did not reset its short probe after proving the long hold"; }
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] \
+      || { reap "$pid"; fail "held stable-hash polls queued a stale wake inside the long re-surface window"; }
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && { reap "$pid"; fail "held stable-hash polls emitted a possible-wedge reason"; }
+    i=$((i + 1))
+    if [ "$i" -lt 2 ]; then
+      printf '%s\n' "$(( $(date +%s) - 500 ))" > "$timer"
+    fi
+  done
+  reap "$pid"
+
+  # Backdate the long-cadence marker and the next probe: the same hash must now
+  # recheck once, without a wedge label, and immediately return to the long cadence.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$timer"
+  : > "$out"
+  hold_watch_surface "$dir" "$out" "$capture" 'bare shell prompt' \
+    || fail "the held stable hash did not recheck when its long window expired"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the expired hold window produced $wakes rechecks instead of one"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the long-cadence captain-call recheck was mislabeled as a wedge"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the long-cadence captain-call recheck"
+
+  # A released and newly re-held call has a new lifecycle identity even though
+  # neither the status line nor pane hash changed, so its first sight must wake.
+  printf 'go ahead\n' > "$dir/decision.txt"
+  run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
+    || fail "could not release the first stable-hash captain call"
+  run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
+    || fail "could not create the second stable-hash captain call"
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$timer"
+  : > "$out"
+  hold_watch_surface "$dir" "$out" "$capture" 'bare shell prompt' \
+    || fail "a newly re-held stable-hash call inherited the prior call's silence"
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+    || fail "a newly re-held stable-hash call did not emit exactly one first notification"
+  new_identity=$(cat "$throttle" 2>/dev/null || true)
+  [ "$new_identity" != "$old_identity" ] \
+    || fail "the newly re-held stable-hash call retained the prior call identity"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a newly re-held stable-hash call was mislabeled as a wedge"
+
+  # Otherwise identical unheld and unreadable-backlog controls retain the real
+  # wedge alarm. Both begin with the same final note and stable bare-shell hash,
+  # then cross a backdated short timer so the queue outcome is nonvacuous.
+  for mode in unheld unreadable; do
+    if [ "$mode" = unheld ]; then
+      dir=$(make_hold_home stable-note-unheld 'note: Setup accepted. Stopping work.' nohold) \
+        || fail "could not build the unheld stable-hash control"
+    else
+      dir=$(make_hold_home stable-note-unreadable 'note: Setup accepted. Stopping work.' hold) \
+        || fail "could not build the unreadable-hold stable-hash control"
+      fakebin="$dir/fakebin"
+      cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 70
+SH
+      chmod +x "$fakebin/tasks-axi"
+      PATH="$fakebin:$PATH" run_hold "$dir" open held-merge \
+        && fail "the unreadable-hold control unexpectedly proved its captain call open"
+    fi
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; timer="$state/.stale-since-$(hold_key)"
+    hold_watch_surface "$dir" "$out" "$capture" 'bare shell prompt' \
+      || fail "[$mode] first sight did not surface"
+    ack_stopped_cycle "$state" || fail "[$mode] could not acknowledge the first surface"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$timer"
+    : > "$out"
+    hold_watch_launch "$dir" "$out" "$capture"
+    pid=$HOLD_WATCH_PID
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "[$mode] stable hash did not wedge-escalate past the short deadline"; }
+    grep -F 'possible wedge' "$out" >/dev/null \
+      || fail "[$mode] stable-hash escalation omitted its possible-wedge reason"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+      || fail "[$mode] stable-hash escalation did not append exactly one stale queue row"
+  done
+  pass "a backlog-only captain call bounds stable non-terminal hashes without suppressing real wedges"
+}
 
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -4868,6 +4994,7 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_open_captain_call_bounds_stable_nonterminal_hash
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
