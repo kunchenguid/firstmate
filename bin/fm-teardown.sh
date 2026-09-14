@@ -104,6 +104,10 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# A pool copy checked out on `fm/<other-task>` is also durable ownership evidence
+# when no foreign slot claim already identifies a reassignment. Teardown refuses
+# before cleanup in that case, including with --force, and leaves the branch,
+# copy, and record intact.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2102,49 +2106,8 @@ teardown_live_slot_path() {
 }
 
 collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
+  fm_treehouse_collect_local_states "$1" || return 1
+  TREEHOUSE_OWNER_STATES=("${FM_TREEHOUSE_OWNER_STATES[@]}")
 }
 
 require_exclusive_worktree_slot_record() {
@@ -3063,6 +3026,27 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+
+# A task branch is durable ownership evidence even when its owner record is not
+# reachable from this home's local registry. Refuse before any cleanup mutation.
+teardown_refuse_if_other_task_branch() {
+  local branch holder_id
+  [ "$KIND" != secondmate ] || return 0
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] || return 0
+  [ -d "$WT" ] || return 0
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 0
+  [ "$branch" != "fm/$ID" ] || return 0
+  case "$branch" in
+    fm/*) holder_id=${branch#fm/} ;;
+    *) return 0 ;;
+  esac
+  [ -n "$holder_id" ] && [ "$holder_id" != "$ID" ] || return 0
+  echo "REFUSED: task $ID's recorded worktree $WT is checked out on branch $branch for task $holder_id; refusing teardown to avoid changing another task's copy." >&2
+  echo "Resolve task $holder_id and retry teardown after its work is safely landed; do not use --force to bypass this refusal." >&2
+  return 1
+}
+teardown_refuse_if_other_task_branch || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

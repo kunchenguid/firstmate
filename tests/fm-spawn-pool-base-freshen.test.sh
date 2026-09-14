@@ -743,8 +743,72 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# Fresh allocation must not replace ownership evidence or an older task record
+# when Treehouse returns a slot that is still retained by another task.
+test_pool_slot_refuses_existing_ownership() {
+  local rec id out status before child_home
+
+  id='pool-slot-record-collision-r1'
+  rec=$(make_case record-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/older-task.meta" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a slot still named by another task record"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task 'older-task'" \
+    "record collision refusal did not name the holding task and slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "record collision published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "record collision changed the held slot"
+
+  id='pool-slot-child-record-collision-r1'
+  rec=$(make_case child-record-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/state" "$child_home/data" "$child_home/config" "$child_home/projects"
+  printf '%s\n' "- mate - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/older-child-task.meta" \
+    "window=firstmate:fm-older-child-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a slot named by a local child task record"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task 'older-child-task'" \
+    "child record collision refusal did not name the holding task and slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "child record collision published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "child record collision changed the held slot"
+
+  id='pool-slot-claim-collision-r1'
+  rec=$(make_case claim-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'task=older-task\\nhome=%s\\n' "$CASE_DIR/older-home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a foreign slot-owner claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "foreign claim refusal did not name the slot claim failure"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "foreign claim was overwritten by a fresh spawn"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "foreign claim refusal published task metadata"
+  pass "fresh Treehouse allocation refuses retained task records and foreign owner claims"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching

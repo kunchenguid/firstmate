@@ -568,6 +568,51 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+test_other_task_branch_refuses_before_cleanup() {
+  local dir id=stale-task branch rc
+
+  dir=$(make_case branch-collision)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a copy checked out on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "branch refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "branch refusal removed the task record"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "branch refusal changed the branch to $branch"
+  [ ! -s "$dir/runtime.log" ] || fail "branch refusal ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses a copy checked out on another task's branch before cleanup"
+}
+
+test_own_task_branch_still_tears_down() {
+  local dir id=own-task rc
+
+  dir=$(make_case own-branch)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b fm/$id
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "teardown of its own task branch should succeed"
+  assert_absent "$dir/home/state/$id.meta" "own-branch teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "own-branch teardown did not return its own pool slot"
+  pass "fm-teardown still cleans up a copy checked out on its own task branch"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -984,6 +1029,8 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_other_task_branch_refuses_before_cleanup
+test_own_task_branch_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down

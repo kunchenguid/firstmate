@@ -120,10 +120,12 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   could later be released out from under its successor. Fresh allocation also
+#   refuses a selected slot named by another local task record, covering slots
+#   whose older holder predates slot-owner claims. A spawn that aborts while it
+#   still holds the allocation lock drops its own claim; an abort after metadata
+#   publication leaves the claim in place, so a later spawn refuses until the
+#   owning task is reconciled.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -3346,6 +3348,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # Refuse a selected slot still named by another local task record before
+  # refreshing or publishing additional state for this task. This is the migration path
+  # for slots whose older holder predates Firstmate's slot-owner claim.
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    fm_treehouse_refuse_if_recorded_collision "$ID" "$WT" || exit 1
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
