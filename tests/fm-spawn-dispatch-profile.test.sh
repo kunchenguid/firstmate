@@ -366,6 +366,36 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
+test_spawn_keeps_workflow_feedback_private() {
+  local rec id kind out
+  for kind in ship scout; do
+    id="vent-$kind"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" 'custom-agent --flag' --scout) || fail "scout spawn failed: $out"
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" 'custom-agent --flag') || fail "ship spawn failed: $out"
+    fi
+    printf 'private feedback\n' > "$WT_DIR/VENT.md"
+    git -C "$WT_DIR" check-ignore -q VENT.md || fail "$kind VENT is not ignored"
+    mkdir "$WT_DIR/docs"
+    printf 'ordinary project documentation\n' > "$WT_DIR/docs/VENT.md"
+    if git -C "$WT_DIR" check-ignore -q docs/VENT.md; then
+      fail "$kind VENT exclusion hides unrelated nested documentation"
+    fi
+    git -C "$WT_DIR" add -A
+    git -C "$WT_DIR" diff --cached --name-only | grep -qx 'docs/VENT.md' \
+      || fail "$kind ordinary documentation could not be staged"
+    if git -C "$WT_DIR" ls-files --error-unmatch VENT.md >/dev/null 2>&1; then
+      fail "$kind git add exposed private feedback"
+    fi
+  done
+  pass "ship/scout launches ignore only root private feedback, including broad git add"
+}
+
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
@@ -1308,6 +1338,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_spawn_keeps_workflow_feedback_private
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

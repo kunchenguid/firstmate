@@ -59,6 +59,29 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Ordinary tasks' private workflow feedback is collected after the safety checks
+# and process reap, before worktree removal: VENT.md is atomically copied to
+# data/<id>/VENT.md, then new dated entries are appended to FM_HOME/VENT.md.
+# A missing central log starts with the standard # VENT / Feedback log header.
+# Each imported entry carries its task id, UTC import time, and a SHA-256 marker
+# over task id plus entry bytes (ignoring trailing line endings for identity).
+# The central log is the deduplication ledger: FM_HOME/.vent-import.lock serializes imports,
+# and a same-directory temporary file publishes the old bytes plus new blocks in
+# one rename, so a retry cannot duplicate entries or leave a partial append.
+# Existing central bytes are never reformatted; a detected concurrent manual edit
+# cancels publication rather than overwriting it. Manual writers should not edit
+# the central file while cleanup is importing feedback.
+# The preserved snapshot is usable on retry even if worktree removal already ran.
+# Unsafe file shapes, copy failures, lock contention, and aggregation failures
+# warn without blocking otherwise authorized cleanup; the snapshot is retained
+# whenever copying succeeded. Neither VENT nor a missing entry is a done gate.
+# fm-spawn.sh keeps ordinary tasks' root VENT.md locally ignored; tracked changes
+# still face the unchanged dirty-work check. Reassigned slots are never read.
+# After a successful pool return, an untracked VENT.md that exactly matches its
+# saved snapshot is removed if it survived Treehouse's reset, so the next worker
+# cannot inherit and reattribute it. Failed preservation never deletes the source.
+# This collection covers ship/scout teardown, not secondmate retirement or its
+# forced descendant removal; secondmate feedback remains local to that home.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1653,6 +1676,109 @@ teardown_treehouse_return() {
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
+}
+
+# Feedback is best effort and must never relax (or add) a landed-work gate.
+# Keep snapshot publication independent of central-log access so even an import
+# failure leaves the original feedback in the existing durable task directory.
+preserve_task_vent() (
+  local source="$WT/VENT.md" archive="$DATA/$ID/VENT.md" tmp='' lock="$FM_HOME/.vent-import.lock" locked=0
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"; [ "$locked" = 0 ] || fm_lock_release "$lock"' EXIT
+  if [ ! -e "$source" ] && [ ! -L "$source" ] \
+      && [ ! -e "$archive" ] && [ ! -L "$archive" ]; then
+    return 0
+  fi
+  [ -d "$DATA" ] && [ ! -L "$DATA" ] || return 1
+  [ ! -L "$DATA/$ID" ] || return 1
+  mkdir -p -- "$DATA/$ID" || return 1
+  if [ -e "$archive" ] || [ -L "$archive" ]; then
+    [ -f "$archive" ] && [ ! -L "$archive" ] \
+      && [ "$(fm_pr_file_link_count "$archive")" = 1 ] || return 1
+  fi
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    [ -f "$source" ] && [ ! -L "$source" ] \
+      && [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
+    tmp=$(umask 077; mktemp "$DATA/$ID/.vent.XXXXXX") || return 1
+    cat -- "$source" > "$tmp" || return 1
+    mv -f -- "$tmp" "$archive" || return 1
+    tmp=
+  fi
+  fm_lock_acquire_wait_bounded "$lock" 5 || return 1
+  locked=1
+  perl - "$archive" "$FM_HOME" "$ID" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT :mode);
+use Digest::SHA qw(sha256_hex);
+use File::Temp qw(tempfile);
+use POSIX qw(strftime);
+
+my ($archive, $home, $id) = @ARGV;
+my $central = "$home/VENT.md";
+my $header = "# VENT\n\nFeedback log. Repeated/systemic workflow friction that should become future automation, docs, or workflow fixes.\n";
+sub read_log {
+    my ($path) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "read $path: $!\n";
+    my @stat = stat($fh);
+    S_ISREG($stat[2]) && $stat[3] == 1 or die "not an ordinary single-link file: $path\n";
+    binmode $fh;
+    my $bytes = '';
+    while (1) {
+        my $count = sysread($fh, my $chunk, 65536);
+        defined $count or die "read $path: $!\n";
+        last unless $count;
+        $bytes .= $chunk;
+    }
+    close $fh or die "close $path: $!\n";
+    return $bytes;
+}
+my $feedback = read_log($archive);
+my $existed = -e $central || -l $central;
+my $old = $existed ? read_log($central) : '';
+# The worker header is not an entry. Preserve nonstandard feedback too rather
+# than silently losing a log whose author did not follow the dated format.
+my $entry_start = qr/^## \d{2}-\d{2}-\d{2} \d{2}:\d{2} [^\r\n]+/m;
+my @entries = grep { /$entry_start/ } split /(?=$entry_start)/, $feedback;
+(my $trimmed_feedback = $feedback) =~ s/\s+\z//;
+(my $trimmed_header = $header) =~ s/\s+\z//;
+if (!@entries && $trimmed_feedback ne '' && $trimmed_feedback ne $trimmed_header) {
+    @entries = ($feedback);
+}
+my $added = '';
+my %seen = map { $_ => 1 } $old =~ /^<!-- firstmate-vent:([a-f0-9]{64}) -->$/mg;
+my $imported = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime);
+for my $entry (@entries) {
+    (my $identity = $entry) =~ s/[\r\n]+\z//;
+    my $key = sha256_hex("$id\0$identity");
+    next if $seen{$key}++;
+    $added .= "\n\n<!-- firstmate-vent:$key -->\n> Workflow feedback from task `$id`, imported $imported.\n\n$entry";
+    $added .= "\n" unless $entry =~ /\n\z/;
+}
+exit 0 if $added eq '' && $existed;
+my ($out, $temp) = tempfile('.vent-XXXXXX', DIR => $home, UNLINK => 1);
+binmode $out;
+print {$out} ($existed ? $old : $header), $added or die "write $temp: $!\n";
+close $out or die "close $temp: $!\n";
+# Imports hold the home lock. Also catch a manual edit made while staging.
+if ($existed) {
+    read_log($central) eq $old or die "central VENT.md changed during import\n";
+} else {
+    !-e $central && !-l $central or die "central VENT.md appeared during import\n";
+}
+rename $temp, $central or die "publish $central: $!\n";
+PERL
+)
+
+retire_preserved_task_vent() {
+  local source="$WT/VENT.md" archive="$DATA/$ID/VENT.md" tracked
+  [ -f "$source" ] && [ ! -L "$source" ] || return 0
+  [ -d "$DATA" ] && [ ! -L "$DATA" ] && [ ! -L "$DATA/$ID" ] || return 0
+  [ -f "$archive" ] && [ ! -L "$archive" ] \
+    && [ "$(fm_pr_file_link_count "$archive")" = 1 ] || return 0
+  cmp -s "$source" "$archive" || return 0
+  tracked=$(git -C "$WT" ls-files -- VENT.md) || return 1
+  [ -z "$tracked" ] || return 0
+  rm -f -- "$source"
 }
 
 validate_worktree_teardown_safety() {
@@ -3288,6 +3414,9 @@ fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$BACKEND" != orca ]; then
+    preserve_task_vent || echo "warning: VENT feedback for $ID could not be fully preserved/imported; any saved copy remains at $DATA/$ID/VENT.md; continuing cleanup" >&2
+  fi
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
@@ -3302,6 +3431,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  preserve_task_vent || echo "warning: VENT feedback for $ID could not be fully preserved/imported; any saved copy remains at $DATA/$ID/VENT.md; continuing cleanup" >&2
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -3339,6 +3469,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # Ignored feedback can survive a pool reset; retire only a saved, untracked
+  # copy while this task still holds the project's slot-return lock.
+  retire_preserved_task_vent || echo "warning: saved VENT feedback for $ID remains in the returned pool slot $WT" >&2
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place

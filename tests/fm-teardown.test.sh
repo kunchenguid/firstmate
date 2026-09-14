@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
+# Tests for bin/fm-teardown.sh's landed-work safety, stale-lock recovery, and
+# best-effort private workflow-feedback preservation/import.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
@@ -3666,6 +3667,286 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+write_worker_vent() {
+  local case_dir=$1
+  # Launch installs this local exclusion; it never hides tracked changes.
+  printf '\n/VENT.md\n' >> "$case_dir/project/.git/info/exclude"
+  printf '%s\n' '# VENT' '' \
+    'Feedback log. Repeated/systemic workflow friction that should become future automation, docs, or workflow fixes.' '' \
+    '## 26-09-09 10:00 — repeated-manual-copy' '' \
+    'Repeated copying should become automation.' > "$case_dir/wt/VENT.md"
+  cp "$case_dir/wt/VENT.md" "$case_dir/vent-expected"
+}
+
+test_vent_preserved_and_imported_before_removal() {
+  local case_dir kind rc
+  for kind in ship scout; do
+    case_dir=$(make_case "vent-$kind")
+    write_meta "$case_dir" local-only "$kind"
+    write_worker_vent "$case_dir"
+    if [ "$kind" = scout ]; then
+      mkdir -p "$case_dir/data/task-x1"
+      printf '# Findings\nNo unresolved choices.\n' > "$case_dir/data/task-x1/report.md"
+      FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-captain-hold.sh" complete task-x1 --none >/dev/null \
+        || fail "could not complete scout fixture"
+    fi
+    rc=0
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+    expect_code 0 "$rc" "$kind VENT cleanup failed: $(cat "$case_dir/err")"
+    cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" \
+      || fail "$kind VENT snapshot differs from source"
+    assert_absent "$case_dir/wt/VENT.md" "$kind feedback survived for the next pool user"
+    assert_grep '# VENT' "$case_dir/VENT.md" "central header missing"
+    assert_grep 'Feedback log.' "$case_dir/VENT.md" "central description missing"
+    assert_grep 'Repeated copying should become automation.' "$case_dir/VENT.md" "feedback not imported"
+    grep -Eq "task \`task-x1\`, imported [0-9].*Z\." "$case_dir/VENT.md" || fail "import provenance missing"
+    assert_absent "$case_dir/state/task-x1.meta" "$kind task was not cleaned up"
+  done
+  pass "ship/scout teardown preserves exact feedback and imports it with provenance"
+}
+
+test_vent_retry_is_idempotent_and_only_imports_new_entries() {
+  local case_dir rc
+  case_dir=$(make_case vent-retry)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  printf 'Existing central bytes\r\n\000without final newline' > "$case_dir/VENT.md"
+  cp "$case_dir/VENT.md" "$case_dir/original"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/treehouse"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fixture return failure did not stop cleanup"
+  cmp -s "$case_dir/wt/VENT.md" "$case_dir/data/task-x1/VENT.md" \
+    || fail "feedback was not preserved before worktree return"
+  head -c "$(wc -c < "$case_dir/original" | tr -d ' ')" "$case_dir/VENT.md" > "$case_dir/prefix"
+  cmp -s "$case_dir/original" "$case_dir/prefix" || fail "central preexisting bytes changed"
+  cp "$case_dir/VENT.md" "$case_dir/first-import"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out2" 2> "$case_dir/err2" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fixture still-failing return unexpectedly succeeded"
+  cmp -s "$case_dir/VENT.md" "$case_dir/first-import" || fail "retry duplicated feedback"
+  printf '\n## 26-09-09 10:15 — repeated-retry\n\nA second friction to automate.\n' >> "$case_dir/wt/VENT.md"
+  cp "$case_dir/wt/VENT.md" "$case_dir/vent-expected"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/fakebin/treehouse"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out3" 2> "$case_dir/err3" \
+    || fail "cleanup retry failed: $(cat "$case_dir/err3")"
+  [ "$(grep -ac '^Repeated copying should become automation\.$' "$case_dir/VENT.md")" = 1 ] \
+    || fail "append-only retry duplicated the original entry"
+  [ "$(grep -ac '^A second friction to automate\.$' "$case_dir/VENT.md")" = 1 ] \
+    || fail "append-only retry lost or duplicated the new entry"
+  cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" || fail "snapshot not refreshed"
+  pass "repeated cleanup imports only new entries and preserves existing central bytes"
+}
+
+test_vent_import_failure_warns_without_blocking_cleanup() {
+  local case_dir shape rc
+  for shape in directory symlink; do
+    case_dir=$(make_case "vent-import-$shape")
+    write_meta "$case_dir" local-only ship
+    write_worker_vent "$case_dir"
+    printf 'do not change\n' > "$case_dir/sentinel"
+    if [ "$shape" = directory ]; then
+      mkdir "$case_dir/VENT.md"
+    else
+      ln -s sentinel "$case_dir/VENT.md"
+    fi
+    rc=0
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+    expect_code 0 "$rc" "VENT import failure blocked cleanup: $(cat "$case_dir/err")"
+    assert_grep 'warning: VENT feedback' "$case_dir/err" "import failure not warned"
+    assert_absent "$case_dir/state/task-x1.meta" "import failure retained task"
+    cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" || fail "import failure lost snapshot"
+    [ "$(cat "$case_dir/sentinel")" = 'do not change' ] || fail "import followed symlink"
+  done
+  pass "unsafe central-log shapes warn, keep snapshots, and do not block landed cleanup"
+}
+
+test_vent_snapshot_failure_warns_and_missing_feedback_is_a_noop() {
+  local case_dir
+  case_dir=$(make_case vent-copy-failure)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  mkdir -p "$case_dir/data/task-x1/VENT.md"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "snapshot failure blocked landed cleanup"
+  assert_grep 'warning: VENT feedback' "$case_dir/err" "snapshot failure not warned"
+  assert_absent "$case_dir/state/task-x1.meta" "snapshot failure retained task"
+  cmp -s "$case_dir/wt/VENT.md" "$case_dir/vent-expected" || fail "failed snapshot deleted the source"
+  case_dir=$(make_case vent-absent)
+  write_meta "$case_dir" local-only ship
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "missing VENT blocked cleanup"
+  assert_absent "$case_dir/VENT.md" "no feedback created a central log"
+  assert_absent "$case_dir/data/task-x1/VENT.md" "no feedback created a snapshot"
+  assert_no_grep 'warning: VENT feedback' "$case_dir/err" "missing feedback warned"
+  case_dir=$(make_case vent-header-only)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  printf '# VENT\n\nFeedback log. Repeated/systemic workflow friction that should become future automation, docs, or workflow fixes.' \
+    > "$case_dir/wt/VENT.md"
+  cp "$case_dir/wt/VENT.md" "$case_dir/vent-expected"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "header-only feedback blocked cleanup"
+  cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" || fail "header-only snapshot lost"
+  assert_no_grep 'firstmate-vent:' "$case_dir/VENT.md" "header was imported as friction"
+  [ "$(grep -c '^# VENT$' "$case_dir/VENT.md")" = 1 ] || fail "standard header not initialized once"
+  pass "snapshot failures warn without blocking; absent or header-only feedback creates no entries"
+}
+
+test_vent_snapshot_can_retry_after_source_removal() {
+  local case_dir rc
+  case_dir=$(make_case vent-source-gone)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  cp "$case_dir/wt/VENT.md" "$case_dir/original"
+  mkdir "$case_dir/VENT.md"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/treehouse"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fixture return failure not exercised"
+  rm "$case_dir/wt/VENT.md"
+  rmdir "$case_dir/VENT.md"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/fakebin/treehouse"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out2" 2> "$case_dir/err2" \
+    || fail "saved feedback retry failed"
+  cmp -s "$case_dir/original" "$case_dir/data/task-x1/VENT.md" || fail "retry lost snapshot"
+  assert_grep 'Repeated copying should become automation.' "$case_dir/VENT.md" "saved snapshot not imported"
+  pass "retry imports a preserved snapshot when the worker feedback source is gone"
+}
+
+test_vent_failed_staging_preserves_existing_central_bytes() {
+  local case_dir rc
+  case_dir=$(make_case vent-write-failure)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  perl -e 'print "Existing private feedback\\n" x 10000' > "$case_dir/VENT.md"
+  cp "$case_dir/VENT.md" "$case_dir/original"
+  # The small snapshot fits, but staging the large central log exceeds this
+  # process-local file-size limit. This exercises a real partial write failure.
+  rc=0
+  ( ulimit -c 0; ulimit -f 64; FM_HOME="$case_dir" run_teardown "$case_dir" ) \
+    > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  expect_code 0 "$rc" "central staging failure blocked cleanup: $(cat "$case_dir/err")"
+  assert_grep 'warning: VENT feedback' "$case_dir/err" "staging failure not warned"
+  cmp -s "$case_dir/VENT.md" "$case_dir/original" || fail "failed staging corrupted central bytes"
+  cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" || fail "staging failure lost snapshot"
+  assert_absent "$case_dir/state/task-x1.meta" "staging failure retained task"
+  pass "a partial staging write leaves the central log byte-identical and does not block cleanup"
+}
+
+test_vent_lock_contention_warns_without_blocking_cleanup() {
+  local case_dir holder i rc
+  case_dir=$(make_case vent-lock-busy)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  printf 'existing feedback\n' > "$case_dir/VENT.md"
+  cp "$case_dir/VENT.md" "$case_dir/original"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$case_dir/.vent-import.lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -e "$case_dir/.vent-import.lock" ] || break
+    sleep 0.1
+  done
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$rc" "contended VENT lock blocked cleanup"
+  assert_grep 'warning: VENT feedback' "$case_dir/err" "lock contention was not reported"
+  cmp -s "$case_dir/VENT.md" "$case_dir/original" || fail "import wrote without owning the lock"
+  cmp -s "$case_dir/vent-expected" "$case_dir/data/task-x1/VENT.md" || fail "lock contention prevented snapshot"
+  assert_absent "$case_dir/state/task-x1.meta" "lock contention retained task"
+  pass "contended feedback import is bounded, preserves a snapshot, and leaves the central log untouched"
+}
+
+test_vent_concurrent_imports_share_the_home_lock() {
+  local first second home p1 p2 r1=0 r2=0
+  first=$(make_case vent-concurrent-first)
+  second=$(make_case vent-concurrent-second)
+  home="$TMP_ROOT/vent-shared-home"
+  mkdir "$home"
+  write_meta "$first" local-only ship
+  write_meta "$second" local-only ship
+  write_worker_vent "$first"
+  write_worker_vent "$second"
+  printf '\n## 26-09-09 11:00 — another-entry\n\nDistinct second source.' >> "$second/wt/VENT.md"
+  cp "$second/wt/VENT.md" "$second/vent-expected"
+  # Separate state overrides still share a central file: serialize by FM_HOME,
+  # not by a task or state directory. Identical input must still appear once.
+  FM_HOME="$home" run_teardown "$first" > "$first/out" 2> "$first/err" &
+  p1=$!
+  FM_HOME="$home" run_teardown "$second" > "$second/out" 2> "$second/err" &
+  p2=$!
+  wait "$p1" || r1=$?
+  wait "$p2" || r2=$?
+  expect_code 0 "$r1" "first concurrent cleanup failed: $(cat "$first/err")"
+  expect_code 0 "$r2" "second concurrent cleanup failed: $(cat "$second/err")"
+  [ "$(grep -c '^Repeated copying should become automation\.$' "$home/VENT.md")" = 1 ] \
+    || fail "concurrent imports duplicated or lost shared feedback"
+  [ "$(grep -c '^Distinct second source\.$' "$home/VENT.md")" = 1 ] \
+    || fail "concurrent imports lost new feedback without a final newline"
+  cmp -s "$first/vent-expected" "$first/data/task-x1/VENT.md" || fail "first concurrent snapshot missing"
+  cmp -s "$second/vent-expected" "$second/data/task-x1/VENT.md" || fail "second concurrent snapshot missing"
+  pass "concurrent imports share the home lock and converge without lost or duplicated feedback"
+}
+
+test_vent_retirement_keeps_tracked_project_content() {
+  local case_dir
+  case_dir=$(make_case vent-tracked-landed)
+  write_meta "$case_dir" local-only ship
+  write_worker_vent "$case_dir"
+  git -C "$case_dir/wt" add -f VENT.md
+  git -C "$case_dir/wt" commit -qm 'existing project-owned VENT'
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "landed tracked VENT prevented cleanup"
+  cmp -s "$case_dir/wt/VENT.md" "$case_dir/vent-expected" || fail "cleanup removed tracked project content"
+  cmp -s "$case_dir/data/task-x1/VENT.md" "$case_dir/vent-expected" || fail "tracked feedback snapshot lost"
+  pass "post-return feedback retirement never deletes a tracked project file"
+}
+
+test_vent_never_relaxes_unlanded_work_refusals() {
+  local case_dir scenario rc head
+  for scenario in tracked-vent dirty-code unpushed-code; do
+    case_dir=$(make_case "vent-safety-$scenario")
+    write_meta "$case_dir" local-only ship
+    write_worker_vent "$case_dir"
+    case "$scenario" in
+      tracked-vent)
+        git -C "$case_dir/wt" add -f VENT.md
+        git -C "$case_dir/wt" commit -qm 'project-owned VENT'
+        git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+        printf 'uncommitted tracked feedback\n' >> "$case_dir/wt/VENT.md" ;;
+      dirty-code) printf 'uncommitted code\n' > "$case_dir/wt/new-code.txt" ;;
+      unpushed-code) wt_commit_file "$case_dir" feature.txt 'unlanded code' ;;
+    esac
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    rc=0
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario: feedback bypassed a safety check"
+    assert_refusal_retained_task_state "$case_dir" "$scenario" "$head"
+    assert_absent "$case_dir/VENT.md" "$scenario: feedback imported before safety passed"
+    assert_absent "$case_dir/data/task-x1/VENT.md" "$scenario: feedback copied before safety passed"
+  done
+  pass "private feedback never weakens dirty or unlanded work protection"
+}
+
+test_vent_preserved_and_imported_before_removal
+test_vent_retry_is_idempotent_and_only_imports_new_entries
+test_vent_import_failure_warns_without_blocking_cleanup
+test_vent_snapshot_failure_warns_and_missing_feedback_is_a_noop
+test_vent_snapshot_can_retry_after_source_removal
+test_vent_failed_staging_preserves_existing_central_bytes
+test_vent_lock_contention_warns_without_blocking_cleanup
+test_vent_concurrent_imports_share_the_home_lock
+test_vent_retirement_keeps_tracked_project_content
+test_vent_never_relaxes_unlanded_work_refusals
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

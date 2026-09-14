@@ -833,12 +833,13 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-teardown" \
     "decisions_reviewed=1" "decision_keys="
+  printf '## 26-09-09 10:00 - helper-friction\n\nAutomate the repeated helper workaround.\n' > "$wt/VENT.md"
   orca_case teardown
   printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_HOME="$neutral" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
@@ -848,7 +849,9 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-teardown'$'\x1f''--force'$'\x1f''--json' \
     "teardown did not remove the Orca worktree through orca worktree rm"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
-  pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
+  cmp -s "$wt/VENT.md" "$data/$id/VENT.md" || fail "Orca teardown lost feedback snapshot"
+  assert_grep 'Automate the repeated helper workaround.' "$neutral/VENT.md" "Orca feedback not imported"
+  pass "fm-teardown.sh backend=orca: scout report gate, feedback preservation, then helper-backed worktree removal"
 }
 
 test_scout_teardown_refuses_orca_id_path_mismatch() {
@@ -870,6 +873,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-scout-mismatch" \
     "decisions_reviewed=1" "decision_keys="
+  printf 'feedback at the unverified path\n' > "$wt/VENT.md"
   orca_case scout-mismatch
   printf '{"ok":true,"result":{"worktree":{"id":"wt-scout-mismatch","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -887,6 +891,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
     "refused mismatched Orca scout teardown should not remove worktrees"
   assert_present "$state/$id.meta" "refused mismatched scout teardown should preserve metadata"
+  assert_absent "$data/$id/VENT.md" "mismatched Orca path feedback should not be copied"
   pass "fm-teardown.sh backend=orca: scout teardown refuses id/path mismatches"
 }
 

@@ -905,6 +905,30 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_workflow_feedback_is_optional_and_private() {
+  local home="$TMP_ROOT/vent-briefs" mode id brief
+  for mode in no-mistakes direct-PR local-only scout; do
+    id="vent-$mode"
+    if [ "$mode" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null \
+        || fail "scout feedback brief did not scaffold"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null \
+        || fail "$mode feedback brief did not scaffold"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "\`VENT.md\` at the worktree root" "$brief" "$mode lacks root feedback log"
+    assert_grep '## YY-MM-DD HH:MM' "$brief" "$mode lacks dated entry format"
+    assert_grep 'one idea per entry' "$brief" "$mode lacks entry scope"
+    assert_grep 'not FYI progress updates' "$brief" "$mode invites progress noise"
+    assert_grep 'do not commit it or publish its contents' "$brief" "$mode exposes feedback"
+    assert_grep 'Firstmate preserves the file and appends new entries' "$brief" "$mode lacks collection contract"
+    assert_grep 'never a completion gate' "$brief" "$mode made feedback a gate"
+  done
+  pass "ship and scout briefs route optional private workflow feedback to firstmate"
+}
+
+test_workflow_feedback_is_optional_and_private
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
