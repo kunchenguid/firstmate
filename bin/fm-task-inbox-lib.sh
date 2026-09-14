@@ -283,11 +283,13 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
 # record), 4 typed but the submit was PROVENLY swallowed, so this attempt's own
-# doorbell text is stranded in the composer. 4 is reserved for backends whose
-# submit core can tell a swallowed Enter from one queued behind a busy agent
-# (fm_backend_submit_pending_is_proof); elsewhere a pending verdict is not
-# proof of anything and the attempt reports 0 as it did before. No return value
-# is delivery proof; the acknowledgement move is the only delivery signal.
+# doorbell text is stranded in the composer. 4 is reserved for endpoints whose
+# submit core can tell a swallowed Enter from one queued behind a working agent
+# (fm_backend_submit_pending_is_proof, answered per endpoint because a harness
+# with no legible native busy state is unproven even on a backend that usually
+# has one); elsewhere a pending verdict is not proof of anything and the
+# attempt reports 0 as it did before. No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -326,14 +328,15 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # Exact `pending` is a stranded-text proof only on a backend whose submit
-  # core resolves a queued Enter (fm_backend_submit_pending_is_proof); every
-  # other value (empty, unknown, pending-unproven, ...) and every `pending`
-  # from a backend without that proof stays advisory and never blocks a ring.
+  # Exact `pending` is a stranded-text proof only at an endpoint whose submit
+  # core could resolve a queued Enter (fm_backend_submit_pending_is_proof);
+  # every other value (empty, unknown, pending-unproven, ...) and every
+  # `pending` from an endpoint without that proof stays advisory and never
+  # blocks a ring.
   case "$verdict" in
     send-failed) return 2 ;;
     pending)
-      if fm_backend_submit_pending_is_proof "$backend"; then
+      if fm_backend_submit_pending_is_proof "$backend" "$target"; then
         return 4
       fi
       ;;

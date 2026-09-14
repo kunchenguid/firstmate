@@ -356,50 +356,99 @@ test_ring_reports_a_stranded_submit() {
   pass "inbox: a submit left pending reports a stranded delivery, never a rung doorbell"
 }
 
-# Replay one post-submit verdict into fm_task_inbox_ring against any backend
-# name. Only the backend dispatchers the ring consumes are shimmed, so the
-# classification under test - including the real capability predicate - is the
-# production one, and no backend CLI is needed to drive a cursorless adapter.
-ring_with_verdict() {  # <state> <backend> <verdict> <record>
+# A fake herdr CLI answering `agent get` with one native agent_status, which is
+# the external boundary the herdr adapter reads its busy primitive from. Every
+# other subcommand succeeds silently, so the adapter's own parsing and status
+# vocabulary stay under test.
+make_fake_herdr() {  # <dir> -> echoes fakebin dir
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  [ -n "${FM_FAKE_HERDR_STATUS:-}" ] || exit 1
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_STATUS"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# Replay one post-submit verdict into fm_task_inbox_ring against any endpoint.
+# Only the dispatchers that TYPE are shimmed; the classification under test -
+# the real capability predicate, the real herdr adapter, and its real native
+# status read - stays production, with the herdr CLI faked at its own boundary.
+ring_with_verdict() {  # <state> <backend> <verdict> <record> [env=val...]
   local state=$1 backend=$2 verdict=$3 rec=$4
-  FM_STATE_OVERRIDE="$state" FM_FAKE_VERDICT="$verdict" bash -c '
+  shift 4
+  env FM_STATE_OVERRIDE="$state" FM_FAKE_VERDICT="$verdict" "$@" bash -c '
     . "$1"
     fm_backend_agent_state() { printf "alive"; }
     fm_backend_composer_state() { printf "empty"; }
     fm_backend_send_text_submit() { printf "%s" "$FM_FAKE_VERDICT"; }
-    fm_task_inbox_ring "$2" fakepane:0 "$3" fm-t1
+    fm_task_inbox_ring "$2" fakesess:pane0 "$3" fm-t1
   ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$backend" "$rec"
 }
 
-# The stranded-text verdict is a CAPABILITY, not a string match. Only a backend
-# whose submit core can tell a swallowed Enter from one queued behind a busy
-# agent may report 4; a cursorless adapter returns the shared retry core's raw
-# `pending`, which is not proof of anything, so it must keep the neutral
-# self-healing behavior it had before rc=4 existed rather than tell an operator
-# a doorbell is stranded when it is merely queued.
-test_ring_stranded_verdict_requires_backend_proof() {
-  local state rec b rc
-  state="$TMP_ROOT/ring-capability/state"; mkdir -p "$state"
+# The stranded-text verdict is a CAPABILITY of the ENDPOINT, not of the backend
+# name. `pending` only proves a swallowed Enter where the submit core could
+# have converted a queued one, and that conversion needs a busy primitive:
+# tmux reads one from the pane, herdr reads the harness's native agent_status,
+# and cmux/orca/zellij have none at all. A harness whose native status never
+# says `working` - Cursor reads `blocked` in every state - is structurally
+# cursorless even on herdr, so its `pending` must stay advisory rather than
+# tell an operator a doorbell is stranded when its Enter may well have landed.
+test_ring_stranded_verdict_requires_endpoint_proof() {
+  local dir state rec b rc fb
+  dir="$TMP_ROOT/ring-capability"
+  state="$dir/state"; mkdir -p "$state"
+  fb=$(make_fake_herdr "$dir")
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "begin validation")
-  for b in tmux herdr; do
-    rc=0; ring_with_verdict "$state" "$b" pending "$rec" || rc=$?
-    [ "$rc" = 4 ] || fail "$b resolves a queued Enter, so its pending is a stranded line (4), got $rc"
+  # tmux reads its busy primitive from the pane itself, so every tmux endpoint
+  # can resolve a queued Enter.
+  rc=0; ring_with_verdict "$state" tmux pending "$rec" || rc=$?
+  [ "$rc" = 4 ] || fail "tmux resolves a queued Enter, so its pending is a stranded line (4), got $rc"
+  # herdr answers per pane. `working` is the queued-Enter signal itself, and a
+  # legibly idle/done pane is the baseline that lets the rendered busy footer
+  # supply it - a pending surviving either read is a genuine swallow. This is
+  # the Codex case: its pane reports those states.
+  for b in working idle done; do
+    rc=0
+    ring_with_verdict "$state" herdr pending "$rec" \
+      PATH="$fb:$PATH" FM_FAKE_HERDR_STATUS="$b" || rc=$?
+    [ "$rc" = 4 ] \
+      || fail "a herdr pane reading $b can resolve a queued Enter, so pending is stranded (4), got $rc"
   done
+  # A Cursor pane reads `blocked` in every state, so the conversion never fires
+  # and its pending carries no proof. An unreadable status is no proof either.
+  rc=0
+  ring_with_verdict "$state" herdr pending "$rec" \
+    PATH="$fb:$PATH" FM_FAKE_HERDR_STATUS=blocked || rc=$?
+  [ "$rc" = 0 ] \
+    || fail "an always-blocked herdr pane cannot prove a swallowed Enter, so pending stays advisory (0), got $rc"
+  rc=0
+  ring_with_verdict "$state" herdr pending "$rec" PATH="$fb:$PATH" || rc=$?
+  [ "$rc" = 0 ] \
+    || fail "an unreadable herdr native status is not proof of a stranded line, got $rc"
+  # Backends with no busy primitive anywhere stay advisory at every endpoint.
   for b in cmux orca zellij; do
     rc=0; ring_with_verdict "$state" "$b" pending "$rec" || rc=$?
     [ "$rc" = 0 ] \
       || fail "$b cannot prove a swallowed Enter, so its pending must stay advisory (0), got $rc"
   done
-  # The verdicts that are backend-independent stay so on every backend.
+  # The verdicts that are endpoint-independent stay so everywhere.
   for b in tmux herdr cmux orca zellij; do
-    rc=0; ring_with_verdict "$state" "$b" send-failed "$rec" || rc=$?
+    rc=0; ring_with_verdict "$state" "$b" send-failed "$rec" PATH="$fb:$PATH" || rc=$?
     [ "$rc" = 2 ] || fail "$b should report a failed send as 2, got $rc"
-    rc=0; ring_with_verdict "$state" "$b" empty "$rec" || rc=$?
+    rc=0; ring_with_verdict "$state" "$b" empty "$rec" PATH="$fb:$PATH" || rc=$?
     [ "$rc" = 0 ] || fail "$b should report a confirmed submit as 0, got $rc"
-    rc=0; ring_with_verdict "$state" "$b" pending-unproven "$rec" || rc=$?
+    rc=0; ring_with_verdict "$state" "$b" pending-unproven "$rec" PATH="$fb:$PATH" || rc=$?
     [ "$rc" = 0 ] || fail "$b must never treat an unproven composer as stranded, got $rc"
   done
-  pass "inbox: only a backend that can resolve a queued Enter reports a stranded line"
+  pass "inbox: only an endpoint that can resolve a queued Enter reports a stranded line"
 }
 
 # Genuine styled Codex idle screens must keep ringing. The composer classifier
@@ -929,7 +978,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_reports_a_stranded_submit
-test_ring_stranded_verdict_requires_backend_proof
+test_ring_stranded_verdict_requires_endpoint_proof
 test_ring_rings_a_genuine_codex_idle_screen
 test_ladder_tracks_input_blocked_streak
 test_idempotent_write_dedups_exact_body
