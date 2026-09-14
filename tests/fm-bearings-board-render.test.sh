@@ -243,17 +243,25 @@ test_full_context_is_text_for_every_card_type() {
   printf '%s' "$out" | jq -e --argjson expected "$calls" '
     .calls as $calls | all(range(3); . as $i |
       $calls[$i].detail == $expected[$i].detail
-      and $calls[$i].expandable
+      and $calls[$i].expandable == ($expected[$i].type != "merge")
       and $calls[$i].links == [{text:$expected[$i].pr_url,href:$expected[$i].pr_url}]
       and $calls[$i].keys == [$expected[$i].key]
       and ($calls[$i].options | .[0] == "keep")
       and ($calls[$i].tags | index("script") == null and index("img") == null))
   ' >/dev/null || fail "detail, URL, identity, or inert markup was lost: $out"
   pass "every card type preserves full multiline context and URLs as inert text with one answer identity"
-  out=$(render_board "$home" '[]' '[]' 0 0 '[{"key":"unknown-context","type":"decision","repo":null,"title":"Unknown detail","options":[],"allow_freeform":true}]')
-  printf '%s' "$out" | jq -e '.calls[0].detail | contains("Full context was not supplied")' >/dev/null \
-    || fail "missing detail silently looked complete"
-  pass "missing owner detail is disclosed rather than fabricated"
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"unknown-context","type":"decision","repo":null,"title":"Unknown detail","options":[],"allow_freeform":true},
+    {"key":"unknown-credential","type":"credential","repo":null,"title":"Unknown credential","options":[],"allow_freeform":true},
+    {"key":"plain-merge","type":"merge","repo":"sample","title":"Merge without detail","pr_url":"https://github.com/example/sample/pull/7","risk":"low","options":[{"value":"merge","label":"Merge"}]}]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and (.calls[0].detail | contains("Full context was not supplied"))
+    and (.calls[1].detail | contains("Full context was not supplied"))
+    and .calls[2].detail == null and (.calls[2].expandable | not)
+    and .calls[2].links == [{text:"https://github.com/example/sample/pull/7",href:"https://github.com/example/sample/pull/7"}]
+  ' >/dev/null || fail "missing detail was not disclosed on question cards only: $out"
+  pass "missing owner detail is disclosed on decision and credential cards and never invented for merge cards"
 }
 
 test_full_context_is_text_for_every_card_type

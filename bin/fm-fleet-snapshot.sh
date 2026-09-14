@@ -21,12 +21,14 @@
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. Captain-held records
 #     additionally retain decision_context: the verbatim filed row and indented
-#     body, including blank lines, punctuation, and links. This is owner-supplied
-#     text, not inferred approval terms or independently verified current facts.
-#     Home summaries carry it beside bounded decision/queued excerpts so explicit
-#     detailed Bearings can reveal it without scraping another home. Existing
-#     row and transport-byte bounds still apply; older summaries omit this field.
-#     They also carry
+#     body, including interior blank lines, punctuation, and links, without the
+#     blank lines that merely separate it from the next row or header. This is
+#     owner-supplied text, not inferred approval terms or independently verified
+#     current facts. Home summaries carry it once, in a top-level
+#     decision_context object keyed by task id for the captain-held rows the
+#     summary emits, so explicit detailed Bearings can join it by identity
+#     without scraping another home. Existing row and transport-byte bounds
+#     still apply; older summaries omit this object. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
 #     and hold_bucket fields.
@@ -85,7 +87,9 @@
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     queued, landed, endpoints, counts, omitted, and decision_context (the
+#     summary's full captain-hold text keyed by task id; empty for older
+#     summaries). provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -533,7 +537,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
+        else . end
+        | if .decision_context? != null then
+            .decision_context |= sub("\\n[[:space:]]*$"; "")
+          else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
@@ -993,8 +1000,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),
-            decision_context:(.decision_context // null),repo:(.repo // null),
+            reason:(.hold_reason | trunc(160)),repo:(.repo // null),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
@@ -1087,6 +1093,28 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        elif ($active_all | length) > 0 then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
+    | ($decisions_all[:$decisions_n]) as $decisions_rows
+    | ([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+          blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
+          blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
+          unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
+          blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
+          hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
+          hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
+          hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
+          hold_bucket:(.hold_bucket // null),
+          hold_age_days:(.hold_age_days // null),
+          captain_actionable:(.captain_actionable // false),
+          repo:((.repo // null) | if . == null then null else trunc(120) end),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          since:((.since // null) | if . == null then null else trunc(40) end)}]
+          | ((map(select(.captain_actionable != true)) | newest_filed_first)
+             + (map(select(.captain_actionable == true)) | newest_filed_first))
+          | .[:$queued_n]) as $queued_rows
+    | (reduce ($queued_all[]
+               | select((.decision_context // null) != null)
+               | select(.id as $id | any($decisions_rows[], $queued_rows[]; .id == $id)))
+         as $record ({}; .[$record.id] = $record.decision_context)) as $decision_context
     | {
         schema:"fm-secondmate-home-summary.v1",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
@@ -1098,26 +1126,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
-        decisions_open:$decisions_all[:$decisions_n],
+        decisions_open:$decisions_rows,
+        decision_context:$decision_context,
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
-          blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
-          blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
-          unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
-          blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
-          hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
-          decision_context:(.decision_context // null),
-          hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
-          hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
-          hold_bucket:(.hold_bucket // null),
-          hold_age_days:(.hold_age_days // null),
-          captain_actionable:(.captain_actionable // false),
-          repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end),
-          since:((.since // null) | if . == null then null else trunc(40) end)}]
-          | ((map(select(.captain_actionable != true)) | newest_filed_first)
-             + (map(select(.captain_actionable == true)) | newest_filed_first))
-          | .[:$queued_n]),
+        queued:$queued_rows,
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
@@ -1875,7 +1887,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
-         decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
+         decisions_open:$summary.decisions_open,decision_context:($summary.decision_context // {}),
+         holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1

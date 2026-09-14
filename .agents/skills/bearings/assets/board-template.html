@@ -503,21 +503,23 @@ __FM_BEARINGS_BOARD_DATA__
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));
 
-    if (item.type !== "merge") {
+    if (item.type === "merge") {
+      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+    } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
       if (item.about) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
-    }
-    if (item.detail) {
-      var context = el("details", "bb-decision__context");
-      context.appendChild(el("summary", "", "Full context"));
-      context.appendChild(el("div", "bb-decision__detail", item.detail));
-      pad.appendChild(context);
-    } else {
-      pad.appendChild(el("p", "bb-decision__detail",
-        "Full context was not supplied. Ask for the complete question and boundaries before approving."));
+      if (item.detail) {
+        var context = el("details", "bb-decision__context");
+        context.appendChild(el("summary", "", "Full context"));
+        context.appendChild(el("div", "bb-decision__detail", item.detail));
+        pad.appendChild(context);
+      } else {
+        pad.appendChild(el("p", "bb-decision__detail",
+          "Full context was not supplied. Ask for the complete question and boundaries before approving."));
+      }
     }
     if (item.pr_url) {
       var pr = el("a", "bb-decision__link", item.pr_url);

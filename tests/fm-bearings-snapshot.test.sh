@@ -2354,7 +2354,7 @@ test_explicit_decision_context_preserves_owner_text_without_expanding_compact_ou
   expanded=$(run "$home" "$fakebin" --json --fields bodies)
   printf '%s' "$expanded" | jq -e --arg context "$context" '
     (.decisions_open | length) == 2 and all(.decisions_open[];
-      .context == ($context + "\n") and .repo == "sample")
+      .context == $context and .repo == "sample")
   ' >/dev/null || fail "explicit context lost owner wording on main or secondmate path: $expanded"
   # --all-decisions uses the queued projection for a deferred secondmate hold.
   perl -pi -e 's/\(hold-kind: captain\)/(hold-kind: captain) (hold-until: 2099-01-01)/' "$mate/data/backlog.md"
@@ -2365,6 +2365,44 @@ test_explicit_decision_context_preserves_owner_text_without_expanding_compact_ou
       | contains("No additional approvals.") and contains("(A), quotes \"B\""))
   ' >/dev/null || fail "deferred queued path lost or duplicated full decision context: $expanded"
   pass "explicit decision detail preserves full owner rows, blank lines, punctuation, nested boundaries, and URLs across main and secondmate paths"
+}
+
+test_wide_decision_context_is_carried_once_within_the_summary_byte_guard() {
+  local home mate fakebin json
+  home=$(make_home wide-context-parent)
+  mate="$TMP_ROOT/wide-context-mate"
+  make_valid_secondmate_home wide-mate "$mate"
+  append_secondmate_registry "$home" wide-mate "$mate"
+  fakebin=$(make_fakebin "$home")
+  {
+    printf -- '- [ ] wide-context - Approve the pasted rollout log (repo: sample) (kind: ship) (hold: Approve the whole pasted plan?) (hold-kind: captain)\n'
+    perl -e 'for my $i (1..1300) { printf "  log %04d %s\n", $i, "x" x 96 }'
+  } > "$home/wide-context.txt"
+  [ "$(wc -c < "$home/wide-context.txt")" -gt 133120 ] || fail "fixture context is not wider than 130 KiB"
+  { printf '## In flight\n\n## Queued\n'; cat "$home/wide-context.txt"; printf '\n## Done\n'; } > "$mate/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "wide-mate" and .state == "captain_decision"))
+    and ([.decisions_open[] | select(.owner == "wide-mate")] | length) == 1
+    and all(.decisions_open[]; (.summary | length) <= 91 and (has("context") | not))
+  ' >/dev/null || fail "a 130 KiB decision context made the owner unavailable or expanded the compact summary: $json"
+  json=$(run "$home" "$fakebin" --json --fields bodies)
+  printf '%s' "$json" | jq -e --rawfile raw "$home/wide-context.txt" '
+    ([.decisions_open[] | select(.owner == "wide-mate")] | length) == 1
+    and (.decisions_open[] | select(.owner == "wide-mate") | .context == ($raw | sub("\\n$"; "")))
+  ' >/dev/null || fail "the wide decision context was shortened or lost: ${json:0:600}"
+  {
+    printf -- '- [ ] wide-context - Approve the pasted rollout log (repo: sample) (kind: ship) (hold: Approve the whole pasted plan?) (hold-kind: captain)\n'
+    perl -e 'for my $i (1..2600) { printf "  log %04d %s\n", $i, "x" x 96 }'
+  } > "$home/wide-context.txt"
+  { printf '## In flight\n\n## Queued\n'; cat "$home/wide-context.txt"; printf '\n## Done\n'; } > "$mate/data/backlog.md"
+  json=$(run "$home" "$fakebin" --json --fields bodies)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "wide-mate" and .state == "unknown"
+      and (.reason | contains("exceeded byte limit"))))
+    and (.decisions_open | any(.owner == "wide-mate") | not)
+  ' >/dev/null || fail "a context beyond the summary byte guard was silently shortened or partially shown: ${json:0:600}"
+  pass "a 130 KiB decision context is carried once within the byte guard and an oversize one stays an explicit unknown"
 }
 
 test_active_children_project_independent_of_home_captain_hold() {
@@ -2480,7 +2518,7 @@ test_remote_decision_context_and_missing_legacy_detail() {
     (.decisions_open | length) == 1 and (.decisions_open[0] | has("context") and .context == null)
   ' >/dev/null || fail "legacy excerpts masqueraded as full decision context: $json"
   context=$(printf 'A remote owner record: '; printf 'full boundary; %.0s' {1..40}; printf '\nQuestion two (unchanged)?\nhttps://github.com/example/sample/pull/999#full-evidence')
-  jq --arg context "$context" '.decisions_open[0].decision_context = $context' \
+  jq --arg context "$context" '.decision_context = {(.decisions_open[0].id): $context}' \
     "$remote_home/state/home-summary.json" > "$remote_home/state/new-summary.json"
   mv "$remote_home/state/new-summary.json" "$remote_home/state/home-summary.json"
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100 --fields bodies)
@@ -3406,6 +3444,7 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_working_captain_holds_keep_their_bucket_surfaces
 test_explicit_decision_context_preserves_owner_text_without_expanding_compact_output
+test_wide_decision_context_is_carried_once_within_the_summary_byte_guard
 test_active_children_project_independent_of_home_captain_hold
 test_nameless_legacy_summary_uses_its_durable_identifier
 test_remote_decision_context_and_missing_legacy_detail

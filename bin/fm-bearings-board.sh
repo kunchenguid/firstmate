@@ -72,9 +72,10 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
-# Captain's Call `detail` is full owner-supplied context, rendered as expandable
-# inert text on every card type; `pr_url` is likewise visible on every type.
-# Missing detail is disclosed, not inferred. The composer obtains full context
+# Captain's Call `detail` is full owner-supplied context, rendered as inert
+# text: expandable on decision and credential cards, inline on merge cards;
+# `pr_url` is visible on every type. A decision or credential card without
+# detail discloses that, not infers it. The composer obtains full context
 # through fm-bearings-snapshot.sh --fields bodies, not its compact summary.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name

@@ -100,7 +100,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, scannable `about` and `decide` rows, and option labels with hints, with the recommended option marked.
-  Copy the decision row's full `context` verbatim into `detail`; the board exposes it as expandable text for every card type, alongside any supplied `pr_url`.
+  Copy the decision row's full `context` verbatim into `detail`; the board exposes it as expandable text on decision and credential cards and inline on merge cards, alongside any supplied `pr_url`.
   Compose the visible question from that context: what is proposed, why, all questions/options, known consequences and boundaries, and supplied evidence links.
   Never shorten approval terms or URLs to fit a card, replace full context with the compact `summary`, or infer missing terms from old conversations or reports.
   When `context` is null or the owner has not recorded enough detail, state exactly what is unavailable, keep any supplied text, and request clarification rather than inventing approval options.
