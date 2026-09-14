@@ -424,6 +424,8 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=$template_hash
   FM_PR_REG_DATA_IDENTITY=$data_identity
   FM_PR_REG_CHECK_IDENTITY=$check_identity
+  # Consumed by bin/fm-fleet-snapshot.sh from this validated registration.
+  # shellcheck disable=SC2034
   FM_PR_REG_EPOCH=$epoch
 }
 
