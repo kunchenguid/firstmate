@@ -1253,8 +1253,23 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # The record-state argument is included first because a remote-seeded home may
 # intentionally terminate its parent walk at itself.
 FM_TREEHOUSE_OWNER_STATES=()
+fm_treehouse_state_identity() {
+  local state=$1 parent leaf resolved
+  if resolved=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  parent=$(dirname -- "$state")
+  leaf=$(basename -- "$state")
+  if resolved=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "$resolved" "$leaf"
+  else
+    printf '%s\n' "$state"
+  fi
+}
+
 fm_treehouse_collect_local_states() {  # <record-state>
-  local record_state=$1 root home reg line child known existing i=0
+  local record_state=$1 root home reg line child known existing candidate candidate_identity existing_identity i=0
   local -a homes
   FM_TREEHOUSE_OWNER_STATES=("$record_state")
   root=$(fm_firstmate_root_home "$FM_HOME") || {
@@ -1269,11 +1284,14 @@ fm_treehouse_collect_local_states() {  # <record-state>
   while [ "$i" -lt "${#homes[@]}" ]; do
     home=${homes[$i]}
     i=$((i + 1))
+    candidate="$home/state"
+    candidate_identity=$(fm_treehouse_state_identity "$candidate")
     known=0
     for existing in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
+      existing_identity=$(fm_treehouse_state_identity "$existing")
+      [ "$existing_identity" != "$candidate_identity" ] || known=1
     done
-    [ "$known" = 1 ] || FM_TREEHOUSE_OWNER_STATES+=("$home/state")
+    [ "$known" = 1 ] || FM_TREEHOUSE_OWNER_STATES+=("$candidate")
     reg="$home/data/secondmates.md"
     [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
     [ -f "$reg" ] && [ ! -L "$reg" ] || {

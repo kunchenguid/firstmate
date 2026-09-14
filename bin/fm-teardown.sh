@@ -104,10 +104,10 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
-# A pool copy checked out on `fm/<other-task>` is also durable ownership evidence
-# when no foreign slot claim already identifies a reassignment. Teardown refuses
-# before cleanup in that case, including with --force, and leaves the branch,
-# copy, and record intact.
+# A recorded copy checked out on `fm/<other-task>` is also durable ownership
+# evidence when no foreign pool-slot claim already identifies a reassignment.
+# Teardown refuses before direct or descendant cleanup in that case, including
+# with --force, and leaves the branch, copy, and record intact.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2720,21 +2720,21 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
-      continue
-    fi
-    if ! fm_treehouse_pool_slot "$project" "$worktree"; then
+    if [ "$kind" = secondmate ]; then
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
-    owner_rc=0
-    require_owned_worktree_slot_record "$task_id" "$worktree" "$task_home" || owner_rc=$?
-    case "$owner_rc" in
-      0) teardown_refuse_if_other_task_branch "$task_id" "$worktree" || return 1 ;;
-      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
-      *) return 1 ;;
-    esac
+    if [ "$backend" != orca ] && fm_treehouse_pool_slot "$project" "$worktree"; then
+      require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+      owner_rc=0
+      require_owned_worktree_slot_record "$task_id" "$worktree" "$task_home" || owner_rc=$?
+      case "$owner_rc" in
+        0) ;;
+        "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
+        *) return 1 ;;
+      esac
+    fi
+    teardown_refuse_if_other_task_branch "$task_id" "$worktree" || return 1
   done
 }
 
