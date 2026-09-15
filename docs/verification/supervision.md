@@ -501,6 +501,23 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+The Codex foreground-checkpoint distinction was verified hermetically on 2026-09-14 with real watcher processes and isolated home state.
+The regression reproduced an announced recovery episode, proved the next checkpoint stayed active for its full bound without changing that generation, proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
+This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh
+```
+
+Observed output:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+ok - a never-announced recovery still surfaces once from a foreground checkpoint
+ok - a queue append during a foreground checkpoint still resurfaces
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11750
+```
+
 Deterministic entry points:
 
 ```sh
@@ -509,6 +526,7 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
 tests/fm-watch-recovery-loop.test.sh
+tests/fm-watch-checkpoint.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
