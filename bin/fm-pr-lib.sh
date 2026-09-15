@@ -89,6 +89,7 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_MODE_CAPABLE_CACHE=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -263,12 +264,53 @@ fm_pr_sha256() {
   fi
 }
 
+# Some mounts cannot represent POSIX permission bits at all: a noacl/posix=0
+# NTFS mount under Git-Bash/MSYS, and a drvfs/9p-backed WSL mount, both let
+# chmod report success while silently leaving the file's observed mode
+# unchanged. Parsing mount option strings to catch this is fragile across
+# platforms and mount tools, so probe the actual kernel behavior instead:
+# chmod a scratch file to two different modes and check whether the observed
+# mode tracks each request. A device that fails the probe can never satisfy an
+# exact-mode check, on this device or any other file on it, so the result is
+# cached per device for the life of the process instead of re-probed per file.
+fm_pr_device_mode_capable() {  # <dir> <device> -> succeeds if chmod mode bits are honored on <device>
+  local dir=$1 device=$2 probe m1 m2 result=0
+  case $'\n'"$FM_PR_MODE_CAPABLE_CACHE" in
+    *$'\n'"$device capable"$'\n'*) return 0 ;;
+    *$'\n'"$device inert"$'\n'*) return 1 ;;
+  esac
+  probe=$(mktemp "$dir/.fm-pr-mode-probe.XXXXXX" 2>/dev/null) && {
+    chmod 0600 "$probe" 2>/dev/null
+    m1=$(fm_pr_file_mode "$probe")
+    chmod 0640 "$probe" 2>/dev/null
+    m2=$(fm_pr_file_mode "$probe")
+    rm -f -- "$probe"
+    [ "$m1" = 600 ] && [ "$m2" = 640 ] || result=1
+  }
+  if [ "$result" = 0 ]; then
+    FM_PR_MODE_CAPABLE_CACHE="${FM_PR_MODE_CAPABLE_CACHE}${device} capable
+"
+  else
+    FM_PR_MODE_CAPABLE_CACHE="${FM_PR_MODE_CAPABLE_CACHE}${device} inert
+"
+  fi
+  return "$result"
+}
+
+# The mode check is skipped only when the live probe above proves this exact
+# device cannot represent POSIX mode bits; every other invariant (regular
+# file, not a symlink, correct device, single hard link) still applies
+# unconditionally, and a device that can honor mode bits still gets the exact
+# equality check with no loosening.
 fm_pr_private_file_valid() {
-  local path=$1 mode=$2 device=$3
+  local path=$1 mode=$2 device=$3 dir
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
-  [ "$(fm_pr_file_link_count "$path")" = 1 ]
+  [ "$(fm_pr_file_link_count "$path")" = 1 ] || return 1
+  dir=$(dirname -- "$path")
+  if fm_pr_device_mode_capable "$dir" "$device"; then
+    [ "$(fm_pr_file_mode "$path")" = "$mode" ]
+  fi
 }
 
 fm_pr_regular_destination_or_absent() {
