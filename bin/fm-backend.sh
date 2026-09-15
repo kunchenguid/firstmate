@@ -493,6 +493,10 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: Herdr endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
+      if ! fm_backend_herdr_task_binding_validate "$meta" "$recorded_session" "$workspace"; then
+        echo "REFUSED: Herdr task $id does not match its authoritative home workspace binding; preserving task state." >&2
+        return 1
+      fi
       ;;
     zellij)
       [ "$binding" = "$id" ] || {
