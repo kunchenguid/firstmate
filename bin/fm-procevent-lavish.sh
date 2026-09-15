@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh direct-poll <artifact.html> [--agent-reply <text>]
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -30,10 +31,18 @@
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
-# poll       The registered listener command `arm` publishes, not a command to
-#            run in a conversational turn. It runs the published blocking poll
-#            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below.
+# direct-poll
+#            Run the foreground worker-owned feedback poll for one canonical
+#            artifact, optionally posting the reply that accompanies a revised
+#            connected review. It reserves that canonical artifact against a
+#            process-event listener and every other direct poll before invoking
+#            Lavish. If a registered listener owns the artifact, retire it with
+#            `retire` and retry; the command refuses rather than racing it.
+# poll       The registered listener command `arm` publishes, not a public
+#            worker command. It runs only inside the generic runner, verifies
+#            the canonical artifact's process-event reservation, executes the
+#            published blocking poll, and prints its response verbatim while
+#            absorbing only the one exact transient interruption below.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -63,8 +72,25 @@
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
-# and how to read a completed result. Ownership, durable capture, publication,
-# and restart recovery all belong to bin/fm-procevent.sh.
+# feedback-consumer exclusion, and how to read a completed result. Durable
+# capture, publication, and restart recovery belong to bin/fm-procevent.sh.
+#
+# ONE FEEDBACK CONSUMER PER CANONICAL ARTIFACT. A private machine-wide
+# `<source-id>.lavish-owner` record beside the generic source claim reserves the
+# canonical real path for either one process-event registration or one live
+# direct-poll process. Publication and removal use the generic per-source lock.
+# A direct record binds pid, process identity, random token, owning state root,
+# and canonical artifact; a dead or PID-reused direct owner is reclaimed on the
+# next operation, while an unreadable live identity is preserved and refused.
+# A process-event record remains authoritative while its registration or claim
+# exists, including between runner generations; explicit retirement removes it,
+# and a record left by terminal retirement or a removed home is reclaimed lazily.
+# `arm` is idempotent only for the same state root and path;
+# `direct-poll` refuses every process-event reservation, registration, or claim.
+# `retire` first stops and verifies the generic owner, then releases only its own
+# matching reservation. These transitions either prove the prior consumer gone
+# before the next starts or return an actionable refusal; they never race two
+# destructive Lavish polls.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -80,7 +106,7 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
+# It wraps ONLY the currently published interface, verified against 0.1.67:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
@@ -115,6 +141,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -124,7 +151,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -143,6 +170,159 @@ cmd_source_id() {
   fi
 }
 
+lavish_realpath() {
+  perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
+}
+
+lavish_state_root() {
+  fm_procevent_state_root_resolve "$STATE"
+}
+
+lavish_owner_path() { printf '%s/%s.lavish-owner\n' "$(fm_procevent_claim_root)" "$1"; }
+
+lavish_owner_token() {
+  local seed
+  seed="$$-${RANDOM:-0}-$(date +%s)-${1-}"
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$seed" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$seed" | sha256sum | awk '{print $1}'
+  fi
+}
+
+# Load the fixed private reservation while the generic source lock is held.
+# 0 = valid, 1 = absent, 2 = malformed.
+lavish_owner_load_locked() {  # <source-id>
+  local file lines format
+  file=$(lavish_owner_path "$1")
+  [ -e "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 2
+  lines=$(awk 'END { print NR }' "$file") || return 2
+  [ "$lines" = 7 ] || return 2
+  format=$(sed -n '1s/^format=//p' "$file")
+  LAVISH_OWNER_KIND=$(sed -n '2s/^kind=//p' "$file")
+  LAVISH_OWNER_STATE=$(sed -n '3s/^state_root=//p' "$file")
+  LAVISH_OWNER_PID=$(sed -n '4s/^pid=//p' "$file")
+  LAVISH_OWNER_IDENTITY=$(sed -n '5s/^identity=//p' "$file")
+  LAVISH_OWNER_TOKEN=$(sed -n '6s/^token=//p' "$file")
+  LAVISH_OWNER_ARTIFACT=$(sed -n '7s/^artifact=//p' "$file")
+  [ "$format" = fm-lavish-owner.v1 ] || return 2
+  case "$LAVISH_OWNER_KIND" in process-event|direct) ;; *) return 2 ;; esac
+  [ -n "$LAVISH_OWNER_STATE" ] && [ -n "$LAVISH_OWNER_TOKEN" ] \
+    && [ -n "$LAVISH_OWNER_ARTIFACT" ] || return 2
+  case "$LAVISH_OWNER_STATE$LAVISH_OWNER_ARTIFACT" in *$'\n'*) return 2 ;; esac
+  if [ "$LAVISH_OWNER_KIND" = direct ]; then
+    case "$LAVISH_OWNER_PID" in ''|*[!0-9]*|0) return 2 ;; esac
+    [ -n "$LAVISH_OWNER_IDENTITY" ] || return 2
+  else
+    [ -z "$LAVISH_OWNER_PID$LAVISH_OWNER_IDENTITY" ] || return 2
+  fi
+  return 0
+}
+
+lavish_owner_publish_locked() {  # <source-id> <kind> <state-root> <artifact> [pid] [identity] [token]
+  local id=$1 kind=$2 state=$3 artifact=$4 pid=${5-} identity=${6-} token=${7-} root file tmp
+  case "$state$artifact$identity$token" in *$'\n'*) return 1 ;; esac
+  root=$(fm_procevent_claim_root)
+  file=$(lavish_owner_path "$id")
+  token=${token:-$(lavish_owner_token "$id")}
+  (umask 077; mkdir -p "$root") || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  tmp=$(umask 077; mktemp "$root/.$id.lavish-owner.XXXXXX") || return 1
+  if ! {
+    printf 'format=fm-lavish-owner.v1\n'
+    printf 'kind=%s\n' "$kind"
+    printf 'state_root=%s\n' "$state"
+    printf 'pid=%s\n' "$pid"
+    printf 'identity=%s\n' "$identity"
+    printf 'token=%s\n' "$token"
+    printf 'artifact=%s\n' "$artifact"
+  } > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  LAVISH_OWNER_TOKEN=$token
+}
+
+# 0 = live direct process, 1 = stale direct process, 2 = identity unreadable.
+lavish_direct_owner_state_locked() {
+  local actual
+  fm_pid_alive "$LAVISH_OWNER_PID" || return 1
+  actual=$(fm_pid_identity "$LAVISH_OWNER_PID" 2>/dev/null) || return 2
+  [ "$actual" = "$LAVISH_OWNER_IDENTITY" ] || return 1
+  return 0
+}
+
+# A process-event reservation remains active while its registration or runner
+# claim exists. This lazy check reclaims a reservation left after terminal
+# retirement or removal of its old home without weakening a live generation.
+lavish_registered_owner_active_locked() {  # <source-id>
+  local registration
+  registration="$(fm_procevent_registry_dir "$LAVISH_OWNER_STATE")/$1.source"
+  { [ -f "$registration" ] && [ ! -L "$registration" ]; } \
+    || [ -e "$(fm_procevent_claim_path "$1")" ]
+}
+
+lavish_registered_reserve() {  # <source-id> <canonical-artifact>
+  local id=$1 artifact=$2 state owner_rc direct_rc
+  state=$(lavish_state_root) || die "process-event state root is not an existing physical directory: $STATE"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock Lavish feedback owner: $id"
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  case "$owner_rc" in
+    0)
+      if [ "$LAVISH_OWNER_KIND" = process-event ] \
+        && [ "$LAVISH_OWNER_STATE" = "$state" ] \
+        && [ "$LAVISH_OWNER_ARTIFACT" = "$artifact" ]; then
+        LAVISH_RESERVATION_CREATED=0
+      elif [ "$LAVISH_OWNER_KIND" = direct ]; then
+        lavish_direct_owner_state_locked; direct_rc=$?
+        if [ "$direct_rc" -eq 1 ]; then
+          rm -f -- "$(lavish_owner_path "$id")"
+          lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
+            || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
+          LAVISH_RESERVATION_CREATED=1
+        else
+          fm_procevent_source_lock_release "$id"
+          die "canonical artifact already has a direct feedback consumer (source $id, pid $LAVISH_OWNER_PID); stop that poll before arming the process-event listener"
+        fi
+      elif lavish_registered_owner_active_locked "$id"; then
+        fm_procevent_source_lock_release "$id"
+        die "canonical artifact is reserved by another process-event home (source $id); retire that owner before arming this one"
+      else
+        rm -f -- "$(lavish_owner_path "$id")"
+        lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
+          || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
+        LAVISH_RESERVATION_CREATED=1
+      fi
+      ;;
+    1)
+      lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
+        || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
+      LAVISH_RESERVATION_CREATED=1
+      ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "Lavish feedback owner record is malformed for source $id; inspect $(lavish_owner_path "$id") before retrying"
+      ;;
+  esac
+  fm_procevent_source_lock_release "$id" || die "cannot unlock Lavish feedback owner: $id"
+}
+
+lavish_registered_rollback() {  # <source-id> <canonical-artifact>
+  local id=$1 artifact=$2 state owner_rc registration
+  [ "${LAVISH_RESERVATION_CREATED:-0}" = 1 ] || return 0
+  state=$(lavish_state_root) || return 1
+  registration="$(fm_procevent_registry_dir "$state")/$id.source"
+  fm_procevent_source_lock_acquire "$id" || return 1
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  if [ "$owner_rc" -eq 0 ] && [ "$LAVISH_OWNER_KIND" = process-event ] \
+    && [ "$LAVISH_OWNER_STATE" = "$state" ] && [ "$LAVISH_OWNER_ARTIFACT" = "$artifact" ] \
+    && [ ! -e "$registration" ]; then
+    rm -f -- "$(lavish_owner_path "$id")" || { fm_procevent_source_lock_release "$id"; return 1; }
+  fi
+  fm_procevent_source_lock_release "$id"
+}
+
 cmd_arm() {
   local artifact=${1-} id real
   [ -n "$artifact" ] || usage
@@ -150,23 +330,57 @@ cmd_arm() {
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
-    || die "cannot resolve the artifact path: $artifact"
+  real=$(lavish_realpath "$artifact") || die "cannot resolve the artifact path: $artifact"
+  lavish_registered_reserve "$id" "$real"
   # This adapter's own listener command, which runs the plain blocking form with
   # no --timeout-ms so completion is a server event, and absorbs only the exact
   # transient interruption. Registering raw poll output is what let that
   # interruption reach the runner as a captured result.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
+  if ! "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
+    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"; then
+    lavish_registered_rollback "$id" "$real" || true
+    exit 1
+  fi
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }
 
 cmd_retire() {
-  local artifact=${1-} id
+  local artifact=${1-} id real state owner_rc claim registration
   [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+  real=$(lavish_realpath "$artifact") || die "cannot resolve the artifact path: $artifact"
+  state=$(lavish_state_root) || die "process-event state root is not an existing physical directory: $STATE"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null \
+    || die "cannot retire process-event listener for source $id; direct polling remains refused"
+  registration="$(fm_procevent_registry_dir "$state")/$id.source"
+  claim=$(fm_procevent_claim_path "$id")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock Lavish feedback owner: $id"
+  if [ -e "$registration" ] || [ -e "$claim" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "process-event listener for source $id is still registered or claimed; direct polling remains refused"
+  fi
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  case "$owner_rc" in
+    0)
+      if [ "$LAVISH_OWNER_KIND" != process-event ] \
+        || [ "$LAVISH_OWNER_STATE" != "$state" ] \
+        || [ "$LAVISH_OWNER_ARTIFACT" != "$real" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "Lavish feedback owner changed while retiring source $id; direct polling remains refused"
+      fi
+      rm -f -- "$(lavish_owner_path "$id")" \
+        || { fm_procevent_source_lock_release "$id"; die "cannot release Lavish feedback owner: $id"; }
+      ;;
+    1) ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "Lavish feedback owner record is malformed for source $id; inspect $(lavish_owner_path "$id") before retrying"
+      ;;
+  esac
+  fm_procevent_source_lock_release "$id" || die "cannot unlock Lavish feedback owner: $id"
+  printf 'retired: %s\n' "$id"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -259,11 +473,104 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
-cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
+lavish_direct_acquire() {  # <source-id> <canonical-artifact>
+  local id=$1 artifact=$2 state owner_rc direct_rc pid identity registration claim
+  state=$(lavish_state_root) || die "process-event state root is not an existing physical directory: $STATE"
+  fm_current_pid pid || die "cannot identify the direct Lavish feedback consumer"
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) \
+    || die "cannot identify the direct Lavish feedback consumer process"
+  registration="$(fm_procevent_registry_dir "$state")/$id.source"
+  claim=$(fm_procevent_claim_path "$id")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock Lavish feedback owner: $id"
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  case "$owner_rc" in
+    0)
+      if [ "$LAVISH_OWNER_KIND" = direct ]; then
+        lavish_direct_owner_state_locked; direct_rc=$?
+        if [ "$direct_rc" -eq 1 ]; then
+          rm -f -- "$(lavish_owner_path "$id")"
+        else
+          fm_procevent_source_lock_release "$id"
+          die "canonical artifact already has a direct feedback consumer (source $id, pid $LAVISH_OWNER_PID); stop that poll before starting another"
+        fi
+      elif lavish_registered_owner_active_locked "$id"; then
+        fm_procevent_source_lock_release "$id"
+        die "canonical artifact has a registered process-event feedback consumer (source $id); run fm-procevent-lavish.sh retire '$artifact' and verify it succeeds before direct-poll"
+      else
+        rm -f -- "$(lavish_owner_path "$id")"
+      fi
+      ;;
+    1) ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "Lavish feedback owner record is malformed for source $id; inspect $(lavish_owner_path "$id") before retrying"
+      ;;
+  esac
+  if [ -e "$registration" ] || [ -e "$claim" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "canonical artifact still has a process-event registration or claim (source $id); run fm-procevent-lavish.sh retire '$artifact' and verify it succeeds before direct-poll"
+  fi
+  lavish_owner_publish_locked "$id" direct "$state" "$artifact" "$pid" "$identity" \
+    || { fm_procevent_source_lock_release "$id"; die "cannot reserve direct Lavish feedback owner: $id"; }
+  LAVISH_DIRECT_TOKEN=$LAVISH_OWNER_TOKEN
+  LAVISH_DIRECT_PID=$pid
+  fm_procevent_source_lock_release "$id" || die "cannot unlock Lavish feedback owner: $id"
+}
+
+lavish_direct_release() {  # <source-id> <canonical-artifact>
+  local id=$1 artifact=$2 state owner_rc
+  state=$(lavish_state_root) || return 1
+  fm_procevent_source_lock_acquire "$id" || return 1
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  if [ "$owner_rc" -eq 0 ] && [ "$LAVISH_OWNER_KIND" = direct ] \
+    && [ "$LAVISH_OWNER_STATE" = "$state" ] && [ "$LAVISH_OWNER_ARTIFACT" = "$artifact" ] \
+    && [ "$LAVISH_OWNER_PID" = "$LAVISH_DIRECT_PID" ] \
+    && [ "$LAVISH_OWNER_TOKEN" = "$LAVISH_DIRECT_TOKEN" ]; then
+    rm -f -- "$(lavish_owner_path "$id")" || { fm_procevent_source_lock_release "$id"; return 1; }
+  elif [ "$owner_rc" -ne 1 ]; then
+    fm_procevent_source_lock_release "$id"
+    return 1
+  fi
+  fm_procevent_source_lock_release "$id"
+}
+
+lavish_registered_poll_assert() {  # <source-id> <canonical-artifact>
+  local id=$1 artifact=$2 state owner_rc registration
+  [ -n "${FM_PROCEVENT_IN_RUNNER:-}" ] \
+    || die "poll is reserved for the registered process-event runner; workers must use direct-poll"
+  state=$(lavish_state_root) || die "process-event state root is not an existing physical directory: $STATE"
+  registration="$(fm_procevent_registry_dir "$state")/$id.source"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock Lavish feedback owner: $id"
+  if [ ! -f "$registration" ] || [ -L "$registration" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "registered Lavish poll has no matching process-event registration for source $id"
+  fi
+  lavish_owner_load_locked "$id"; owner_rc=$?
+  case "$owner_rc" in
+    0)
+      if [ "$LAVISH_OWNER_KIND" != process-event ] \
+        || [ "$LAVISH_OWNER_STATE" != "$state" ] \
+        || [ "$LAVISH_OWNER_ARTIFACT" != "$artifact" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "registered Lavish poll does not own canonical artifact source $id; refusing a competing feedback consumer"
+      fi
+      ;;
+    1)
+      # Rollout recovery for a registration created by an older Firstmate.
+      lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
+        || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
+      ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "Lavish feedback owner record is malformed for source $id; inspect $(lavish_owner_path "$id") before retrying"
+      ;;
+  esac
+  fm_procevent_source_lock_release "$id" || die "cannot unlock Lavish feedback owner: $id"
+}
+
+lavish_poll_loop() {  # <canonical-artifact> [agent-reply]
+  local artifact=$1 reply_set=${2-0} reply=${3-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -281,7 +588,11 @@ cmd_poll() {
   done
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    if [ "$reply_set" = 1 ]; then
+      lavish-axi poll "$artifact" --agent-reply "$reply" | poll_response_filter "$response"
+    else
+      lavish-axi poll "$artifact" | poll_response_filter "$response"
+    fi
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
@@ -300,6 +611,37 @@ cmd_poll() {
       *) die "cannot classify the poll response" ;;
     esac
   done
+  rm -f -- "$response"
+  trap - EXIT INT TERM HUP
+  return "$rc"
+}
+
+cmd_poll() {
+  local artifact=${1-} id real
+  [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
+  id=$(cmd_source_id "$artifact") || exit 1
+  real=$(lavish_realpath "$artifact") || die "cannot resolve the artifact path: $artifact"
+  lavish_registered_poll_assert "$id" "$real"
+  lavish_poll_loop "$real"
+}
+
+cmd_direct_poll() {
+  local artifact=${1-} id real reply_set=0 reply='' rc
+  [ -n "$artifact" ] || usage
+  shift || true
+  if [ "$#" -gt 0 ]; then
+    [ "$#" -eq 2 ] && [ "$1" = --agent-reply ] || usage
+    reply_set=1
+    reply=$2
+    case "$reply" in *$'\n'*) die "agent replies must be one line" ;; esac
+  fi
+  id=$(cmd_source_id "$artifact") || exit 1
+  real=$(lavish_realpath "$artifact") || die "cannot resolve the artifact path: $artifact"
+  lavish_direct_acquire "$id" "$real"
+  lavish_poll_loop "$real" "$reply_set" "$reply"; rc=$?
+  lavish_direct_release "$id" "$real" \
+    || die "direct Lavish poll ended but its feedback-owner reservation could not be released for source $id"
   return "$rc"
 }
 
@@ -676,9 +1018,10 @@ cmd_read() {
 }
 
 case "${1-}" in
-  arm)       shift; cmd_arm "$@" ;;
-  retire)    shift; cmd_retire "$@" ;;
-  poll)      shift; cmd_poll "$@" ;;
+  arm)        shift; cmd_arm "$@" ;;
+  retire)     shift; cmd_retire "$@" ;;
+  direct-poll) shift; cmd_direct_poll "$@" ;;
+  poll)       shift; cmd_poll "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

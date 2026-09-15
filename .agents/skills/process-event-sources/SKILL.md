@@ -27,11 +27,14 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 ## Arming a source
 
 Use the adapter, not the generic runner, for a real source.
-For a Lavish review artifact firstmate owns (a live investigating scout should host its own loop):
+For a Lavish review artifact Firstmate owns, load `lavish-review-lifecycle` first and then arm its canonical path:
 
 ```sh
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
+
+A live investigating scout should normally host its own foreground loop through that lifecycle instead.
+The Lavish adapter's reservation makes `arm` refuse while a direct worker poll owns the same canonical artifact, and makes direct polling refuse until this registered source is retired successfully.
 
 Registering a source is not the same fact as listening to it: arming records the source, and a separate runner still has to pick it up.
 After arming by hand, confirm `bin/fm-procevent.sh list` reports that source as `live`, and run `bin/fm-procevent.sh reconcile` when it does not.
@@ -130,7 +133,7 @@ Supported by tests:
 - proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
-- one identity-matched owner per canonical source, across homes that share one underlying source store;
+- one identity-matched owner per canonical source, across homes that share one underlying source store, with `lavish-review-lifecycle` owning the additional direct-worker versus registered-listener transition;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
 - leaderless PID/PGID-reuse ambiguity preserves the claim without signalling or replacement, as owned by the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
 - runner lifetime, owner-lease, and launch-pacing guarantees follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);

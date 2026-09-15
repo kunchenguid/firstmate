@@ -89,6 +89,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 ## Lavish board mode
 
+Load `lavish-review-lifecycle` before invoking or handling this board's review loop.
 `/bearings lavish` adds one deliverable beside the unchanged chat digest: the interactive fleet board, a myfirstmate-styled Lavish page where the captain answers Captain's Call items directly instead of replying in chat.
 `bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, template injection, live Lavish session verification and ended-session reopening, the any-origin answer binding, and listener registration - so the per-invocation work is composing the payload and running its `build`.
 
@@ -110,8 +111,8 @@ Compose the payload from the same snapshot with the same ranking judgment as the
   Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable secondmate home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
-Run `build` once after composing the payload.
-Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
+Run `build --reopen` once after composing the payload because the current `/bearings lavish` invocation is explicit further-review intent.
+Its serve-first sequence publishes the board, preserves a connected tab without another open, uses at most one plain open for a disconnected session, uses exactly one authorized reopen for a user-ended session, verifies only through non-opening status, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
 Never bind or arm the board before its session is listed open.
 Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and both the build and the watcher's ordinary reconcile repair a missing listener, so no conversational turn ever blocks on the board.
 
@@ -130,7 +131,9 @@ Route the non-decision keys yourself:
 - `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.
 - `dispatch.charted` carries comma-separated task ids the captain picked to start now; verify each id against the current backlog - still queued, blocker and time gate actually clear - then dispatch through the normal lifecycle, and report any id that no longer qualifies instead of forcing it.
 
-After handling, rebuild the board from a fresh snapshot so acted-on items leave Captain's Call, and echo every action taken in chat so the board and chat never diverge silently.
+After handling ordinary connected feedback, rebuild the board from a fresh snapshot with plain `build` so acted-on items leave Captain's Call and the same tab live-reloads without another open.
+After final **Send & End** feedback, use `build --reopen` only when that feedback requests another board revision; otherwise use plain `build` to update the canonical file while leaving the review closed.
+Echo every action taken in chat so the board and chat never diverge silently.
 
 ### The merge-click ruling (captain-decided)
 

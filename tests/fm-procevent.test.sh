@@ -656,6 +656,97 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# --- one feedback consumer per canonical Lavish artifact ---------------------
+# Public adapter commands own the transition: an armed process-event listener
+# excludes a worker direct poll until retire has stopped and verified it, while
+# a live direct poll excludes arm. Different canonical files remain independent.
+HOWN="$TMP_ROOT/hown"; new_home "$HOWN"
+OWN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-owner-stub")
+OWN_LOG="$TMP_ROOT/lavish-owner-log"
+OWN_TRIGGER="$TMP_ROOT/lavish-owner-trigger"
+export OWN_LOG OWN_TRIGGER
+cat > "$OWN_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "$1" >> "$OWN_LOG"
+shift
+printf ' <%s>' "$@" >> "$OWN_LOG"
+printf '\n' >> "$OWN_LOG"
+while [ ! -e "$OWN_TRIGGER" ]; do sleep 0.05; done
+printf 'session:\n  status: feedback\n  session_ended: false\nfeedback[1]{text}:\n  revise\n'
+SH
+chmod +x "$OWN_BIN/lavish-axi"
+OWN_ART_A="$TMP_ROOT/owned-a.html"
+OWN_ART_B="$TMP_ROOT/owned-b.html"
+printf '<h1>a</h1>\n' > "$OWN_ART_A"
+printf '<h1>b</h1>\n' > "$OWN_ART_B"
+owner_a_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OWN_ART_A")
+owner_b_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OWN_ART_B")
+[ "$owner_a_id" != "$owner_b_id" ] || fail "separate canonical artifacts shared one source identity"
+fm_test_track_procevent_home "$HOWN"
+PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OWN_ART_A" >/dev/null
+PATH="$OWN_BIN:$PATH" pe "$HOWN" reconcile >/dev/null
+for _ in $(seq 1 100); do
+  owner_log_lines=0
+  [ ! -f "$OWN_LOG" ] || owner_log_lines=$(wc -l < "$OWN_LOG" | tr -d ' ')
+  [ "$owner_log_lines" -ge 1 ] && break
+  sleep 0.05
+done
+[ "$owner_log_lines" -ge 1 ] || fail "the registered Lavish listener never invoked its poll command"
+owner_refusal=''
+owner_status=0
+owner_refusal=$(PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" direct-poll "$OWN_ART_A" 2>&1) || owner_status=$?
+[ "$owner_status" -ne 0 ] || fail "a direct poll competed with an armed process-event listener"
+assert_contains "$owner_refusal" "run fm-procevent-lavish.sh retire" \
+  "the competing direct-poll refusal did not name the safe transition"
+[ "$(wc -l < "$OWN_LOG" | tr -d ' ')" = 1 ] \
+  || fail "a refused direct poll still invoked Lavish"
+raw_refusal=''
+raw_status=0
+raw_refusal=$(PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$OWN_ART_A" 2>&1) || raw_status=$?
+[ "$raw_status" -ne 0 ] || fail "the internal registered poll command was public to a worker"
+assert_contains "$raw_refusal" "reserved for the registered process-event runner" \
+  "the internal poll refusal did not direct workers to the owned interface"
+[ "$(wc -l < "$OWN_LOG" | tr -d ' ')" = 1 ] \
+  || fail "a refused internal poll still invoked Lavish"
+
+# Artifact B has its own identity and may receive its own direct feedback poll.
+: > "$OWN_TRIGGER"
+PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" direct-poll "$OWN_ART_B" \
+    --agent-reply "The separate revision is ready." >/dev/null \
+  || fail "one artifact's registered owner blocked another artifact's direct poll"
+grep -F "poll <$OWN_ART_B> <--agent-reply> <The separate revision is ready.>" "$OWN_LOG" >/dev/null \
+  || fail "direct-poll did not pass the connected-review reply on the same canonical artifact"
+
+rm -f "$OWN_TRIGGER"
+PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$OWN_ART_A" >/dev/null \
+  || fail "the registered-to-direct transition could not retire its old owner"
+PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" direct-poll "$OWN_ART_A" >/dev/null &
+OWN_DIRECT_PID=$!
+for _ in $(seq 1 100); do
+  owner_log_lines=$(wc -l < "$OWN_LOG" | tr -d ' ')
+  [ "$owner_log_lines" -ge 3 ] && break
+  sleep 0.05
+done
+[ "$owner_log_lines" -ge 3 ] || fail "the post-retirement direct Lavish poll never started"
+arm_refusal=''
+arm_status=0
+arm_refusal=$(PATH="$OWN_BIN:$PATH" FM_HOME="$HOWN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OWN_ART_A" 2>&1) || arm_status=$?
+[ "$arm_status" -ne 0 ] || fail "arm competed with a live direct feedback poll"
+assert_contains "$arm_refusal" "direct feedback consumer" \
+  "the competing arm refusal did not identify the live direct owner"
+: > "$OWN_TRIGGER"
+wait "$OWN_DIRECT_PID" || fail "the direct feedback poll did not finish after its trigger"
+owner_a_file="$FM_PROCEVENT_CLAIM_ROOT/$owner_a_id.lavish-owner"
+assert_absent "$owner_a_file" "a completed direct poll retained its feedback-owner reservation"
+pass "canonical Lavish artifacts have one feedback consumer and independent identities"
+
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
 # put a wake in his chat whose entire content was that nothing happened. The
@@ -774,12 +865,13 @@ SH
 chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
 export LAVISH_COUNT LAVISH_SCRIPT
 
+HDEFAULT="$TMP_ROOT/hdefault"; new_home "$HDEFAULT"
 DEFAULT_RATE_ART="$TMP_ROOT/default-rate-board.html"
 printf '<h1>default rate</h1>\n' > "$DEFAULT_RATE_ART"
 DEFAULT_RATE_COUNT="$TMP_ROOT/default-rate-count"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRIPT=interrupt \
-  FM_LAVISH_POLL_RETRY_DELAY='' \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
+  FM_HOME="$HDEFAULT" FM_LAVISH_POLL_RETRY_DELAY='' \
+  "$ROOT/bin/fm-procevent-lavish.sh" direct-poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
 DEFAULT_RATE_PID=$!
 perl -MTime::HiRes=sleep -e 'sleep 6.2'
 kill -TERM "$DEFAULT_RATE_PID" 2>/dev/null || true
@@ -902,11 +994,12 @@ done
 pass "arm rejects malformed and out-of-range retry delays before registration"
 
 # Shell-safe cleanup must preserve a valid TMPDIR containing an apostrophe.
+HQUOTED="$TMP_ROOT/hquoted"; new_home "$HQUOTED"
 QUOTED_TMPDIR="$TMP_ROOT/poll's-stage"
 mkdir -p "$QUOTED_TMPDIR"
 LAVISH_COUNT="$TMP_ROOT/quoted-count"; LAVISH_SCRIPT="feedback"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$QUOTED_TMPDIR" \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$NEAR_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$QUOTED_TMPDIR" FM_HOME="$HQUOTED" \
+  "$ROOT/bin/fm-procevent-lavish.sh" direct-poll "$NEAR_ART" >/dev/null
 quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
 [ ! -e "${quoted_staged[0]}" ] \
   || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"

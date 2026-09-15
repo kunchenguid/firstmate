@@ -5,7 +5,7 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+Verified on 2026-09-15 on macOS (Darwin 25.2.0) with `lavish-axi` 0.1.67 installed.
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
@@ -16,9 +16,11 @@ Verified at implementation time without upgrading the installed build:
 
 ```sh
 $ lavish-axi --version
-0.1.45
+0.1.67
 $ lavish-axi poll --help | head -1
 Usage: lavish-axi poll <html-file> [--agent-reply "..."]
+$ lavish-axi /tmp/does-not-exist --help | head -1
+Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]
 ```
 
 The same help states that the command "long-polls indefinitely".
@@ -39,7 +41,7 @@ The adapter depends on none of this: it uses only the published poll shape above
 
 ## Why an ended Lavish review is terminal
 
-Re-verified on 2026-08-01 against the same installed build.
+Originally verified on 2026-08-01 against 0.1.45 and re-verified on 2026-09-15 against 0.1.67.
 The published poll help states the lifecycle directly:
 
 ```text
@@ -110,7 +112,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | immutable adapter identity | a captured result retains its adapter after its mutable registration is removed |
 | trusted classification boundary | Lavish lifecycle classification reads the leading response envelope, so prompt payload text that resembles a missing-session error cannot override a valid session status |
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
-| one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
+| one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing; the Lavish adapter additionally refuses a direct worker poll while a registered listener owns the same canonical artifact, refuses `arm` while a direct poll owns it, permits the transition only after verified retirement, passes `--agent-reply` on the same canonical path, and gives separate paths separate identities |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
@@ -157,6 +159,18 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | complete external adapter path | the shipped external `file-signal` package is copied outside the Git project, explicitly bound with its required artifact-reference consent, discovered, verified, registered with one file reference, started through the generic runner, completed by a real file appearance, durably captured, published through the existing bounded event, classified through its immutable package identity, left unhandled, and terminally retired |
 | owner-matched replacement safety | two registrations for the same external source receive distinct owner tokens; unconditional external retirement and the first token cannot retire the replacement, the replacement token can, bounded home sweep derives and uses that exact token, and legacy built-in registrations retain unconditional behavior plus exact `--if-matches` retirement |
 | independent homes | two homes bind the same package id/version to different content-addressed absolute paths and independently capture results and extension state, with no cross-home fallback or result path |
+
+The 2026-09-15 non-browser regression run also printed:
+
+```text
+ok - canonical Lavish artifacts have one feedback consumer and independent identities
+ok - rebuild refreshes the connected board in place without another open or listener
+ok - a disconnected board resumes with one plain open and never reopen
+ok - a board build reopens a session the captain ended instead of arming a dead one
+ok - a user-ended board remains closed unless the build carries revision intent
+ok - build refuses instead of issuing a second open after verification fails
+ok - lavish-axi 0.1.67 reports a captain-ended session through --no-open without reopening it or failing
+```
 
 Run the focused external-binding evidence and the live Bearings session guard with:
 

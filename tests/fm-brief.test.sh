@@ -845,7 +845,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # text-report instruction instead, so a scout never drives a below-floor Lavish.
 test_scout_lavish_line_follows_presentation_floor() {
   local base label version expect case_dir fakebin brief n=0
-  local hosting='you may host the Lavish review loop yourself'
+  local hosting='lavish-review-lifecycle/SKILL.md'
   local text_only='deliver your findings as a text report without Lavish'
   base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
   while IFS='^' read -r label version expect; do
@@ -860,7 +860,9 @@ test_scout_lavish_line_follows_presentation_floor() {
       || fail "$label: scout scaffold failed"
     brief="$case_dir/home/data/scout-lavish/brief.md"
     if [ "$expect" = hosting ]; then
-      assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
+      assert_grep "$hosting" "$brief" "$label: scout brief did not load the Lavish review lifecycle"
+      assert_grep "same canonical artifact and sole feedback consumer" "$brief" \
+        "$label: scout brief did not preserve the review identity and consumer"
       assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
     else
       assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"

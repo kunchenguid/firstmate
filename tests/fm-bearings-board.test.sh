@@ -14,12 +14,14 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 # A lavish-axi stub that reproduces the shapes verified against the real
-# lavish-axi 0.1.61, because the build's liveness verdict is read from what the
+# lavish-axi 0.1.67, because the build's liveness verdict is read from what the
 # vendor emits. The load-bearing shape is the refusal: opening a session the
 # captain ended from the browser EXITS 0 while reporting `status: user-ended`,
 # and that session is absent from the server's listing. `--reopen` restores it.
-# Markers under lavish-state drive the fixture: `user-ended` makes the next
-# plain open refuse, and `refuse-reopen` makes even --reopen leave it dead.
+# Markers under lavish-state drive the fixture: `user-ended` makes a non-opening
+# inspection report the ended state, and `refuse-reopen` makes the one authorized
+# --reopen leave it dead. Counters prove browser-opening commands are not used
+# for connected updates or post-open verification.
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   # Registered with tests/lib.sh, not with a shell array: make_home is called
@@ -38,8 +40,13 @@ emit() {  # <canonical-file> <status>
   printf '  url: "http://127.0.0.1:4387/session/deadbeef"\n'
   printf '  status: %s\n' "$2"
 }
+count_call() {  # <name>
+  local file="$state/$1-count" count=0
+  [ ! -f "$file" ] || count=$(cat "$file")
+  printf '%s\n' "$((count + 1))" > "$file"
+}
 case "${1-}" in
-  --version) printf '0.1.61\n'; exit 0 ;;
+  --version) printf '0.1.67\n'; exit 0 ;;
   poll)
     # A real blocking listener: it returns only when the trigger appears, so a
     # live owner in these tests is a live process rather than a timing artifact.
@@ -61,7 +68,7 @@ case "${1-}" in
     exit 0
     ;;
   '')
-    if [ -e "$state/end-before-next-list" ]; then
+    if [ -e "$state/end-before-next-list" ] && [ -s "$state/open" ]; then
       : > "$state/open"
       rm -f "$state/end-before-next-list"
     fi
@@ -79,16 +86,27 @@ esac
 file=$1
 shift
 reopen=0
-for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
+no_open=0
+for arg in "$@"; do
+  [ "$arg" != --reopen ] || reopen=1
+  [ "$arg" != --no-open ] || no_open=1
+done
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
+if [ "$no_open" = 1 ]; then
+  count_call no-open
+  if [ -e "$state/user-ended" ]; then emit "$real" user-ended; else emit "$real" opened; fi
+  exit 0
+fi
 if [ -e "$state/user-ended" ] && [ "$reopen" = 0 ]; then
   emit "$real" user-ended
   exit 0
 fi
 if [ -e "$state/refuse-reopen" ]; then
+  count_call reopen
   emit "$real" user-ended
   exit 0
 fi
+if [ "$reopen" = 1 ]; then count_call reopen; else count_call open; fi
 rm -f -- "$state/user-ended"
 printf '%s\n' "$real" > "$state/open"
 emit "$real" opened
@@ -467,7 +485,7 @@ run_lavish_source_id() {  # <home> <artifact>
 }
 
 test_rebuild_is_idempotent_and_does_not_double_arm() {
-  local home data board out records
+  local home data board out records opens
   home=$(make_home rearm)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -481,7 +499,29 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
     || fail "the rebuild did not refresh the board payload in place"
   records=$(find "$home/state/procevent" -name '*.source' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "rebuilding left $records source registrations instead of 1"
-  pass "rebuild refreshes the board in place without double-arming"
+  opens=$(cat "$home/lavish-state/open-count")
+  [ "$opens" = 1 ] || fail "a connected rebuild issued $opens browser opens instead of preserving the existing tab"
+  [ ! -e "$home/lavish-state/reopen-count" ] \
+    || fail "a connected rebuild reopened the existing session"
+  pass "rebuild refreshes the connected board in place without another open or listener"
+}
+
+test_build_resumes_a_disconnected_session_with_one_plain_open() {
+  local home data out
+  home=$(make_home disconnected)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  : > "$home/lavish-state/open"
+
+  out=$(run_board "$home" build "$data") || fail "the disconnected resume failed: $out"
+  assert_contains "$out" "session: opened" \
+    "the disconnected resume did not use its one plain open: $out"
+  [ "$(cat "$home/lavish-state/open-count")" = 2 ] \
+    || fail "the initial presentation plus disconnected resume did not issue exactly two plain opens"
+  [ ! -e "$home/lavish-state/reopen-count" ] \
+    || fail "the disconnected resume incorrectly used reopen"
+  pass "a disconnected board resumes with one plain open and never reopen"
 }
 
 test_build_refuses_a_template_without_exactly_one_slot() {
@@ -547,10 +587,14 @@ test_build_reopens_a_session_the_captain_ended() {
     || fail "the old listener did not receive its terminal result"
   rm -f "$home/lavish-state/poll-trigger"
   end_session_as_captain "$home"
-  out=$(run_board "$home" build "$data") || fail "the rebuild refused a recoverable ended session"
+  out=$(run_board "$home" build --reopen "$data") || fail "the authorized rebuild refused a recoverable ended session"
   rm -f "$home/lavish-state/hold-after-terminal"
   assert_contains "$out" "session: reopened" \
-    "the rebuild did not reopen the ended session: $out"
+    "the authorized rebuild did not reopen the ended session: $out"
+  [ "$(cat "$home/lavish-state/reopen-count")" = 1 ] \
+    || fail "the ended revision issued more than one reopen"
+  [ "$(cat "$home/lavish-state/open-count")" = 1 ] \
+    || fail "the ended revision issued another plain browser open"
   [ ! -e "$home/lavish-state/user-ended" ] \
     || fail "the rebuild reported success while the session was still ended"
   new_pid=$(sed -n '2p' "$claim")
@@ -562,21 +606,48 @@ test_build_reopens_a_session_the_captain_ended() {
   pass "a board build reopens a session the captain ended instead of arming a dead one"
 }
 
-test_build_reopens_when_an_opened_session_ends_before_listing() {
-  local home data out board sid
-  home=$(make_home establish-list-race)
+test_build_leaves_a_user_ended_session_closed_without_revision_intent() {
+  local home data board out sid
+  home=$(make_home ended-no-revision)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
   write_valid_payload "$data"
-  : > "$home/lavish-state/end-before-next-list"
-  out=$(run_board "$home" build "$data") || fail "the raced session build failed: $out"
-  assert_contains "$out" "session: reopened" \
-    "the build trusted an opened response after the server no longer listed it: $out"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
   sid=$(run_lavish_source_id "$home" "$board")
-  [ -s "$home/lavish-state/open" ] || fail "the raced session was not live before arming"
-  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
-    || fail "the replacement session did not receive a live listener"
-  pass "build reopens a session that ends between establish and listing"
+  end_session_as_captain "$home"
+
+  out=$(run_board "$home" build "$data") || fail "the closed update failed: $out"
+  assert_contains "$out" "session: user-ended" \
+    "the update did not preserve the user-ended lifecycle: $out"
+  assert_contains "$out" "updated-closed: $board" \
+    "the update did not report that the revised file remained closed: $out"
+  [ "$(cat "$home/lavish-state/open-count")" = 1 ] \
+    || fail "the closed update issued another plain browser open"
+  [ ! -e "$home/lavish-state/reopen-count" ] \
+    || fail "the closed update reopened without revision intent"
+  ! run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
+    || fail "the user-ended board retained a feedback listener"
+  pass "a user-ended board remains closed unless the build carries revision intent"
+}
+
+test_build_refuses_a_second_open_when_the_session_ends_before_verification() {
+  local home data out rc
+  home=$(make_home establish-list-race)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  : > "$home/lavish-state/end-before-next-list"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the raced session build hid a failed post-open verification: $out"
+  assert_contains "$out" "refusing a second open" \
+    "the raced build did not prohibit redundant browser verification: $out"
+  [ "$(cat "$home/lavish-state/open-count")" = 1 ] \
+    || fail "the raced build issued more than its one authorized browser open"
+  [ ! -e "$home/lavish-state/reopen-count" ] \
+    || fail "the raced build used reopen as browser verification"
+  pass "build refuses instead of issuing a second open after verification fails"
 }
 
 test_build_refuses_to_arm_when_the_session_stays_ended() {
@@ -587,12 +658,13 @@ test_build_refuses_to_arm_when_the_session_stays_ended() {
   # An ended session that will not come back: the build must stop rather than
   # register a poll against it.
   : > "$home/lavish-state/refuse-reopen"
+  : > "$home/lavish-state/user-ended"
   set +e
-  out=$(run_board "$home" build "$data" 2>&1)
+  out=$(run_board "$home" build --reopen "$data" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "build armed a poll on a session that stayed ended: $out"
-  assert_contains "$out" "ended session" "the refusal did not say why: $out"
+  assert_contains "$out" "refusing a second open" "the refusal did not say why: $out"
   sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
   ! run_decisions "$home" binding "$sid" >/dev/null 2>&1 \
     || fail "build bound the board to a session that stayed ended"
@@ -784,9 +856,11 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
+test_build_resumes_a_disconnected_session_with_one_plain_open
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
-test_build_reopens_when_an_opened_session_ends_before_listing
+test_build_leaves_a_user_ended_session_closed_without_revision_intent
+test_build_refuses_a_second_open_when_the_session_ends_before_verification
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
 test_build_drops_decision_cards_whose_subject_already_landed
