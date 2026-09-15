@@ -6,7 +6,8 @@
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipAnimation,
-} from "../../.pi/extensions/lib/fm-calm-working-ship.ts";
+} from "./lib/fm-calm-omp-working-ship.ts";
+import { installCalmOmpPresentation } from "./lib/fm-calm-omp-presentation.ts";
 
 type Component = { render: (width: number) => string[]; invalidate: () => void; dispose?: () => void };
 type UI = {
@@ -36,6 +37,42 @@ export default function calmOmp(omp: ExtensionAPI): void {
   let boat: Component | undefined;
   let requestRender: (() => void) | undefined;
   let warned = false;
+  let presentationDispose: (() => void) | undefined;
+
+  // Older OMP builds do not expose the bundled settings namespace through the
+  // extension API. The live TUI still carries the public display mode on the
+  // todo container; inspect it only through a short-lived widget probe.
+  const probeNativeHidden = (ctx: Context): unknown => {
+    if (!ctx.ui.setWidget) return undefined;
+    let hidden: unknown;
+    let probing = true;
+    const visit = (value: unknown, seen: Set<object>, depth: number): void => {
+      if (!probing || hidden !== undefined || depth > 8 || !value || typeof value !== "object") return;
+      const object = value as Record<string, unknown>;
+      if (seen.has(object)) return;
+      seen.add(object);
+      const mode = object.mode;
+      if (mode && typeof mode === "object" && (mode as Record<string, unknown>).todoContainer === object) {
+        const candidate = (mode as Record<string, unknown>).hideToolActivity;
+        if (typeof candidate === "boolean") { hidden = candidate; return; }
+      }
+      for (const child of Object.values(object)) visit(child, seen, depth + 1);
+    };
+    try {
+      ctx.ui.setWidget(WIDGET_KEY, (tui) => {
+        visit(tui, new Set<object>(), 0);
+        return { render: () => [], invalidate: () => {} };
+      });
+    } catch { /* capability probe only */ }
+    probing = false;
+    try { ctx.ui.setWidget(WIDGET_KEY, undefined); } catch { /* best effort cleanup */ }
+    return hidden;
+  };
+  const nativeHidden = (ctx: Context): unknown => {
+    let hidden: unknown;
+    try { hidden = omp.pi?.settings?.get("display.hideToolActivity"); } catch { hidden = undefined; }
+    return typeof hidden === "boolean" ? hidden : probeNativeHidden(ctx);
+  };
 
   const clearBoat = (): void => {
     if (!boat) return;
@@ -53,12 +90,7 @@ export default function calmOmp(omp: ExtensionAPI): void {
   };
   const syncBoat = (): void => {
     if (!context?.hasUI || !context.ui.setWidget) return;
-    let hidden: unknown;
-    try {
-      hidden = omp.pi?.settings?.get("display.hideToolActivity");
-    } catch {
-      hidden = undefined;
-    }
+    const hidden = nativeHidden(context);
     if (typeof hidden !== "boolean") {
       clearBoat();
       if (!warned) {
@@ -102,6 +134,17 @@ export default function calmOmp(omp: ExtensionAPI): void {
     // Repeated starts in a continuing logical run must not duplicate the clock.
     if (timer !== undefined) return;
     context = ctx;
+    try {
+      ctx.ui.setWidget?.("fm-calm-omp-presentation-probe", (tui) => {
+        try { presentationDispose = installCalmOmpPresentation(tui, () => {
+          return nativeHidden(ctx) === true;
+        }); } catch (error) {
+          if (!warned) { warned = true; ctx.ui.notify(`/calm-omp: advisor/TODO hiding unavailable (${error instanceof Error ? error.message : String(error)}).`, "warning"); }
+        }
+        return { render: () => [], invalidate: () => {} };
+      });
+      ctx.ui.setWidget?.("fm-calm-omp-presentation-probe", undefined);
+    } catch { /* base native hiding remains fully functional */ }
     if (!ctx.hasUI || !ctx.ui.setWidget) return;
     syncBoat();
     timer = setInterval(() => {
@@ -118,7 +161,11 @@ export default function calmOmp(omp: ExtensionAPI): void {
   omp.on?.("agent_end", (event) => {
     if (!event.willContinue) stop();
   });
-  omp.on?.("session_shutdown", stop);
+  omp.on?.("session_shutdown", () => {
+    presentationDispose?.();
+    presentationDispose = undefined;
+    stop();
+  });
 
   omp.registerCommand("calm-omp", {
     description: "Toggle OMP's native tool activity visibility",
@@ -137,11 +184,21 @@ export default function calmOmp(omp: ExtensionAPI): void {
       try {
         ctx.ui.setWidget(WIDGET_KEY, (tui) => {
           // A future asynchronous widget factory must not act after this command.
-          if (probing && tui && typeof (tui as any).getFocused === "function") {
-            const focused = (tui as any).getFocused();
-            if (focused && typeof focused.onToggleToolActivity === "function") {
-              toggle = () => focused.onToggleToolActivity();
-            }
+          if (probing && tui) {
+            const seen = new Set<object>();
+            const visit = (value: unknown): void => {
+              if (toggle || !value || typeof value !== "object" || seen.has(value as object)) return;
+              const object = value as Record<string, unknown>;
+              seen.add(object);
+              if (typeof object.onToggleToolActivity === "function") {
+                toggle = () => (object.onToggleToolActivity as () => void).call(object);
+                return;
+              }
+              for (const child of (Array.isArray(object.children) ? object.children : [])) visit(child);
+            };
+            const focused = typeof (tui as any).getFocused === "function" ? (tui as any).getFocused() : undefined;
+            visit(focused);
+            visit(tui);
           }
           return { render: () => [], invalidate: () => {} };
         });

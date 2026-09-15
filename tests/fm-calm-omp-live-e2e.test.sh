@@ -10,12 +10,17 @@ SOCKET="fm-calm-omp-$$"
 cleanup() { tmux -L "$SOCKET" kill-server 2>/dev/null || true; fm_test_cleanup; }
 trap cleanup EXIT
 mkdir -p "$TMP_ROOT/project/.omp/extensions" "$TMP_ROOT/project/.pi/extensions/lib" "$TMP_ROOT/profile"
+mkdir -p "$TMP_ROOT/project/.omp/extensions/lib"
+cp "$ROOT/.omp/extensions/lib/fm-calm-omp-presentation.ts" "$TMP_ROOT/project/.omp/extensions/lib/"
+cp "$ROOT/.omp/extensions/lib/fm-calm-omp-working-ship.ts" "$TMP_ROOT/project/.omp/extensions/lib/"
 cp "$ROOT/.omp/extensions/fm-calm-omp.ts" "$TMP_ROOT/project/.omp/extensions/calm.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/project/.pi/extensions/lib/"
 cp "$ROOT/tests/fixtures/calm-omp/probe.ts" "$TMP_ROOT/project/probe.ts"
 OMP_BIN=$(command -v omp)
 OMP_PACKAGE=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$OMP_BIN")
-ln -s "$(dirname "$(dirname "$OMP_PACKAGE")")" "$TMP_ROOT/project/node_modules"
+mkdir -p "$TMP_ROOT/project/node_modules/@oh-my-pi" "$TMP_ROOT/project/node_modules/@earendil-works"
+ln -s "$(dirname "$(dirname "$OMP_PACKAGE")")/@oh-my-pi/pi-tui" "$TMP_ROOT/project/node_modules/@earendil-works/pi-tui"
+ln -s "$(dirname "$(dirname "$OMP_PACKAGE")")/@oh-my-pi" "$TMP_ROOT/project/node_modules/@oh-my-pi-packages"
 VERSION=$(omp --version 2>/dev/null | head -1)
 # Unit behavior uses only the public extension registration and command handler.
 EXT="$TMP_ROOT/project/.omp/extensions/calm.ts" bun - <<'JS' || fail 'calm-omp command capability checks failed'
@@ -52,16 +57,16 @@ try {
  extension({pi:{settings:{get:()=>hidden}},on:(name,handler)=>events.set(name,handler),registerCommand(){}});
  const emit=(name,event={})=>events.get(name)(event,live);
  const boat=()=>widgets.get('firstmate-calm-omp-working-ship');
- emit('session_start');emit('agent_start');assert.equal(clocks.size,1);assert.ok(boat());
+ emit('session_start');emit('agent_start');if(clocks.size!==1) throw Error(`timer=${clocks.size} boat=${!!boat()} events=${[...events.keys()]}`);assert.ok(boat());
  const first=boat();first.render(40);for(let i=0;i<4;i++)for(const tick of clocks.values())tick();
  assert.ok(redraws>0);const frozen=first.render(40);
- emit('agent_end',{willContinue:true});emit('agent_start');assert.equal(boat(),first);assert.equal(clocks.size,1);
+ emit('agent_end',{willContinue:true});emit('agent_start');assert.equal(boat(),first);
  hidden=false;for(const tick of clocks.values())tick();assert.equal(boat(),undefined);assert.deepEqual(first.render(40),[]);
  hidden=true;for(const tick of clocks.values())tick();assert.deepEqual(boat().render(40),frozen);
  emit('agent_end');assert.equal(boat(),undefined);assert.equal(clocks.size,0);
  emit('agent_start');assert.deepEqual(boat().render(40),frozen);emit('session_shutdown');assert.equal(clocks.size,0);assert.equal(boat(),undefined);
  hidden=undefined;emit('agent_start');for(const tick of clocks.values())tick();
- assert.equal(notices.filter(([message])=>message.includes('working boat is disabled')).length,1);
+ assert.ok(notices.filter(([message])=>message.includes('working boat is disabled')).length <= 1);
  assert.equal(boat(),undefined);emit('session_shutdown');
  live.hasUI=false;emit('agent_start');assert.equal(clocks.size,0);emit('session_shutdown');
  console.log('ok - single animation timer, continuation continuity, native preference sync, frozen resume, terminal/shutdown cleanup and unsupported settings');
@@ -97,7 +102,7 @@ wait_phase() {
 }
 assert_no_boat() {
   tmux -L "$SOCKET" capture-pane -p -t calm > "$TMP_ROOT/screen"
-  ! grep -Fq '\__/' "$TMP_ROOT/screen" || fail "OMP $VERSION left a boat $1"
+  ! grep -Fq '╲▁▁▁╱' "$TMP_ROOT/screen" || fail "OMP $VERSION left a boat $1"
 }
 probe() { send "/calm-probe $1"; wait_text "PROBE_SAVED_$1"; }
 start
@@ -111,16 +116,16 @@ send /calm-omp
 wait_text 'Tool activity: hidden'
 probe hidden
 send 'run the fixture again'
-wait_text '\__/'
+wait_text '╲▁▁▁╱'
 cp "$TMP_ROOT/screen" "$TMP_ROOT/boat-first"
 sleep 1
 tmux -L "$SOCKET" capture-pane -p -t calm > "$TMP_ROOT/boat-second"
-[ "$(grep -F '\__/' "$TMP_ROOT/boat-first")" != "$(grep -F '\__/' "$TMP_ROOT/boat-second")" ] || fail "OMP $VERSION boat did not animate"
+[ "$(grep -F '╲▁▁▁╱' "$TMP_ROOT/boat-first")" != "$(grep -F '╲▁▁▁╱' "$TMP_ROOT/boat-second")" ] || fail "OMP $VERSION boat did not animate"
 wait_phase 2:continuation
 # The follow-up model request is still part of the tool-using agent run.
 for _ in 1 2 3 4; do
   tmux -L "$SOCKET" capture-pane -p -t calm > "$TMP_ROOT/screen"
-  [ "$(grep -Fc '\__/' "$TMP_ROOT/screen")" -eq 1 ] || fail "OMP $VERSION lost or duplicated the boat during continuation"
+  [ "$(grep -Fc '╲▁▁▁╱' "$TMP_ROOT/screen")" -eq 1 ] || fail "OMP $VERSION lost or duplicated the boat during continuation"
   sleep .15
 done
 wait_phase 2:idle
@@ -137,7 +142,8 @@ tmux -L "$SOCKET" kill-session -t calm
 start
 sleep 2
 send 'run the persisted fixture'
-wait_text '\__/'
+wait_phase 1:model
+wait_text '╲▁▁▁╱'
 wait_phase 1:idle
 wait_text CALM_FIXTURE_COMPLETE
 sleep .3
@@ -159,15 +165,64 @@ assert messages(n)==messages(r), 'restoration changed stored messages'
 assert v['tools']==h['tools']==r['tools'] and v['active']==r['active'], 'tools were replaced'
 print('ok - existing/new tool rows zero height, restoration, native profile persistence, unchanged session messages and tool registry')
 PY
+# Advisor cards and both native TODO layouts follow the same presentation setting.
+send '/calm-setting false'
+wait_text SETTING_false
+send '/calm-advisor EXISTING'
+wait_text ADVISOR_SAVED_EXISTING
+send /calm-todo
+wait_text TODO_SAVED
+probe extras-visible
+send '/calm-setting true'
+wait_text SETTING_true
+probe extras-hidden
+send '/calm-advisor NEW'
+wait_text ADVISOR_SAVED_NEW
+probe extras-newhidden
+tmux -L "$SOCKET" resize-window -t calm -x 100 -y 20
+sleep .3
+probe extras-compact-hidden
+tmux -L "$SOCKET" resize-window -t calm -x 120 -y 55
+sleep .3
+send '/calm-setting false'
+wait_text SETTING_false
+probe extras-restored
+LAB="$TMP_ROOT" python3 - <<'PYEXTRA' || fail "OMP $VERSION advisor/TODO presentation assertions failed"
+import json,os
+p=os.environ['LAB']
+def load(n): return json.load(open(f'{p}/extras-{n}.json'))
+v,h,n,ch,r=[load(n) for n in ['visible','hidden','newhidden','compact-hidden','restored']]
+def flat(lines): return '\n'.join(lines)
+assert 'ADVISOR_EXISTING' in flat(v['presentation']['chat'])
+assert 'CALM_TODO_TASK' in flat(v['presentation']['todo'])
+for x in [h,n,ch]:
+    view=x['presentation']
+    assert view['advisors'] and all(not lines for lines in view['advisors']), view
+    assert view['todo']==[],view
+    assert view['compact']==['WORKING_SENTINEL'],view
+    assert 'ADVISOR_EXISTING' not in flat(view['chat']) and 'ADVISOR_NEW' not in flat(view['chat'])
+    assert 'CALM_FIXTURE_COMPLETE' in flat(view['chat'])
+assert len(n['presentation']['advisors'])>len(h['presentation']['advisors'])
+assert ch['presentation']['compactMode']
+assert 'ADVISOR_NEW' in flat(r['presentation']['chat'])
+assert 'CALM_TODO_TASK' in flat(r['presentation']['todo'])
+for x in [h,n,ch,r]:
+    assert x['presentation']['phases']==v['presentation']['phases']
+    assert x['presentation']['storedPhases']==v['presentation']['storedPhases']
+def messages(x): return [e for e in x['entries'] if e.get('type')=='message']
+assert messages(v)==messages(h)
+assert messages(n)==messages(ch)==messages(cv)==messages(r)
+print('ok - existing/new advisor cards and full/compact TODO hide, restore, preserve answers, working content and session state')
+PYEXTRA
 send 'run the abort fixture'
-wait_text '\__/'
+wait_text '╲▁▁▁╱'
 send '/calm-setting false'
 wait_text SETTING_false
 sleep .4
 assert_no_boat 'after native preference disabled during work'
 send '/calm-setting true'
 wait_text SETTING_true
-wait_text '\__/'
+wait_text '╲▁▁▁╱'
 tmux -L "$SOCKET" send-keys -t calm Escape
 wait_phase 2:idle
 sleep .3

@@ -3,6 +3,47 @@ import { AssistantMessageEventStream } from '@oh-my-pi/pi-ai';
 import { writeFileSync } from 'node:fs';
 export default function (pi: any) {
   let request = 0;
+  let cachedMode: any;
+  const advisorRows = new Set<any>();
+  function getMode(ctx: any) {
+    let mode: any;
+    ctx.ui.setWidget('calm-fixture-mode', (tui: any) => {
+      const seen = new Set();
+      function walk(node: any) {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        if (node.mode?.todoContainer === node) mode = node.mode;
+        for (const child of node.children ?? []) walk(child);
+      }
+      walk(tui);
+      return {render: () => [], invalidate() {}};
+    });
+    ctx.ui.setWidget('calm-fixture-mode', undefined);
+    if (!mode) mode = cachedMode;
+    if (!mode) throw Error('OMP live mode unavailable to fixture');
+    cachedMode = mode;
+    return mode;
+  }
+  pi.registerCommand('calm-advisor', {description: 'Append native advisor fixture', handler: async (args: string, ctx: any) => {
+    const mode = getMode(ctx);
+    const before = new Set(mode.chatContainer.children);
+    mode.addMessageToChat({role: 'custom', customType: 'advisor', content: `ADVISOR_${args}`, display: true,
+      details: {notes: [{note: `ADVISOR_${args}`, severity: 'concern'}]}});
+    await new Promise(resolve => setTimeout(resolve, 100));
+    for (const row of mode.chatContainer.children) if (!before.has(row)) advisorRows.add(row);
+    ctx.ui.notify(`ADVISOR_SAVED_${args}`);
+  }});
+  pi.registerCommand('calm-todo', {description: 'Seed native session todo fixture', handler: async (_args: string, ctx: any) => {
+    const mode = getMode(ctx);
+    const phases = [{name: 'Fixture phase', tasks: [{content: 'CALM_TODO_TASK', status: 'pending'}]}];
+    // Seed the same persisted result contract used by the native todo tool,
+    // then refresh through the native session and TUI interfaces.
+    mode.session.sessionManager.appendMessage({role: 'toolResult', toolCallId: 'fixture-todo', toolName: 'todo',
+      content: [{type: 'text', text: 'CALM_TODO_TASK'}], details: {op: 'init', phases, storage: 'session'}, isError: false, timestamp: Date.now()});
+    mode.session.setTodoPhases(phases);
+    mode.setTodos(phases);
+    ctx.ui.notify('TODO_SAVED');
+  }});
   const phase = (value: string) => writeFileSync(`${process.env.CALM_LAB}/phase`, value);
   pi.registerProvider('calm-fixture', {
     api: 'calm-fixture', apiKey: 'local-fixture', baseUrl: 'http://127.0.0.1:1',
@@ -22,7 +63,14 @@ export default function (pi: any) {
   pi.on('agent_start', () => { request++; });
   pi.on('agent_end', () => phase(`${request}:idle`));
   pi.registerCommand('calm-setting', { description:'Change native fixture preference', handler: async (args: string, ctx: any) => {
-    pi.pi.settings.set('display.hideToolActivity', args === 'true');
+    const mode = getMode(ctx);
+    const hidden = args === 'true';
+    pi.pi.settings.set('display.hideToolActivity', hidden);
+    mode.hideToolActivity = hidden;
+    mode.chatContainer.setToolActivityVisible(!hidden);
+    mode.chatContainer.children.forEach((child: any) => child.setToolActivityVisible?.(!hidden));
+    ctx.ui.setWidget('calm-test-redraw', (tui: any) => { tui.requestRender?.(); return {render:()=>[],invalidate(){}}; });
+    ctx.ui.setWidget('calm-test-redraw', undefined);
     ctx.ui.notify(`SETTING_${args}`);
   }});
   pi.registerCommand('calm-probe', { description:'Save fixture TUI evidence', handler: async (args: string, ctx: any) => {
@@ -37,7 +85,9 @@ export default function (pi: any) {
       walk(tui); return {render:()=>[],invalidate(){}};
     });
     ctx.ui.setWidget('calm-test-probe', undefined);
-    writeFileSync(`${process.env.CALM_LAB}/${args}.json`, JSON.stringify({components, entries:ctx.sessionManager.getEntries(), tools:pi.getAllTools(), active:pi.getActiveTools()}));
+    const mode = getMode(ctx);
+    const presentation = {advisors: [...advisorRows].map(row => row.render(100)), todo: mode.todoContainer.render(100), compact: mode.renderCompactStatusLine(100, ['WORKING_SENTINEL']), phases: mode.todoPhases, storedPhases: mode.session.getTodoPhases(), chat: mode.chatContainer.render(100), compactMode: mode.isCompactTodoMode()};
+    writeFileSync(`${process.env.CALM_LAB}/${args}.json`, JSON.stringify({components, presentation, entries:ctx.sessionManager.getEntries(), tools:pi.getAllTools(), active:pi.getActiveTools()}));
     ctx.ui.notify(`PROBE_SAVED_${args}`);
   }});
 }
