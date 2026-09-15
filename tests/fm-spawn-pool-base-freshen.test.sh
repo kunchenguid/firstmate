@@ -821,7 +821,9 @@ test_unprovable_retained_record_names_its_record_and_route() (
   assert_contains "$out" "$HOME_DIR/state/vanished.meta" "refusal did not name the unprovable record"
   assert_contains "$out" "$pool/2/project" "refusal did not name the recorded copy"
   assert_contains "$out" "recorded native copy is unavailable" "refusal did not carry the resolver reason"
-  assert_contains "$out" "fm-teardown.sh vanished" "refusal did not name the guarded reconciliation route"
+  assert_contains "$out" "restore that copy and project at their recorded paths" "refusal did not name the working remedy"
+  assert_contains "$out" "$HOME_DIR/state" "refusal did not name the owning home's record location"
+  case "$out" in *fm-teardown.sh*) fail "refusal presented teardown as a route for a missing copy" ;; esac
   assert_contains "$out" "do not delete ownership records" "refusal did not warn against deleting the record"
   [ "$(cat "$pool/treehouse-state.json")" = "$before" ] || fail "refusal changed native pool state"
   pass "an unprovable retained record refuses allocation and names its record, copy, reason and route"

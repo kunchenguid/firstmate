@@ -1389,15 +1389,29 @@ fm_treehouse_acquisition_begin() {
     '{pool:$pool,root:$root,holder:$holder}' > "$tmp" && mv "$tmp" "$receipt"
 }
 
-fm_treehouse_acquisition_complete() {
+# A retained receipt must name this exact copy's pool and holder before the
+# operation it recorded may be retired; anything else is inspected, not removed.
+fm_treehouse_acquisition_check() { # <slot> <task-id> [home]
   local slot=$1 id=$2 home=${3:-$FM_HOME} receipt holder
+  FM_TREEHOUSE_ACQUISITION_RECEIPT=
   receipt=$(fm_treehouse_acquisition_receipt "$id" "$home") || return 1
   [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
-  fm_pr_regular_destination_or_absent "$receipt" || return 1
+  fm_pr_regular_destination_or_absent "$receipt" || {
+    echo "REFUSED: Treehouse acquisition receipt $receipt for task $id is not a private regular file; inspect it before launching; no lease or claim was changed" >&2
+    return 1
+  }
   holder=$(fm_treehouse_lease_holder "$id" "$home") || return 1
   jq -e --arg pool "$(dirname "$(dirname "$slot")")" --arg holder "$holder" \
-    '.pool == $pool and .holder == $holder' "$receipt" >/dev/null || return 1
-  rm -f "$receipt"
+    '.pool == $pool and .holder == $holder' "$receipt" >/dev/null || {
+    echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $receipt that does not match $slot under $holder; inspect that exact acquisition before launching; no lease or claim was changed" >&2
+    return 1
+  }
+  FM_TREEHOUSE_ACQUISITION_RECEIPT=$receipt
+}
+
+fm_treehouse_acquisition_complete() {
+  fm_treehouse_acquisition_check "$@" || return 1
+  [ -z "$FM_TREEHOUSE_ACQUISITION_RECEIPT" ] || rm -f "$FM_TREEHOUSE_ACQUISITION_RECEIPT"
 }
 
 # Native status is read through the supported CLI, never written by Firstmate.
@@ -1483,7 +1497,7 @@ fm_treehouse_acquire_preflight() { # <project> <task-id>
             recorded_project=$(fm_meta_get "$meta" project)
             [ -n "$recorded_project" ] || recorded_project=$project
             selection=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-identity.py" "$recorded_project" "$slot" 2>&1) || {
-              echo "REFUSED: $meta records $field=$slot for project $recorded_project, whose native pool cannot be proven (${selection#REFUSED: }); restore that copy and project at their recorded paths, or inspect the exact record in $(dirname "$state") and reconcile it through guarded fm-teardown.sh $(basename "$meta" .meta) before spawning; do not delete ownership records to bypass this refusal" >&2
+              echo "REFUSED: $meta records $field=$slot for project $recorded_project, whose native pool cannot be proven (${selection#REFUSED: }); restore that copy and project at their recorded paths and retry; if they are gone, inspect the exact record in $(dirname "$state") together with its native pool before any manual reconciliation; do not delete ownership records to bypass this refusal" >&2
               return 1
             }
             other_pool=$(printf '%s\n' "$selection" | jq -er '.pool') || return 1

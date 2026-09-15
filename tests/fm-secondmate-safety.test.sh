@@ -577,6 +577,61 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   pass "secondmate spawn resolves home validation and projects from punctuated registry fields"
 }
 
+# A seed whose acquisition was interrupted leaves this id's receipt behind by
+# design. A later spawn onto an explicitly supplied home must judge that receipt
+# before any launch, name it, and leave it in place; a matching receipt retires.
+test_secondmate_spawn_judges_retained_acquisition_receipt_before_launch() {
+  local home sub sub_abs fakebin log receipt out rc
+  home="$TMP_ROOT/receipt-spawn-home"
+  sub="$TMP_ROOT/receipt-spawn-subhome"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  mark_firstmate_home "$sub"
+  printf 'receipted\n' > "$sub/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf -- '- receipted - receipt notes (home: %s; scope: receipts; projects: alpha; added 2026-07-30)' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/receipt-spawn-fake")
+  log="$TMP_ROOT/receipt-spawn-fake/tmux.log"
+  receipt="$home/state/receipted.treehouse-acquisition"
+  jq -n --arg pool "$TMP_ROOT/elsewhere/.treehouse/other-pool" --arg root "$TMP_ROOT/elsewhere" \
+    --arg holder "firstmate:$(cd "$home" && pwd -P):receipted" \
+    '{pool:$pool,root:$root,holder:$holder}' > "$receipt"
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate spawn launched over a mismatched acquisition receipt"
+  assert_contains "$out" "$receipt" "mismatched receipt refusal did not name the receipt"
+  assert_contains "$out" "does not match" "mismatched receipt refusal did not explain the mismatch"
+  assert_present "$receipt" "mismatched receipt was removed by the refusal"
+  assert_absent "$home/state/receipted.meta" "mismatched receipt refusal published a task record"
+  [ ! -s "$log" ] || fail "mismatched receipt refusal reached the terminal: $(cat "$log")"
+
+  rm "$receipt"
+  ln -s "$TMP_ROOT/receipt-spawn-fake/pane.txt" "$receipt"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate spawn launched over an unsafe acquisition receipt"
+  assert_contains "$out" "$receipt" "unsafe receipt refusal did not name the receipt"
+  [ -L "$receipt" ] || fail "unsafe receipt was replaced or removed by the refusal"
+  [ ! -s "$log" ] || fail "unsafe receipt refusal reached the terminal: $(cat "$log")"
+
+  rm "$receipt"
+  jq -n --arg pool "$(dirname "$(dirname "$sub_abs")")" --arg root "$TMP_ROOT" \
+    --arg holder "firstmate:$(cd "$home" && pwd -P):receipted" \
+    '{pool:$pool,root:$root,holder:$holder}' > "$receipt"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "secondmate spawn refused its own matching acquisition receipt: $out"
+  assert_absent "$receipt" "published secondmate spawn retained its matching receipt"
+  assert_grep "home=$sub_abs" "$home/state/receipted.meta" "published secondmate spawn lost its home"
+  pass "secondmate spawn refuses a mismatched or unsafe acquisition receipt before launch and retires a matching one"
+}
+
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings() {
   local row case_name home sub other fakebin log err meta_before
   for row in duplicate-id unterminated-duplicate-id duplicate-home supplied-mismatch metadata-mismatch; do
@@ -2998,6 +3053,7 @@ test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
 test_secondmate_spawn_resolves_punctuated_registry_projects
+test_secondmate_spawn_judges_retained_acquisition_receipt_before_launch
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
