@@ -138,16 +138,50 @@ rm "$SESSION_STATE"
   || fail "missing session state must fail independent and default off"
 pass "missing or invalid frozen session state defaults off"
 
-# --- resolve: default-off omits; enabled mints ------------------------------
+# --- resolve: frozen-off omits; frozen-on mints -----------------------------
+# resolve gates on the FROZEN per-session decision (state/.trace-context-effective
+# bound to state/.lock), never the live config file or FM_TRACE_CONTEXT, so each
+# case seeds a state dir with a lock and an effective record instead of forcing
+# an env override.
 
+RES_ON="$WORK/resolve-on"; RES_OFF="$WORK/resolve-off"
+mkdir -p "$RES_ON" "$RES_OFF"
+printf '303\n' > "$RES_ON/.lock"
+printf '303 on\n' > "$RES_ON/.trace-context-effective"
+printf '303\n' > "$RES_OFF/.lock"
+printf '303 off\n' > "$RES_OFF/.trace-context-effective"
 NOMETA="$WORK/none.meta"
-out=$(fm_trace_context_resolve "$CFG_OFF" "$NOMETA"); rc=$?
-[ -z "$out" ] && [ "$rc" -eq 0 ] || fail "default-off resolve must omit and return 0 (got rc=$rc out='$out')"
-pass "resolve omits the carrier and returns success when the capability is off (byte-identical default)"
 
-out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_OFF" "$NOMETA")
-fm_trace_context_valid "$out" || fail "enabled resolve must mint a valid traceparent: $out"
-pass "resolve mints a valid traceparent when enabled"
+out=$(fm_trace_context_resolve "$RES_OFF" "$NOMETA"); rc=$?
+[ -z "$out" ] && [ "$rc" -eq 0 ] || fail "frozen-off resolve must omit and return 0 (got rc=$rc out='$out')"
+pass "resolve omits the carrier and returns success when the frozen session decision is off (byte-identical default)"
+
+out=$(fm_trace_context_resolve "$RES_ON" "$NOMETA")
+fm_trace_context_valid "$out" || fail "frozen-on resolve must mint a valid traceparent: $out"
+pass "resolve mints a valid traceparent when the frozen session decision is on"
+
+# --- resolve gates on the FROZEN decision, not the live environment ----------
+# The old signature keyed on fm_trace_context_enabled, which every production
+# caller had to defeat with FM_TRACE_CONTEXT=on; a stray on in the spawn
+# environment could then revive telemetry. This negative was inexpressible then:
+# a live FM_TRACE_CONTEXT=on must NOT resolve when the session froze off, has no
+# live lock, or carries a stale-lock record.
+out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$RES_OFF" "$NOMETA"); rc=$?
+[ -z "$out" ] && [ "$rc" -eq 0 ] || fail "FM_TRACE_CONTEXT=on must not override a frozen-off session (rc=$rc out='$out')"
+
+RES_NOLOCK="$WORK/resolve-nolock"
+mkdir -p "$RES_NOLOCK"
+printf '303 on\n' > "$RES_NOLOCK/.trace-context-effective"
+out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$RES_NOLOCK" "$NOMETA"); rc=$?
+[ -z "$out" ] && [ "$rc" -eq 0 ] || fail "FM_TRACE_CONTEXT=on must not resolve without a live session lock (rc=$rc out='$out')"
+
+RES_STALE="$WORK/resolve-stale"
+mkdir -p "$RES_STALE"
+printf '303\n' > "$RES_STALE/.lock"
+printf '999 on\n' > "$RES_STALE/.trace-context-effective"
+out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$RES_STALE" "$NOMETA"); rc=$?
+[ -z "$out" ] && [ "$rc" -eq 0 ] || fail "FM_TRACE_CONTEXT=on must not resolve against a stale-lock session record (rc=$rc out='$out')"
+pass "resolve gates on the frozen session decision: a live FM_TRACE_CONTEXT=on cannot revive a frozen-off, unlocked, or stale-lock session"
 
 # --- secondmate home-session boundary ---------------------------------------
 # fm-spawn launches every Secondmate with the primary session's non-empty frozen
@@ -159,13 +193,13 @@ pass "resolve mints a valid traceparent when enabled"
 PRIMARY_TP='00-abcabcabcabcabcabcabcabcabcabcab-1212121212121212-01'
 saved_tp=${TRACEPARENT-__unset__}
 unset TRACEPARENT
-frozen_off=$(FM_TRACE_CONTEXT=off fm_trace_context_resolve "$CFG_ON" "$WORK/sm-frozen-off.meta")
-[ -z "$frozen_off" ] || fail "a Secondmate launched off must stay disabled even after the config file appears: $frozen_off"
-frozen_on=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_OFF" "$WORK/sm-frozen-on.meta")
-fm_trace_context_valid "$frozen_on" || fail "a Secondmate launched on must stay enabled even while the config file is absent: $frozen_on"
+frozen_off=$(fm_trace_context_resolve "$RES_OFF" "$WORK/sm-frozen-off.meta")
+[ -z "$frozen_off" ] || fail "a Secondmate whose session froze off must stay disabled: $frozen_off"
+frozen_on=$(fm_trace_context_resolve "$RES_ON" "$WORK/sm-frozen-on.meta")
+fm_trace_context_valid "$frozen_on" || fail "a Secondmate whose session froze on must stay enabled: $frozen_on"
 [ "${frozen_on:3:32}" != "${PRIMARY_TP:3:32}" ] || fail "an enabled Secondmate without an ambient carrier must start a new root"
-routed_a=$(TRACEPARENT="$PRIMARY_TP" FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$WORK/sm-routed-a.meta")
-routed_b=$(TRACEPARENT="$PRIMARY_TP" FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$WORK/sm-routed-b.meta")
+routed_a=$(TRACEPARENT="$PRIMARY_TP" fm_trace_context_resolve "$RES_ON" "$WORK/sm-routed-a.meta")
+routed_b=$(TRACEPARENT="$PRIMARY_TP" fm_trace_context_resolve "$RES_ON" "$WORK/sm-routed-b.meta")
 fm_trace_context_valid "$routed_a" || fail "resolving under an ambient TRACEPARENT must still mint a valid carrier (a='$routed_a')"
 fm_trace_context_valid "$routed_b" || fail "resolving under an ambient TRACEPARENT must still mint a valid carrier (b='$routed_b')"
 [ "${routed_a:3:32}" != "${PRIMARY_TP:3:32}" ] && [ "${routed_b:3:32}" != "${PRIMARY_TP:3:32}" ] \
@@ -180,24 +214,24 @@ pass "Secondmate home-session state stays off or on despite later file state; am
 REC_META="$WORK/rec.meta"
 printf 'kind=ship\ntraceparent=%s\nmode=no-mistakes\n' "$VALID" > "$REC_META"
 out=$(TRACEPARENT='00-ffffffffffffffffffffffffffffffff-1111111111111111-01' \
-  FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$REC_META")
+  fm_trace_context_resolve "$RES_ON" "$REC_META")
 [ "$out" = "$VALID" ] || fail "recovery must reuse the recorded traceparent verbatim, ignoring the ambient environment (got '$out')"
 pass "resolve reuses a valid recorded traceparent verbatim on relaunch (stable identity across restarts)"
 
-out=$(fm_trace_context_resolve "$CFG_OFF" "$REC_META")
-[ -z "$out" ] || fail "a disabled home must omit even when a traceparent is already recorded (got '$out')"
-pass "disabling the capability omits the carrier even for a task with a recorded identity"
+out=$(fm_trace_context_resolve "$RES_OFF" "$REC_META")
+[ -z "$out" ] || fail "a frozen-off session must omit even when a traceparent is already recorded (got '$out')"
+pass "a frozen-off session omits the carrier even for a task with a recorded identity"
 
 CORRUPT_META="$WORK/corrupt.meta"
 printf 'traceparent=not-a-valid-traceparent\n' > "$CORRUPT_META"
-out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$CORRUPT_META")
+out=$(fm_trace_context_resolve "$RES_ON" "$CORRUPT_META")
 fm_trace_context_valid "$out" || fail "a corrupt recorded value must be re-minted to a valid one"
 [ "$out" != "not-a-valid-traceparent" ] || fail "a corrupt recorded value must not be reused"
 pass "a corrupt recorded traceparent is re-minted rather than propagated"
 
 # --- durable metadata consistency: one value for record and injection --------
 
-out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA")
+out=$(fm_trace_context_resolve "$RES_ON" "$NOMETA")
 fm_trace_context_valid "$out" || fail "resolve must yield a single valid carrier per call"
 pass "resolve yields exactly one carrier per logical task, so the recorded and injected values are identical by construction"
 
@@ -205,7 +239,7 @@ pass "resolve yields exactly one carrier per logical task, so the recorded and i
 
 fm_trace_context_hex() { return 1; }
 ef_mint=$(fm_trace_context_mint); ef_mint_rc=$?
-ef_res=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); ef_res_rc=$?
+ef_res=$(fm_trace_context_resolve "$RES_ON" "$NOMETA"); ef_res_rc=$?
 # Restore the real entropy source for any later use.
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
@@ -218,7 +252,7 @@ pass "entropy failure omits telemetry safely: mint reports failure, resolve retu
 assert_no_grep 'sleep' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not sleep on the spawn path"
 assert_no_grep 'timeout' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not depend on an external timeout"
 assert_no_grep 'command:' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not run an arbitrary command provider"
-fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
+fm_trace_context_resolve "$RES_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
 pass "the resolver has no sleep/timeout/command hang source and always returns success"
 
 # --- harness/backend/kind independence (code only, comments stripped) ---------
