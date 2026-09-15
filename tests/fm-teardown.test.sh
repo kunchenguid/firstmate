@@ -783,6 +783,58 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# Claude hooks live in state/<id>.claude-settings.json. A project's committed
+# .claude/settings.local.json is the project's own file, so cleanup must leave
+# it in place, while an untracked copy is legacy firstmate wiring from an older
+# spawn that must not keep firing for a dead task in a reused worktree.
+test_teardown_keeps_a_tracked_claude_settings_file() {
+  local case_dir rc wt_head
+  case_dir=$(make_case tracked-claude-settings)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"]}}' > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -f .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project settings"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/state/task-x1.claude-settings.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "tracked-claude-settings: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/wt/.claude/settings.local.json" \
+    "tracked-claude-settings: teardown deleted the project's committed .claude/settings.local.json"
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "tracked-claude-settings: teardown left the worktree dirty: $(git -C "$case_dir/wt" status --porcelain)"
+  assert_absent "$case_dir/state/task-x1.claude-settings.json" \
+    "tracked-claude-settings: teardown kept the per-task claude hook settings"
+  pass "teardown keeps a project's committed .claude/settings.local.json and retires the per-task claude settings"
+}
+
+test_teardown_removes_an_untracked_legacy_claude_hook_file() {
+  local case_dir rc wt_head
+  case_dir=$(make_case legacy-claude-hook)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-claude-hook: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt/.claude/settings.local.json" \
+    "legacy-claude-hook: teardown kept an untracked legacy claude hook file"
+  pass "teardown still removes an untracked legacy claude hook file"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3671,6 +3723,8 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_teardown_keeps_a_tracked_claude_settings_file
+test_teardown_removes_an_untracked_legacy_claude_hook_file
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
