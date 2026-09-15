@@ -13,8 +13,15 @@ const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const REARM_RETRY_LIMIT = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// OpenCode's session.idle carries only a sessionID, and a subagent child session
+// emits its own idle, so an ancestor walk is the only way to tell a captain's
+// session from a delegated one. Bounded because the walk is server-supplied.
+const SESSION_ANCESTOR_LIMIT = 4;
 
 let child = null;
+let activeSessionID = "";
+let idleSequence = 0;
+let activeSequence = 0;
 let armStatus = "idle";
 let retryTimer = null;
 let retryFailures = 0;
@@ -184,6 +191,32 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
+async function resolveCaptainSession(client, sessionID) {
+  let current = sessionID;
+  for (let hop = 0; hop < SESSION_ANCESTOR_LIMIT && current; hop += 1) {
+    let parentID = "";
+    try {
+      parentID = (await client.session.get({ path: { id: current } }))?.data?.parentID ?? "";
+    } catch {
+      return "";
+    }
+    if (!parentID) return current;
+    current = parentID;
+  }
+  return current;
+}
+
+async function noteIdleSession(client, sessionID) {
+  const sequence = ++idleSequence;
+  const resolved = await resolveCaptainSession(client, sessionID);
+  const next = resolved || (!activeSessionID ? sessionID : activeSessionID);
+  if ((resolved || !activeSessionID) && sequence > activeSequence) {
+    activeSessionID = next;
+    activeSequence = sequence;
+  }
+  return next;
+}
+
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
   await client.session.promptAsync({
@@ -333,7 +366,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   retryTimer = timer;
 }
 
-function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
+function spawnArm(paths, client, predecessorArmPid = "") {
   setArmStatus("starting");
   const env = {
     ...process.env,
@@ -396,12 +429,16 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      // Deliver to the session that most recently went idle, not the one that
+      // first armed this watcher: a home can host more than one OpenCode
+      // session, and the captain watches whichever is active.
+      const deliverTo = activeSessionID;
+      const restoration = restoreAfterActionableClose(paths, deliverTo, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
         try {
           const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+          await deliverActionableWake(paths, client, deliverTo, message, result.recovery);
         } finally {
           if (restorationInFlight === restoration) restorationInFlight = null;
         }
@@ -410,7 +447,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
         surfaceFailure(
           paths,
           client,
-          sessionID,
+          deliverTo,
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
       });
@@ -420,7 +457,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("failed");
       return;
     }
-    void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
+    void scheduleRetry(paths, activeSessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
     if (settled) return;
@@ -434,7 +471,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     }
     void scheduleRetry(
       paths,
-      sessionID,
+      activeSessionID,
       client,
       `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
       String(armChild.pid ?? ""),
@@ -450,7 +487,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
-  return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
+  return { status: "spawned", armChild: spawnArm(paths, client, predecessorArmPid) };
 }
 
 function armAttempt(status, armChild, includeArmChild) {
@@ -481,7 +518,11 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {
-    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
+    ensureArmed: async (sessionID, activeClient) => {
+      const sessionClient = activeClient ?? client;
+      const sessionToArm = await noteIdleSession(sessionClient, sessionID);
+      return ensureArm(paths, sessionToArm, sessionClient);
+    },
   };
 
   return {
@@ -489,7 +530,13 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
-      void ensureArm(paths, sessionID, client);
+      // Remember the most recently idle captain session so an actionable wake is
+      // delivered to the session the captain is watching even when another
+      // session in this home armed the watcher first. A subagent child's idle
+      // resolves to the captain session that delegated it, never to the
+      // finished child transcript.
+      const sessionToArm = await noteIdleSession(client, sessionID);
+      void ensureArm(paths, sessionToArm, client);
     },
   };
 };
