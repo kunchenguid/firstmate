@@ -1343,9 +1343,9 @@ A stale-registration pane is never a husk: create, reclaim, presentation recover
 
 Measured 2026-09-15 on Linux x86_64 with Herdr 0.8.2 (`/usr/bin/herdr`, protocol 20) and Codex CLI 0.153.4 (`codex-cli 0.153.4`, the `codex` on `PATH`) in a named `fm-herdr-lab.sh` session.
 The opt-in guard runs real Codex through one trivial turn in a disposable committed git worktree (answering Codex's directory-trust dialog with Enter), quits it orderly with `/quit`, then runs a no-op shell command in the same pane, the shape a Firstmate steering nudge leaves behind an exited worker.
-Herdr re-detects the pane and drops the agent label while keeping the record: `agent get` reads `agent_status` `unknown` with no `agent`, the echoed `pane_id`, and `agent_session` still naming Codex, which is the record the muxr browser-display workers were stranded behind.
+After those steps, `agent get` reads an `agent_info` record with `agent_status` `unknown`, no `agent`, the echoed `pane_id`, and `agent_session` still naming Codex, which is the record the muxr browser-display workers were stranded behind.
 Before the fix that record read `unknown`/`unreadable` and `fm-control.sh <id> relaunch` refused it; it now reads `stale-agent`/`dead`, refuses husk closing, and the relaunch reuses the same pane with the committed candidate intact.
-The same run records that `pane process-info` on 0.8.2 emits `name`, `argv`, and `cmdline` with `argv0` null.
+The same run records that raw `pane process-info` entries on 0.8.2 carry `name`, `argv`, and `cmdline` while omitting `argv0`; the transcript's `jq` projection materializes that missing key as `null`.
 The helper's teardown confirmed the default session's fleet-state tripwire after the run.
 
 ```sh

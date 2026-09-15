@@ -36,6 +36,7 @@ cleanup() {
   local status=$?
   PATH=$HERDR_ORIGINAL_PATH "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=1
   [ -z "$SCRATCH" ] || rm -rf "$SCRATCH"
+  fm_test_cleanup
   exit "$status"
 }
 trap cleanup EXIT
@@ -158,8 +159,8 @@ until shell_only; do
 done
 printf 'shell_only_foreground=%s\n' "$(foreground)"
 
-# Shell output after the exit is what makes Herdr re-detect the pane and drop
-# the agent label while keeping the record.
+# Run the same post-exit shell no-op from the observed reproduction, then wait
+# for the recorded unlabeled-unknown end state.
 lab pane run "$PANE_ID" ':'
 unlabeled_unknown() {
   lab agent get "$PANE_ID" | jq -e --arg pane "$PANE_ID" '
