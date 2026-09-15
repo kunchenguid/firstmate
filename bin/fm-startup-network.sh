@@ -73,12 +73,15 @@
 #        fm-startup-network.sh wait [<seconds>]
 #          Block until the report is published, up to <seconds> (default 120).
 #          For operators and tests only; a session start never waits.
+#        fm-startup-network.sh reap [<generation>]
+#          Reap stale, expired, or superseded workers and their process groups.
 #
 # STATE, all under this home's state/ and gitignored with it:
 #   .startup-network.status   key=value record - generation, lock_pid, state,
-#                             pid, started, finished, rc, locked, phases, and
-#                             whether the report was published. The single
-#                             source of truth for what ran and how it ended.
+#                             pid, identity, pgid, started, finished, rc,
+#                             locked, phases, and whether the report was
+#                             published. The single source of truth for what
+#                             ran and how it ended.
 #   .startup-network.report   the sweep output, byte for byte as
 #                             bin/fm-bootstrap.sh produced it, plus a
 #                             NETWORK_CHECKS: line whenever the stage itself
@@ -182,14 +185,169 @@ delivery_budget() {
 # treated as abandoned no matter what its pid says, which keeps "in progress"
 # from becoming a permanent state.
 worker_alive() {
-  local pid started age
+  local pid started age recorded current
   pid=$(status_get pid)
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
+  recorded=$(status_get identity)
+  if [ -n "$recorded" ]; then
+    current=$(fm_pid_identity "$pid" 2>/dev/null | tr '\r\n' ' ' | sed 's/[[:space:]]*$//') || return 1
+    recorded=$(printf '%s' "$recorded" | tr '\r\n' ' ' | sed 's/[[:space:]]*$//')
+    [ "$current" = "$recorded" ] || return 1
+  fi
   started=$(status_get started)
   age=$(age_of "$started")
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
   [ "$age" -le "$(( $(stage_budget) + 30 ))" ]
+}
+
+# Inspect process group ID for a PID
+worker_pgid() {  # <pid>
+  local pid=$1 pgid
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  printf '%s\n' "$pgid"
+}
+
+# Check if a process identity matches recorded identity
+worker_identity_matches() {  # <pid> <expected_identity>
+  local pid=$1 expected=$2 current
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  [ -n "$expected" ] || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null | tr '\r\n' ' ' | sed 's/[[:space:]]*$//') || return 1
+  expected=$(printf '%s' "$expected" | tr '\r\n' ' ' | sed 's/[[:space:]]*$//')
+  [ -n "$current" ] && [ "$current" = "$expected" ]
+}
+
+# Check if any process remains in the given PGID
+worker_group_alive() {  # <pgid>
+  local pgid=$1
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  kill -0 -- "-$pgid" 2>/dev/null
+}
+
+# Safe termination of a worker and its whole process group.
+# Returns: 0 if successfully terminated or already gone, 1 if verification failed/unsafe to kill
+terminate_worker_group() {  # <pid> <identity> <pgid>
+  local pid=$1 identity=$2 pgid=$3 own_pgid current_pgid i=0
+  case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
+
+  # Verify PID is alive first
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  # Verify identity before signaling
+  if [ -n "$identity" ] && ! worker_identity_matches "$pid" "$identity"; then
+    return 1 # Identity mismatch / PID reuse: do not signal!
+  fi
+
+  # Safety check: do not signal own process group or self
+  own_pgid=$(worker_pgid "$$") || own_pgid=""
+  if [ "$pid" = "$$" ] || { [ -n "$own_pgid" ] && { [ "$pgid" = "$own_pgid" ] || [ "$pid" = "$own_pgid" ]; }; }; then
+    return 1
+  fi
+
+  # Verify pgid of the target process
+  current_pgid=$(worker_pgid "$pid") || current_pgid=""
+  if [ -n "$pgid" ] && [ -n "$current_pgid" ] && [ "$current_pgid" != "$pgid" ]; then
+    return 1
+  fi
+  [ -n "$current_pgid" ] || current_pgid=$pgid
+
+  if [ -n "$current_pgid" ]; then
+    kill -TERM -- "-$current_pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  else
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+
+  # Bounded wait for TERM
+  while [ "$i" -lt 20 ]; do
+    if [ -n "$current_pgid" ]; then
+      worker_group_alive "$current_pgid" || ! kill -0 "$pid" 2>/dev/null || break
+    else
+      kill -0 "$pid" 2>/dev/null || break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+
+  # Escalate to KILL if still alive and identity still matches
+  if kill -0 "$pid" 2>/dev/null || { [ -n "$current_pgid" ] && worker_group_alive "$current_pgid"; }; then
+    if kill -0 "$pid" 2>/dev/null; then
+      if [ -n "$identity" ] && ! worker_identity_matches "$pid" "$identity"; then
+        return 1 # PID reused during escalation
+      fi
+    fi
+    if [ -n "$current_pgid" ]; then
+      kill -KILL -- "-$current_pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    else
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    i=0
+    while [ "$i" -lt 20 ]; do
+      if [ -n "$current_pgid" ]; then
+        worker_group_alive "$current_pgid" || ! kill -0 "$pid" 2>/dev/null || break
+      else
+        kill -0 "$pid" 2>/dev/null || break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
+  fi
+  return 0
+}
+
+# Reap stale, expired, or superseded workers and lingering child process groups.
+reap_stale_workers() {  # [target_pid] [target_identity] [target_pgid]
+  local target_pid=${1:-} target_ident=${2:-} target_pgid=${3:-}
+  local cur_state cur_pid cur_ident cur_pgid started age budget need_kill=0 recorded_gen
+
+  if [ -n "$target_pid" ]; then
+    if [ -z "$target_ident" ] && [ -z "$target_pgid" ]; then
+      recorded_gen=$(status_get generation)
+      [ -n "$recorded_gen" ] && [ "$target_pid" = "$recorded_gen" ] || return 1
+      target_pid=$(status_get pid)
+      target_ident=$(status_get identity)
+      target_pgid=$(status_get pgid)
+      [ -n "$target_pid" ] || return 0
+    fi
+    terminate_worker_group "$target_pid" "$target_ident" "$target_pgid" || true
+    return 0
+  fi
+
+  [ -f "$STATUS_FILE" ] || return 0
+  cur_state=$(status_get state)
+  cur_pid=$(status_get pid)
+  cur_ident=$(status_get identity)
+  cur_pgid=$(status_get pgid)
+  started=$(status_get started)
+
+  case "$cur_pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
+
+  if [ "$cur_state" = running ]; then
+    age=$(age_of "$started")
+    budget=$(stage_budget)
+    case "$age" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$age" -gt "$(( budget + 30 ))" ]; then
+          need_kill=1
+        fi
+        ;;
+    esac
+    if ! kill -0 "$cur_pid" 2>/dev/null; then
+      need_kill=1
+    fi
+    if [ -n "$cur_ident" ] && ! worker_identity_matches "$cur_pid" "$cur_ident"; then
+      need_kill=1
+    fi
+  fi
+
+  if [ "$need_kill" -eq 1 ]; then
+    terminate_worker_group "$cur_pid" "$cur_ident" "$cur_pgid" || true
+  fi
 }
 
 # The exact phase names the digest and the report use, so "what has not been
@@ -212,7 +370,7 @@ worker_covers_request() {  # <locked> <lock-pid>
 }
 
 cmd_start() {  # <locked> <harvest-pid>
-  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
+  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started prev_pid prev_ident prev_pgid identity pgid
   mkdir -p "$STATE" 2>/dev/null || return 1
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
@@ -234,6 +392,9 @@ cmd_start() {  # <locked> <harvest-pid>
     return 0
   fi
 
+  prev_pid=$(status_get pid)
+  prev_ident=$(status_get identity)
+  prev_pgid=$(status_get pgid)
   generation="$(now).$$.$harvest_pid"
   started=$(now)
   phases=probe
@@ -272,9 +433,13 @@ EOF
     --generation "$generation" \
     >/dev/null 2>&1 </dev/null &
   worker_pid=$!
+  identity=$(fm_pid_identity "$worker_pid" 2>/dev/null | tr '\r\n' ' ' | sed 's/[[:space:]]*$//') || identity=""
+  pgid=$(worker_pgid "$worker_pid") || pgid=""
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=$worker_pid
+identity=$identity
+pgid=$pgid
 started=$started
 locked=$locked
 phases=$phases
@@ -290,6 +455,7 @@ EOF
   printf '%s\t%s\n' "$generation" "$harvest_pid" > "$CLAIM_FILE" 2>/dev/null || true
   fm_lock_release "$PUBLISH_LOCK"
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  [ -z "$prev_pid" ] || reap_stale_workers "$prev_pid" "$prev_ident" "$prev_pgid"
   return 0
 }
 
@@ -406,6 +572,8 @@ publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-fil
   write_atomic "$STATUS_FILE" <<EOF || true
 state=$state
 pid=$$
+identity=$(status_get identity)
+pgid=$(status_get pgid)
 started=$started
 finished=$(now)
 rc=$rc
@@ -420,7 +588,7 @@ EOF
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started prev_pid prev_ident prev_pgid identity pgid
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -454,9 +622,16 @@ cmd_run() {  # <locked> <lock-pid> <generation>
       fm_lock_release "$PUBLISH_LOCK"
       return 1
     fi
+    prev_pid=$(status_get pid)
+    prev_ident=$(status_get identity)
+    prev_pgid=$(status_get pgid)
+    identity=$(fm_pid_identity "$$" 2>/dev/null | tr '\r\n' ' ' | sed 's/[[:space:]]*$//') || identity=""
+    pgid=$(worker_pgid "$$") || pgid=""
     write_atomic "$STATUS_FILE" <<EOF || true
 state=running
 pid=$$
+identity=$identity
+pgid=$pgid
 started=$started
 locked=$sweep_locked
 phases=$phases
@@ -464,6 +639,7 @@ generation=$generation
 lock_pid=$lock_pid
 EOF
     fm_lock_release "$PUBLISH_LOCK"
+    [ -z "$prev_pid" ] || reap_stale_workers "$prev_pid" "$prev_ident" "$prev_pgid"
   fi
 
   out=$(mktemp "${TMPDIR:-/tmp}/fm-startup-network.XXXXXX" 2>/dev/null) || return 1
@@ -657,10 +833,11 @@ case "$MODE" in
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
   report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
+  reap) reap_stale_workers "${1:-}" || exit $? ;;
   -h|--help) usage ;;
   *)
     printf 'fm-startup-network: unknown mode: %s\n' "${MODE:-<none>}" >&2
-    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait\n' >&2
+    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait|reap\n' >&2
     exit 2
     ;;
 esac

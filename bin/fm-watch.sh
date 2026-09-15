@@ -450,6 +450,21 @@ inbox_steer_check() {  # <window> <task>
       inbox_steer_escalate_unavailable "$w" "$task" "$rec"
       return 0
       ;;
+    working|busy)
+      # The worker agent is actively executing a turn, tool, or subagent.
+      # Defer routine rapid re-ringing to prevent doorbell storms. If an unhandled
+      # message has been pending past the busy poll interval (default: 300s / 5m),
+      # allow a periodic check/ring to detect and recover hung workers.
+      busy_interval=${FM_INBOX_BUSY_POLL_INTERVAL:-300}
+      last_ring=$(cat "${rec%/*}/.ring-state" 2>/dev/null | awk -F'\t' '{print $3}')
+      case "$last_ring" in ''|*[!0-9]*) last_ring=0 ;; esac
+      now=$(date +%s)
+      if [ "$last_ring" -gt 0 ] && [ "$((now - last_ring))" -lt "$busy_interval" ]; then
+        return 0
+      elif [ "$last_ring" -eq 0 ] && [ "$(fm_path_age "$rec" 2>/dev/null || echo 0)" -lt "$busy_interval" ]; then
+        return 0
+      fi
+      ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then

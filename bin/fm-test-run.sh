@@ -366,6 +366,7 @@ family_for_basename() {
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-dispatch-circuit-breaker.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -402,7 +403,9 @@ family_for_basename() {
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
-    fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
+    fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh|\
+    fm-hygiene.test.sh|fm-decision.test.sh|fm-tool-spool.test.sh|\
+    fm-session-rotate.test.sh|fm-launcher.test.sh)
       printf '%s\n' standalone
       ;;
     *)

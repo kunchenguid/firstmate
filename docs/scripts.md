@@ -9,7 +9,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
-| `fm-sessionstart-run.sh` | Route a native session-open hook to the full digest, a context re-emit, or the nudge |
+| `fm-sessionstart-run.sh` | Route a native session-open hook to the full digest, a context re-emit, a compact delta, or the nudge |
+| `fm-session-rotate.sh` | Check watermarks and manually generate a rotation handoff or rotate a task with `--force` |
+| `fm-decision.sh` | Append, list, or show a task's optional structured decision journal |
+| `fm-tool-spool.sh` | Bound tool output in context and discover full spooled output on demand |
+| `fm-hygiene.sh` | Report workspace hygiene and perform only conservative dead-state cleanup with `--repair` or `--prune` |
+| `fm-launcher.sh` | Launch the primary harness from an allowed firstmate home or checkout, with reserved container paths refused |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-startup-network.sh`  | Run session start's network checks and inactive-outcome scan off its blocking path, retaining reports and durable findings |
@@ -17,6 +22,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print structured fleet snapshot JSON and refresh only its parent-side remote-ledger cache (schema `fm-fleet-snapshot.v1`) |
 | `fm-home-summary-refresh.sh` | Atomically publish this home's structured summary ledger                         |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
+| `fm-fabro-trigger.sh`    | Best-effort registration of ship/scout spawns with the repository's optional Fabro DAG workflow |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
@@ -58,6 +64,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-dispatch-breaker.sh` | Inspect, reset, or check the per-task dispatch start-proof circuit breaker |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |

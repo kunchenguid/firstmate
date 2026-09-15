@@ -34,6 +34,7 @@ Hard rules, in priority order:
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
+   `bin/fm-hygiene.sh` (`firstmate doctor|repair|hygiene|prune`) is report-first: repair may GC a dead-PID `state/.lock` and leftover temp/lease files, and may `git worktree prune` already-missing records, but it never deletes Treehouse slots, Hermes pools, agent worktrees, inboxes, or unlanded files.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
@@ -109,6 +110,9 @@ state/               runtime records and signals; gitignored
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
+  <id>.decisions.jsonl     append-only decision journal (choice, rationale, rejected options, discovered constraints, outcomes); written by bin/fm-decision.sh; never compacted
+  <id>.handoff.md          rotation handoff assembled by bin/fm-session-rotate.sh from brief, git status, and the decision journal; not a second context authority
+  tool-outputs/            spooled tool-output logs from bin/fm-tool-spool.sh; previews stay in working context, full payloads stay on disk
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll

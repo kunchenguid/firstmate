@@ -113,6 +113,10 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   A fresh spawn also proves the worker started before publishing state/<id>.meta,
+#   so a pane that never becomes a live agent stays unwindable and the isolated
+#   worktree can be reused by one automatic retry. bin/fm-dispatch-breaker-lib.sh
+#   owns that start-proof, the per-task circuit breaker, and worktree preservation.
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
@@ -494,6 +498,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-dispatch-breaker-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-breaker-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1212,6 +1218,10 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
+# Dispatch circuit breaker check: refuse if breaker is open
+if [ "$RELAUNCH" -eq 0 ]; then
+  fm_dispatch_breaker_check "$STATE" "$ID" || exit 1
+fi
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -1307,6 +1317,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
   fi
+  fm_backend_check_reachable "$BACKEND" || exit 1
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -2354,6 +2365,17 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+  # Pre-spawn branch hygiene advisory: inform operator if unmerged task branches exist
+  if [ -d "$PROJ_ABS/.git" ]; then
+    _unmerged_fm=$(git -C "$PROJ_ABS" for-each-ref --format='%(refname:short)' refs/heads/fm/ 2>/dev/null || true)
+    if [ -n "$_unmerged_fm" ]; then
+      echo "firstmate: advisory: target project '$(basename "$PROJ_ABS")' has unmerged task branch(es):" >&2
+      for _b in $_unmerged_fm; do
+        echo "  - $_b" >&2
+      done
+      echo "  Ensure 'main' is updated if this task depends on prior landed work." >&2
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -3304,63 +3326,75 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Worktree preservation guard: if breaker record already has a preserved worktree, reuse it.
+  # A reused copy is not a fresh pooled slot, so the later base refresh must not
+  # reset unlanded work that the start-proof path deliberately kept.
+  fm_dispatch_breaker_read "$STATE" "$ID"
+  SPAWN_REUSED_PRESERVED_WORKTREE=0
+  if [ -n "$FM_BREAKER_WORKTREE" ] && [ -d "$FM_BREAKER_WORKTREE" ] && spawn_worktree_isolated "$FM_BREAKER_WORKTREE"; then
+    WT=$FM_BREAKER_WORKTREE
+    SPAWN_REUSED_PRESERVED_WORKTREE=1
+    cd_path=${WT//\'/\'\\\'\'}
+    spawn_send_text_line "$WT_TARGET" "cd -- '$cd_path'"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # The project comparison is physical: spawn_worktree_isolated screens each
-  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
-  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
-  # the very first poll, before the pane has actually moved.
-  #
-  # A single read that already looks isolated is not proof the pane settled
-  # there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path passes spawn_worktree_isolated too (it resolves to a real,
-  # distinct worktree top-level), so accepting it on one read alone silently
-  # records the wrong worktree= in state/<id>.meta. Require two consecutive
-  # reads to agree on the same isolated path before accepting it; a mismatch
-  # just becomes the new candidate rather than resetting the wait, so a pane
-  # that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  #
-  # Every candidate is screened with the isolation guard's own predicate, so a
-  # read of the project itself or of the repository primary checkout is treated
-  # as the transient it is and the wait continues, instead of being adopted and
-  # then refused by the guard.
-  # A candidate the screen rejects is never adopted, so a host where the pane
-  # never reaches an isolated worktree spends the whole window before refusing.
-  # That wait is deliberate - telling a transient apart from a terminal
-  # misconfiguration would need machinery this path does not want - so the
-  # refusal has to be self-explaining instead: carry the last path seen and the
-  # reason it was rejected, and report both at the deadline.
-  candidate=""
-  last_seen=""
-  last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
-      p_real=$(real_path_or_raw "$p")
-      last_reason="it is an isolated worktree, but no second read agreed with it"
-      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-        WT="$p"
-        break
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Target the stable window id, not the name: if the name is ever lost (e.g. an
+    # automatic-rename slips through), display-message -t <bad-name> falls back to the
+    # active client's window, which would misread firstmate's OWN pane path as the
+    # worktree and tangle a hook into the primary checkout. The window id never lies.
+    # The project comparison is physical: spawn_worktree_isolated screens each
+    # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
+    # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
+    # the very first poll, before the pane has actually moved.
+    #
+    # A single read that already looks isolated is not proof the pane settled
+    # there: on some tmux/WSL setups a brand-new window's pane_current_path
+    # transiently reports an unrelated stale path (seen live as another real git
+    # checkout entirely) before the shell catches up with treehouse get's cd. That
+    # stale path passes spawn_worktree_isolated too (it resolves to a real,
+    # distinct worktree top-level), so accepting it on one read alone silently
+    # records the wrong worktree= in state/<id>.meta. Require two consecutive
+    # reads to agree on the same isolated path before accepting it; a mismatch
+    # just becomes the new candidate rather than resetting the wait, so a pane
+    # that is already settled by the first real read only costs the one existing
+    # inter-poll sleep as confirmation, not a whole extra cycle on top.
+    #
+    # Every candidate is screened with the isolation guard's own predicate, so a
+    # read of the project itself or of the repository primary checkout is treated
+    # as the transient it is and the wait continues, instead of being adopted and
+    # then refused by the guard.
+    # A candidate the screen rejects is never adopted, so a host where the pane
+    # never reaches an isolated worktree spends the whole window before refusing.
+    # That wait is deliberate - telling a transient apart from a terminal
+    # misconfiguration would need machinery this path does not want - so the
+    # refusal has to be self-explaining instead: carry the last path seen and the
+    # reason it was rejected, and report both at the deadline.
+    candidate=""
+    last_seen=""
+    last_reason="the pane reported no path"
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$p" ] || last_seen="$p"
+      if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+        p_real=$(real_path_or_raw "$p")
+        last_reason="it is an isolated worktree, but no second read agreed with it"
+        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        fi
+        candidate="$p_real"
+      else
+        candidate=""
+        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      candidate="$p_real"
-    else
-      candidate=""
-      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      sleep 1
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
-    exit 1
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
@@ -3385,7 +3419,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "${SPAWN_REUSED_PRESERVED_WORKTREE:-0}" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -3452,6 +3486,9 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+if [ "$RELAUNCH" -eq 0 ]; then
+  rm -f "$TURNEND" "$STATE_REAL/$ID.progress"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3887,6 +3924,10 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+# Record dispatch attempt in circuit breaker
+if [ "$RELAUNCH" -eq 0 ]; then
+  fm_dispatch_breaker_record_attempt "$STATE" "$ID" "$SPAWN_GEN" "$WT" "$BACKEND" "$HARNESS"
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -3961,13 +4002,35 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
-if [ "$RELAUNCH" -eq 0 ]; then
+
+# Allocation locks stay held until the durable record exists. A fresh spawn
+# delays that publication until worker-start proof succeeds, so a failed start
+# can still unwind without leaving a dangling owner record.
+spawn_release_allocation_locks() {
+  if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+  fi
+  if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+    # The record is published, so this task is now part of the set a teardown
+    # enumerates and locks per task. The set lock is only needed across that
+    # publication.
+    SPAWN_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_SET_LOCK"
+  fi
+}
+
+spawn_publish_fresh_record() {
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
+    return 1
   fi
   SPAWN_META_TMP=
-fi
+  spawn_release_allocation_locks
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+  return 0
+}
 
 # Fuse the backlog In-flight transition into the publication that just created
 # the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
@@ -4026,26 +4089,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  spawn_release_allocation_locks
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
-# The backlog mutation is deliberately the final fallible commit below, so
-# teardown cannot remove a relaunched record while its replacement worker is
+# Fresh publication waits for worker-start proof below so a failed start stays
+# unwindable. The backlog mutation is deliberately the final fallible commit,
+# so teardown cannot remove a relaunched record while its replacement worker is
 # still being delivered, cannot observe or complete a fresh provisional record
 # between its state check and `tasks-axi start`, and a delivery failure cannot
 # follow a committed In-flight transition.
-if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
-  fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
-fi
-if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
-  # The record is published, so this task is now part of the set a teardown
-  # enumerates and locks per task. The set lock is only needed across that
-  # publication.
-  SPAWN_TASK_SET_LOCK_HELD=0
-  fm_lock_release "$SPAWN_TASK_SET_LOCK"
-fi
-"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -4127,7 +4181,7 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
 fi
 
 spawn_record_traceparent() {
-  local meta="$STATE/$ID.meta" status=0 acquired=0
+  local meta="$STATE/$ID.meta" status=0 acquired=0 staged=$SPAWN_META_TMP trace_tmp
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -4136,15 +4190,27 @@ spawn_record_traceparent() {
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
-  SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
-  if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
-     || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+  trace_tmp="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  if [ -n "$staged" ] && [ -f "$staged" ]; then
+    # The durable record is still staged. Rewrite that file in place so a later
+    # start-proof failure can still unwind without publishing, and so this
+    # helper never steals SPAWN_META_TMP out from under the spawn staging path.
+    # A non-writable staged file is the same failure as a non-writable published
+    # record: do not claim a carrier we could not persist.
+    if [ ! -w "$staged" ] \
+       || ! awk -F= '$1 != "traceparent"' "$staged" > "$trace_tmp" \
+       || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$trace_tmp" \
+       || ! mv -f "$trace_tmp" "$staged"; then
+      status=1
+      rm -f "$trace_tmp" 2>/dev/null || true
+    fi
+  elif [ ! -f "$meta" ] || [ ! -w "$meta" ] \
+     || ! awk -F= '$1 != "traceparent"' "$meta" > "$trace_tmp" \
+     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$trace_tmp" \
+     || ! fm_backlog_atomic_transition publish "$trace_tmp" "$meta" "task record" "$STATE"; then
     status=1
-    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+    rm -f "$trace_tmp" 2>/dev/null || true
   fi
-  SPAWN_META_TMP=
   if [ "$acquired" = 1 ]; then
     fm_lock_release "$SPAWN_META_LOCK" || status=1
     SPAWN_META_LOCK_HELD=0
@@ -4279,6 +4345,35 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
+# Proof of worker start happens BEFORE metadata publication on a fresh spawn.
+# A pane that never becomes a live agent must stay unwindable: no durable
+# owner record, the failed endpoint is closed, and the isolated worktree is
+# preserved for one automatic retry. Like the other launch checks, this is a
+# refusal that costs nothing to unwind.
+if [ "$RELAUNCH" -eq 0 ] && [ "${FM_SKIP_WORKER_VERIFY:-0}" != 1 ]; then
+  if ! fm_spawn_verify_worker_started "$BACKEND" "$T" "$ID" "$HARNESS" "$STATE" "$WT"; then
+    start_reason=${FM_SPAWN_START_FAILURE_REASON:-worker-not-started}
+    echo "error: task $ID worker failed to start processing instructions in endpoint $T (reason: $start_reason); preserving worktree $WT" >&2
+    fm_dispatch_breaker_record_outcome "$STATE" "$ID" "$SPAWN_GEN" "failure" "$start_reason" "$WT" 0
+    # Close the failed endpoint so a retry can reuse the preserved worktree.
+    # Orca abort cleanup would also remove that worktree; disarm it first.
+    if [ "$BACKEND" = orca ]; then
+      ORCA_ABORT_CLEANUP=0
+      [ -z "${ORCA_TERMINAL:-}" ] || fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    else
+      fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" 2>/dev/null || true
+    fi
+    exit 1
+  fi
+fi
+
+# Record successful dispatch in circuit breaker only after the durable record
+# exists, so a publish failure cannot leave a closed breaker for a missing task.
+if [ "$RELAUNCH" -eq 0 ]; then
+  spawn_publish_fresh_record || exit 1
+  fm_dispatch_breaker_record_outcome "$STATE" "$ID" "$SPAWN_GEN" "success" "started" "$WT" 0
+fi
+
 # This is the commit point: all endpoint and harness delivery that can reject
 # the spawn has succeeded. Re-read and transition while holding the same
 # per-task lock as metadata publication, then and only then report success.
@@ -4344,6 +4439,11 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+# Trigger Fabro DAG workflow registration for coding tasks if available
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  "$SCRIPT_DIR/fm-fabro-trigger.sh" "$ID" "$WT" "$HARNESS" "$KIND" || true
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

@@ -47,6 +47,12 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Skip worker-start proof in the ordinary spawn suite. Most custom tmux stubs
+# answer pane-path and send-keys only; treating a missing inventory as a
+# failed start would explode those tests. Circuit-breaker coverage opts in by
+# setting FM_SKIP_WORKER_VERIFY=0 around the spawn under test.
+export FM_SKIP_WORKER_VERIFY=1
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
@@ -161,15 +167,40 @@ fm_test_reap_procevent_homes() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
+fm_test_reap_network_workers() {  # <dir>
+  local d=$1 f pid own_pgid
+  [ -n "$d" ] && [ -d "$d" ] || return 0
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+  find "$d" -name ".startup-network.status" -type f 2>/dev/null | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    pid=$(sed -n 's/^pid=//p' "$f" 2>/dev/null)
+    case "$pid" in
+      '' | *[!0-9]* | 0 | 1) ;;
+      *)
+        if [ "$pid" != "$$" ] && [ "$pid" != "$own_pgid" ]; then
+          kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+          kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    if [ -n "$d" ] && [ -d "$d" ]; then
+      fm_test_reap_network_workers "$d"
+      rm -rf "$d"
+    fi
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      if [ -n "$d" ] && [ -d "$d" ]; then
+        fm_test_reap_network_workers "$d"
+        rm -rf "$d"
+      fi
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi

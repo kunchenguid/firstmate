@@ -14,9 +14,10 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--slice] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--slice] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --slice adds vertical feature slicing and execution standards guidance to the scaffold.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -123,6 +124,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+SLICE=0
 MODE=
 MODE_SET=0
 POS=()
@@ -144,6 +146,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --slice) SLICE=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
@@ -347,6 +350,23 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+if [ "$SLICE" -eq 1 ]; then
+IFS= read -r -d '' TASK_SECTION <<'EOF' || true
+# Task
+## Captain's intent
+{TASK}
+
+## Firstmate spec
+{FIRSTMATE_SPEC}
+
+## Execution & Slicing Standards
+1. **Vertical Feature Slicing**: Decompose into thin end-to-end vertical slices (Schema -> Endpoint -> Logic -> Test/Contract). Complete and test each slice before starting the next.
+2. **Scaffold Verification Contracts**: Write or verify automated test contracts alongside implementation.
+3. **Structured Decision Logging**: Record key architectural choices, rejected options, and discovered constraints.
+4. **Context Watermarks**: Protect context with output spooling and rotate when approaching budget.
+EOF
+TASK_SECTION=${TASK_SECTION%$'\n'}
+else
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
 ## Captain's intent
@@ -356,6 +376,7 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+fi
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
