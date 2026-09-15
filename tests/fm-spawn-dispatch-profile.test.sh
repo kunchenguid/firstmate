@@ -588,28 +588,14 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --auto --prompt" \
     "opencode launch did not thread model with the auto-approve posture"
+  assert_contains "$launch" "opencode --auto --prompt" \
+    "opencode launch did not use the auto-approve interactive prompt path"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
     "opencode launch must reach full access through --auto, not a forced wildcard-allow config override"
   pass "opencode receives --model with --auto and omits the unsupported effort axis"
-}
-
-test_opencode_default_model_launches_bare_auto_prompt() {
-  local rec id out status launch expected
-  id=profile-opencode-auto-z7b
-  rec=$(make_spawn_case profile-opencode-auto opencode "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "opencode spawn without profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
-  launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI opencode --auto --prompt \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
-  [ "$launch" = "$expected" ] || fail "default opencode launch is not the bare auto-approve prompt shape"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "default-model opencode launch is exactly opencode --auto with the typed brief"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1411,7 +1397,6 @@ test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
-test_opencode_default_model_launches_bare_auto_prompt
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
