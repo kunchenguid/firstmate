@@ -152,6 +152,10 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
+# One authoritative workspace binding per FirstMate home. This is durable home
+# identity, not a presentation hint, and labels never participate in validation.
+FM_BACKEND_HERDR_HOME_BINDING_FILE="herdr-workspace"
+FM_BACKEND_HERDR_HOME_BINDING_VERSION=1
 
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
@@ -1895,6 +1899,63 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   fi
 }
 
+# The home binding is the sole durable owner of a stable Herdr workspace.
+# Existing homes may be claimed once from an exact launcher pane or, only for
+# initial persistent-home provisioning outside Herdr, from one unambiguous
+# home-label match. Every later spawn validates the binding and live workspace
+# id; labels and workspace order never authorize placement.
+fm_backend_herdr_home_binding_path() { printf '%s/state/%s' "$FM_HOME" "$FM_BACKEND_HERDR_HOME_BINDING_FILE"; }
+fm_backend_herdr_home_binding_field() { local f=$1 k=$2 n; n=$(grep -c "^${k}=" "$f" 2>/dev/null || true); [ "$n" = 1 ] || return 1; grep "^${k}=" "$f" | cut -d= -f2-; }
+fm_backend_herdr_home_binding_snapshot() {
+  local f=$1 k v
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 9 ] || return 1
+  for k in version home session socket workspace_id owner_kind generation anchor_tab_id anchor_pane_id; do
+    v=$(fm_backend_herdr_home_binding_field "$f" "$k") || return 1
+    [ -n "$v" ] || [ "$k" = anchor_tab_id ] || [ "$k" = anchor_pane_id ] || return 1
+    case "$v" in *[[:space:]]*) return 1 ;; esac
+    eval "FM_BACKEND_HERDR_BINDING_${k^^}=\$v"
+  done
+  [ "$FM_BACKEND_HERDR_BINDING_VERSION" = "$FM_BACKEND_HERDR_HOME_BINDING_VERSION" ] || return 1
+  [ "$FM_BACKEND_HERDR_BINDING_OWNER_KIND" = primary ] || [ "$FM_BACKEND_HERDR_BINDING_OWNER_KIND" = secondmate ] || return 1
+  case "$FM_BACKEND_HERDR_BINDING_HOME" in /*) ;; *) return 1 ;; esac
+}
+fm_backend_herdr_home_binding_write() { # <session> <workspace> [<anchor-tab>] [<anchor-pane>]
+  local session=$1 workspace=$2 tab=${3:-} pane=${4:-} f tmp home socket kind
+  f=$(fm_backend_herdr_home_binding_path); home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  socket=${HERDR_SOCKET_PATH:-}
+  [ -n "$socket" ] || socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  kind=primary; [ -f "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] && kind=secondmate
+  mkdir -p "${f%/*}" || return 1; tmp=$(mktemp "${f}.tmp.XXXXXX") || return 1
+  {
+    printf 'version=%s\n' "$FM_BACKEND_HERDR_HOME_BINDING_VERSION"
+    printf 'home=%s\nsession=%s\nsocket=%s\nworkspace_id=%s\nowner_kind=%s\n' "$home" "$session" "$socket" "$workspace" "$kind"
+    printf 'generation=%s.%s\nanchor_tab_id=%s\nanchor_pane_id=%s\n' "$(date +%s)" "${BASHPID:-$$}" "$tab" "$pane"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$f"
+}
+fm_backend_herdr_home_binding_validate_live() { # <session> [<workspace>]
+  local session=$1 expected=${2:-} f home socket presence
+  f=$(fm_backend_herdr_home_binding_path); fm_backend_herdr_home_binding_snapshot "$f" || return 1
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  socket=${HERDR_SOCKET_PATH:-}
+  [ -n "$socket" ] || socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  [ "$FM_BACKEND_HERDR_BINDING_HOME" = "$home" ] && [ "$FM_BACKEND_HERDR_BINDING_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_BINDING_SOCKET" = "$socket" ] \
+    && { [ -z "$expected" ] || [ "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" = "$expected" ]; } || return 1
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID")
+  [ "$presence" = present ]
+}
+fm_backend_herdr_task_binding_validate() { # <meta> <session> <workspace>
+  local meta=$1 session=$2 workspace=$3 home version socket
+  home=$(fm_backend_meta_exact_value "$meta" herdr_home 2>/dev/null || true); [ -z "$home" ] && return 0
+  version=$(fm_backend_meta_exact_value "$meta" herdr_workspace_binding_version 2>/dev/null || true)
+  socket=$(fm_backend_meta_exact_value "$meta" herdr_socket_path 2>/dev/null || true)
+  [ "$version" = "$FM_BACKEND_HERDR_HOME_BINDING_VERSION" ] || return 1
+  fm_backend_herdr_home_binding_validate_live "$session" "$workspace" || return 1
+  [ "$home" = "$FM_BACKEND_HERDR_BINDING_HOME" ] && [ "$socket" = "$FM_BACKEND_HERDR_BINDING_SOCKET" ]
+}
+
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab
 # belongs in inside <session> - the launching agent's own exact workspace when
 # it has one, otherwise this HOME's persistent workspace, created in <cwd> if
@@ -1958,46 +2019,63 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status binding
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
+  binding=$(fm_backend_herdr_home_binding_path)
+  if [ -e "$binding" ] || [ -L "$binding" ]; then
+    fm_backend_herdr_home_binding_validate_live "$session" || {
+      echo "error: authoritative Herdr workspace binding for $FM_HOME is missing, stale, or contradictory; refusing placement" >&2
+      return 3
+    }
+    if [ "$relationship" = launcher-home ]; then
+      fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+      case "$status" in
+        0) [ "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" = "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" ] || {
+          echo "error: launcher workspace contradicts the authoritative Herdr home binding; refusing placement" >&2
+          return 3
+        } ;;
+        2) ;;
+        *) return 3 ;;
+      esac
+    fi
+    FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID
+    printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+    return 0
+  fi
   if [ "$relationship" = launcher-home ]; then
     fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
     case "$status" in
       0)
-        FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+        wsid=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+        fm_backend_herdr_home_binding_write "$session" "$wsid" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" || return 1
+        FM_BACKEND_HERDR_WS_ID=$wsid
+        printf '%s' "$wsid"
         return 0
         ;;
+      1) return 3 ;;
       2) ;;
-      *) return 3 ;;
     esac
   fi
+  # Initial persistent-home provisioning may discover one existing home label;
+  # the exact workspace id is immediately journaled and all later placement
+  # uses that binding rather than the cosmetic label.
   label=$(fm_backend_herdr_workspace_label)
   matches=$(fm_backend_herdr_workspace_find_all "$session")
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
   if [ "$count" -gt 1 ]; then
-    echo "error: ${count} herdr workspaces in session '$session' are labeled '$label' (${matches//$'\n'/ }) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
+    echo "error: multiple Herdr workspaces are labeled '$label' (${matches//$'\n'/ }) during initial home discovery; refusing to guess ownership" >&2
     return 3
   fi
   wsid=${matches%%$'\n'*}
-  if [ -n "$wsid" ]; then
-    FM_BACKEND_HERDR_WS_ID=$wsid
-    printf '%s' "$wsid"
-    return 0
+  if [ -z "$wsid" ]; then
+    out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+    wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+    [ -n "$wsid" ] || return 1
+    FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   fi
-  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
-  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
-  [ -n "$wsid" ] || return 1
+  fm_backend_herdr_home_binding_write "$session" "$wsid" || return 1
   FM_BACKEND_HERDR_WS_ID=$wsid
-  # Herdr seeds a new workspace with one auto-created default tab firstmate
-  # never uses. It is NOT pruned here: at this instant it is the workspace's
-  # ONLY tab, and closing a workspace's last tab deletes the workspace itself
-  # (verified against the real herdr binary) - pruning here would destroy the
-  # workspace we just created. fm_backend_herdr_create_task prunes it instead,
-  # once the first real task tab exists alongside it, and only ever targets
-  # this exact captured tab_id.
-  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   printf '%s' "$wsid"
 }
 

@@ -78,9 +78,21 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
-## Presentation spaces
+## Stable home spaces and ordinary worker tabs
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+Each FirstMate home and persistent SecondMate owns one durable `state/herdr-workspace` binding containing the canonical physical home, Herdr session/socket identity, exact workspace id, owner kind, generation, and optional launcher anchor ids.
+
+A first spawn claims the exact launcher workspace when the process has a verified Herdr parent; initial persistent-home provisioning may instead adopt one unambiguous cosmetic home-label match or create one stable home workspace.
+
+Every later spawn validates the binding against the live session and exact workspace id and refuses stale, missing, contradictory, or ambiguous ownership rather than guessing.
+
+Ordinary workers are created as tabs directly in that exact workspace. New spawns never create disposable worker workspaces and never call `workspace.move`; existing agents and existing presentation journals are not migrated.
+
+Herdr 0.9.0/protocol 22 does not provide verified workspace-scoped Agents filtering or a native FirstMate-home ownership relationship. Agents-view grouping must therefore remain cosmetic; FirstMate uses the durable binding and exact endpoint metadata instead.
+
+## Legacy presentation spaces
+
+Legacy presentation journals and cleanup remain readable for existing tasks, but new spawns no longer create disposable one-task workspaces.
 A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
 An absent file leaves the choice to the version floor below, an empty file and the value `on` are both a deliberate opt-in, values are compared with whitespace stripped and case ignored, and an unrecognized value warns and follows the unconfigured default rather than failing a spawn over a purely visual setting.
 The empty file is the historical presence-based opt-in form, so every home that had already enabled the projection stays enabled with no migration step, and no previously enabled home can be turned off by the default or by the floor.
