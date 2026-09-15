@@ -1258,7 +1258,7 @@ azure_work_is_landed() {
   fi
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
-    || unpushed_patches_are_in_pr_head "$head" all || content_in_default
+    || content_in_commit "$head" || content_in_default
 }
 
 azure_remote_origin_requires_pr() {
@@ -1276,11 +1276,10 @@ if not parsed.scheme and re.fullmatch(r"[^@/:]+@[^/:]+:.*", normalized):
     normalized = "ssh://" + normalized
     parsed = urlsplit(normalized)
 host = (parsed.hostname or "").lower()
-path = parsed.path or ""
 kind = "non-azure"
-if parsed.scheme in ("http", "https") and host == "dev.azure.com" and "/_git/" in path:
+if parsed.scheme in ("http", "https") and host == "dev.azure.com":
     kind = "azure"
-elif parsed.scheme in ("http", "https") and host.endswith(".visualstudio.com") and "/_git/" in path:
+elif parsed.scheme in ("http", "https") and host.endswith(".visualstudio.com"):
     kind = "azure"
 elif parsed.scheme == "ssh" and host in ("ssh.dev.azure.com", "vs-ssh.visualstudio.com"):
     kind = "azure"
@@ -1326,40 +1325,13 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  if [ "${2:-}" = all ]; then
-    unpushed=$(git -C "$WT" log --format=%H "$base..$current" -- 2>/dev/null) || return 1
-  else
-    unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  fi
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
+content_in_commit() {
+  local ref_tree merged_tree ref=$1
+  ref_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$ref_tree" ] || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$ref_tree" ]
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
@@ -1391,7 +1363,7 @@ pr_is_merged() {
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif content_in_commit "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1

@@ -824,7 +824,7 @@ test_no_mistakes_truly_unpushed_refuses() {
 
 test_azure_requires_completed_pr_and_local_containment() {
   local case_dir state head rc expected api_state
-  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-https-port unregistered-https-mixed unregistered-new-ssh unregistered-legacy unregistered-legacy-ssh; do
+  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-https-port unregistered-https-mixed unregistered-https-gitcase unregistered-new-ssh unregistered-legacy unregistered-legacy-ssh; do
     case_dir=$(make_case "azure-$state")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello
@@ -861,6 +861,9 @@ SH
         ;;
       unregistered-https-mixed)
         git -C "$case_dir/wt" remote set-url origin 'https://Dev.Azure.Com/example/Project/_git/repo'
+        ;;
+      unregistered-https-gitcase)
+        git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_GIT/repo'
         ;;
       unregistered-new-ssh)
         git -C "$case_dir/wt" remote set-url origin 'git@ssh.dev.azure.com:v3/example/Project/repo'
@@ -1050,6 +1053,39 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+test_merged_pr_history_with_reapplied_local_change_refuses() {
+  local case_dir rc pr_head local_head tmp
+  case_dir=$(make_case merged-revert-reapply)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "reapplied local change"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_url "$case_dir"
+
+  tmp="$case_dir/_pr-history"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b fm/task-x1
+  printf '%s\n' hello > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  git -C "$tmp" rm -q feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "revert feature"
+  pr_head=$(git -C "$tmp" rev-parse HEAD)
+  git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" fetch -q origin "refs/pull/7/head:refs/fm-test/pr-head"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-revert-reapply: teardown should refuse when final PR content does not contain the local change"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-revert-reapply: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-revert-reapply "$local_head"
+  pass "merged PR history does not authorize a reapplied local change absent from final content"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -3847,6 +3883,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
+test_merged_pr_history_with_reapplied_local_change_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
