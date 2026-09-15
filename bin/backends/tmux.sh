@@ -71,6 +71,34 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
+# fm_backend_tmux_recreate_session: ensure <session> exists so a task window
+# can be created in it, for the recovery case where the endpoint went missing
+# because the WHOLE session (or the whole server) is gone, not just the task's
+# window. Creating the session is what separates that shape from a missing
+# window in a live session: fm_backend_tmux_create_task can only add a window
+# to a session that already exists, and `tmux new-session -d` also starts the
+# server when no server is running - the other way a recorded endpoint reads
+# missing.
+#
+# Idempotent by design: an existing session is left exactly as it is, so the
+# common missing-window shape recreates nothing and this is a no-op. The
+# session is created DETACHED and with no command, so it holds only an
+# ordinary shell; the task's own window is still created by
+# fm_backend_tmux_create_task, which stays the single owner of task-window
+# creation and of pinning the fm-<id> name.
+#
+# Callers must pass a session name already proved to belong to this task by
+# fm_backend_validate_task_endpoint, which is what refuses a recorded endpoint
+# string that does not parse as <session>:fm-<id>.
+fm_backend_tmux_recreate_session() {  # <session> <proj-abs>
+  local ses=$1 proj_abs=$2
+  tmux has-session -t "=$ses" 2>/dev/null && return 0
+  tmux new-session -d -s "$ses" -c "$proj_abs" 2>/dev/null || {
+    echo "error: could not recreate tmux session $ses" >&2
+    return 1
+  }
+}
+
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
