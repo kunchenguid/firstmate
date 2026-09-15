@@ -1,0 +1,9 @@
+{
+  "name": "firstmate-calm",
+  "version": "1.0.0",
+  "description": "Firstmate Calm for Claude Code: the sailboat working animation and conversation-only transcript presentation, sharing the per-home config/calm preference with the Pi Calm extension. Its hooks module loads only while Claude Code's default-off CLAUDE_CODE_ENABLE_FUNCTION_HOOKS early-access flag is on and the mod is a complete no-op otherwise.",
+  "author": {
+    "name": "Firstmate",
+    "url": "https://github.com/kunchenguid/firstmate"
+  }
+}

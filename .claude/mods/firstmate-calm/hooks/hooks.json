@@ -1,0 +1,4 @@
+{
+  "description": "Firstmate Calm hooks module: loads only under CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 and registers /calm itself",
+  "modules": ["./register.ts"]
+}
