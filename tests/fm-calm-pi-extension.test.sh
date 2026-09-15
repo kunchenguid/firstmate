@@ -2369,8 +2369,9 @@ const ESC = "\u001b";
 const BLUE = `${ESC}[34m`;
 const CYAN = `${ESC}[36m`;
 const YELLOW = `${ESC}[33m`;
+const RED = `${ESC}[31m`;
 const RESET = `${ESC}[39m`;
-const SAIL = "◢│◣";
+const SAIL = "▸│◣";
 const HULL = "╲▁▁▁╱";
 const WAVE_BARS = "▁▂▃▄";
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
@@ -2507,7 +2508,7 @@ const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
       const codes = row.match(new RegExp(`${ESC}\\[[0-9;]*m`, "g")) ?? [];
       for (const code of codes) {
         check(
-          code === BLUE || code === CYAN || code === YELLOW || code === RESET,
+          code === BLUE || code === CYAN || code === YELLOW || code === RED || code === RESET,
           `non-standard ANSI escape ${JSON.stringify(code)} in ${JSON.stringify(row)}`,
         );
       }
@@ -2524,11 +2525,15 @@ const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
     const leading = sailRow.slice(0, sailRow.indexOf(ESC));
     check(/^ *$/.test(leading), `sail row padding was colored: ${JSON.stringify(leading)}`);
 
-    // The sail and hull edges are yellow, while zero-height blue water remains visible
-    // through all three hull-interior cells.
+    // The smaller left sail and mast are yellow, the larger right sail is red, and
+    // zero-height blue water remains visible through all three hull-interior cells.
     check(
-      sailRow.includes(`${YELLOW}${SAIL}${RESET}`),
-      `sail was not a closed yellow run: ${JSON.stringify(sailRow)}`,
+      sailRow.includes(`${YELLOW}▸│${RESET}${RED}◣${RESET}`),
+      `sail did not keep its restrained asymmetric colors: ${JSON.stringify(sailRow)}`,
+    );
+    check(
+      visibleWidth("▸") === 1 && visibleWidth(SAIL) === 3,
+      "the neutral-width smaller sail broke the three-cell sprite",
     );
     check(
       waterRow.includes(`${YELLOW}╲${RESET}${BLUE}▁▁▁${RESET}${YELLOW}╱${RESET}`),
@@ -3206,7 +3211,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
-  pass "Pi Calm working ship keeps its centered two-row Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow/red with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step
@@ -3863,22 +3868,25 @@ JS
   done
   cp "$working_snapshot" "$boat_frame_one"
   assert_contains "$(cat "$boat_frame_one")" '╲▁▁▁╱' "Calm did not show the working ship during a real provider wait"
-  assert_contains "$(cat "$boat_frame_one")" '◢│◣' "the working ship lost its centered sail"
+  assert_contains "$(cat "$boat_frame_one")" '▸│◣' "the working ship lost its centered asymmetric sail"
   assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
   boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
   boat_hull_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
-  boat_sail_column=$(awk 'index($0,"◢│◣"){print index($0,"◢│◣"); exit}' "$boat_frame_one")
+  boat_sail_column=$(awk 'index($0,"▸│◣"){print index($0,"▸│◣"); exit}' "$boat_frame_one")
   [ "$boat_sail_column" -eq $((boat_hull_column + 1)) ] \
     || fail "the working ship sail was not centered over its five-cell hull"
   assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
   printf '%s\n' "$boat_hull_line" | grep -Eq '[▁▂▃▄]' \
     || fail "the working ship rendered no low waveform"
-  # Standard ANSI colors: blue troughs, cyan crests, yellow boat, no RGB/256 escapes.
+  # Standard ANSI colors: blue troughs, cyan crests, yellow hull/left sail, red
+  # right sail, and no RGB/256 escapes.
   tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
   boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
+  boat_sail_line=$(grep -F '▸' "$boat_color_snapshot" | head -1)
   [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
+  [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship sail"
   case "$boat_color_line" in
     *'[34m'*) : ;;
     *) fail "the trough was not rendered with standard ANSI blue" ;;
@@ -3889,9 +3897,13 @@ JS
   esac
   case "$boat_color_line" in
     *'[33m'*) : ;;
-    *) fail "the boat was not rendered with standard ANSI yellow" ;;
+    *) fail "the hull was not rendered with standard ANSI yellow" ;;
   esac
-  case "$boat_color_line" in
+  case "$boat_sail_line" in
+    *'[33m'*'[31m'*) : ;;
+    *) fail "the asymmetric sail did not render yellow before standard ANSI red" ;;
+  esac
+  case "$boat_color_line$boat_sail_line" in
     *'[38;2;'*|*'[38;5;'*|*'[9'[0-9]'m'*) fail "the working ship used a non-standard color escape" ;;
     *) : ;;
   esac
@@ -4022,10 +4034,10 @@ JS
   # period in this same Pi session can prove freeze/resume continuity.
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
   boat_freeze_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_freeze_snapshot")
-  boat_freeze_sail=$(grep -F '◢│◣' "$boat_freeze_snapshot" | tail -1 || true)
+  boat_freeze_sail=$(grep -F '▸│◣' "$boat_freeze_snapshot" | tail -1 || true)
   case "$boat_freeze_sail" in
-    *'◢│◣'*) boat_freeze_sail='◢│◣' ;;
-    *) fail "could not read the freeze-frame centered sail" ;;
+    *'▸│◣'*) boat_freeze_sail='▸│◣' ;;
+    *) fail "could not read the freeze-frame centered asymmetric sail" ;;
   esac
   [ -n "$boat_freeze_column" ] && [ "$boat_freeze_column" -gt 1 ] \
     || fail "freeze frame never left the left edge (column '${boat_freeze_column:-empty}')"
@@ -4063,9 +4075,9 @@ JS
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
     if grep -Fq '╲▁▁▁╱' "$boat_resume_snapshot"; then
       boat_resume_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resume_snapshot")
-      boat_resume_sail=$(grep -F '◢│◣' "$boat_resume_snapshot" | tail -1 || true)
+      boat_resume_sail=$(grep -F '▸│◣' "$boat_resume_snapshot" | tail -1 || true)
       case "$boat_resume_sail" in
-        *'◢│◣'*) boat_resume_sail='◢│◣' ;;
+        *'▸│◣'*) boat_resume_sail='▸│◣' ;;
       esac
       break
     fi

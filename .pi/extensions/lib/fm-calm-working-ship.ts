@@ -28,9 +28,13 @@
 // applied on the first resumed frame through the same clamp path.
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
-// The three-cell sail is centered over a five-cell hull. The hull's inner cells retain
-// zero-height water glyphs instead of interrupting the trough beneath the boat.
-const SAIL = "◢│◣";
+// The asymmetric three-cell sail is centered over a five-cell hull. The narrow-width
+// small triangle keeps the yellow left sail lighter than the full red right sail.
+// The hull's inner cells retain zero-height water glyphs instead of interrupting the trough.
+const LEFT_SAIL = "▸";
+const MAST = "│";
+const RIGHT_SAIL = "◣";
+const SAIL = `${LEFT_SAIL}${MAST}${RIGHT_SAIL}`;
 const HULL_LEFT = "╲";
 const HULL_WATER = "▁▁▁";
 const HULL_RIGHT = "╱";
@@ -52,6 +56,7 @@ const WAVE_TROUGH_RADIUS = 5;
 const BLUE = "\u001b[34m";
 const CYAN = "\u001b[36m";
 const YELLOW = "\u001b[33m";
+const RED = "\u001b[31m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
@@ -204,6 +209,8 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   };
 
   const boat = (text: string): string => `${YELLOW}${text}${RESET}`;
+  const sail = (): string =>
+    `${YELLOW}${LEFT_SAIL}${MAST}${RESET}${RED}${RIGHT_SAIL}${RESET}`;
   const hull = (): string =>
     `${boat(HULL_LEFT)}${BLUE}${HULL_WATER}${RESET}${boat(HULL_RIGHT)}`;
 
@@ -260,12 +267,12 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
         // Too narrow for the hull: the sail alone rides inside the water row.
         frame = [
           water(0, position, hullCenter) +
-            boat(SAIL) +
+            sail() +
             water(position + SAIL_WIDTH, width - position - SAIL_WIDTH, hullCenter),
         ];
       } else {
         frame = [
-          " ".repeat(position + SAIL_OFFSET) + boat(SAIL),
+          " ".repeat(position + SAIL_OFFSET) + sail(),
           water(0, position, hullCenter) +
             hull() +
             water(position + HULL_WIDTH, width - position - HULL_WIDTH, hullCenter),
