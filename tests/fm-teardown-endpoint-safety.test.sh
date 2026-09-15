@@ -540,6 +540,43 @@ test_cross_home_pool_slot_collision_refuses() {
   pass "fm-teardown: a pool slot held by another firstmate home is never returned"
 }
 
+# The collision the record scan alone cannot resolve: an old dead task record
+# and the replacement that took its slot both name the same path. The scan sees
+# two records and would refuse, but the slot's own owner claim names the
+# replacement - positive proof that the old record is the stale one - so the
+# stale record's own cleanup must proceed with every slot step skipped.
+test_stale_record_claiming_collision_with_its_replacement_finishes_cleanup() {
+  local dir id=stale-task other=replacement-task worker rc
+  dir=$(make_case slot-collision-resolved-by-claim)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+  # The replacement task is live in the slot right now (staged in this shell so
+  # the background worker outlives this function's command substitutions).
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of a stale record whose slot claim names the replacement refused: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the replacement task's live worker"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the replacement task's record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "collision resolved by the slot claim"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a slot claim naming the replacement lets the stale record's cleanup finish"
+}
+
 test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
@@ -983,6 +1020,7 @@ test_isolated_tmux_invalid_and_valid_cleanup
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
+test_stale_record_claiming_collision_with_its_replacement_finishes_cleanup
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down

@@ -73,6 +73,7 @@ Also report verdict captain for:
 - anything destructive, irreversible, or security-sensitive.
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
 Keep an unchanged fleet review silent as instructed above.
+A routine summary that repeats the same task's most recent routine outcome is filtered before MAIN sees it, so an unchanged state is reported once and reaches MAIN once; phrase any real change distinctly enough to stand as new evidence.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 

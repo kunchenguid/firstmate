@@ -446,6 +446,35 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Pi project trust
+
+Verified 2026-09-15 on Pi 0.85.1 on macOS arm64.
+Pi gates project-local settings, resources, extensions, and `.agents/skills` behind project trust, and asks on interactive startup in a directory with no saved decision, which every fresh task worktree and secondmate home is (`docs/pi-supervision-branch.md` records the observed wedge: a scout that stopped at the dialog before reading its brief).
+The control is `--approve`, the CLI's documented per-run trust override; a probe for the flag refuses the spawn rather than launching without it, and `bin/fm-spawn.sh` carries it on every Pi and Pi-signed launch.
+The flag's effect was driven against the real CLI in a genuinely fresh `/tmp` directory whose ancestors carry no saved `~/.pi/agent/trust.json` decision, with a project extension that writes a marker only once Pi loads project resources; the same decision the interactive dialog gates.
+
+```sh
+cd <fresh-tmp-dir> && FM_TRUST_PROBE_MARKER=<marker> pi --print --approve --no-session \
+  --no-context-files --model <model> --thinking low "Reply with exactly OK"
+```
+
+```text
+marker present (project resources trusted)
+OK
+```
+
+The same run without `--approve`, under the default `defaultProjectTrust: "ask"`, reached the model but wrote no marker, so the flag is the control and not incidental.
+With `defaultProjectTrust: "always"` a no-flag run legitimately trusts too, which is why the guard checks the configured default before asserting that half.
+
+The live guard is the refresh command, and it reports the Pi version it exercised:
+
+```sh
+FM_LIVE=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+`tests/fm-spawn-dispatch-profile.test.sh` pins the portable half: a Pi or Pi-signed launch carries `--approve`, and a resolved executable that does not advertise it refuses the spawn before any endpoint, record, or launch command exists.
+The existing interactive live arm in the same guard already launches Pi with `--approve` and asserts its project extensions load, so the launch flag and the live behavior are covered together.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

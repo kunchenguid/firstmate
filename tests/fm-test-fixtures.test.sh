@@ -28,7 +28,7 @@ test_git_config_isolation() (
   cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
   cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
-  fm_fake_exit0 "$fakebin" pi
+  fm_fake_pi "$fakebin" pi
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -eu

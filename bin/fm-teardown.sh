@@ -95,7 +95,14 @@
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
 # never the other task's claim. Skipping the inspection discards nothing of this
 # task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
+# the pool handed the slot on. The claim is read BEFORE the record-exclusivity
+# scan below, because an old dead record and the replacement that took its slot
+# both name the same path: the claim names the replacement, which is exactly the
+# positive proof that the old record is stale, so its cleanup proceeds (slot
+# steps skipped) instead of refusing on the collision. Only a record that still
+# owns its slot (claim `mine` or absent) can be part of a genuine live
+# collision, and that state keeps the exclusivity refusal.
+# Refusing instead would strand the record, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
@@ -2760,11 +2767,14 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    # Same ordering rule as the top-level teardown: a slot claim naming another
+    # task proves this child record is stale, so the record-exclusivity scan
+    # must not refuse in its place.
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1 ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -3061,8 +3071,16 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+# The slot's own owner claim is consulted FIRST. It is the only positive proof
+# of who currently holds the slot, so when it names another task this record is
+# the stale one and every slot-owning check - including the record-exclusivity
+# refusal below - must not fire. Only a record that still owns its slot (claim
+# `mine` or absent) can be a live collision worth refusing; in that state the
+# record scan still runs and still refuses.
 require_owned_task_worktree_slot || exit 1
+if teardown_owns_worktree; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
