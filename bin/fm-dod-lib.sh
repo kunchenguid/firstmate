@@ -289,7 +289,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), copy the structured return's exact run ID into the producer-owned terminal line, append \`done [run=<id>]: PR {url} checks green\`, and stop. If you report a terminal no-mistakes failure instead, use \`failed [run=<id>]: {failure}\`. You are finished.
 EOF
       ;;
     *)

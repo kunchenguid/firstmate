@@ -948,7 +948,7 @@ SH
   out=$(run_real_reconcile "$MATE")
   [ -n "$out" ] || fail "unknown secondmate endpoint blocked authoritative gate reconciliation"
 
-  write_child "$MATE" duplicate 'done: completed delivery'
+  write_child "$MATE" duplicate 'done [run=delivered-run]: completed delivery'
   printf 'backend=zellij\n' >> "$MATE/state/duplicate.meta"
   age "$MATE/state/duplicate.meta"
   mkdir -p "$MATE/projects/duplicate"
@@ -956,10 +956,13 @@ SH
   git -C "$MATE/projects/duplicate" checkout -q -b fm/duplicate
   git -C "$MATE/projects/duplicate" commit -q --allow-empty -m initial
   head=$(git -C "$MATE/projects/duplicate" rev-parse HEAD)
-  # Reboot recovery sees the terminal ledger and completed run together, with
-  # no prior periodic observation to lend the receipt a run id.
+  # Reboot recovery sees the producer-tagged terminal ledger and completed run
+  # together, with no prior periodic observation. The receipt copies the tag
+  # rather than guessing identity from this publication-time state read.
   printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
   run_real_reconcile "$MATE" >/dev/null
+  grep -q '^run_id=delivered-run$' "$MATE/state/terminal-outcomes/"*.reported \
+    || fail "the terminal producer's run identity was not durable in its receipt"
   [ "$(grep -c 'child duplicate done:' "$MAIN/state/mate.status")" = 1 ] \
     || fail "the ledger and completed run published one delivery twice: $(cat "$MAIN/state/mate.status")"
   [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status" || true)" = 0 ] \
@@ -967,7 +970,7 @@ SH
   printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
   run_real_reconcile "$MATE" >/dev/null
   [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status")" = 1 ] \
-    || fail "a genuinely newer terminal run was hidden by the ledger receipt: $(cat "$MAIN/state/mate.status")"
+    || fail "a genuinely newer terminal run was hidden by the producer-owned ledger receipt: $(cat "$MAIN/state/mate.status")"
   # A reused task id cannot inherit the previous incarnation's active observer,
   # and another branch's run cannot be reported as this task's decision.
   printf 'spawn_gen=reused-task\n' >> "$MAIN/state/child.meta"

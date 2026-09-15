@@ -65,10 +65,11 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#      Active/parked records also require a successful bounded daemon probe;
-#      unavailable execution reports unknown, never a completed task or a
-#      license to relaunch. Full run-step detail includes the attributed run id
-#      and parked findings fingerprint so observers distinguish replacement
+#      Active records also require a successful bounded daemon probe; unavailable
+#      execution reports unknown, never a completed task or a license to relaunch.
+#      A persisted parked gate remains authoritative through daemon loss because
+#      its durable findings still require a decision. Full run-step detail includes
+#      the attributed run id and parked findings fingerprint so observers distinguish
 #      runs and changed decisions without treating elapsed time as an event.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
@@ -798,15 +799,13 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   # A persisted active row is not proof that its executor survived a reboot.
-  # An unavailable daemon makes that evidence unverified, never a task failure.
-  case "$RUN_STATE" in
-    working|parked)
-      if nm_daemon_probe_down; then
-        RUN_STATE=unknown
-        RUN_DETAIL="no-mistakes daemon unreachable; attributed run requires recovery"
-      fi
-      ;;
-  esac
+  # An unavailable daemon makes working evidence unverified, never a task
+  # failure. A persisted parked gate remains authoritative: its durable findings
+  # still require the recorded decision even while execution is unavailable.
+  if [ "$RUN_STATE" = working ] && nm_daemon_probe_down; then
+    RUN_STATE=unknown
+    RUN_DETAIL="no-mistakes daemon unreachable; attributed run requires recovery"
+  fi
   if [ "$RUN_SOURCE" = full ]; then
     run_id=$(strip_quotes "$(nm_field id)")
     [ -z "$run_id" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $run_id"

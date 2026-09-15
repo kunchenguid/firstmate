@@ -73,8 +73,9 @@
 # When a terminal ledger append races just after the inactive path's final read,
 # ledger_claim binds that one ledger fingerprint to the already-delivered
 # inactive receipt so the two publishers cannot report one completion twice.
-# A ledger receipt records the exact run id only when its bounded
-# publication-time read binds the same terminal outcome.
+# A no-mistakes terminal producer persists its exact run identity in the ledger
+# line's `[run=<id>]` tag. The ledger receipt copies that identity and never
+# infers it from a later current-state read that may already describe another run.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -200,8 +201,8 @@ record_field_set() {
   mv -f "$tmp" "$record"
 }
 
-ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head]
-  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} tmp
+ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head] [run-id]
+  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} run_id=${10:-} tmp
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -228,6 +229,7 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
     printf 'created_epoch=%s\n' "$(reconcile_now)"
     printf 'notice_emitted=0\n'
     [ -z "$status_head" ] || printf 'status_head=%s\n' "$status_head"
+    [ -z "$run_id" ] || printf 'run_id=%s\n' "$run_id"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$RECORD_PENDING" || { rm -f "$tmp"; return 1; }
@@ -412,10 +414,11 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line run_id recorded_run_id
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line run_id
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
+  run_id=$(status_line_run_id "$last" 2>/dev/null || true)
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
@@ -423,8 +426,11 @@ report_child_ledger_locked() { # <id> <meta>
     | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
   predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
-  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" "" "$run_id" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  if [ -n "$run_id" ] && [ "$(record_value "$RECORD_PENDING" run_id)" != "$run_id" ]; then
+    record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
+  fi
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
@@ -432,11 +438,6 @@ report_child_ledger_locked() { # <id> <meta>
     return 0
   elif [ "$?" -eq 2 ]; then
     return 1
-  fi
-  recorded_run_id=$(record_value "$RECORD_PENDING" run_id)
-  if [ -z "$recorded_run_id" ]; then
-    run_id=$(delivered_run_id "$id" "$state" 2>/dev/null || true)
-    [ -z "$run_id" ] || record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
   fi
   note=$(clean_field "$(status_line_note "$last")")
   mode=$(clean_field "$(meta_field "$meta" mode)")
@@ -552,20 +553,6 @@ observation_run_id() { # <task> <incarnation>
   run_id_from_state_line "$line"
 }
 
-# Bind a ledger delivery to a run only when the authoritative current-state
-# reader reports the same terminal outcome.
-# The one-second read happens once per new receipt and never blocks delivery
-# when the run is absent, active, ambiguous, or unreadable.
-delivered_run_id() { # <task> <done|failed>
-  local task=$1 state=$2 line
-  line=$(fm_run_timed 1 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
-  case "$state|$line" in
-    'done|state: done '*|'failed|state: failed '*) ;;
-    *) return 1 ;;
-  esac
-  run_id_from_state_line "$line"
-}
 
 claim_ledger_report_for_run() { # <task> <incarnation> <state> <run-id>
   local task=$1 incarnation=$2 state=$3 run_id=$4 record key

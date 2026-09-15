@@ -691,6 +691,28 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+# A reboot can remove the daemon while leaving a complete decision record.
+# Execution is unavailable, but the persisted gate and findings remain the
+# authoritative decision rather than becoming a generic recovery notice.
+test_parked_run_survives_daemon_probe_failure() {
+  reset_fakes
+  local d out
+  d=$(new_case parked-daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-cd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cd.meta" "window=fm:fm-feat-cd" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-cd.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-cd)"
+  FM_FAKE_DAEMON_DOWN=1
+  out=$(run_crew_state "$d" feat-cd)
+  unset FM_FAKE_DAEMON_DOWN
+  assert_contains "$out" "state: parked" "daemon loss must not hide a persisted gate"
+  assert_contains "$out" "source: run-step" "persisted gate keeps authoritative run source"
+  assert_contains "$out" "ask-user" "persisted gate keeps its decision findings"
+  assert_not_contains "$out" "state: unknown" "persisted gate is not generic recovery"
+  pass "persisted parked run survives daemon probe failure"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -2492,6 +2514,7 @@ test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
+test_parked_run_survives_daemon_probe_failure
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
