@@ -1275,22 +1275,19 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
-# A stopped worker's unchanged pane can retain a timer from its last active
-# run. Resolve the wait before capture (which a missing endpoint cannot supply)
-# or hash-based wedge bookkeeping. Unread steers and positive busy signals
-# retain their own paths. Authoritative runs retain the inactive run monitor.
+# A stopped worker's unchanged pane can retain a timer, busy signal, or status
+# verb from its last active run.
+# Once the endpoint is confirmed dead, only unread steers, declared waits, and
+# the authoritative run may override bounded recovery.
 ended_worker_stale_check() {  # <window> <task>
   local win=$1 task=$2 key line last reason held=0
   [ -n "$task" ] || return 1
   [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = dead ] || return 1
   fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
-  window_is_busy "$win" "" && return 1
   last=$(last_status_line "$STATE/$task.status")
   status_is_paused_or_captain_held "$last" && return 1
   if task_captain_call_open "$task"; then
     held=1
-  elif [ "$(status_line_verb "$last")" != working ] && [ -n "$last" ]; then
-    return 1
   fi
   key=$(window_key "$win")
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
