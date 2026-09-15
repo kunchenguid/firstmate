@@ -63,9 +63,8 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
-# Resolve the repo root from this library's own location. Consumed by sourcing
-# test files, not by this library, so it reads as "unused" here.
-# shellcheck disable=SC2034
+# Resolve the repo root from this library's own location, for sourcing test
+# files and for fm_test_tasks_axi below.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- reporters --------------------------------------------------------------
@@ -539,6 +538,33 @@ fm_write_secondmate_meta() {
     "yolo=off" \
     "home=$home" \
     "projects=$projects"
+}
+
+# --- backlog backend --------------------------------------------------------
+
+# The bound every test call site runs the real tasks-axi under. A test that
+# calls tasks-axi without one is the shape that wedges a whole run: a backend
+# that hangs (a wedged beads daemon, a lock it never gets) holds the suite open
+# until CI kills it, so the run reports nothing instead of failing the case.
+# Generous enough that a slow CI box never flakes, far below any harness or CI
+# job limit.
+FM_TEST_TASKS_AXI_TIMEOUT=${FM_TEST_TASKS_AXI_TIMEOUT:-30}
+
+# fm_test_tasks_axi <tasks-axi args...>: run the real tasks-axi under that
+# bound, with its exit status and both output streams passed through unchanged.
+# The bounding mechanism is the production one - bin/fm-backlog-transition-lib.sh's
+# fm_tasks_axi, which picks timeout, gtimeout, or its perl watchdog and forces
+# termination either way - so a test never grows a second bound of its own. That
+# function execs, so it must be the last command of a subshell; this helper is
+# that subshell, which also keeps the sourced library out of the caller's shell.
+# A timed-out call exits 124 (or 137 when the kill-after fired), which fails the
+# case exactly like any other non-zero tasks-axi status.
+fm_test_tasks_axi() {
+  (
+    # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    FM_TASKS_AXI_TIMEOUT="$FM_TEST_TASKS_AXI_TIMEOUT" fm_tasks_axi "$@"
+  )
 }
 
 # --- common assertions ------------------------------------------------------

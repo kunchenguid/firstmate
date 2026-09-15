@@ -117,10 +117,15 @@ test_guard_silent_for_single_home() {
 # The end-to-end fork: a bare tasks-axi write from the code root. Whatever the
 # installed tasks-axi does to the link, bootstrap must agree with the result:
 # a replaced link is reported, a written-through link is not.
+#
+# "Bare" here means the addressing: no --file and no bin/fm-tasks-axi.sh, so
+# tasks-axi resolves the tracked .tasks.toml against the code root exactly as an
+# operator's own shell would. The call still runs under the suite's bound, which
+# changes nothing about that addressing.
 test_bare_tasks_axi_fork_is_detected() {
   local dir out
   dir=$(make_split bare-fork)
-  (cd "$dir/code" && tasks-axi add bare-1 "written from the code root" >/dev/null 2>&1) \
+  (cd "$dir/code" && fm_test_tasks_axi add bare-1 "written from the code root" >/dev/null 2>&1) \
     || fail "bare tasks-axi add failed in the code root"
   out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
   if [ -L "$dir/code/data/backlog.md" ]; then

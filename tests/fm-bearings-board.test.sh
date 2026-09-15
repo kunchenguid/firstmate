@@ -422,7 +422,7 @@ SH
     "$runtime/bin/fm-bearings-board.sh" build "$data" >/dev/null \
     || fail "the order-proof board build failed"
 
-  show=$(cd "$home" && tasks-axi show "$hold" --full) \
+  show=$(cd "$home" && fm_test_tasks_axi show "$hold" --full) \
     || fail "the order-proof captain hold disappeared"
   assert_contains "$show" "state: done" \
     "registration consumed its answer before the any-origin binding existed"

@@ -279,12 +279,12 @@ SH
 seed_backlog() {  # <case-dir> <id> <queued|in_flight>
   local dir=$1 id=$2 want=$3 file="$1/home/data/backlog.md"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$file"
-  tasks-axi add "$id" "relaunch fixture task" --kind ship --file "$file" >/dev/null
-  [ "$want" != in_flight ] || tasks-axi start "$id" --file "$file" >/dev/null
+  fm_test_tasks_axi add "$id" "relaunch fixture task" --kind ship --file "$file" >/dev/null
+  [ "$want" != in_flight ] || fm_test_tasks_axi start "$id" --file "$file" >/dev/null
 }
 
 backlog_state() {  # <case-dir> <id>
-  tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
+  fm_test_tasks_axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 

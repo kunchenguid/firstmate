@@ -1626,7 +1626,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   fakebin=$(make_fakebin "$home")
   main_backlog="$home/data/backlog.md"
 
-  "$TASKS_AXI_BIN" add answered-question \
+  fm_test_tasks_axi add answered-question \
     "Decide whether https://github.com/o/r/pull/7 may merge" --kind ship \
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the answered captain question"
@@ -1641,13 +1641,13 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   run_captain "$home" "$fakebin" hold created-local-question \
     --title "Choose local main" --reason "captain local route pending" >/dev/null \
     || fail "could not create the local-only captain question"
-  created_kind=$("$TASKS_AXI_BIN" show created-local-question --full --file "$main_backlog" \
+  created_kind=$(fm_test_tasks_axi show created-local-question --full --file "$main_backlog" \
     | sed -n 's/^  kind: *//p' | head -1)
   run_captain "$home" "$fakebin" answer created-local-question \
     --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the local-only captain question"
 
-  "$TASKS_AXI_BIN" add legacy-local-question "Choose local main" \
+  fm_test_tasks_axi add legacy-local-question "Choose local main" \
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the legacy kindless captain question"
   run_captain "$home" "$fakebin" hold legacy-local-question \
@@ -1662,34 +1662,34 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   mkdir -p "$home/data/keyword-scout" "$home/data/shipping-scout"
   printf '# Keyword scout\n' > "$home/$keyword_report"
   printf '# Shipping scout\n' > "$home/$shipping_report"
-  "$TASKS_AXI_BIN" add keyword-scout "SCOUT parser keywords" --kind scout \
+  fm_test_tasks_axi add keyword-scout "SCOUT parser keywords" --kind scout \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the canonical keyword scout"
-  "$TASKS_AXI_BIN" 'done' keyword-scout --report "$keyword_report" \
+  fm_test_tasks_axi 'done' keyword-scout --report "$keyword_report" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the canonical keyword scout"
-  "$TASKS_AXI_BIN" add keyword-local "SHIP keyword local main" --kind ship \
+  fm_test_tasks_axi add keyword-local "SHIP keyword local main" --kind ship \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the canonical keyword local delivery"
-  "$TASKS_AXI_BIN" 'done' keyword-local --note "local main" \
+  fm_test_tasks_axi 'done' keyword-local --note "local main" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the canonical keyword local delivery"
-  "$TASKS_AXI_BIN" add noted-local "Land the local-only change" --kind ship \
+  fm_test_tasks_axi add noted-local "Land the local-only change" --kind ship \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the recorded-note local delivery"
-  "$TASKS_AXI_BIN" 'done' noted-local --note "local main" \
+  fm_test_tasks_axi 'done' noted-local --note "local main" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the recorded-note local delivery"
-  "$TASKS_AXI_BIN" add legacy-noted-local "Complete the legacy work" \
+  fm_test_tasks_axi add legacy-noted-local "Complete the legacy work" \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the kindless local delivery"
-  "$TASKS_AXI_BIN" 'done' legacy-noted-local --note "local main" \
+  fm_test_tasks_axi 'done' legacy-noted-local --note "local main" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the kindless local delivery"
-  "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
+  fm_test_tasks_axi add shipping-scout "SHIPPING parser boundary" --kind scout \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the longer-word scout"
-  "$TASKS_AXI_BIN" 'done' shipping-scout --report "$shipping_report" \
+  fm_test_tasks_axi 'done' shipping-scout --report "$shipping_report" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the longer-word scout"
 
@@ -1778,11 +1778,11 @@ test_kind_fallback_matches_tasks_axi_word_boundaries() {
   : > "$home/net.log"
   : > "$home/expected.jsonl"
   while IFS='|' read -r id title kind; do
-    "$TASKS_AXI_BIN" add "$id" "$title" --start --file "$home/data/backlog.md" >/dev/null \
+    fm_test_tasks_axi add "$id" "$title" --start --file "$home/data/backlog.md" >/dev/null \
       || fail "could not create keyword fixture $id"
-    "$TASKS_AXI_BIN" 'done' "$id" --report "data/$id/report.md" \
+    fm_test_tasks_axi 'done' "$id" --report "data/$id/report.md" \
       --file "$home/data/backlog.md" >/dev/null || fail "could not complete keyword fixture $id"
-    producer_kind=$("$TASKS_AXI_BIN" show "$id" --full --file "$home/data/backlog.md" \
+    producer_kind=$(fm_test_tasks_axi show "$id" --full --file "$home/data/backlog.md" \
       | sed -n 's/^  kind: *//p' | head -1)
     [ "$producer_kind" = "${kind/-/task}" ] || fail "tasks-axi kind differs for $title: $producer_kind"
     jq -cn --arg id "$id" --arg kind "$kind" \

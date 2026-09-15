@@ -77,7 +77,7 @@ run_teardown() {  # <home> <id>
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
-  (cd "$home" && tasks-axi "$@")
+  (cd "$home" && fm_test_tasks_axi "$@")
 }
 
 run_captain() {  # <home> <command args...>
@@ -265,7 +265,7 @@ path = "$probe_graph/.beads"
 binary = "bd"
 prefix = "fm"
 PROBEEOF
-  (cd "$probe_home" && tasks-axi list) >/dev/null 2>&1
+  (cd "$probe_home" && fm_test_tasks_axi list) >/dev/null 2>&1
 }
 TASKS_AXI_BEADS_OK=0
 if bd --version >/dev/null 2>&1 && jq --version >/dev/null 2>&1 \
@@ -302,10 +302,10 @@ test_verify_resolves_a_hold_migrated_to_beads_notes() {
   home=${fixture%%|*}
   beads=${fixture##*|}
   scout=sample-beads-scout
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi add fm-herald-github-delete \
     "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
     || fail "could not create the migrated hold fixture"
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi hold fm-herald-github-delete \
     --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
     || fail "could not hold the migrated fixture row"
   bdrow "$beads" note fm-herald-github-delete \
@@ -371,10 +371,10 @@ test_verify_resolves_a_hold_migrated_under_the_configured_prefix() {
   fixture=$(make_beads_home migrated-prefix)
   home=${fixture%%|*}
   scout=sample-prefix-scout
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-other-legacy-row \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi add fm-other-legacy-row \
     "Second migrated hold" --repo sample) >/dev/null 2>&1 \
     || fail "could not create the prefix-migrated fixture row"
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-other-legacy-row \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi hold fm-other-legacy-row \
     --kind captain --reason "captain must decide") >/dev/null 2>&1 \
     || fail "could not hold the prefix-migrated fixture row"
   # No row in this graph carries a marker note, so the narrowed prefix guess is
@@ -402,9 +402,9 @@ test_marker_noted_row_wins_over_a_prefix_namesake() {
   beads=${fixture##*|}
   scout=sample-marker-wins-scout
   for row in fm-dual-row fm-marked-dual-row fm-solo-row; do
-    (cd "$home" && BEADS_ACTOR=fixture tasks-axi add "$row" "Captain call $row" \
+    (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi add "$row" "Captain call $row" \
       --repo sample) >/dev/null 2>&1 || fail "could not create the fixture row $row"
-    (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold "$row" --kind captain \
+    (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi hold "$row" --kind captain \
       --reason "captain must decide") >/dev/null 2>&1 \
       || fail "could not hold the fixture row $row"
   done
@@ -433,10 +433,10 @@ test_complete_accepts_a_migrated_inventory_on_beads() {
   home=${fixture%%|*}
   beads=${fixture##*|}
   scout=sample-complete-scout
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi add fm-herald-github-delete \
     "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
     || fail "could not create the migrated hold fixture"
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi hold fm-herald-github-delete \
     --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
     || fail "could not hold the migrated fixture row"
   bdrow "$beads" note fm-herald-github-delete \
@@ -490,10 +490,10 @@ test_verify_resolves_a_pre_collapse_key_through_its_derived_marker() {
   scout=sample-derived-scout
   # The row was migrated under the DERIVED pre-collapse identity, keyed by a
   # bare decision key the origin's old metadata attests.
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-dec-call \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi add fm-dec-call \
     "Migrated pre-collapse call" --repo sample) >/dev/null 2>&1 \
     || fail "could not create the derived-marker fixture row"
-  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-dec-call \
+  (cd "$home" && BEADS_ACTOR=fixture fm_test_tasks_axi hold fm-dec-call \
     --kind captain --reason "captain must decide") >/dev/null 2>&1 \
     || fail "could not hold the derived-marker fixture row"
   bdrow "$beads" note fm-dec-call \
@@ -3028,7 +3028,7 @@ test_relocated_report_does_not_wedge_an_answer_before_replay() {
 
 ## Done
 EOF
-  (cd "$home" && tasks-axi add "$id" "Investigate relocated answer replay" --kind scout \
+  (cd "$home" && fm_test_tasks_axi add "$id" "Investigate relocated answer replay" --kind scout \
     --repo sample --start --file "$data/backlog.md" >/dev/null) \
     || fail "could not create the relocated answer-before-replay fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3067,7 +3067,7 @@ SH
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$home/answer.txt" \
     >/dev/null || fail "the unsupported relocated report wedged the captain's answer"
-  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+  show=$(cd "$home" && fm_test_tasks_axi show "$id" --full --file "$data/backlog.md") \
     || fail "the answered relocated row disappeared"
   assert_contains "$show" "state: done" "the relocated report kept the answered call open"
   assert_contains "$show" "held: no" "the relocated report kept the answered call held"
@@ -3107,7 +3107,7 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog() {
 
 ## Done
 EOF
-  (cd "$home" && tasks-axi add "$id" "Investigate relocated sample hold" --kind scout \
+  (cd "$home" && fm_test_tasks_axi add "$id" "Investigate relocated sample hold" --kind scout \
     --repo sample --start --file "$data/backlog.md" >/dev/null) \
     || fail "could not create the relocated captain-hold fixture"
   write_origin_meta "$home" "$id"
@@ -3128,7 +3128,7 @@ EOF
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" \
     > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "cleanup of the relocated captain hold failed: $(cat "$home/teardown.err")"
-  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+  show=$(cd "$home" && fm_test_tasks_axi show "$id" --full --file "$data/backlog.md") \
     || fail "the relocated captain-held row disappeared"
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
