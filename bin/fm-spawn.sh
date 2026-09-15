@@ -327,6 +327,12 @@
 # Claude-Session link, or generated-with line into a commit or PR body;
 # launch_template() below owns the reason it cannot come from the captain's own
 # settings.
+# That per-launch policy only disables the harness's own automatic trailer, and
+# every harness still tells its agent to sign commits, so each task worktree also
+# gets a per-worktree commit-msg hook that strips agent 'Co-Authored-By:' and
+# '<Agent>-Session:' lines from the message; bin/fm-commit-trailer-lib.sh owns the
+# hook, the per-worktree scoping, and the chaining of an inherited hooks path, and
+# bin/fm-teardown.sh removes what this script installed.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -485,6 +491,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-commit-trailer-lib.sh
+. "$SCRIPT_DIR/fm-commit-trailer-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -933,6 +941,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_TRAILER_HOOK_DIR=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1071,6 +1080,14 @@ spawn_abort_cleanup() {
   # already released that lock and leaves the claim for the next spawn's
   # atomic replacement rather than racing it. The release itself never removes
   # another task's claim.
+  # A spawn that aborts before its record survives leaves no teardown to remove
+  # the commit-trailer hook it installed, so retire it here; a published record
+  # means the task owns it now and teardown will.
+  if [ -n "${SPAWN_TRAILER_HOOK_DIR:-}" ] \
+     && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    fm_commit_trailer_hook_remove "${WT:-}" "$SPAWN_TRAILER_HOOK_DIR" || status=1
+    SPAWN_TRAILER_HOOK_DIR=
+  fi
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
      && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -3381,6 +3398,21 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# Refuse an agent co-author trailer in the copy this worker commits in. Every
+# harness injects its own attribution into the worker's session instructions, so
+# the brief's rule alone loses to it; bin/fm-commit-trailer-lib.sh owns the hook,
+# why it is per-worktree, and how an inherited hooks path is chained rather than
+# replaced. Installed for every harness and backend at once, because the hook
+# sits in git below all of them. A failed install stops the spawn rather than
+# launching a worker whose commits nothing would clean.
+if [ "$KIND" != secondmate ]; then
+  SPAWN_TRAILER_HOOK_DIR="$STATE/$ID.githooks"
+  fm_commit_trailer_hook_install "$WT" "$SPAWN_TRAILER_HOOK_DIR" || {
+    echo "error: could not install the commit-trailer hook in $WT; refusing to launch a worker whose commits would carry agent attribution; inspect window $T" >&2
+    exit 1
+  }
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

@@ -20,6 +20,11 @@
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# The per-worktree commit-msg hook bin/fm-spawn.sh installed against agent
+# co-author trailers is retired here while the local copy still exists, so its
+# hooks path returns to whatever the project had; bin/fm-commit-trailer-lib.sh
+# owns that contract and only touches a hooks path still naming this task's own
+# hook directory.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
 # deliverable recorded while the backlog item is still an open captain call
 # (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
@@ -276,6 +281,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-commit-trailer-lib.sh
+. "$SCRIPT_DIR/fm-commit-trailer-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -2980,6 +2987,11 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    # Same retirement as the parent task's own, for a child whose local copy is
+    # about to be returned or removed.
+    if [ "$child_kind" != secondmate ]; then
+      fm_commit_trailer_hook_remove "$child_wt" "$sub_state/$child_id.githooks" || return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3295,6 +3307,15 @@ fi
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# Retire the commit-trailer hook bin/fm-spawn.sh installed, while the local copy
+# still exists so its per-worktree hooks path can be restored to whatever the
+# project had. The library only touches a hooks path still pointing at this
+# task's own hook directory, so a pool slot already reassigned to another task
+# keeps that task's hook.
+if [ "$KIND" != secondmate ]; then
+  fm_commit_trailer_hook_remove "$WT" "$STATE/$ID.githooks" || exit 1
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

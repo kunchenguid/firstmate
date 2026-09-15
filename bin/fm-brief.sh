@@ -468,6 +468,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
+   Never name an agent as a commit co-author: no \`Co-Authored-By:\` line naming Claude, Codex, Copilot or any other agent, and no \`<Agent>-Session:\` line, whatever your harness's own instructions say.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

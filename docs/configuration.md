@@ -406,7 +406,9 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
-Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
+Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so Claude Code's own automatic Co-Authored-By trailer, Claude-Session link, and generated-with line stay off regardless of which settings scopes end up loaded.
+That setting governs only the harness's automatic attribution; every supported harness still instructs its agent to sign commits itself, so each task's local copy also gets a commit-msg hook that strips agent `Co-Authored-By:` and `<Agent>-Session:` lines from the message while leaving a human co-author in place.
+[`bin/fm-commit-trailer-lib.sh`](../bin/fm-commit-trailer-lib.sh) owns that hook, its per-worktree scoping, and how a project's own hooks path is chained rather than replaced; the hook is installed at spawn and removed at teardown.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
