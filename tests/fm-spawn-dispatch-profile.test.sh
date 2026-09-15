@@ -928,7 +928,7 @@ test_claude_secondmate_launch_omits_task_control_channel_authority() {
 }
 
 test_claude_crewmate_launch_carries_the_attribution_policy() {
-  local rec id out status launch
+  local rec id out status launch settings
   id=profile-claude-attribution-z22
   rec=$(make_spawn_case profile-claude-attribution claude "$id")
   read_case_record "$rec"
@@ -937,7 +937,11 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
   status=$?
   expect_code 0 "$status" "claude crewmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_attribution_policy "$launch" "claude crewmate"
+  # A task worker's launch loads its per-task settings file through the one
+  # --settings flag Claude honors, so the policy must be in that file.
+  settings=$(printf '%s\n' "$launch" | sed -n "s/.* --settings '\([^']*\)'.*/\1/p")
+  [ -f "$settings" ] || fail "claude crewmate launch names no per-task settings file: $launch"
+  assert_attribution_policy "$(jq -c . "$settings")" "claude crewmate"
   pass "a claude crewmate launch carries the attribution-off policy in its own settings"
 }
 
