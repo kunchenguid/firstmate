@@ -2,11 +2,11 @@
 //
 // A Claude Code "mod" is a plugin whose behavior lives in one hooks module, loaded only
 // while Claude Code's default-off early-access function-hooks surface is on
-// (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`). Claude Code itself never loads this file
-// while that flag is off, and the plugin carries no command, skill, agent, or classic
-// hook of its own, so the mod is a complete no-op there; the `/calm` command below
-// exists only once this module has registered it. docs/calm.md owns the captain-facing
-// contract and docs/calm-mode-feasibility.md the version-scoped evidence.
+// (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`). Every handler also checks that exact opt-in,
+// so loading this module through Claude Code's rollout flag remains a complete no-op.
+// The plugin carries no command, skill, agent, or classic hook of its own; the `/calm`
+// command below exists only once this module has registered it. docs/calm.md owns the
+// captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
 //
 // This file is the only place the engine interface `$` is touched: the geometry lives
 // in ../lib/fm-calm-working-ship-sprite.ts (shared with the Pi extension), the Raster
@@ -53,6 +53,7 @@ const CALM_COMMAND = "calm";
 // same as a new Pi extension lifetime.
 let calm = false;
 let preferencePath: string | undefined;
+let activation: Promise<boolean> | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
@@ -61,6 +62,16 @@ const sprite = createCalmWorkingShipSprite();
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
+
+function isActivated($: EngineInterface): Promise<boolean> {
+  if (activation === undefined) {
+    activation = $.env.get("CLAUDE_CODE_ENABLE_FUNCTION_HOOKS").then(
+      (value) => value === "1",
+      () => false,
+    );
+  }
+  return activation;
+}
 
 async function readPreference($: EngineInterface, path: string): Promise<string | undefined> {
   try {
@@ -127,6 +138,7 @@ function hiddenRow($: EngineInterface, e: RenderInput): RenderElement {
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     // A genuine new session lifetime starts the boat at the normal initial position.
     sprite.reset();
     await ensureLoaded($);
@@ -137,7 +149,8 @@ export const register: Register = (on) => {
     return next(e);
   });
 
-  on("command.run", { command: CALM_COMMAND }, async ($) => {
+  on("command.run", { command: CALM_COMMAND }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     const active = !calm;
     // Persist before changing live presentation, so a failed write leaves the current
@@ -160,6 +173,11 @@ export const register: Register = (on) => {
   // Record mid-turn narration as it streams: the text blocks of a model step that
   // stopped to call tools. Subagent steps never draw in the main transcript.
   on("turn.step", async function* ($, e, next) {
+    if (!(await isActivated($))) {
+      const untouched = next(e);
+      for await (const chunk of untouched) yield chunk;
+      return await untouched.result;
+    }
     const stream = next(e);
     const blocks = new Map<number, string>();
     for await (const chunk of stream) {
@@ -193,6 +211,7 @@ export const register: Register = (on) => {
   });
 
   on("ui.render", { component: "Spinner" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     if (!calm || e.surface !== "terminal") {
       sites.delete(e.requestId);
@@ -209,24 +228,29 @@ export const register: Register = (on) => {
   });
 
   on("ui.render", { component: "ToolUse" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     return calm ? hiddenRow($, e) : next(e);
   });
   on("ui.render", { component: "ToolResult" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     return calm ? hiddenRow($, e) : next(e);
   });
   on("ui.render", { component: "ToolGroup" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     return calm ? hiddenRow($, e) : next(e);
   });
 
   on("ui.render", { component: "UserMessage" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     return calm && userTextIsOperational(e.props.text) ? hiddenRow($, e) : next(e);
   });
 
   on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
     await ensureLoaded($);
     const key = workingNoteKey(e.props.text);
     return calm && workingNotes.has(key) && !finalReplies.has(key) ? hiddenRow($, e) : next(e);

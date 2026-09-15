@@ -21,6 +21,39 @@ import {
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
 
 describe("activation", () => {
+  async function expectInert($: Engine, on: Parameters<typeof world>[0], functionHooks: string | undefined) {
+    const { clock, journal } = world(on, {
+      functionHooks,
+      preference: "on\n",
+      messages: [{ role: "assistant", text: "Working", toolUses: [{ name: "Bash" }] }],
+    });
+    await $.session.start(sessionStart);
+    const drawings = await Promise.all([
+      $.ui.render(spinner()),
+      $.ui.render(toolUse()),
+      $.ui.render(toolResult()),
+      $.ui.render(toolGroup()),
+      $.ui.render(userMessage(operational("watcher", "signal: x"))),
+      $.ui.render(assistantMessage("Working")),
+    ]);
+    expect(drawings.every(isStock)).toBe(true);
+    await clock.advance(220 * 8);
+    expect(journal.commands).toHaveLength(0);
+    expect(journal.blits).toHaveLength(0);
+    expect(journal.invalidations).toHaveLength(0);
+    expect(journal.toasts).toHaveLength(0);
+    expect(journal.fsReads).toHaveLength(0);
+    expect(journal.sessionMessageReads).toBe(0);
+  }
+
+  test("is fully inert when the function-hooks opt-in is absent", async ($, on) => {
+    await expectInert($, on, undefined);
+  });
+
+  test("is fully inert when the function-hooks opt-in is not exactly one", async ($, on) => {
+    await expectInert($, on, "true");
+  });
+
   test("registers /calm at session start and stays a pass-through while off", async ($, on) => {
     const { clock, journal } = world(on);
     await $.session.start(sessionStart);

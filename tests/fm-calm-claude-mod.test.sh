@@ -68,7 +68,7 @@ console.log("shape-ok");
 JS
   out=$(run_node "$TMP_ROOT/shape.mjs" 2>&1) || fail "plugin shape: $out"
   assert_contains "$out" "shape-ok" "plugin shape check did not complete"
-  pass "the Calm mod is one hooks module behind the flag, linked into the project's auto-load path, with no command, skill, agent, or classic hook that could load while the flag is off"
+  pass "the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in"
 }
 
 test_shared_sprite_and_pi_rendering() {

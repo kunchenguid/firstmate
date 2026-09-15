@@ -290,7 +290,7 @@ It asserts one persisted and rendered captain answer, exact user-role operationa
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
-`tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with nothing that could load while the flag is off, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod's home resolution and working-note policy match Pi's, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
+`tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod's home resolution and working-note policy match Pi's, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
 `tests/fm-calm-claude-mod-plugin.test.sh` runs wherever `claude` is installed without spending a model turn: strict `claude plugin validate` on the folder and on the `.claude/skills` auto-load path, then the mod's own `claude plugin test` suites, which drive the hooks module in the engine's host against a mocked clock, environment, file system, and drawing surface.
 `tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, and `claude --continue` restores the hidden rows.
 
@@ -623,7 +623,7 @@ ok - Pi calm native E2E replaces the stock working row with a moving, resize-cla
 Claude Code 2.1.272 exposes exactly the capability the 2026-07-22 row found missing, through its early-access "Claude Mods" surface, whose engineering primitive is the function hook: a plugin whose behavior lives in one hooks module exporting `register(on, options)`, hooking dotted engine events as `($, e, next)` middleware, with `ui.render` drawing per-component transcript rows and the working row, `$.ui.invalidate("ui.render")` redrawing every hooked drawing, and `$.ui.blit` repainting a mounted `Raster` without a render pass.
 The surface is default-off: hooks modules load only when the `tengu_plugin_hooks_modules` rollout flag or the `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` environment variable turns them on, never under safe mode, `disableAllHooks`, or a managed-hooks-only policy, and only after workspace trust is accepted.
 The generated declarations (`/plugin-types`) carry the header "EARLY ACCESS: this surface may change between releases without notice", and the public proposal invites testing behind that variable while the feature is not yet in the public docs or CHANGELOG.
-The feasibility spike (scout `fm-claude-mods-calm-sailboat-s1`, whose private report holds the raw captures) and the shipped `firstmate-calm` mod both use only that documented-in-binary plugin API; nothing patches installed Claude Code code, and no prompt, tool, or session event is rewritten.
+The feasibility spike (scout `fm-claude-mods-calm-sailboat-s1`, whose private report holds the raw captures) and the shipped `firstmate-calm` mod both use only that documented-in-binary plugin API; the shipped mod also checks that `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is exactly `1` before any preference read, transcript read, timer, command registration, or drawing change, so loading its module through the rollout flag alone remains a complete no-op. Nothing patches installed Claude Code code, and no prompt, tool, or session event is rewritten.
 
 ```text
 $ claude --version
@@ -690,28 +690,28 @@ Three further observations, recorded so they are not read as failures: the `ctrl
 
 `.claude/mods/firstmate-calm` holds the plugin: its manifest, `hooks/hooks.json` naming the one module, `hooks/register.ts` (the only file that touches `$`), and pure libraries the tests drive under Node: the sprite core both harnesses share, the Raster packing, the presentation policy, and a port of `bin/fm-operational-input.sh`'s `classify` guarded by a corpus parity test.
 `.agents/skills/firstmate-calm` is a symlink to it, so the project's `.claude/skills` scan adopts it, and it carries no `SKILL.md` so other harnesses' skill loaders see nothing.
-The mod declares no command file, skill, agent, or classic hook, so nothing of it exists while the flag is off; `/calm` is registered by the hooks module itself through `$.command.register` at `session.start`.
+The mod declares no command file, skill, agent, or classic hook; its function-hooks handlers independently require the exact environment opt-in before `/calm` registration or any other side effect, including when Claude Code loads the module through its rollout flag.
 Working notes are recorded from `turn.step` per text block (a step that stopped for `tool_use`, or `max_tokens` with tool calls) and seeded from `$.session.messages()` for a restored transcript, the same rule as Pi's `assistant-working-note` class.
 
 ```text
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mods/firstmate-calm
   ❯ ./register.ts hooks: session.start, command.run{command=calm}, turn.step, ui.render{component=Spinner}, ui.render{component=ToolUse}, ui.render{component=ToolResult}, ui.render{component=ToolGroup}, ui.render{component=UserMessage}, ui.render{component=AssistantMessage}
-  ❯ ./register.ts calls: $.clock.every (via load), $.command.register, $.env.get (via load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
+  ❯ ./register.ts calls: $.clock.every (via load), $.command.register, $.env.get (via isActivated, load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
   ❯ ./register.ts env writes: nothing
-  ❯ ./register.ts env reads: FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE
+  ❯ ./register.ts env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE
 ✔ Validation passed
 
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .claude/mods/firstmate-calm
- 26 pass
+ 29 pass
  0 fail
-Ran 26 tests across 2 files.
+Ran 29 tests across 2 files.
 
 $ bin/fm-test-run.sh tests/fm-calm-claude-mod.test.sh
-ok - the Calm mod is one hooks module behind the flag, linked into the project's auto-load path, with no command, skill, agent, or classic hook that could load while the flag is off
+ok - the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in
 ok - the Pi working ship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, at every width, cadence step, freeze, clamp, and reset
 ok - the Raster packing lays the shared frame out row-major with the sprite's palette, plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding
 ok - the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and classifies working notes by stop reason, tool use, and restored transcript shape
-ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 70 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
+ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 77 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
 
 $ bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=68438

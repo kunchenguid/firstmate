@@ -65,8 +65,8 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ## Claude Code
 
 Calm on Claude Code is the `firstmate-calm` mod under `.claude/mods/firstmate-calm`: a Claude Code plugin whose whole behavior lives in one function-hooks module.
-Claude Code loads such modules only while its early-access function-hooks surface is on, which is off by default and turned on per session with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
-Firstmate never sets that flag in any project or user settings; enabling it is each captain's own explicit opt-in, and while it is off the mod is a complete no-op: the module never loads, there is no `/calm` command, and every drawing stays exactly as Claude Code draws it, whatever `config/calm` says.
+Claude Code's early-access function-hooks surface is off by default and can load modules through its rollout flag or per session with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; the mod independently requires that environment variable to equal `1` before doing anything.
+Firstmate never sets that flag in any project or user settings; enabling it is each captain's own explicit opt-in, and without that exact value the mod is a complete no-op even if Claude Code's rollout flag loads the module: there is no `/calm` command, no preference or transcript read, no timer, and every drawing stays exactly as Claude Code draws it, whatever `config/calm` says.
 The trusted project auto-loads the mod through the `.claude/skills/firstmate-calm` entry (a symlink into `.claude/mods`), so no `--plugin-dir` or marketplace install is needed.
 
 With the flag on, the mod registers `/calm`, which toggles the same per-home preference Pi's `/calm` uses, so one choice applies on both harnesses.

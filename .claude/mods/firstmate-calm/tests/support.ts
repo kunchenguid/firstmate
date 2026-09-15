@@ -21,6 +21,10 @@ export type Journal = {
   blits: { requestId: string; key: string; columns?: number; rows?: number; cells: string }[];
   /** Which components reached the engine's own drawing, in order. */
   stock: string[];
+  /** Preference reads that reached the mocked filesystem. */
+  fsReads: string[];
+  /** Number of transcript reads that reached the mocked session. */
+  sessionMessageReads: number;
 };
 
 export type World = {
@@ -38,6 +42,8 @@ export type WorldOptions = {
   preference?: string;
   /** Extra environment beside FM_HOME; pass `{}` with `home: undefined` to unset FM_HOME. */
   env?: Record<string, string>;
+  /** Function-hooks opt-in value; omitted options default to the active value `1`. */
+  functionHooks?: string | undefined;
   /** The Firstmate home FM_HOME names; undefined leaves FM_HOME unset. */
   home?: string | undefined;
   /** What `$.session.messages()` answers. */
@@ -49,17 +55,31 @@ export const STOCK_TEXT = "STOCK-DRAWING";
 
 export function world(on: On, options: WorldOptions = {}): World {
   const home = "home" in options ? options.home : HOME;
-  mock.env(on, { ...(home === undefined ? {} : { FM_HOME: home }), ...(options.env ?? {}) });
+  const functionHooks = "functionHooks" in options ? options.functionHooks : "1";
+  mock.env(on, {
+    ...(home === undefined ? {} : { FM_HOME: home }),
+    ...(options.env ?? {}),
+    ...(functionHooks === undefined ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: functionHooks }),
+  });
   const clock = mock.clock(on);
   const files = new Map<string, string>();
   if (options.preference !== undefined) files.set(PREFERENCE, options.preference);
-  const journal: Journal = { commands: [], toasts: [], invalidations: [], blits: [], stock: [] };
+  const journal: Journal = {
+    commands: [],
+    toasts: [],
+    invalidations: [],
+    blits: [],
+    stock: [],
+    fsReads: [],
+    sessionMessageReads: 0,
+  };
   let blitDenial: string | undefined;
   let writeFailure: string | undefined;
 
-  on("fs.read", async (_$, e) =>
-    files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` },
-  );
+  on("fs.read", async (_$, e) => {
+    journal.fsReads.push(e.path);
+    return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };
+  });
   on("fs.write", async (_$, e) => {
     if (writeFailure !== undefined) return { deny: writeFailure };
     files.set(e.path, e.text);
@@ -81,7 +101,10 @@ export function world(on: On, options: WorldOptions = {}): World {
     journal.blits.push({ requestId: e.requestId, key: e.key, columns: e.columns, rows: e.rows, cells: e.cells });
     return { value: blitDenial === undefined ? {} : { deny: blitDenial } };
   });
-  on("session.messages", async () => ({ value: [...(options.messages ?? [])] as SessionMessage[] }));
+  on("session.messages", async () => {
+    journal.sessionMessageReads += 1;
+    return { value: [...(options.messages ?? [])] as SessionMessage[] };
+  });
   on("session.start", async (_$, e) => ({ cwd: e.cwd }));
   on("ui.render", async (_$, e) => {
     journal.stock.push(e.component);

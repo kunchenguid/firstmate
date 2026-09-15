@@ -50,7 +50,7 @@ test_validate_strict() {
     expect_in_report "$report" "ui.render{component=UserMessage}" "the scan of $path does not hook user rows"
     expect_in_report "$report" "ui.render{component=AssistantMessage}" "the scan of $path does not hook assistant rows"
     expect_in_report "$report" "command.run{command=calm}" "the scan of $path does not serve /calm"
-    expect_in_report "$report" "env reads: FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE" "the scan of $path reads a different environment"
+    expect_in_report "$report" "env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE" "the scan of $path reads a different environment"
     expect_in_report "$report" "env writes: nothing" "the scan of $path writes the environment"
     case "$report" in
       *"process.run"*|*"http.fetch"*|*"env.set"*|*"prompt."*|*"tool.call"*)
