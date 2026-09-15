@@ -24,10 +24,10 @@
 # This costs real Pi model turns and requires its normal authenticated profile.
 set -u
 
-if [ "${FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 to run the isolated real-Pi instruction-refresh regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E pi tmux git
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_SOCKET="fm-sessionstart-instruction-refresh-$$"
@@ -106,10 +106,6 @@ cleanup() {
   rm -rf "$LAB"
 }
 trap cleanup EXIT INT TERM
-
-command -v pi >/dev/null 2>&1 || fail "pi not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
-command -v git >/dev/null 2>&1 || fail "git not found"
 
 mkdir -p "$LAB"
 git clone --quiet --no-hardlinks "$ROOT" "$PROJECT" || fail "could not create isolated Firstmate checkout"

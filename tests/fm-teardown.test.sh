@@ -755,7 +755,7 @@ test_teardown_closes_the_backlog_item_itself() {
     "closed backlog item did not record the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
-  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
     || fail "teardown dropped the dependency-cleared follow-up: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
@@ -1138,14 +1138,25 @@ test_content_in_default_fallback_allows() {
   # the same net change has independently landed on origin/main via a squash commit.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${FM_TEST_TREEHOUSE_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
+  assert_present "$case_dir/treehouse.log" \
+    "content-landed: teardown never reached destructive worktree cleanup"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "content-landed: teardown left task metadata after destructive cleanup"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
@@ -1638,6 +1649,13 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
 
 test_index_lock_mtime_read_failure_refuses() {
   local case_dir rc lock
+  # The mtime fault is injected by a fake stat on PATH; on Darwin the lock
+  # helper now calls /usr/bin/stat directly, so the fake can never fire there.
+  # Skip the Darwin run of this case.
+  if [ "$(uname)" = Darwin ]; then
+    pass "index-lock mtime fault injection is PATH-based; skipped on Darwin where stat is /usr/bin/stat"
+    return
+  fi
   case_dir=$(make_case mtime-error-index-lock)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"

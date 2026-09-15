@@ -1,6 +1,6 @@
 Mode: Pi extension background wake.
 
-When this session owns supervision and away mode is not active:
+When this session owns supervision and no legacy away daemon flag is active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi` or `pi-signed`, after approving project trust once per clone); if not, restart the selected executable with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
@@ -20,6 +20,7 @@ When this session owns supervision and away mode is not active:
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
 The supervision branch is default-on (docs/pi-supervision-branch.md): whenever this session owns the fleet lock and away mode is not active, the watcher extension offers eligible task-local rows from ordinary actionable wakes, plus selected fleet-wide heartbeat reviews, to the persistent in-process supervision branch, which takes them only when it can begin them, while main-only rows remain queued for this conversation.
+The supervision branch is default-on (docs/pi-supervision-branch.md): whenever this session owns the fleet lock and no legacy away daemon flag is active, the watcher extension hands eligible task-local rows from ordinary actionable wakes, plus selected fleet-wide heartbeat reviews, to the in-process supervision branch while main-only rows remain queued for this conversation; the away-posture record alone leaves this path active.
 Decision-owned signal and stale routing, including whole-batch precedence and the independent heartbeat exception, is owned by [docs/pi-supervision-branch.md](../pi-supervision-branch.md#components-and-their-owners).
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome returns as an appended, rendered note that leads with ⛵ then the dim outcome text.
 A captain-facing outcome instead appears as one exact, sequence-keyed visible transcript entry, and then arrives in this conversation as one hidden supervision processing request listing each `[seq N] task: summary` it covers.
@@ -29,6 +30,7 @@ The persisted entry is already the captain-visible record, so MAIN must not re-e
 Before MAIN steers, controls lifecycle, or cleans up a task, claim its lease with `bin/fm-lease.sh claim <task>` and release it afterwards; a refused claim means the branch is acting on that task right now.
 For an instruction authorized by one task but addressed to a different local worker, use `bin/fm-task-handoff.sh send <source-task> <target-task> --id <stable-id> '<exact instruction>'` before any target claim; this preserves the body across a refused claim and hands successful delivery to the target's ordinary inbox acknowledgement and retry ladder.
 This conversation still receives every other fleet-wide or unresolvable wake, the branch's wakes when it is unavailable, busy with an unsettled turn that does not already own the new rows, or away mode is active, and every watcher-failure alarm regardless, so the arm and repair contract above is unchanged.
+This conversation still receives every other fleet-wide or unresolvable wake, the branch's wakes when it is unavailable or a legacy away daemon flag is active, and every watcher-failure alarm regardless, so the arm and repair contract above is unchanged.
 Treat the merged fleet event as already handled for fleet operations: MAIN must not re-drain, re-run, or acknowledge it.
 Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
 Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.

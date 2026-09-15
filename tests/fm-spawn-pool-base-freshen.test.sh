@@ -676,7 +676,75 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
+# with the pool's state file beside the slot, which is the shape fm-spawn claims
+# for its task. Rewrites POOL_DIR to the relocated checkout.
+lay_out_as_pool_slot() {
+  local slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+  SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
+}
+
+# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
+# a launched task's claim names it, a slot that cannot be claimed refuses before
+# anything is published, and an abort while the allocation lock is still held
+# leaves no claim naming a task with no record.
+test_pool_slot_claim_follows_the_spawn_outcome() {
+  local rec id out status before
+
+  id='pool-slot-claim-r1'
+  rec=$(make_case slot-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "spawn did not publish the relocated slot as its worktree"
+  [ -f "$SLOT_CLAIM" ] || fail "spawn left its Treehouse slot unclaimed: $out"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
+  grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+
+  id='pool-slot-unclaimable-r1'
+  rec=$(make_case slot-unclaimable "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mkdir -p "$SLOT_CLAIM"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "spawn did not name the unclaimable slot as the reason"
+  [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot's HEAD after failing to claim it"
+
+  id='pool-slot-claim-aborted-r1'
+  rec=$(make_originless_case slot-claim-aborted "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
+  assert_contains "$out" "could not fetch origin" \
+    "the aborted spawn did not refuse on its unusable origin"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching

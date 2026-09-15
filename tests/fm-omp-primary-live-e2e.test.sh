@@ -16,10 +16,10 @@
 #      the turn-end guard continuation and the model reaches for the tool.
 set -u
 
-if [ "${FM_OMP_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_OMP_LIVE_E2E=1 to run the isolated omp primary regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_OMP_LIVE_E2E omp node jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -44,10 +44,6 @@ fail() {
 }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
-
-command -v omp >/dev/null 2>&1 || fail "omp not found"
-command -v node >/dev/null 2>&1 || fail "node not found"
-command -v jq >/dev/null 2>&1 || fail "jq not found"
 
 OMP_VERSION=$(omp --version 2>/dev/null | head -1)
 MODEL=${FM_OMP_LIVE_MODEL:-openai-codex/gpt-6-astra}

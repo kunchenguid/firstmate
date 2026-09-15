@@ -3,10 +3,10 @@
 # through Grok's tracked background-task notification path.
 set -u
 
-if [ "${FM_GROK_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_GROK_LIVE_E2E=1 to run the interactive Grok continuity regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_GROK_LIVE_E2E grok tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -14,9 +14,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v grok >/dev/null 2>&1 || fail "grok not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 
 TMUX=$(command -v tmux)
 SOCKET="fm-grok-live-e2e-$$"

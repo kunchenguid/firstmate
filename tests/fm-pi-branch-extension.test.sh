@@ -55,6 +55,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -146,6 +147,10 @@ export class ModelRuntime {
   constructor() {
     this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
     this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
+    this.registeredProviderConfigs = new Map();
+    // Like the real runtime, a registered provider's credentials are only
+    // known once refresh() has run for it; registration alone is provisional.
+    this.pendingAuth = new Set();
   }
   static async create() {
     const queuedError = globalThis.__fmModelRuntimeErrors?.shift();
@@ -154,6 +159,18 @@ export class ModelRuntime {
     const runtime = new ModelRuntime();
     (globalThis.__fmModelRuntimes ??= []).push(runtime);
     return runtime;
+  }
+  registerProvider(providerId, config) {
+    this.registeredProviderConfigs.set(providerId, config);
+    for (const model of config.models ?? []) {
+      this.models.push({ ...model, provider: providerId });
+    }
+    if (config.oauth || config.apiKey) this.pendingAuth.add(providerId);
+  }
+  async refresh(options) {
+    for (const providerId of options?.providers ?? this.pendingAuth) {
+      if (this.pendingAuth.delete(providerId)) this.authenticated.add(providerId);
+    }
   }
   getModel(provider, id) {
     return this.models.find((model) => model.provider === provider && model.id === id);
@@ -590,6 +607,8 @@ const modelRegistry = {
   getAvailable: () => registryModels.filter((model) => model.mainAvailable !== false).slice(),
   find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
   hasConfiguredAuth: (model) => model.mainAvailable !== false,
+  getRegisteredProviderConfig: (providerId) => globalThis.__fmExtensionProviderConfigs?.get(providerId),
+  getRegisteredProviderIds: () => [...(globalThis.__fmExtensionProviderConfigs?.keys() ?? [])],
 };
 function makeCtx(extra) {
   return {
@@ -1385,8 +1404,8 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home }; })()`);
-const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -1472,7 +1491,18 @@ if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcom
 }
 
 // Only the sequence-bound acknowledgement closes it.
-const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const nativeTools = new Map();
+const messageTypes = new Set();
+bus.emit("firstmate:native-tools", {
+  register: (tool) => nativeTools.set(tool.name, tool),
+  allowMessageType: (type) => messageTypes.add(type),
+});
+if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed") throw new Error("native discovery exposed unrelated tools");
+for (const tool of mainTools) {
+  if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
+}
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
 if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
@@ -3171,6 +3201,16 @@ if (cleared.options.model?.id === "cheap-1") {
 if (cleared.options.model?.provider !== "anthropic" || cleared.options.model?.id !== "main-model") {
   throw new Error(`clearing the pin did not return the branch to main's model: ${JSON.stringify(cleared.options.model)}`);
 }
+// A native main must use an explicit independent ordinary-Pi branch.
+registryModels.push({ provider: "openai-codex", id: "gpt-6-astra" });
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } }));
+dispatch("signal: native main ordinary branch");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main branch build");
+const nativeBranch = globalThis.__fmSessions[5].options.model;
+if (nativeBranch?.provider !== "openai-codex" || nativeBranch?.id !== "gpt-6-astra") {
+  throw new Error(`native main inherited an unsafe branch runtime: ${JSON.stringify(nativeBranch)}`);
+}
 process.exit(0);
 EOF
   status=$?
@@ -3380,6 +3420,52 @@ if (
 ) {
   throw new Error(`post-clear resolution failure was not reported honestly: ${JSON.stringify(clearFailureNotices)}`);
 }
+
+// Under a codex-native main, Follow main reports the ordinary openai-codex
+// model the next build actually runs, and the picker never offers the main
+// native provider itself.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" }, { provider: "openai-codex", id: "gpt-6-astra" });
+const nativeCtx = makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } });
+const nativePromptCount = uiPrompts.length;
+const nativeNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const nativeOffer = uiPrompts[nativePromptCount];
+if (nativeOffer.options[0] !== "Follow main (codex-native/gpt-6-astra)" || nativeOffer.options.includes("codex-native/gpt-6-astra")) {
+  throw new Error(`the picker must offer following a native main without offering its native provider: ${JSON.stringify(nativeOffer.options)}`);
+}
+const nativeNotices = notices.slice(nativeNoticeCount);
+if (nativeNotices.length !== 1 || nativeNotices[0].type !== "info" || !nativeNotices[0].message.includes("openai-codex/gpt-6-astra")) {
+  throw new Error(`following a native main did not report the ordinary Pi model the build uses: ${JSON.stringify(nativeNotices)}`);
+}
+dispatch("signal: native follow");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main follow build");
+const nativeFollowed = globalThis.__fmSessions[5].options.model;
+if (nativeFollowed?.provider !== "openai-codex" || nativeFollowed?.id !== "gpt-6-astra") {
+  throw new Error(`the build did not run the model the picker reported: ${JSON.stringify(nativeFollowed)}`);
+}
+
+// When that ordinary model is unavailable, the picker reports the refusal the
+// next build enforces instead of claiming the branch keeps a recorded model.
+registryModels.splice(registryModels.findIndex((model) => model.provider === "openai-codex" && model.id === "gpt-6-astra"), 1);
+const refusalNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const refusalNotices = notices.slice(refusalNoticeCount);
+if (
+  refusalNotices.length !== 1 ||
+  refusalNotices[0].type !== "warning" ||
+  !refusalNotices[0].message.includes("refuses to build") ||
+  refusalNotices[0].message.includes("keeps the model its own session recorded")
+) {
+  throw new Error(`following an unavailable native main did not report the build refusal: ${JSON.stringify(refusalNotices)}`);
+}
+const refusedOffer = dispatch("signal: native follow refused");
+const refusal = await refusedOffer.settlement.then(() => null, (error) => error);
+if (!(refusal instanceof Error) || !refusal.message.includes("refuses to build")) {
+  throw new Error(`the build did not refuse as the picker reported: ${String(refusal)}`);
+}
+if (globalThis.__fmSessions.length !== 6) throw new Error("a refused native follow still built a branch");
 process.exit(0);
 EOF
   status=$?
@@ -3917,6 +4003,18 @@ const unparseable = globalThis.__fmSessions[0].options.model;
 if (unparseable?.provider !== "anthropic" || unparseable?.id !== "main-model") {
   throw new Error(`an unparseable pin must be treated as no pin and follow main: ${JSON.stringify(unparseable)}`);
 }
+// Even a registered native provider cannot be selected by the independent
+// supervision session: its persistent native thread belongs to main.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" });
+writeFileSync(`${home}/config/supervision-branch-model`, "codex-native/gpt-6-astra\n");
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const nativeOffer = dispatch("signal: native branch pin refused");
+const nativeFailure = await nativeOffer.settlement.then(() => null, (error) => error);
+if (!(nativeFailure instanceof Error) || !nativeFailure.message.includes("ordinary Pi provider")) {
+  throw new Error(`native branch pin was not explicitly refused: ${String(nativeFailure)}`);
+}
+if (globalThis.__fmSessions.length !== 1) throw new Error("native pin built a shared native branch");
 process.exit(0);
 EOF
   status=$?
@@ -4267,6 +4365,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -4695,6 +4794,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -5297,6 +5397,98 @@ EOF
   pass "a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated"
 }
 
+test_extension_registered_provider_resolves_in_the_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/extprov-root"
+  home="$TMP_ROOT/extprov-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+// An extension-registered provider exists only in main's registry, never in
+// the isolated branch runtime's static catalog. Registering its config on
+// main's registry is what makes it resolvable for the branch.
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  // Available in main's registry but absent from the branch runtime's static
+  // catalog, exactly like a provider an extension registered at runtime.
+  { provider: "devin", id: "swe-1-7", branchAvailable: false },
+);
+globalThis.__fmExtensionProviderConfigs = new Map([
+  [
+    "devin",
+    {
+      name: "Devin (Cognition)",
+      api: "devin-cloud",
+      baseUrl: "https://server.codeium.com",
+      models: [{ id: "swe-1-7", name: "SWE 1.7", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 8192 }],
+      oauth: { name: "Devin (Cognition / Windsurf)", login: async () => ({}), refreshToken: async (c) => c, getApiKey: (c) => c.access },
+      streamSimple: () => {},
+    },
+  ],
+]);
+
+await fire("session_start", {}, makeCtx());
+
+// The picker must offer the extension-registered model: it is available in
+// main's registry and resolvable in the branch runtime once its registration
+// is copied across.
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+uiSelections.push("devin/swe-1-7");
+await command.handler("", makeCtx());
+const offered = uiPrompts[0];
+if (!offered.options.includes("devin/swe-1-7")) {
+  throw new Error(`the picker must offer an extension-registered provider the branch can run: ${JSON.stringify(offered.options)}`);
+}
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "devin/swe-1-7\n") {
+  throw new Error("the extension-registered pick was not persisted");
+}
+dispatch("signal: extension provider pin");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pinned extension-provider branch build");
+const pinned = globalThis.__fmSessions[0].options.model;
+if (!pinned || pinned.provider !== "devin" || pinned.id !== "swe-1-7") {
+  throw new Error(`the extension-registered pin did not bind the branch: ${JSON.stringify(pinned)}`);
+}
+// Copying the provider registration must not loosen the branch's isolation:
+// the devin-pinned session still loads no extensions, skills, or context files.
+const pinnedLoader = globalThis.__fmLoaders.at(-1);
+for (const key of ["noExtensions", "noSkills", "noContextFiles"]) {
+  if (pinnedLoader.options[key] !== true) throw new Error(`devin-pinned branch loader must keep ${key}`);
+}
+
+// Without the registration, the same pin is unavailable and the branch
+// refuses to build rather than silently downgrading.
+globalThis.__fmExtensionProviderConfigs = new Map();
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const unregisteredOffer = dispatch("signal: unregistered provider pin");
+if (!unregisteredOffer.accepted) throw new Error("unregistered-pin wake was not initially accepted");
+const unregisteredFailure = await unregisteredOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (
+  !(unregisteredFailure instanceof Error) ||
+  !unregisteredFailure.message.includes("devin/swe-1-7") ||
+  !unregisteredFailure.message.includes("supervision model pin")
+) {
+  throw new Error(`the unregistered pin did not reject with its own name: ${String(unregisteredFailure)}`);
+}
+if ((globalThis.__fmSessions ?? []).length !== 1) throw new Error("an unregistered pin must not build a second branch session");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an extension-registered provider must resolve in the isolated branch runtime: $out"
+  pass "an extension-registered provider resolves in the isolated branch runtime"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -5330,6 +5522,7 @@ test_supervision_model_picker_is_bounded_searchable_and_branch_only
 test_branch_model_picker_keeps_follow_main_first_under_ranking
 test_branch_effort_pin_applies_and_absent_pin_follows_main
 test_unpinned_branch_follows_main_effort_changes_live
+test_extension_registered_provider_resolves_in_the_branch
 test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure

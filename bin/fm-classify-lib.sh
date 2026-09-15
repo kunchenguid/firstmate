@@ -91,14 +91,36 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a verified captain hold.
+# Bounded re-surface cadence for a declared external-wait pause.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
-# one owner.
+# avoids nagging a deliberate wait while ensuring a forgotten wait cannot rot
+# invisibly - it re-surfaces once for a recheck every window. Four hours by
+# default: a declared wait is by definition expected to clear on its own, so a
+# recheck is a backstop, not progress, and an hourly one only produced nagging
+# (the 2026-09-07 away-window audit). A worker that knows when its wait clears
+# names it with `until` (status_paused_until below) and is rechecked at that
+# time or this cadence bound, whichever comes first. Both consumers read
+# FM_PAUSE_RESURFACE_SECS with this default so
+# the cadence has one owner. An item held for the captain is not rechecked at all
+# while the away-posture record exists (bin/fm-watch.sh owns that rule).
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
-FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
+FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
+
+# fm_utc_iso_to_epoch <YYYY-MM-DDTHH:MM[:SS]Z>: the one portable UTC ISO 8601
+# reader shared by the declared-wait vocabulary and the away-posture record
+# (bin/fm-afk-contract.sh). Prints epoch seconds; returns 1 on any other shape
+# so a malformed time is refused rather than read as "now".
+fm_utc_iso_to_epoch() {  # <timestamp>
+  local ts=$1
+  case "$ts" in
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]Z) ts="${ts%Z}:00Z" ;;
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z) ;;
+    *) return 1 ;;
+  esac
+  date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null \
+    || date -u -d "$ts" +%s 2>/dev/null \
+    || return 1
+}
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
@@ -184,6 +206,23 @@ status_is_captain_held() {  # <status-line>
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
+}
+
+# A condition-aware declared wait: a `paused:` line may say WHEN it expects to
+# clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
+# no local-zone guess is ever recorded). Prints that time as epoch seconds so a
+# supervisor rechecks the wait when the worker said it would clear instead of on
+# the flat cadence; returns 1 when the line is not a pause or declares no time,
+# or the time is malformed, so a bad token falls back to the cadence rather than
+# silencing the wait.
+status_paused_until() {  # <status-line> -> epoch on stdout
+  local line=$1 token
+  status_is_paused "$line" || return 1
+  token=$(printf '%s' "$line" \
+    | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
+    | head -1)
+  [ -n "$token" ] || return 1
+  fm_utc_iso_to_epoch "$token"
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -653,9 +692,9 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    ident=$(LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
+    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   else
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
@@ -672,7 +711,7 @@ _fm_status_file_size() {  # <status-file>
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%z' "$f" 2>/dev/null
+    LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%s' "$f" 2>/dev/null
   fi
@@ -681,7 +720,7 @@ _fm_status_file_size() {  # <status-file>
 _fm_status_file_mtime() {  # <status-file>
   local f=$1
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%m' "$f" 2>/dev/null
+    LC_ALL=C /usr/bin/stat -f '%m' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
   fi
@@ -1072,7 +1111,7 @@ status_presentation_marker_parse() {
 
 _status_observed_path_state() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%HT:%p' "$1" 2>/dev/null
+    LC_ALL=C /usr/bin/stat -f '%HT:%p' "$1" 2>/dev/null
   else
     LC_ALL=C stat -c '%F:%f' "$1" 2>/dev/null
   fi

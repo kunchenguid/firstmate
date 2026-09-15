@@ -79,6 +79,7 @@ import {
   getAgentDir,
   keyHint,
   ModelRuntime,
+  type ModelRegistry,
   SessionManager,
   SettingsManager,
   ToolExecutionComponent,
@@ -89,6 +90,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
@@ -297,6 +299,9 @@ async function resolveCodexCompatResources(
   }
   return { extensionPath: expectedExtensionPath };
 }
+type FollowMainResolution =
+  | { ok: true; selection: PinnedBranchModel }
+  | { ok: false; reason: string; refusesBuild: boolean };
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
 // come from Pi's own getSupportedThinkingLevels/clampThinkingLevel, so this
@@ -726,6 +731,11 @@ export default function (pi: ExtensionAPI) {
   // extension plus its model_select event, because createBranch runs at wake
   // time with no context of its own. It is what "follow main" applies.
   let mainModel: { provider: string; id: string } | null = null;
+  // Main's own model registry, captured from the contexts Pi hands this
+  // extension the same way mainModel is. It is the ONLY read path to
+  // providers an extension registered at runtime (pi-devin-auth's "devin"),
+  // which the branch's isolated ModelRuntime cannot see on its own.
+  let mainModelRegistry: ModelRegistry | null = null;
 
   // Main's own current effort needs no such tracking: Pi answers it directly
   // on demand, including at wake time. It throws only when the extension
@@ -739,8 +749,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function rememberMainModel(ctx?: { model?: { provider: string; id: string } }): void {
+  function rememberMainModel(ctx?: { model?: { provider: string; id: string }; modelRegistry?: ModelRegistry }): void {
     if (ctx?.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
+    if (ctx?.modelRegistry) mainModelRegistry = ctx.modelRegistry;
   }
 
   function deliverBranchHealthNote(text: string): void {
@@ -790,10 +801,58 @@ export default function (pi: ExtensionAPI) {
   // and same user as main, so stored credentials keep their own semantics
   // (OAuth stays OAuth, an API key stays an API key) and nothing is ever
   // installed, converted, derived, or overwritten here.
+  // A provider that exists only because an extension registered it into
+  // main's runtime (pi-devin-auth's "devin", whose streamSimple is the custom
+  // gRPC path no static catalog can express) is invisible to an isolated
+  // branch runtime until its registration is copied across. The config object
+  // carries that streamSimple and oauth wiring by reference, so copying it
+  // reuses the provider's own registration rather than reimplementing its
+  // wire protocol; the copy is never persisted and stays scoped to this one
+  // runtime. One registration that fails to compose must not blind the rest,
+  // so each copy is isolated. A just-registered provider's auth check has not
+  // run yet, so the copied providers are refreshed here and every caller's
+  // hasConfiguredAuth verdict is real rather than the provisional entry
+  // registration leaves behind.
+  async function copyExtensionProviders(modelRuntime: ModelRuntime): Promise<void> {
+    if (!mainModelRegistry) return;
+    let providerIds: readonly string[];
+    try {
+      providerIds = mainModelRegistry.getRegisteredProviderIds();
+    } catch {
+      return;
+    }
+    const copied: string[] = [];
+    for (const providerId of providerIds) {
+      try {
+        const config = mainModelRegistry.getRegisteredProviderConfig(providerId);
+        if (config) {
+          modelRuntime.registerProvider(providerId, config);
+          copied.push(providerId);
+        }
+      } catch {
+        // A registration that fails to compose in the isolated runtime leaves
+        // that provider unavailable, exactly as if it were never copied.
+      }
+    }
+    if (copied.length === 0) return;
+    try {
+      await modelRuntime.refresh({ providers: copied, allowNetwork: false });
+    } catch {
+      // A failed availability refresh is answered by hasConfiguredAuth.
+    }
+  }
+
   async function resolveBranchModel(provider: string, modelId: string): Promise<BranchModelResolution> {
     const label = `${provider}/${modelId}`;
+    if (provider === "codex-native") {
+      return { ok: false, reason: `${label} belongs to the main native session; choose an ordinary Pi provider for supervision` };
+    }
     const modelRuntime = await ModelRuntime.create();
-    const model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    let model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    if (!model) {
+      await copyExtensionProviders(modelRuntime);
+      model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    }
     if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
     if (!modelRuntime.hasConfiguredAuth(provider)) {
       return { ok: false, reason: `${label} has no configured credentials in the isolated branch runtime` };
@@ -809,25 +868,50 @@ export default function (pi: ExtensionAPI) {
     return resolved.selection;
   }
 
+  // "Follow main" is ONE rule, shared by every unpinned branch build and by
+  // the /supervision-model report, so the report describes exactly what the
+  // next build does. An ordinary Pi provider is applied as main's own model;
+  // when the isolated runtime cannot run it, the build passes no override at
+  // all (refusesBuild false). A native provider owns a persistent main
+  // thread, so the branch instead selects the same model through Pi's
+  // independent openai-codex provider, and when that model is unavailable the
+  // build refuses (refusesBuild true) rather than inheriting the native
+  // thread or silently restoring a recorded native selection.
+  async function followMainModel(main: { provider: string; id: string }): Promise<FollowMainResolution> {
+    const native = main.provider === "codex-native";
+    let resolved: BranchModelResolution;
+    try {
+      resolved = await resolveBranchModel(native ? "openai-codex" : main.provider, main.id);
+    } catch (error) {
+      resolved = { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (resolved.ok) return resolved;
+    if (!native) return { ...resolved, refusesBuild: false };
+    return {
+      ok: false,
+      refusesBuild: true,
+      reason: `native main requires an independent Pi supervision model and ${resolved.reason}; the branch refuses to build until one is pinned with /supervision-model`,
+    };
+  }
+
   // The pin file's CURRENT state decides the model on every branch build,
   // create and reopen alike, and it overrides Pi's restore of whatever model
   // a reopened branch session recorded. With a pin, that model. With no pin,
-  // main's own model is applied EXPLICITLY - otherwise clearing the pin would
-  // report that the branch follows main while the reopened session quietly
-  // restored the model an earlier pin left behind. Only when main's model is
-  // genuinely unknown, or the isolated runtime cannot run it, does the build
+  // main's own model is applied EXPLICITLY through followMainModel -
+  // otherwise clearing the pin would report that the branch follows main
+  // while the reopened session quietly restored the model an earlier pin left
+  // behind. Only when main's model is genuinely unknown, or the follow rule
+  // says the isolated runtime cannot run an ordinary provider, does the build
   // fall back to passing no override at all, which is the pre-feature
-  // behavior; an unpinned branch is never refused over model choice alone.
+  // behavior.
   async function branchModelSelection(): Promise<PinnedBranchModel | undefined> {
     const pin = readModelPin();
     if (pin) return preparePinnedBranchModel(pin);
     if (!mainModel) return undefined;
-    try {
-      const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
-      return resolved.ok ? resolved.selection : undefined;
-    } catch {
-      return undefined;
-    }
+    const following = await followMainModel(mainModel);
+    if (following.ok) return following.selection;
+    if (following.refusesBuild) throw new Error(following.reason);
+    return undefined;
   }
 
   async function effectiveBranchModel(selected: BranchModel | undefined): Promise<BranchModel | undefined> {
@@ -1938,9 +2022,10 @@ ${context.command}
       let available: string[];
       try {
         const modelRuntime = await ModelRuntime.create();
+        await copyExtensionProviders(modelRuntime);
         available = ctx.modelRegistry
           .getAvailable()
-          .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
+          .filter((model) => model.provider !== "codex-native" && modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
           .map(modelLabel);
       } catch (error) {
         ctx.ui.notify(
@@ -1984,23 +2069,22 @@ ${context.command}
         modelReport = { message: `Supervision branch model: ${picked}.`, warning: false };
       } else {
         // Clearing the pin only follows main if main's model can actually be
-        // applied to the branch; say what will really happen rather than
-        // reporting a state that did not take effect.
-        try {
-          const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
-          if (following?.ok) branchModel = following.selection.model;
-          modelReport = following?.ok
-            ? {
-                message: `Supervision branch follows main's model (${modelLabel(following.selection.model)}).`,
-                warning: false,
-              }
-            : {
-                message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"}); the branch keeps the model its own session recorded until that conversation is replaced.`,
-                warning: true,
-              };
-        } catch (error) {
+        // applied to the branch; the same followMainModel rule the next build
+        // runs says what will really happen rather than reporting a state
+        // that did not take effect.
+        const following = mainModel ? await followMainModel(mainModel) : null;
+        if (following?.ok) {
+          branchModel = following.selection.model;
           modelReport = {
-            message: `Supervision branch pin cleared, but main's model could not be applied (${error instanceof Error ? error.message : String(error)}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+            message: `Supervision branch follows main's model (${modelLabel(following.selection.model)}).`,
+            warning: false,
+          };
+        } else {
+          const consequence = following?.refusesBuild
+            ? ""
+            : "; the branch keeps the model its own session recorded until that conversation is replaced";
+          modelReport = {
+            message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"})${consequence}.`,
             warning: true,
           };
         }
@@ -2256,7 +2340,7 @@ ${context.command}
     return shell;
   };
 
-  pi.registerTool?.({
+  registerFirstmateTool(pi, {
     name: "fm_branch_outcomes",
     label: "Read supervision branch outcomes",
     description:
@@ -2318,7 +2402,7 @@ ${context.command}
   // cursor, never backwards), and refused outside lock ownership, so neither a
   // paraphrase, an empty reply, nor a stale generation can mark an outcome
   // processed.
-  pi.registerTool?.({
+  registerFirstmateTool(pi, {
     name: "fm_branch_processed",
     label: "Acknowledge processed supervision outcomes",
     description:

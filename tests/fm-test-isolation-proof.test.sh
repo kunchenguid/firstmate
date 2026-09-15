@@ -268,6 +268,24 @@ test_parallel_shards_consume_the_proven_set() {
   pass "parallel shards consume the proven-isolated set only"
 }
 
+# A fixture repository names its branch, so a suite that resolves `main` gets
+# the same answer wherever it runs. Without the pinned initial branch this
+# fails on any host whose init.defaultBranch is still master.
+test_fixture_repo_branch_is_pinned() {
+  local root dir config branch
+  root=$(fm_test_tmproot fm-fixture-branch-pin) || fail "could not create a fixture root"
+  dir="$root/repo"
+  config="$root/gitconfig"
+  printf '[init]\n\tdefaultBranch = master\n' > "$config"
+  GIT_CONFIG_GLOBAL="$config" fm_git_init_commit "$dir"
+  branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = main ] \
+    || fail "fixture repo branch follows init.defaultBranch instead of main: $branch"
+  git -C "$dir" rev-parse main >/dev/null 2>&1 \
+    || fail "fixture repo cannot resolve main"
+  pass "fixture repositories pin their initial branch to main"
+}
+
 test_unknown_pool_is_refused
 test_family_pool_json_identifies_admission
 test_list_candidates_nonempty_and_stable
@@ -276,3 +294,4 @@ test_extra_hermetic_candidates_present
 test_list_exclusions_documents_reasons
 test_family_map_labels_this_contract
 test_parallel_shards_consume_the_proven_set
+test_fixture_repo_branch_is_pinned
