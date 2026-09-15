@@ -47,7 +47,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
-import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
+import {
+  installCalmAssistantLayout,
+  resetCalmAssistantLiveStepCounter,
+} from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
@@ -432,6 +435,7 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
+    resetCalmAssistantLiveStepCounter();
     // A genuine new session lifetime starts the boat at the normal initial position.
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
@@ -476,6 +480,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", (_event, ctx) => {
     currentStepUi = ctx.ui;
     setCalmCurrentStep(undefined);
+    resetCalmAssistantLiveStepCounter();
     agentRunActive = true;
     applyWorkingPresentation(ctx.ui);
     updateCurrentStepPresentation();

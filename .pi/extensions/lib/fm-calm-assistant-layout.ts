@@ -19,6 +19,9 @@ type AssistantMessagePresentationState = {
   hiddenThinkingLabel: string;
   hideThinkingBlock: boolean;
   lastMessage?: AssistantMessage;
+  lastPresentedMessage?: AssistantMessage;
+  lastSourceMessage?: AssistantMessage;
+  liveStepKey?: string;
 };
 
 type CalmAssistantLayoutPatch = {
@@ -46,6 +49,34 @@ const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-assistant-layout:pi-0.81.1",
 );
 
+let liveStepCounter = 0;
+
+export function resetCalmAssistantLiveStepCounter(): void {
+  liveStepCounter = 0;
+}
+
+type LiveStep = {
+  key: string;
+  block: AssistantMessage["content"][number];
+  text: string;
+};
+
+function currentLiveStep(message: AssistantMessage): LiveStep | undefined {
+  for (let index = message.content.length - 1; index >= 0; index--) {
+    const block = message.content[index];
+    if (block.type !== "thinking" && block.type !== "text") continue;
+    const raw = block.type === "thinking" ? block.thinking : block.text;
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const text = lines.at(-1);
+    if (!text) continue;
+    return { key: `${index}:${lines.length}`, block, text };
+  }
+  return undefined;
+}
+
 export function installCalmAssistantLayout(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmAssistantLayoutPatch | undefined;
@@ -71,34 +102,58 @@ export function installCalmAssistantLayout(): void {
 
   AssistantMessageComponent.prototype.updateContent = function (
     message: AssistantMessage,
+    isStreaming = false,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
+    // Pi's invalidate() and presentation setters call updateContent() with the
+    // shallow presentation copy held by Pi itself. Do not decorate that copy a
+    // second time or a live step would acquire a new prefix on every redraw.
+    if (message === state.lastPresentedMessage && message !== state.lastSourceMessage) {
+      originalUpdateContent.call(this, message, isStreaming);
+      return;
+    }
+
+    const midTurn = isMidTurnAssistantMessage(message);
+    const hadLiveStep = state.liveStepKey !== undefined;
+    const liveStep = isStreaming && patch.hidesWorkingNote() ? currentLiveStep(message) : undefined;
     const hideThinking =
+      !isStreaming &&
       state.hiddenThinkingLabel === "" &&
-      state.hideThinkingBlock &&
+      (state.hideThinkingBlock || hadLiveStep) &&
       patch.hidesThinking();
-    const hideWorkingNote =
-      patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
+    const hideWorkingNote = !isStreaming && patch.hidesWorkingNote() && midTurn;
     if (hideWorkingNote) {
       const step = message.content
         .flatMap((block) => (block.type === "text" ? [block.text] : []))
         .join(" ");
       if (step.trim()) setCalmCurrentStep(step);
     }
-    const presentationMessage =
-      hideThinking || hideWorkingNote
-        ? {
-            ...message,
-            content: message.content.filter(
-              (block) =>
-                !(hideThinking && block.type === "thinking") &&
-                !(hideWorkingNote && block.type === "text"),
-            ),
-          }
-        : message;
+    let presentationMessage = message;
+    if (liveStep) {
+      liveStepCounter = state.liveStepKey === liveStep.key ? liveStepCounter : liveStepCounter + 1;
+      state.liveStepKey = liveStep.key;
+      const text = `Step ${liveStepCounter}: ${liveStep.text}`;
+      const block =
+        liveStep.block.type === "thinking"
+          ? { ...liveStep.block, thinking: text }
+          : { ...liveStep.block, text };
+      presentationMessage = { ...message, content: [block] };
+    } else if (hideThinking || hideWorkingNote) {
+      presentationMessage = {
+        ...message,
+        content: message.content.filter(
+          (block) =>
+            !(hideThinking && block.type === "thinking") &&
+            !(hideWorkingNote && block.type === "text"),
+        ),
+      };
+    }
 
-    originalUpdateContent.call(this, presentationMessage);
-    if (presentationMessage !== message) state.lastMessage = message;
+    originalUpdateContent.call(this, presentationMessage, isStreaming);
+    state.lastMessage = message;
+    if (!isStreaming) state.liveStepKey = undefined;
+    state.lastSourceMessage = message;
+    state.lastPresentedMessage = presentationMessage;
   };
 
   registry[CALM_ASSISTANT_LAYOUT_PATCH] = patch;

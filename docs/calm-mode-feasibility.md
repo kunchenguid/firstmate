@@ -224,8 +224,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
-| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The text blocks are removed from the shallow presentation copy before layout and the latest text is shown in Calm's replace-in-place current-step status, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
+| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | A live stream shows only its current text line as one numbered `Step N:` row; each new line replaces the previous row, while settled tool-use narration is removed from the shallow presentation copy (verified on Pi 0.84.1 and 0.85.1). |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | A live stream shows only its current thinking line as one numbered `Step N:` row; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -611,3 +611,14 @@ ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-
 ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
+
+## 2026-09-15 Pi 0.85.1 live intermediate-step verification
+
+The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session with a deterministic provider that streamed three planning lines before a final response.
+
+```text
+$ NODE_NO_WARNINGS=1 FM_CALM_PI_HERDR_LIVE_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
+ok - real Pi 0.85.1 in Herdr displayed one replacing numbered Calm step at a time, settled to the final response, and preserved planning transcript context
+```
+
+The test observed Step 1, Step 2, and Step 3 as single replacing rows, verified that settlement removed the planning rows, and verified that all three planning lines remained in the persisted session transcript.

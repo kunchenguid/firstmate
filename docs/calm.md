@@ -16,9 +16,11 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, mid-turn assistant working notes, routine supervision notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
+Calm shows one current live intermediate thinking or assistant-text row, prefixed with an increasing `Step N:` counter, while the model is streaming.
+Each distinct streamed line replaces the previous row instead of accumulating a planning transcript on screen.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
-Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
-Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
+When the response settles, intermediate tool-use narration and any live planning thinking are hidden while the genuine final response stays visible.
+Restored tool-use narration remains hidden, while explicit reasoning expansion still restores the original reasoning row.
 The narration and routine supervision notes are hidden only from the live transcript presentation, and remain in their messages, model context, session storage, and `/export` artifacts.
 The current-step line is cleared when the main run settles, so the final answer remains the lasting transcript result.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
@@ -59,4 +61,5 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_CALM_PI_HERDR_LIVE_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
 ```

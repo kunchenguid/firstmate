@@ -1542,6 +1542,7 @@ const ui = {
   setStatus() {},
   setToolsExpanded() {},
   setWorkingVisible() {},
+  setWidget() {},
   notify() {},
 };
 const context = { ui };
@@ -1549,11 +1550,13 @@ const context = { ui };
 async function loadCalmExtension() {
   const registeredTools = [];
   let sessionStart;
+  let agentStart;
   let calmCommand;
   const pi = {
     events: { emit() {}, on() {} },
     on(event, handler) {
       if (event === "session_start") sessionStart = handler;
+      if (event === "agent_start") agentStart = handler;
     },
     registerCommand(name, command) {
       if (name === "calm") calmCommand = command;
@@ -1568,10 +1571,10 @@ async function loadCalmExtension() {
   };
   const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
   extension.default(pi);
-  if (!calmCommand || !sessionStart) {
-    throw new Error("Calm extension did not register its command and session handler");
+  if (!calmCommand || !sessionStart || !agentStart) {
+    throw new Error("Calm extension did not register its command and lifecycle handlers");
   }
-  return { calmCommand, sessionStart, registeredTools };
+  return { calmCommand, sessionStart, agentStart, registeredTools };
 }
 
 const assistantBase = {
@@ -1660,6 +1663,35 @@ requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
 await calm.calmCommand.handler("", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
   throw new Error("plain /calm from off did not persist on");
+}
+await calm.agentStart({}, context);
+const live = new AssistantMessageComponent(undefined, false);
+components.push(live);
+const liveMessage = {
+  ...assistantBase,
+  stopReason: "pending",
+  content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
+};
+live.updateContent(liveMessage, true);
+if (live.render(100).join("\n").indexOf("Step 1: LIVE_STEP_ONE") === -1) {
+  throw new Error("live Calm thinking did not render as the first numbered step");
+}
+liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
+live.updateContent(liveMessage, true);
+const liveStepText = live.render(100).join("\n");
+if (!liveStepText.includes("Step 2: LIVE_STEP_TWO") || liveStepText.includes("LIVE_STEP_ONE")) {
+  throw new Error(`live Calm thinking did not replace the prior step: ${liveStepText}`);
+}
+if ((liveStepText.match(/Step [0-9]+:/g) || []).length !== 1) {
+  throw new Error(`live Calm thinking rendered more than one current step: ${liveStepText}`);
+}
+live.updateContent(
+  { ...assistantBase, stopReason: "stop", content: [{ type: "text", text: "LIVE_FINAL_REPLY" }] },
+  false,
+);
+const settledLiveText = live.render(100).join("\n");
+if (!settledLiveText.includes("LIVE_FINAL_REPLY") || settledLiveText.includes("Step 2:")) {
+  throw new Error("settled final assistant response retained the live step prefix");
 }
 if (rendered("midTurn").length !== 0) {
   throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
