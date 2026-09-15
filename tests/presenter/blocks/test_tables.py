@@ -62,6 +62,14 @@ def test_format_engineering() -> None:
     assert format_engineering(None) == "-"
 
 
+def test_format_engineering_nonfinite() -> None:
+    """Verify engineering formatter labels non-finite values like sibling formatters."""
+    assert format_engineering(float("nan")) == "NaN"
+    assert format_engineering("nan") == "NaN"
+    assert format_engineering(float("inf"), unit="V") == "Inf"
+    assert format_engineering(float("-inf"), unit="V") == "-Inf"
+
+
 def test_format_number() -> None:
     """Verify format_number dispatcher with various options."""
     assert format_number(1.234, sig_figs=2) == "1.2"
@@ -193,6 +201,65 @@ def test_build_spec_table() -> None:
     assert r1[4] == "200"
     assert r1[5] == "mV"
     assert r1[6] == "IOUT = 100mA"
+
+
+def test_build_spec_table_custom_header_order() -> None:
+    """Verify values land under their named columns when headers are reordered."""
+    specs: list[SpecItem | Mapping[str, Any]] = [
+        SpecItem(parameter="IQ", min_val=1.0, typ_val=1.2, max_val=2.5, unit="mA"),
+        {"parameter": "VDO", "min": 1.0, "typ": 1.2, "max": 2.5, "unit": "mV"},
+    ]
+
+    block = build_spec_table(
+        specs,
+        headers=["Min", "Typ", "Max", "Units", "Parameter"],
+        include_symbol=False,
+        include_conditions=False,
+    )
+
+    assert block["headers"] == ["Min", "Typ", "Max", "Units", "Parameter"]
+    assert block["rows"] == [
+        ["1.00", "1.20", "2.50", "mA", "IQ"],
+        ["1.00", "1.20", "2.50", "mV", "VDO"],
+    ]
+    assert block["alignments"] == ["right", "right", "right", "center", "left"]
+
+
+def test_build_spec_table_renamed_headers_with_units() -> None:
+    """Verify unit-suffixed headers keep their values and apply numeric formatting."""
+    block = build_spec_table(
+        [{"parameter": "VDO", "min": 1.0, "typ": 1.2, "max": 2.5}],
+        headers=["Parameter", "Min (V)", "Typ (V)", "Max (V)"],
+        include_symbol=False,
+        include_conditions=False,
+    )
+
+    assert block["headers"] == ["Parameter", "Min (V)", "Typ (V)", "Max (V)"]
+    assert block["rows"] == [["VDO", "1.00", "1.20", "2.50"]]
+
+
+def test_build_spec_table_unknown_header_raises() -> None:
+    """Verify an unrecognized custom header fails loudly instead of mislabeling."""
+    with pytest.raises(ValueError, match="Bogus"):
+        build_spec_table(
+            [{"parameter": "IQ", "typ": 1.2}],
+            headers=["Parameter", "Bogus"],
+            include_symbol=False,
+            include_conditions=False,
+        )
+
+
+def test_build_spec_table_custom_headers_override_includes() -> None:
+    """Verify a custom header list fully determines the emitted columns."""
+    block = build_spec_table(
+        [{"parameter": "IQ", "symbol": "I_Q", "typ": 1.2}],
+        include_symbol=False,
+        include_conditions=False,
+        headers=["Parameter", "Symbol", "Typ"],
+    )
+
+    assert block["headers"] == ["Parameter", "Symbol", "Typ"]
+    assert block["rows"] == [["IQ", "I_Q", "1.20"]]
 
 
 def test_build_pvt_table() -> None:

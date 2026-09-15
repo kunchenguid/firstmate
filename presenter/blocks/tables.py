@@ -102,8 +102,10 @@ def format_engineering(val: Any, unit: str | None = None, sig_figs: int = 3) -> 
     except (ValueError, TypeError):
         return str(val)
 
-    if math.isnan(f) or math.isinf(f):
-        return str(f)
+    if math.isnan(f):
+        return "NaN"
+    if math.isinf(f):
+        return "Inf" if f > 0 else "-Inf"
     if f == 0.0:
         return f"0 {unit}".strip() if unit else "0"
 
@@ -315,6 +317,33 @@ def build_table(
     return block
 
 
+_SPEC_TABLE_COLUMNS: tuple[str, ...] = (
+    "Parameter",
+    "Symbol",
+    "Min",
+    "Typ",
+    "Max",
+    "Units",
+    "Conditions",
+)
+
+
+def _resolve_spec_column(header: str) -> str:
+    """Map a spec-table header to its canonical column name."""
+    h = header.strip()
+    lowered = h.lower()
+    for canonical in _SPEC_TABLE_COLUMNS:
+        if lowered == canonical.lower():
+            return canonical
+    for canonical in _SPEC_TABLE_COLUMNS:
+        prefix = canonical.lower()
+        if lowered.startswith(prefix) and not h[len(prefix) : len(prefix) + 1].isalnum():
+            return canonical
+    raise ValueError(
+        f"Unknown spec-table column {header!r}; expected one of {list(_SPEC_TABLE_COLUMNS)}"
+    )
+
+
 def build_spec_table(
     specs: Sequence[SpecItem | Mapping[str, Any]],
     *,
@@ -334,7 +363,11 @@ def build_spec_table(
         sig_figs: Number of significant figures for numeric min/typ/max values.
         include_symbol: Whether to include the 'Symbol' column.
         include_conditions: Whether to include the 'Conditions' column.
-        headers: Optional custom header list.
+        headers: Optional custom header list. Each header must identify one of
+            the canonical columns (Parameter, Symbol, Min, Typ, Max, Units,
+            Conditions); unit suffixes such as 'Min (V)' are recognized, and
+            unrecognized names raise ValueError. When given, the list fully
+            determines the emitted columns, overriding the include flags.
 
     Returns:
         A table block dict per the shared contract.
@@ -349,15 +382,15 @@ def build_spec_table(
         if include_conditions:
             table_headers.append("Conditions")
 
+    resolved_columns = [_resolve_spec_column(h) for h in table_headers]
+
     col_specs: list[ColumnSpec] = []
-    for h in table_headers:
-        if h in ("Min", "Typ", "Max"):
+    for h, key in zip(table_headers, resolved_columns):
+        if key in ("Min", "Typ", "Max"):
             col_specs.append(
                 ColumnSpec(header=h, sig_figs=sig_figs, align="right", include_unit_in_header=False)
             )
-        elif h == "Units":
-            col_specs.append(ColumnSpec(header=h, align="center"))
-        elif h == "Symbol":
+        elif key in ("Units", "Symbol"):
             col_specs.append(ColumnSpec(header=h, align="center"))
         else:
             col_specs.append(ColumnSpec(header=h, align="left"))
@@ -381,20 +414,16 @@ def build_spec_table(
             unit = item.get("unit", item.get("units", "-"))
             cond = item.get("conditions", item.get("condition", "-"))
 
-        row: list[Any] = [param]
-        if include_symbol and "Symbol" in table_headers:
-            row.append(symbol)
-        if "Min" in table_headers:
-            row.append(min_v)
-        if "Typ" in table_headers:
-            row.append(typ_v)
-        if "Max" in table_headers:
-            row.append(max_v)
-        if "Units" in table_headers:
-            row.append(unit)
-        if include_conditions and "Conditions" in table_headers:
-            row.append(cond)
-        rows_data.append(row)
+        values: dict[str, Any] = {
+            "Parameter": param,
+            "Symbol": symbol,
+            "Min": min_v,
+            "Typ": typ_v,
+            "Max": max_v,
+            "Units": unit,
+            "Conditions": cond,
+        }
+        rows_data.append([values[key] for key in resolved_columns])
 
     return build_table(
         headers=table_headers,

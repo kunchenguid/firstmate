@@ -229,6 +229,37 @@ def test_build_plot_from_csv_stream_no_header(tmp_path: Path) -> None:
     assert out_png.exists()
 
 
+def test_build_plot_from_csv_missing_path_raises(tmp_path: Path) -> None:
+    """Verify a nonexistent CSV path raises FileNotFoundError naming the path."""
+    missing = tmp_path / "typo.csv"
+
+    with pytest.raises(FileNotFoundError, match="typo.csv"):
+        build_plot_from_csv(missing)
+
+    with pytest.raises(FileNotFoundError, match="also_missing.csv"):
+        build_plot_from_csv(str(tmp_path / "also_missing.csv"))
+
+
+def test_build_plot_from_csv_directory_raises(tmp_path: Path) -> None:
+    """Verify passing a directory path fails instead of rendering an empty plot."""
+    with pytest.raises(FileNotFoundError, match="No such CSV file"):
+        build_plot_from_csv(tmp_path)
+
+
+def test_build_plot_from_csv_raw_string(tmp_path: Path) -> None:
+    """Verify raw CSV strings still render without a file."""
+    out_png = tmp_path / "raw_string.png"
+
+    block = build_plot_from_csv(
+        "t,V\n0.0,1.0\n1.0,2.0\n2.0,4.0\n",
+        output_path=out_png,
+    )
+
+    assert block["type"] == "plot"
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+
 def test_build_plot_from_csv_invalid_columns(tmp_path: Path) -> None:
     """Verify error handling when column names in CSV do not match."""
     csv_file = tmp_path / "bad.csv"

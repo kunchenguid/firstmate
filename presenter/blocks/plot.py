@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+import errno
 import io
 from pathlib import Path
 import tempfile
@@ -279,6 +280,14 @@ def build_plot_from_arrays(
     return build_waveform_plot(x=x, y=y, **kwargs)
 
 
+def _looks_like_csv_content(text: str, delimiter: str) -> bool:
+    """Return True when a string reads as CSV data rather than a file path."""
+    s = text.strip()
+    if not s:
+        return False
+    return any(ch in s for ch in ("\n", "\r", delimiter, ",", ";", "\t"))
+
+
 def build_plot_from_csv(
     csv_source: str | Path | TextIO,
     *,
@@ -291,7 +300,10 @@ def build_plot_from_csv(
     """Build a waveform plot from CSV data.
 
     Args:
-        csv_source: File path (str or Path) or readable text stream containing CSV data.
+        csv_source: File path (str or Path), raw CSV string, or readable text
+            stream. A str is interpreted as raw CSV content only when it
+            contains a delimiter or line break; otherwise it is treated as a
+            file path and must exist (FileNotFoundError is raised otherwise).
         x_col: Column name (str) or index (int) for the x-axis. Defaults to 0.
         y_cols: Column names or indices for the y-axis traces. Defaults to all other columns.
         delimiter: CSV field delimiter. Defaults to ','.
@@ -304,12 +316,12 @@ def build_plot_from_csv(
     """
     if isinstance(csv_source, (str, Path)):
         p = Path(csv_source)
-        if p.exists() and p.is_file():
-            with open(p, "r", encoding="utf-8") as f:
-                content = f.read()
+        if p.is_file():
+            content = p.read_text(encoding="utf-8")
+        elif isinstance(csv_source, str) and _looks_like_csv_content(csv_source, delimiter):
+            content = csv_source
         else:
-            # Might be CSV string directly
-            content = str(csv_source)
+            raise FileNotFoundError(errno.ENOENT, "No such CSV file", str(csv_source))
         f_in: TextIO = io.StringIO(content)
     else:
         f_in = csv_source
