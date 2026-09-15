@@ -922,6 +922,39 @@ test_non_grok_harness_ignores_grok_home() {
   pass "non-grok harnesses do not receive the GROK_HOME prefix"
 }
 
+# Execute the emitted grok launch in real pane shells whose environment lacks
+# GROK_HOME, the shape of a pane inherited from the long-lived tmux/herdr
+# daemon. A `grok` probe on PATH reports the home it would run under, so this
+# proves the isolated home reaches the worker PROCESS, not merely the command
+# text. No developer environment or credential values are inspected.
+test_grok_launch_runs_worker_under_firstmate_home() {
+  local rec id out status launch probe_dir pane_shell observed expected
+  id=profile-grok-home-env-z27
+  rec=$(make_spawn_case profile-grok-home-env grok "$id")
+  read_case_record "$rec"
+  probe_dir="$CASE_DIR/probe-bin"
+  mkdir -p "$probe_dir"
+  cat > "$probe_dir/grok" <<'SH'
+#!/bin/sh
+printf '%s\n' "${GROK_HOME-unset}" "${GROK_HOME:-$HOME/.grok}"
+SH
+  chmod +x "$probe_dir/grok"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "grok spawn with GROK_HOME set should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  expected="$HOME_DIR/grok-home"$'\n'"$HOME_DIR/grok-home"
+  for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$pane_shell" ] || continue
+    observed=$(env -i HOME="$HOME_DIR/user-home" PATH="$probe_dir:/usr/bin:/bin" TERM=xterm \
+      "$pane_shell" -c "$launch") || fail "emitted grok launch failed in $pane_shell"
+    [ "$observed" = "$expected" ] \
+      || fail "grok worker in $pane_shell did not run under firstmate's GROK_HOME: $observed"
+  done
+  pass "the emitted grok launch runs the worker under firstmate's GROK_HOME in a pane that lacks it"
+}
+
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1461,6 +1494,7 @@ test_non_claude_harness_ignores_config_dir
 test_grok_forwards_firstmate_home_when_set
 test_grok_omits_home_prefix_when_unset
 test_non_grok_harness_ignores_grok_home
+test_grok_launch_runs_worker_under_firstmate_home
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
