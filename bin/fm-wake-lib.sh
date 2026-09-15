@@ -1249,6 +1249,143 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Local state inventory: every local Firstmate home that can reach this pool.
+# The record-state argument is included first because a remote-seeded home may
+# intentionally terminate its parent walk at itself.
+FM_TREEHOUSE_OWNER_STATES=()
+fm_treehouse_state_identity() {
+  local state=$1 parent leaf resolved
+  if resolved=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  parent=$(dirname -- "$state")
+  leaf=$(basename -- "$state")
+  if resolved=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "$resolved" "$leaf"
+  else
+    printf '%s\n' "$state"
+  fi
+}
+
+fm_treehouse_require_enumerable_state() {  # <state>
+  local state=$1
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    if [ ! -d "$state" ] \
+      || ! find "$state" -mindepth 1 -maxdepth 1 -print -quit >/dev/null 2>&1; then
+      echo "REFUSED: cannot enumerate local Firstmate state at $state; nothing was changed" >&2
+      return 1
+    fi
+  fi
+}
+
+fm_treehouse_collect_local_states() {  # <record-state>
+  local record_state=$1 root home reg line child known existing candidate candidate_identity existing_identity i=0
+  local -a homes
+  fm_treehouse_require_enumerable_state "$record_state" || return 1
+  FM_TREEHOUSE_OWNER_STATES=("$record_state")
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
+    return 1
+  }
+  if ! command -v secondmate_registry_parse_line >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh
+    . "$FM_WAKE_LIB_DIR/fm-secondmate-registry-lib.sh"
+  fi
+  homes=("$root")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    candidate="$home/state"
+    candidate_identity=$(fm_treehouse_state_identity "$candidate")
+    known=0
+    for existing in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
+      existing_identity=$(fm_treehouse_state_identity "$existing")
+      [ "$existing_identity" != "$candidate_identity" ] || known=1
+    done
+    if [ "$known" != 1 ]; then
+      fm_treehouse_require_enumerable_state "$candidate" || return 1
+      FM_TREEHOUSE_OWNER_STATES+=("$candidate")
+    fi
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || {
+      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
+      return 1
+    }
+    if while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || {
+            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"; then
+      :
+    else
+      echo "REFUSED: cannot read local Firstmate registry at $reg; nothing was changed" >&2
+      return 1
+    fi
+  done
+}
+
+FM_TREEHOUSE_RECORD_WORKTREE=
+FM_TREEHOUSE_RECORD_HOME=
+fm_treehouse_read_task_slot_paths() {  # <meta-file>
+  local meta=$1 content line
+  FM_TREEHOUSE_RECORD_WORKTREE=
+  FM_TREEHOUSE_RECORD_HOME=
+  content=$(< "$meta") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree=*) FM_TREEHOUSE_RECORD_WORKTREE=${line#*=} ;;
+      home=*) FM_TREEHOUSE_RECORD_HOME=${line#*=} ;;
+    esac
+  done <<< "$content"
+}
+
+# Refuse a fresh spawn when another local task record still names the selected
+# pool slot. This covers records created before slot-owner claims existed.
+fm_treehouse_refuse_if_recorded_collision() {  # <worktree>
+  local worktree=$1 target_real state_dir other other_id field other_path other_real
+  target_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  fm_treehouse_collect_local_states "$STATE" || return 1
+  for state_dir in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      other_id=$(basename "$other" .meta)
+      if ! fm_treehouse_read_task_slot_paths "$other"; then
+        echo "REFUSED: cannot read local task record $other; refusing to hand out worktree '$worktree'" >&2
+        return 1
+      fi
+      for field in worktree home; do
+        case "$field" in
+          worktree) other_path=$FM_TREEHOUSE_RECORD_WORKTREE ;;
+          home) other_path=$FM_TREEHOUSE_RECORD_HOME ;;
+        esac
+        [ -n "$other_path" ] || continue
+        other_real=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
+        [ "$other_real" = "$target_real" ] || continue
+        echo "error: spawn refused: worktree '$worktree' is already held by task '$other_id'" >&2
+        echo "Resolve task '$other_id' and retry after its work is safely landed and its record is cleaned up; do not bypass this refusal." >&2
+        return 1
+      done
+    done
+  done
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
@@ -1277,7 +1414,8 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
-# Claim a pool slot for a task, replacing whatever the previous holder left.
+# Claim a pool slot for a task. A task may refresh its own claim, but a
+# foreign or unreadable claim refuses rather than handing out the slot twice.
 # The rename is atomic, so a reader either sees the old claim or the new one.
 fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   local worktree=$1 id=$2 home=$3 marker tmp
@@ -1289,6 +1427,13 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
      && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
     return 1
   fi
+  if [ -f "$marker" ]; then
+    fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      mine) ;;
+      *) return 1 ;;
+    esac
+  fi
   tmp="$marker.tmp.${BASHPID:-$$}"
   rm -f "$tmp" || return 1
   {
@@ -1298,17 +1443,16 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-# Read the claim on a pool slot and compare it with a task id.
+# Read the claim on a pool slot and compare it with a task owner.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
-#   mine   - the claim names this task
-#   other  - the claim names a different task, so the slot was reassigned
+#   mine   - the claim names this task and home
+#   other  - the claim names a different task/home owner
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
-fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+# claimant as evidence.
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 marker line owner_id='' owner_home='' owner_home_real home_real
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1324,12 +1468,18 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
       home=*) owner_home=${line#home=} ;;
     esac
   done < "$marker" || return 0
-  [ -n "$owner_id" ] || return 0
+  [ -n "$owner_id" ] && [ -n "$owner_home" ] || return 0
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ]; then
+  if [ "$owner_id" != "$id" ]; then
+    FM_TREEHOUSE_SLOT_OWNER=other
+    return 0
+  fi
+  owner_home_real=$(CDPATH='' cd -- "$owner_home" 2>/dev/null && pwd -P) || return 0
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 0
+  if [ "$owner_home_real" = "$home_real" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other
@@ -1339,9 +1489,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$id"
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 marker
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true

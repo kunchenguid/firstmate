@@ -87,8 +87,8 @@
 # returned out from under a live worker (observed 2026-09-07). So teardown also
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
+# owns the claim, its location, and its states. A claim naming a different task
+# ID is proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
 # status, records, checks, backlog - while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
@@ -104,6 +104,10 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# A recorded copy checked out on `fm/<other-task>` is also durable ownership
+# evidence when no foreign pool-slot claim already identifies a reassignment.
+# Teardown refuses before direct or descendant cleanup in that case, including
+# with --force, and leaves the branch, copy, and record intact.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -361,6 +365,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_TASK_OWNER_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
@@ -2102,49 +2107,8 @@ teardown_live_slot_path() {
 }
 
 collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
+  fm_treehouse_collect_local_states "$1" || return 1
+  TREEHOUSE_OWNER_STATES=("${FM_TREEHOUSE_OWNER_STATES[@]}")
 }
 
 require_exclusive_worktree_slot_record() {
@@ -2157,8 +2121,15 @@ require_exclusive_worktree_slot_record() {
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       [ "$other" != "$record_meta" ] || continue
       other_id=$(basename "$other" .meta)
+      if ! fm_treehouse_read_task_slot_paths "$other"; then
+        echo "REFUSED: cannot read local task record $other; refusing teardown because slot ownership is unproven." >&2
+        return 1
+      fi
       for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
+        case "$field" in
+          worktree) other_path=$FM_TREEHOUSE_RECORD_WORKTREE ;;
+          home) other_path=$FM_TREEHOUSE_RECORD_HOME ;;
+        esac
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
@@ -2186,11 +2157,11 @@ require_exclusive_task_worktree_slot() {
 # exited and its record been cleaned up, or it may belong to a home this machine
 # does not register. The claim closes that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# that allocates it - so a claim naming a different task ID is proof the slot
+# was reassigned after this record was written.
 #
-# A claim naming another task does not refuse: it means the slot is no longer
-# this task's, so the record's own cleanup proceeds and every slot step is
+# A claim naming a different task ID does not refuse: it means the slot is no
+# longer this task's, so the record's own cleanup proceeds and every slot step is
 # skipped (see the script header for why refusing would strand the record and
 # why skipping discards nothing). Returns TEARDOWN_SLOT_REASSIGNED_RC for that
 # state so each caller gates its slot steps on one determination; the claimant
@@ -2201,12 +2172,17 @@ require_exclusive_task_worktree_slot() {
 # would strand every task in flight across the change for no evidence at all.
 # Those keep exactly the record-scan protection they had before.
 TEARDOWN_SLOT_REASSIGNED_RC=3
-require_owned_worktree_slot_record() {  # <task-id> <worktree>
-  local record_id=$1 worktree=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$record_id"
+require_owned_worktree_slot_record() {  # <task-id> <worktree> <home>
+  local record_id=$1 worktree=$2 home=$3 marker
+  fm_treehouse_slot_owner_state "$worktree" "$record_id" "$home"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) return 0 ;;
     other)
+      if [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$record_id" ]; then
+        echo "REFUSED: task $record_id's recorded worktree $worktree carries a slot-owner claim for the same task ID in a different physical Firstmate home ($FM_TREEHOUSE_SLOT_OWNER_HOME); nothing was changed - not even with --force." >&2
+        echo "Reconcile the stale same-named task record or foreign claim before retrying teardown." >&2
+        return 1
+      fi
       echo "warning: task $record_id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; that slot is no longer $record_id's, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
       ;;
@@ -2226,7 +2202,7 @@ TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
-  require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
+  require_owned_worktree_slot_record "$ID" "$slot" "$FM_HOME" || rc=$?
   case "$rc" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
@@ -2647,6 +2623,7 @@ collect_descendant_task_locks() {
     DESCENDANT_TASK_IDS+=("$child_id")
     DESCENDANT_TASK_KINDS+=("$child_kind")
     DESCENDANT_TASK_HOMES+=("$child_home")
+    DESCENDANT_TASK_OWNER_HOMES+=("$home")
     [ "$child_kind" != secondmate ] \
       || collect_descendant_task_locks "$child_home" \
       || return 1
@@ -2659,6 +2636,7 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_IDS=()
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
+  DESCENDANT_TASK_OWNER_HOMES=()
   DESCENDANT_TREEHOUSE_LOCK_PATHS=()
   collect_descendant_task_locks "$home" || return 1
   # Acquisition order, which every other holder of these locks must match so
@@ -2710,7 +2688,7 @@ preflight_descendant_task_locks() {
 }
 
 preflight_descendant_treehouse_slots() {
-  local i state task_id meta kind backend target worktree project lock_path held owner_rc
+  local i state task_id task_home meta kind backend target worktree project lock_path held owner_rc
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
@@ -2747,26 +2725,28 @@ preflight_descendant_treehouse_slots() {
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
+    task_home=${DESCENDANT_TASK_OWNER_HOMES[$i]}
     meta="$state/$task_id.meta"
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
-      continue
-    fi
-    if ! fm_treehouse_pool_slot "$project" "$worktree"; then
+    if [ "$kind" = secondmate ]; then
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
-    owner_rc=0
-    require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
-    case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
-      *) return 1 ;;
-    esac
+    if [ "$backend" != orca ] && fm_treehouse_pool_slot "$project" "$worktree"; then
+      require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+      owner_rc=0
+      require_owned_worktree_slot_record "$task_id" "$worktree" "$task_home" || owner_rc=$?
+      case "$owner_rc" in
+        0) ;;
+        "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
+        *) return 1 ;;
+      esac
+    fi
+    teardown_refuse_if_other_task_branch "$task_id" "$worktree" || return 1
   done
 }
 
@@ -3001,12 +2981,12 @@ cleanup_firstmate_home_children() {
       # already named the reassignment on stderr under the same lock.
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
+        require_owned_worktree_slot_record "$child_id" "$child_wt" "$home" 2>/dev/null || child_owner_rc=$?
       fi
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         :
       elif [ "$child_owner_rc" -ne 0 ]; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
+        require_owned_worktree_slot_record "$child_id" "$child_wt" "$home" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3014,7 +2994,7 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-            fm_treehouse_slot_owner_release "$child_wt" "$child_id"
+            fm_treehouse_slot_owner_release "$child_wt" "$child_id" "$home"
           else
             child_return_rc=$?
             if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
@@ -3063,6 +3043,41 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+
+# A task branch is durable ownership evidence even when its owner record is not
+# reachable from this home's local registry. Refuse before any cleanup mutation.
+teardown_refuse_if_other_task_branch() {  # <task-id> <worktree>
+  local record_id=$1 worktree=$2 branch holder_id branch_status=0
+  [ -d "$worktree" ] || return 0
+  branch=$(git -C "$worktree" symbolic-ref --quiet HEAD 2>/dev/null) || branch_status=$?
+  case "$branch_status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "REFUSED: cannot inspect branch ownership for task $record_id's recorded worktree $worktree; refusing teardown because cleanup safety is unproven." >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$branch" ]; then
+    echo "REFUSED: cannot inspect branch ownership for task $record_id's recorded worktree $worktree; refusing teardown because cleanup safety is unproven." >&2
+    return 1
+  fi
+  [ "$branch" != "refs/heads/fm/$record_id" ] || return 0
+  case "$branch" in
+    refs/heads/fm/*)
+      holder_id=${branch#refs/heads/fm/}
+      branch=${branch#refs/heads/}
+      ;;
+    *) return 0 ;;
+  esac
+  [ -n "$holder_id" ] && [ "$holder_id" != "$record_id" ] || return 0
+  echo "REFUSED: task $record_id's recorded worktree $worktree is checked out on branch $branch for task $holder_id; refusing teardown to avoid changing another task's copy." >&2
+  echo "Resolve task $holder_id and retry teardown after its work is safely landed; do not use --force to bypass this refusal." >&2
+  return 1
+}
+if [ "$KIND" != secondmate ] && [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]; then
+  teardown_refuse_if_other_task_branch "$ID" "$WT" || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3343,7 +3358,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  fm_treehouse_slot_owner_release "$WT" "$ID" "$FM_HOME"
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

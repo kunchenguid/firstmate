@@ -7,6 +7,7 @@ set -u
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
+REAL_GIT=$(command -v git)
 REAL_TMUX=$(command -v tmux || true)
 
 make_case() {  # <name>
@@ -15,6 +16,7 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   git init -q "$TMP_ROOT/$dir/project"
+  git init -q "$TMP_ROOT/$dir/worktree"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -540,6 +542,100 @@ test_cross_home_pool_slot_collision_refuses() {
   pass "fm-teardown: a pool slot held by another firstmate home is never returned"
 }
 
+test_unreadable_child_state_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task child_home rc
+
+  dir=$(make_case slot-unreadable-child-state)
+  mark_case_as_treehouse_pool "$dir"
+  child_home="$dir/child-home"
+  mkdir -p "$child_home/data" "$child_home/state"
+  printf '%s\n' \
+    "- child - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$child_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 111 "$child_home/state"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 700 "$child_home/state"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after a child state directory could not be enumerated"
+  assert_contains "$(cat "$dir/stderr")" "cannot enumerate local Firstmate state at $child_home/state" \
+    "child state enumeration failure did not explain the safety refusal"
+  assert_present "$dir/home/state/$id.meta" "child state enumeration failure removed stale metadata"
+  assert_present "$child_home/state/$other.meta" "child state enumeration failure removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "child state enumeration failure changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "child state enumeration failure ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when a reachable state directory cannot be enumerated"
+}
+
+test_unreadable_override_state_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task override_state rc
+
+  dir=$(make_case slot-unreadable-override-state)
+  mark_case_as_treehouse_pool "$dir"
+  override_state="$dir/alternate-state"
+  mkdir -p "$override_state"
+  fm_write_meta "$override_state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$override_state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 300 "$override_state"
+
+  set +e
+  FM_STATE_OVERRIDE="$override_state" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 700 "$override_state"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after its alternate state directory could not be enumerated"
+  assert_contains "$(cat "$dir/stderr")" "cannot enumerate local Firstmate state at $override_state" \
+    "alternate state enumeration failure did not explain the safety refusal"
+  assert_present "$override_state/$id.meta" "alternate state enumeration failure removed stale metadata"
+  assert_present "$override_state/$other.meta" "alternate state enumeration failure removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "alternate state enumeration failure changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "alternate state enumeration failure ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when its alternate state directory cannot be enumerated"
+}
+
+test_unreadable_task_record_refuses_before_cleanup() {
+  local dir id=stale-task other=hidden-task rc
+
+  dir=$(make_case slot-unreadable-task-record)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  chmod 000 "$dir/home/state/$other.meta"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  chmod 600 "$dir/home/state/$other.meta"
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after a reachable task record could not be read"
+  assert_contains "$(cat "$dir/stderr")" "cannot read local task record $dir/home/state/$other.meta" \
+    "unreadable task record did not explain the ownership refusal"
+  assert_present "$dir/home/state/$id.meta" "unreadable task record removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "unreadable task record removed hidden metadata"
+  assert_present "$dir/worktree/sentinel" "unreadable task record changed the worktree"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unreadable task record ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses when a reachable task record cannot be read"
+}
+
 test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
@@ -566,6 +662,210 @@ test_sole_slot_record_still_tears_down() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
+}
+
+test_other_task_branch_refuses_before_cleanup() {
+  local dir id=stale-task branch rc
+
+  dir=$(make_case branch-collision)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a copy checked out on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "branch refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "branch refusal removed the task record"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "branch refusal changed the branch to $branch"
+  [ ! -s "$dir/runtime.log" ] || fail "branch refusal ran cleanup: $(cat "$dir/runtime.log")"
+  pass "fm-teardown refuses a copy checked out on another task's branch before cleanup"
+}
+
+test_branch_inspection_error_refuses_before_cleanup() {
+  local dir id=inspection-failure rc
+
+  dir=$(make_case branch-inspection-failure)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mv "$dir/worktree/.git" "$dir/git-marker"
+  cat > "$dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${2:-}" = "$dir/worktree" ] && [ "\${3:-}" = symbolic-ref ]; then
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+SH
+  chmod +x "$dir/fakebin/git"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown proceeded after branch ownership inspection failed"
+  assert_contains "$(cat "$dir/stderr")" "cannot inspect branch ownership" \
+    "branch inspection failure did not explain the safety refusal"
+  assert_present "$dir/home/state/$id.meta" "branch inspection failure removed the task record"
+  assert_present "$dir/worktree/sentinel" "branch inspection failure changed the worktree"
+  assert_present "$dir/git-marker" "branch inspection failure changed the hidden Git marker"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "branch inspection failure ran cleanup: $(cat "$dir/runtime.log")"
+  mv "$dir/git-marker" "$dir/worktree/.git"
+  pass "fm-teardown refuses before cleanup when branch ownership inspection fails"
+}
+
+test_own_task_branch_still_tears_down() {
+  local dir id=own-task rc
+
+  dir=$(make_case own-branch)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b "fm/$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "teardown of its own task branch should succeed"
+  assert_absent "$dir/home/state/$id.meta" "own-branch teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "own-branch teardown did not return its own pool slot"
+  pass "fm-teardown still cleans up a copy checked out on its own task branch"
+}
+
+test_forced_secondmate_refuses_descendant_on_other_task_branch() {
+  local dir id=domain child=stale-child subhome branch rc
+
+  dir=$(make_case descendant-branch-collision)
+  mark_case_as_treehouse_pool "$dir"
+  subhome="$dir/secondmate-home"
+  mkdir -p "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf '%s\n' "- $id - fixture (home: $subhome; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$subhome" "home=$subhome" "project=$subhome" "kind=secondmate"
+  fm_write_meta "$subhome/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a descendant on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "descendant branch refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "descendant branch refusal removed the secondmate record"
+  assert_present "$subhome/state/$child.meta" "descendant branch refusal removed the child record"
+  assert_present "$dir/worktree/sentinel" "descendant branch refusal reset the child slot"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "descendant branch refusal changed the branch to $branch"
+  [ ! -s "$dir/runtime.log" ] || fail "descendant branch refusal ran cleanup: $(cat "$dir/runtime.log")"
+  pass "forced secondmate teardown refuses a descendant checked out on another task's branch"
+}
+
+test_forced_secondmate_refuses_nonpool_descendant_on_other_task_branch() {
+  local dir id=domain child=legacy-child subhome branch rc
+
+  dir=$(make_case descendant-nonpool-branch-collision)
+  rm -rf "$dir/worktree"
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm legacy-fixture
+  git -C "$dir/project" worktree add -q --detach "$dir/worktree"
+  : > "$dir/worktree/sentinel"
+  subhome="$dir/secondmate-home"
+  mkdir -p "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf '%s\n' "- $id - fixture (home: $subhome; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$subhome" "home=$subhome" "project=$subhome" "kind=secondmate"
+  fm_write_meta "$subhome/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown removed a non-pool descendant on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "non-pool descendant refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "non-pool branch refusal removed the secondmate record"
+  assert_present "$subhome/state/$child.meta" "non-pool branch refusal removed the child record"
+  assert_present "$dir/worktree/sentinel" "non-pool branch refusal removed the child worktree"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "non-pool branch refusal changed the branch to $branch"
+  [ ! -s "$dir/runtime.log" ] || fail "non-pool branch refusal ran cleanup: $(cat "$dir/runtime.log")"
+  pass "forced secondmate teardown refuses a non-pool descendant on another task's branch"
+}
+
+test_forced_secondmate_refuses_orca_descendant_on_other_task_branch() {
+  local dir id=domain child=orca-child subhome branch rc
+
+  dir=$(make_case descendant-orca-branch-collision)
+  mark_case_as_treehouse_pool "$dir"
+  subhome="$dir/secondmate-home"
+  mkdir -p "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf '%s\n' "- $id - fixture (home: $subhome; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$subhome" "home=$subhome" "project=$subhome" "kind=secondmate"
+  fm_write_meta "$subhome/state/$child.meta" \
+    "window=fm-$child" "endpoint_task_id=$child" "terminal=term-$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=orca" "orca_worktree_id=wt-$child"
+  git -C "$dir/worktree" checkout -q -b fm/other-task
+  cat > "$dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+printf 'orca' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+if [ "\${1:-} \${2:-}" = 'worktree show' ]; then
+  printf '%s\n' '{"ok":true,"result":{"worktree":{"id":"wt-$child","path":"$dir/worktree"}}}'
+else
+  printf '%s\n' '{"ok":true,"result":{}}'
+fi
+SH
+  chmod +x "$dir/fakebin/orca"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown removed an Orca descendant on another task's branch"
+  assert_contains "$(cat "$dir/stderr")" "branch fm/other-task for task other-task" \
+    "Orca descendant refusal did not name the branch and holding task"
+  assert_present "$dir/home/state/$id.meta" "Orca branch refusal removed the secondmate record"
+  assert_present "$subhome/state/$child.meta" "Orca branch refusal removed the child record"
+  assert_present "$dir/worktree/sentinel" "Orca branch refusal removed the child worktree"
+  branch=$(git -C "$dir/worktree" symbolic-ref --short HEAD)
+  [ "$branch" = fm/other-task ] || fail "Orca branch refusal changed the branch to $branch"
+  assert_not_contains "$(cat "$dir/runtime.log")" " <terminal> <close>" \
+    "Orca branch refusal closed the child terminal"
+  assert_not_contains "$(cat "$dir/runtime.log")" " <worktree> <rm>" \
+    "Orca branch refusal removed the child worktree"
+  assert_not_contains "$(cat "$dir/runtime.log")" "tmux" \
+    "Orca branch refusal reached parent or child terminal cleanup"
+  pass "forced secondmate teardown refuses an Orca descendant on another task's branch"
 }
 
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
@@ -938,10 +1238,47 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+test_same_id_foreign_home_claim_refuses_before_cleanup() {
+  local dir id=shared-task foreign_tasktmp worker rc
+
+  dir=$(make_case slot-same-id-foreign-home)
+  mark_case_as_treehouse_pool "$dir"
+  foreign_tasktmp="$dir/foreign-tasktmp"
+  mkdir -p "$dir/other-home" "$foreign_tasktmp"
+  : > "$foreign_tasktmp/sentinel"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "tasktmp=$foreign_tasktmp"
+  claim_pool_slot "$dir" "$id" "$dir/other-home"
+  ( cd "$foreign_tasktmp" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted a same-ID claim from a different physical home"
+  assert_contains "$(cat "$dir/stderr")" "same task ID in a different physical Firstmate home" \
+    "same-ID foreign-home refusal did not explain the ownership conflict"
+  assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
+    "same-ID foreign-home refusal did not name the claimant's home"
+  assert_present "$dir/home/state/$id.meta" "same-ID foreign-home refusal removed the task record"
+  assert_present "$dir/worktree/sentinel" "same-ID foreign-home refusal reset the claimed slot"
+  assert_present "$dir/pool/1/.fm-slot-owner" "same-ID foreign-home refusal removed the claim"
+  assert_present "$foreign_tasktmp/sentinel" "same-ID foreign-home refusal removed shared task temp"
+  kill -0 "$worker" 2>/dev/null || fail "same-ID foreign-home refusal killed a process in shared task temp"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "same-ID foreign-home refusal reached endpoint cleanup: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown refuses same-ID slot ownership from another physical home"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
-  local dir id=owned-task
+  local dir id=owned-task home_link
 
   dir=$(make_case slot-claim-own)
   mark_case_as_treehouse_pool "$dir"
@@ -957,6 +1294,42 @@ test_own_and_absent_slot_claims_still_tear_down() {
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "own-claim teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
 
+  dir=$(make_case slot-claim-home-alias)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b "fm/$id"
+  home_link="$dir/home-link"
+  ln -s "$dir/home" "$home_link"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id" "$home_link"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown through the physical home refused its symlink-spelled own claim: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "home-alias teardown left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "home-alias teardown left its own slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "home-alias teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
+  dir=$(make_case slot-claim-active-home-alias)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" checkout -q -b "fm/$id"
+  home_link="$dir/home-link"
+  ln -s "$dir/home" "$home_link"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id" "$home_link"
+
+  FM_HOME="$home_link" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown through a symlink-spelled home refused its own record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "active home-alias teardown left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "active home-alias teardown left its own slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "active home-alias teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
   dir=$(make_case slot-claim-absent)
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -969,7 +1342,7 @@ test_own_and_absent_slot_claims_still_tear_down() {
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "unclaimed-slot teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
-  pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
+  pass "fm-teardown: physical own-home identity and an unclaimed slot both still tear down"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
@@ -983,8 +1356,18 @@ test_isolated_tmux_invalid_and_valid_cleanup
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
+test_unreadable_child_state_refuses_before_cleanup
+test_unreadable_override_state_refuses_before_cleanup
+test_unreadable_task_record_refuses_before_cleanup
 test_sole_slot_record_still_tears_down
+test_other_task_branch_refuses_before_cleanup
+test_branch_inspection_error_refuses_before_cleanup
+test_own_task_branch_still_tears_down
+test_forced_secondmate_refuses_descendant_on_other_task_branch
+test_forced_secondmate_refuses_nonpool_descendant_on_other_task_branch
+test_forced_secondmate_refuses_orca_descendant_on_other_task_branch
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_same_id_foreign_home_claim_refuses_before_cleanup
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

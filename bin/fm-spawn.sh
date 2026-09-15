@@ -121,10 +121,12 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   could later be released out from under its successor. Fresh allocation also
+#   refuses a selected slot named by another local task record, covering slots
+#   whose older holder predates slot-owner claims. A spawn that aborts while it
+#   still holds the allocation lock drops its own claim; an abort after metadata
+#   publication leaves the claim in place, so a later spawn refuses until the
+#   owning task is reconciled.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1069,17 +1071,17 @@ spawn_abort_cleanup() {
   # must not leave a claim naming a task no record describes. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
+  # already released that lock and leaves the claim in place rather than racing
+  # it. The same task and home may refresh that claim, while another owner must
+  # reconcile it first. The release itself never removes another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
      && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_treehouse_slot_owner_release "$WT" "$ID" "$FM_HOME" || true
     else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+      echo "warning: leaving task $ID's slot claim on $WT in place because the Treehouse project lock is no longer held; reconcile the retained claim before spawning a different task into that slot" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -2828,7 +2830,7 @@ case "$BACKEND" in
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -3364,6 +3366,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # Refuse a selected slot still named by another local task record before
+  # refreshing or publishing additional state for this task. This is the migration path
+  # for slots whose older holder predates Firstmate's slot-owner claim.
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    fm_treehouse_refuse_if_recorded_collision "$WT" || exit 1
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

@@ -691,10 +691,11 @@ lay_out_as_pool_slot() {
 
 # The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
 # a launched task's claim names it, a slot that cannot be claimed refuses before
-# anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
+# anything is published, an abort while the allocation lock is still held
+# leaves no claim naming a task with no record, and a later abort explains its
+# retained claim.
 test_pool_slot_claim_follows_the_spawn_outcome() {
-  local rec id out status before
+  local rec id retry_id out retry_out status retry_status before
 
   id='pool-slot-claim-r1'
   rec=$(make_case slot-claim "$id")
@@ -740,11 +741,287 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
   [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
     || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+
+  id='pool-slot-claim-retained-r1'
+  retry_id='pool-slot-claim-retained-retry-r1'
+  rec=$(make_case slot-claim-retained "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-real"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = send-keys ] && [ -e "$HOME_DIR/state/$id.meta" ]; then
+  exit 1
+fi
+exec "$FAKEBIN_DIR/tmux-real" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after launch delivery failed"
+  assert_contains "$out" "reconcile the retained claim before spawning a different task" \
+    "post-publication abort did not explain how to reconcile its retained slot claim"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "post-publication abort retained rolled-back metadata"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "post-publication abort lost its retained slot claim: $(cat "$SLOT_CLAIM")"
+  mv "$FAKEBIN_DIR/tmux-real" "$FAKEBIN_DIR/tmux"
+  fm_test_spawn_brief "$HOME_DIR" "$retry_id"
+  retry_out=$(run_spawn "$retry_id" --scout)
+  retry_status=$?
+  [ "$retry_status" -ne 0 ] || fail "a different task replaced the retained post-publication claim"
+  assert_contains "$retry_out" "could not claim Treehouse pool slot" \
+    "different-task retry did not refuse the retained post-publication claim"
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
+test_unreadable_nested_registry_refuses_pool_allocation() {
+  local rec id out status before child_a child_b grandchild registry
+
+  id='pool-slot-unreadable-nested-registry-r1'
+  rec=$(make_case unreadable-nested-registry "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_a="$CASE_DIR/child-a"
+  child_b="$CASE_DIR/child-b"
+  grandchild="$CASE_DIR/grandchild"
+  mkdir -p "$child_a/data" "$child_a/state" "$child_b/data" "$child_b/state" \
+    "$grandchild/data" "$grandchild/state"
+  printf '%s\n%s\n' \
+    "- child-a - fixture (home: $child_a; scope: test; projects: project; added 2026-01-01)" \
+    "- child-b - fixture (home: $child_b; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  registry="$child_a/data/secondmates.md"
+  printf '%s\n' \
+    "- grandchild - fixture (home: $grandchild; scope: test; projects: project; added 2026-01-01)" \
+    > "$registry"
+  : > "$child_b/data/secondmates.md"
+  fm_write_meta "$grandchild/state/older-grandchild-task.meta" \
+    "window=firstmate:fm-older-grandchild-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 000 "$registry"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 600 "$registry"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a nested registry read failed: $out"
+  assert_contains "$out" "cannot read local Firstmate registry at $registry" \
+    "nested registry read failure did not refuse the allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "nested registry read failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "nested registry read failure claimed the retained slot"
+  [ -e "$grandchild/state/older-grandchild-task.meta" ] \
+    || fail "nested registry read failure removed the holding grandchild record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "nested registry read failure changed the held slot"
+  pass "an unreadable nested Firstmate registry refuses pooled allocation"
+}
+
+test_unreadable_nested_state_refuses_pool_allocation() {
+  local rec id out status before child_home
+
+  id='pool-slot-unreadable-nested-state-r1'
+  rec=$(make_case unreadable-nested-state "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/data" "$child_home/state"
+  printf '%s\n' \
+    "- child - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/older-child-task.meta" \
+    "window=firstmate:fm-older-child-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 111 "$child_home/state"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 700 "$child_home/state"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a nested state directory could not be enumerated: $out"
+  assert_contains "$out" "cannot enumerate local Firstmate state at $child_home/state" \
+    "nested state enumeration failure did not refuse the allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "nested state enumeration failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "nested state enumeration failure claimed the retained slot"
+  [ -e "$child_home/state/older-child-task.meta" ] \
+    || fail "nested state enumeration failure removed the holding child record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "nested state enumeration failure changed the held slot"
+  pass "an unreadable nested Firstmate state refuses pooled allocation"
+}
+
+test_unreadable_override_state_refuses_pool_allocation() {
+  local rec id out status before override_state other
+
+  id='pool-slot-unreadable-override-state-r1'
+  rec=$(make_case unreadable-override-state "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  override_state="$CASE_DIR/alternate-state"
+  other="$override_state/older-task.meta"
+  mkdir -p "$override_state"
+  : > "$override_state/.last-watcher-beat"
+  fm_write_meta "$other" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 300 "$override_state"
+
+  out=$(FM_TEST_STATE_OVERRIDE="$override_state" run_spawn "$id" --scout)
+  status=$?
+  chmod 700 "$override_state"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after its alternate state directory could not be enumerated: $out"
+  assert_contains "$out" "cannot enumerate local Firstmate state at $override_state" \
+    "alternate state enumeration failure did not refuse allocation explicitly"
+  [ ! -e "$override_state/$id.meta" ] || fail "alternate state enumeration failure published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "alternate state enumeration failure claimed the retained slot"
+  [ -e "$other" ] || fail "alternate state enumeration failure removed the holding task record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "alternate state enumeration failure changed the held slot"
+  pass "an unreadable alternate state refuses pooled allocation"
+}
+
+test_unreadable_task_record_refuses_pool_allocation() {
+  local rec id out status before other
+
+  id='pool-slot-unreadable-task-record-r1'
+  rec=$(make_case unreadable-task-record "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  other="$HOME_DIR/state/older-task.meta"
+  fm_write_meta "$other" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  chmod 000 "$other"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  chmod 600 "$other"
+  [ "$status" -ne 0 ] \
+    || fail "spawn allocated a slot after a reachable task record could not be read: $out"
+  assert_contains "$out" "cannot read local task record $other" \
+    "unreadable task record did not refuse allocation explicitly"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unreadable task record published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "unreadable task record claimed the retained slot"
+  [ -e "$other" ] || fail "unreadable task record was removed"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "unreadable task record changed the held slot"
+  pass "an unreadable task record refuses pooled allocation"
+}
+
+# Fresh allocation must not replace ownership evidence or an older task record
+# when Treehouse returns a slot that is still retained by another task.
+test_pool_slot_refuses_existing_ownership() {
+  local rec id out status before child_home
+
+  id='pool-slot-record-collision-r1'
+  rec=$(make_case record-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/older-task.meta" \
+    "window=firstmate:fm-older-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a slot still named by another task record"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task 'older-task'" \
+    "record collision refusal did not name the holding task and slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "record collision published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "record collision changed the held slot"
+
+  id='pool-slot-child-record-collision-r1'
+  rec=$(make_case child-record-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/state" "$child_home/data" "$child_home/config" "$child_home/projects"
+  printf '%s\n' "- mate - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/older-child-task.meta" \
+    "window=firstmate:fm-older-child-task" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a slot named by a local child task record"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task 'older-child-task'" \
+    "child record collision refusal did not name the holding task and slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "child record collision published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "child record collision changed the held slot"
+
+  id='pool-slot-same-id-child-record-r1'
+  rec=$(make_case same-id-child-record "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  child_home="$CASE_DIR/child-home"
+  mkdir -p "$child_home/state" "$child_home/data" "$child_home/config" "$child_home/projects"
+  printf '%s\n' "- mate - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$child_home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  printf 'task=%s\nhome=%s\n' "$id" "$child_home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a same-named child task's retained slot"
+  assert_contains "$out" "worktree '$POOL_DIR' is already held by task '$id'" \
+    "same-named child record refusal did not name the holding task and slot"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "same-named child task's slot claim was overwritten"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "same-named child collision published parent metadata"
+
+  id='pool-slot-same-id-foreign-claim-r1'
+  rec=$(make_case same-id-foreign-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mkdir -p "$CASE_DIR/other-home"
+  printf 'task=%s\nhome=%s\n' "$id" "$CASE_DIR/other-home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a same-named foreign-home slot claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "same-named foreign-home claim refusal did not name the slot claim failure"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "same-named foreign-home claim was overwritten"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "same-named foreign claim refusal published metadata"
+
+  id='pool-slot-claim-collision-r1'
+  rec=$(make_case claim-collision "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'task=older-task\nhome=%s\n' "$CASE_DIR/older-home" > "$SLOT_CLAIM"
+  before=$(cat "$SLOT_CLAIM")
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn replaced a foreign slot-owner claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "foreign claim refusal did not name the slot claim failure"
+  [ "$(cat "$SLOT_CLAIM")" = "$before" ] \
+    || fail "foreign claim was overwritten by a fresh spawn"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "foreign claim refusal published task metadata"
+  pass "fresh Treehouse allocation refuses retained task records and foreign owner claims"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_unreadable_nested_registry_refuses_pool_allocation
+test_unreadable_nested_state_refuses_pool_allocation
+test_unreadable_override_state_refuses_pool_allocation
+test_unreadable_task_record_refuses_pool_allocation
+test_pool_slot_refuses_existing_ownership
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
