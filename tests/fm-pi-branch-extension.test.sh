@@ -927,6 +927,19 @@ for (const text of [
     throw new Error(`Calm hid a restored legacy branch health alert: ${text}`);
   }
 }
+for (const text of [
+  "⚓ task-9: PR https://example.com/pr/9 checks green, ready for review",
+  "⎇ branch merged [captain] task-9: ready for review",
+]) {
+  const restoredLegacyCaptainNote = renderers.get("fm-branch-merge")(
+    { content: text },
+    { expanded: false },
+    renderTheme,
+  );
+  if (!restoredLegacyCaptainNote.render(100).join("\n").includes(text)) {
+    throw new Error(`Calm hid a restored legacy captain outcome: ${text}`);
+  }
+}
 if (!captainRendered.render(100).join("\n").includes("checks green, ready for review")) {
   throw new Error("Calm hid a captain-facing outcome entry");
 }

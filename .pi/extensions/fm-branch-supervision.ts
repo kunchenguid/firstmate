@@ -2236,7 +2236,7 @@ ${context.command}
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
     const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
     const outputPad = 1;
-    const Note = BRANCH_HEALTH_NOTES.has(rest.trim()) ? Text : CalmAwareRoutineNote;
+    const Note = !hasGlyph || BRANCH_HEALTH_NOTES.has(rest.trim()) ? Text : CalmAwareRoutineNote;
     return new Note(
       `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
