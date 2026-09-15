@@ -3566,4 +3566,42 @@ kill -0 -"$CRASH_PID" 2>/dev/null \
 pass "a group whose leader died to something else is still refused, not signalled"
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
+# --- the claim root's two refusals stay distinct -----------------------------
+#
+# Regression. A claim root the runner cannot write used to be mistaken for a
+# stale lock and retried as `<lock>.steal`, then `.steal.steal`, until the path
+# overflowed and bash crashed - which is what a sandbox that denies the
+# machine-wide state directory produced. It must instead name the directory,
+# and must stay distinguishable from the opposite problem, a live holder, since
+# the two need opposite responses.
+
+HLOCK="$TMP_ROOT/lock-refusals"; new_home "$HLOCK"
+
+DENIED_ROOT="$TMP_ROOT/denied-claims"
+mkdir -p "$DENIED_ROOT"
+chmod 500 "$DENIED_ROOT"
+out=$(FM_PROCEVENT_CLAIM_ROOT="$DENIED_ROOT" pe "$HLOCK" handled denied-src 1 2>&1) \
+  && { chmod 700 "$DENIED_ROOT"; fail "an unwritable claim root reported success"; }
+chmod 700 "$DENIED_ROOT"
+assert_contains "$out" "claims root not writable: $DENIED_ROOT" \
+  "an unwritable claim root names the directory that refused the lock"
+case "$out" in
+  *.steal.steal*) fail "an unwritable claim root still built a steal-of-steal lock name: $out" ;;
+esac
+find "$DENIED_ROOT" -name '*.steal*' 2>/dev/null | head -n 1 | grep -q . \
+  && fail "an unwritable claim root left steal locks behind"
+
+sleep 60 &
+LOCK_HOLDER=$!
+mkdir -p "$FM_PROCEVENT_CLAIM_ROOT/held-src.lock"
+printf '%s\n' "$LOCK_HOLDER" > "$FM_PROCEVENT_CLAIM_ROOT/held-src.lock/pid"
+out=$(FM_PROCEVENT_SOURCE_LOCK_WAIT=2 pe "$HLOCK" handled held-src 1 2>&1) \
+  && fail "a source lock held by a live process reported success"
+kill "$LOCK_HOLDER" 2>/dev/null || true
+wait "$LOCK_HOLDER" 2>/dev/null || true
+rm -rf "$FM_PROCEVENT_CLAIM_ROOT/held-src.lock"
+assert_contains "$out" "lock held by live PID $LOCK_HOLDER" \
+  "a live source-lock holder is named rather than waited on forever"
+pass "an unwritable claim root and a live lock holder stay distinct refusals"
+
 printf '\nall procevent tests passed\n'

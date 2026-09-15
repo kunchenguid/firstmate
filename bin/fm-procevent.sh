@@ -217,6 +217,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+# Refusing to lock a source has two operator responses, so never collapse them
+# into one generic message: fm_procevent_source_lock_acquire distinguishes an
+# unwritable claim root from a live holder.
+die_lock() { die "cannot lock source $1: ${FM_PROCEVENT_LOCK_ERROR:-unknown lock failure}"; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 case "${1-}" in ''|-h|--help|help) usage ;; esac
@@ -474,7 +478,7 @@ cmd_register() {
   done
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
-  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  fm_procevent_source_lock_acquire "$id" || die_lock "$id"
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
@@ -558,7 +562,7 @@ cmd_register_extension() {
   fi
   if ! fm_procevent_source_lock_acquire "$id"; then
     extension_lifecycle_lock_release
-    die "cannot lock the source"
+    die_lock "$id"
   fi
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"
@@ -725,7 +729,7 @@ cmd_start() {
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
-  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  fm_procevent_source_lock_acquire "$id" || die_lock "$id"
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     fm_procevent_source_lock_release "$id"
     die "source is not registered: $id"
@@ -1630,7 +1634,7 @@ cmd_handled() {
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   owner_lease_refresh
-  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  fm_procevent_source_lock_acquire "$id" || die_lock "$id"
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
   fm_procevent_source_lock_release "$id"
@@ -1664,7 +1668,7 @@ cmd_retire() {
       ;;
     *) usage ;;
   esac
-  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  fm_procevent_source_lock_acquire "$id" || die_lock "$id"
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     if [ -z "$condition" ]; then
       fm_procevent_extension_registration_load_locked "$STATE" "$id"

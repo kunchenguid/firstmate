@@ -335,13 +335,42 @@ fm_procevent_source_lock_path() {
   printf '%s/%s.lock\n' "$(fm_procevent_claim_root)" "$1"
 }
 
+# How long a source-lock acquisition waits for a live holder before refusing.
+# A source lock guards one short ownership transition, so a wait this long
+# already means the holder is wedged rather than working.
+FM_PROCEVENT_SOURCE_LOCK_WAIT="${FM_PROCEVENT_SOURCE_LOCK_WAIT:-30}"
+
+# fm_procevent_source_lock_acquire <source-id>
+#
+# Bounded acquisition of the machine-wide source lock. On failure it leaves an
+# operator-actionable sentence in FM_PROCEVENT_LOCK_ERROR, because the two ways
+# this fails need opposite responses: an unwritable claim root is a permission
+# problem to fix (a sandbox that denies the machine-wide state directory is the
+# usual cause, and FM_PROCEVENT_CLAIM_ROOT redirects it), while a live holder
+# is a process to inspect.
 fm_procevent_source_lock_acquire() {
-  local id=$1 root
+  local id=$1 root rc
+  FM_PROCEVENT_LOCK_ERROR=
   fm_procevent_source_id_valid "$id" || return 1
   root=$(fm_procevent_claim_root)
-  (umask 077; mkdir -p "$root") || return 1
-  [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+  (umask 077; mkdir -p "$root") 2>/dev/null
+  if [ ! -d "$root" ] || [ -L "$root" ]; then
+    FM_PROCEVENT_LOCK_ERROR="claims root is not a directory: $root"
+    return 1
+  fi
+  if ! fm_lock_dir_writable "$root"; then
+    FM_PROCEVENT_LOCK_ERROR="claims root not writable: $root"
+    return 1
+  fi
+  fm_lock_acquire_wait_bounded "$(fm_procevent_source_lock_path "$id")" \
+    "$FM_PROCEVENT_SOURCE_LOCK_WAIT" && return 0
+  rc=$?
+  if [ "$rc" -eq 124 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    FM_PROCEVENT_LOCK_ERROR="lock held by live PID $FM_LOCK_HELD_PID"
+  else
+    FM_PROCEVENT_LOCK_ERROR="could not acquire source lock: $id"
+  fi
+  return 1
 }
 
 # fm_procevent_source_lock_try_acquire <source-id>
@@ -349,11 +378,25 @@ fm_procevent_source_lock_acquire() {
 # that caller owns the exit-cleanup lock-order invariant.
 fm_procevent_source_lock_try_acquire() {
   local id=$1 root
+  FM_PROCEVENT_LOCK_ERROR=
   fm_procevent_source_id_valid "$id" || return 1
   root=$(fm_procevent_claim_root)
-  (umask 077; mkdir -p "$root") || return 1
-  [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"
+  (umask 077; mkdir -p "$root") 2>/dev/null
+  if [ ! -d "$root" ] || [ -L "$root" ]; then
+    FM_PROCEVENT_LOCK_ERROR="claims root is not a directory: $root"
+    return 1
+  fi
+  if ! fm_lock_dir_writable "$root"; then
+    FM_PROCEVENT_LOCK_ERROR="claims root not writable: $root"
+    return 1
+  fi
+  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")" && return 0
+  if [ "${FM_LOCK_FAILURE:-}" = held ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    FM_PROCEVENT_LOCK_ERROR="lock held by live PID $FM_LOCK_HELD_PID"
+  else
+    FM_PROCEVENT_LOCK_ERROR="could not acquire source lock: $id"
+  fi
+  return 1
 }
 
 fm_procevent_source_lock_release() {

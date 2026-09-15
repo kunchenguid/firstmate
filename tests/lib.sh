@@ -189,6 +189,30 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# fm_test_in_fixture_tree <path>: true when <path> lies inside a root
+# fm_test_tmproot allocated, proved by the .fm-test-fixture marker that
+# function writes rather than by a path prefix. A prefix test cannot be
+# trusted here: fm_test_tmproot resolves its root with `pwd -P`, so on macOS
+# the root reads /private/var/... while TMPDIR still reads /var/..., and the
+# comparison silently never matches. The path need not exist yet.
+fm_test_in_fixture_tree() {
+  local path=$1 dir depth=0
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  dir=$path
+  while [ "$depth" -lt 64 ]; do
+    [ -f "$dir/.fm-test-fixture" ] && return 0
+    case "$dir" in
+      /|'') return 1 ;;
+    esac
+    dir=$(dirname "$dir")
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM

@@ -433,7 +433,7 @@ mail_heal() {
   # Both are generation-scoped: only evidence matching the CURRENT mailbox
   # generation is healed, so a legacy key or a stale prior-generation wake can
   # never mark a reused numeric uid as surfaced in the new mailbox.
-  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0
+  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0 queued_keys
   if [ -s "$WOKEN" ]; then
     while IFS=$'\t' read -r jgen juid jtag; do
       [ -n "$juid" ] || continue
@@ -454,25 +454,42 @@ mail_heal() {
       mail_prune_journal || true
     fi
   fi
-  while IFS= read -r k; do
-    keyrest="${k#mail:}"
-    [ "$keyrest" = "$k" ] && continue
-    keygen=""
-    keyuid=""
-    case "$keyrest" in
-      */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
-      *) keyuid="$keyrest" ;;
-    esac
-    [ -z "$keyuid" ] && continue
-    [ "$keygen" != "$generation" ] && continue
-    if ! mail_seen "$keyuid"; then
-      if printf '%s\n' "$keyuid" >> "$CURSOR"; then
-        :
-      else
-        heal_ok=1
+  # Read the queue into a variable rather than straight into the loop, so an
+  # unreadable queue is distinguishable from an empty one. They demand opposite
+  # conclusions here: empty means every published wake is already recorded and
+  # phase 2 is complete, while unreadable proves nothing and must leave phase 2
+  # unfinished for the next poll. Treating the second as the first would record
+  # nothing and report success, and the uids it failed to heal would surface
+  # again as duplicate mail wakes.
+  # Capture stdout only. Folding stderr in would parse a diagnostic as queue
+  # content; letting it pass through keeps it reaching the operator, and adds
+  # no state file to the inventory docs/configuration.md owns.
+  if queued_keys=$(fm_wake_queued_keys check); then
+    while IFS= read -r k; do
+      keyrest="${k#mail:}"
+      [ "$keyrest" = "$k" ] && continue
+      keygen=""
+      keyuid=""
+      case "$keyrest" in
+        */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
+        *) keyuid="$keyrest" ;;
+      esac
+      [ -z "$keyuid" ] && continue
+      [ "$keygen" != "$generation" ] && continue
+      if ! mail_seen "$keyuid"; then
+        if printf '%s\n' "$keyuid" >> "$CURSOR"; then
+          :
+        else
+          heal_ok=1
+        fi
       fi
-    fi
-  done < <(fm_wake_queued_keys check 2>/dev/null || true)
+    done <<EOF
+$queued_keys
+EOF
+  else
+    echo "fm-mail: could not read the wake queue to finish recovery; retried on next poll" >&2
+    heal_ok=1
+  fi
   return "$heal_ok"
 }
 
