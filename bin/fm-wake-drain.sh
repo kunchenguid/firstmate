@@ -3,7 +3,8 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
+# newer branch outcome, OPEN DECISIONS, silenced decision replacements, and
+# captain-call record divergence,
 # then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
@@ -488,6 +489,54 @@ EOF
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
 }
 
+# Print the DECISION REPLACEMENTS section: every still-open decision whose
+# current record silently overwrote a DIFFERENT open note for the same key,
+# fleet-wide, replayed by fm-classify-lib.sh's status_decision_replacements
+# fold (via its snapshot-bounded scan_decision_replacements_snapshot wrapper)
+# rather than from the OPEN DECISIONS listing itself - that listing shows only
+# the survivor, so without this section the discarded note is invisible. The
+# fold itself is unchanged: this announces the replacement and never alters
+# what is open. Bounded and silent like OPEN DECISIONS above: nothing prints
+# when no open key replaced another, which is the common case.
+print_decision_replacements_section() {
+  local snapshot=${1:-} repl task key verb old new line item_bytes=220 global_bytes=4000
+  local output='' used=0 shown=0 omitted=0 bytes
+
+  if [ -n "$snapshot" ]; then
+    repl=$(scan_decision_replacements_snapshot "$STATE" "$snapshot") || return 1
+  else
+    repl=$(scan_decision_replacements "$STATE") || return 1
+  fi
+  [ -n "$repl" ] || return 0
+
+  while IFS=$(printf '\t') read -r task key verb old new; do
+    [ -n "$task" ] || continue
+    [ -n "$key" ] || continue
+    line="$task [key=$key] $verb: $new (replaced unread: $old)"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$repl
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'DECISION REPLACEMENTS (a still-open decision overwrote a different open note for the same key - the earlier note was discarded unread):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'DECISION REPLACEMENTS: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+  printf 'DECISION REPLACEMENTS: the replaced note is gone from OPEN DECISIONS - read the task status history before answering the survivor.\n' || return 1
+}
+
 # Print the RECORD DIVERGENCE section: every captain call whose two records
 # contradict each other - the status log says a key was resolved outright while
 # the task held for the captain is still open. Nothing here closes anything; the
@@ -558,6 +607,7 @@ print_status_sections() {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
+      && print_decision_replacements_section "$snapshot" \
       && print_record_divergence_section
   } > "$prepared"; then
     rm -f -- "$prepared"
