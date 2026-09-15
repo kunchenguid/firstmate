@@ -308,8 +308,8 @@ test_reserved_key_foreign_resolution_still_rejected() {
 
 # Version 5 named two different rule sets across the two trees, so a cursor
 # stamped version=5 may carry an open set folded under older semantics -
-# still listing a key the status log already closes. The bump to 6 must
-# invalidate it and rebuild from byte 0, closing the key.
+# still listing a key the status log already closes. A newer fold version
+# must invalidate it and rebuild from byte 0, closing the key.
 test_stale_version5_cursor_is_invalidated() {
   local dir f cf file_ident file_size incr new_version
   dir=$(case_dir stale-version5)
@@ -339,9 +339,139 @@ test_stale_version5_cursor_is_invalidated() {
   new_version=$(head -1 "$cf")
   [ "$new_version" = "version=$FM_OPEN_DECISIONS_FOLD_VERSION" ] \
     || fail "the cursor was not rewritten with the current version: got '$new_version'"
-  [ "$FM_OPEN_DECISIONS_FOLD_VERSION" = "6" ] \
-    || fail "the fold version is $FM_OPEN_DECISIONS_FOLD_VERSION, want 6"
-  pass "a stale version-5 cursor is invalidated by the bump to 6 and refolds to resolved"
+  [ "$FM_OPEN_DECISIONS_FOLD_VERSION" = "8" ] \
+    || fail "the fold version is $FM_OPEN_DECISIONS_FOLD_VERSION, want 8"
+  pass "a stale version-5 cursor is invalidated and refolds to resolved"
+}
+
+# A "[key=<slug>]" token as the last thing on the note (only whitespace may
+# follow it) states the same key as the two previously accepted positions.
+# Workers handed a brief that names the token without a position put it where
+# it reads naturally, which is the end - and two such lines then shared the
+# "default" bucket, so the second silently overwrote the first. The end
+# position is asymmetric by verb: it opens and strips like the note-head form,
+# but never closes (see test_end_of_line_close_across_positions). A token
+# with prose after it stays prose (see the mid-note test below), so a summary
+# merely mentioning "[key=x]" mid-sentence still cannot open that decision.
+test_end_of_line_key_opens_stated_key() {
+  local dir before endline
+  dir=$(case_dir end-position)
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$dir/before.status"
+  printf 'needs-decision: pick REST or RPC [key=api-shape]\n' > "$dir/end.status"
+  before=$(status_open_decisions "$dir/before.status")
+  endline=$(status_open_decisions "$dir/end.status")
+  [ "$endline" = "$before" ] \
+    || fail "end-of-line form folded differently: '$endline' vs '$before'"
+  assert_fold "$dir/end.status" "$(printf 'api-shape\tneeds-decision\tpick REST or RPC\n')" \
+    "end-of-line key"
+  printf 'blocked: waiting on the deploy token [key=creds]\n' > "$dir/b.status"
+  assert_fold "$dir/b.status" "$(printf 'creds\tblocked\twaiting on the deploy token\n')" \
+    "end-of-line blocked form"
+  pass "a stated [key=X] at the end of the note opens X with the token stripped"
+}
+
+# The exact silent collapse from the incident: two needs-decision lines
+# carrying different well-formed keys at the end of the line, on one task.
+# Both must stay independently open; losing either without anyone being told
+# is the defect.
+test_two_end_of_line_decisions_stay_distinct() {
+  local dir expected
+  dir=$(case_dir end-distinct)
+  printf 'needs-decision: remove the three asks [key=asks-to-remove]\n' > "$dir/t.status"
+  printf 'needs-decision: what about the legend routes [key=legend-routes]\n' >> "$dir/t.status"
+  expected=$(printf 'asks-to-remove\tneeds-decision\tremove the three asks\nlegend-routes\tneeds-decision\twhat about the legend routes\n')
+  assert_fold "$dir/t.status" "$expected" "two end-of-line decisions"
+  printf 'resolved [key=asks-to-remove]: answered: drop them\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'legend-routes\tneeds-decision\twhat about the legend routes\n')" \
+    "closing one of two end-of-line decisions"
+  pass "two end-of-line keyed decisions never collapse into one shared bucket"
+}
+
+# An end-of-line open closes through either previously accepted close shape -
+# which is what lets fm-send's before-colon --resolve-key close answer an
+# end-of-line decision. The reverse does NOT hold: the end position is
+# asymmetric by verb, accepted when opening, refused when closing. A
+# `resolved:` line whose note merely ENDS in a key token is prose quoting
+# that key, not a close - CI caught the symmetric form of this fix closing
+# q1 on exactly such a line (tests/fm-watch-triage.test.sh). A false close
+# silently loses a live escalation; a missed close leaves the decision
+# visibly open, re-closeable with a documented-position line.
+test_end_of_line_close_across_positions() {
+  local dir
+  dir=$(case_dir end-cross-close)
+  printf 'needs-decision: pick the bound [key=seam-max-bound]\n' > "$dir/a.status"
+  printf 'resolved [key=seam-max-bound]: answered: use 4\n' >> "$dir/a.status"
+  assert_fold "$dir/a.status" "" "documented resolution closing an end-of-line open"
+
+  printf 'needs-decision: pick the bound [key=seam-max-bound]\n' > "$dir/b.status"
+  printf 'resolved: [key=seam-max-bound] answered: use 4\n' >> "$dir/b.status"
+  assert_fold "$dir/b.status" "" "note-head resolution closing an end-of-line open"
+
+  printf 'needs-decision [key=q1]: real choice\n' > "$dir/c.status"
+  printf 'resolved: docs still mention [key=q1]\n' >> "$dir/c.status"
+  assert_fold "$dir/c.status" \
+    "$(printf 'q1\tneeds-decision\treal choice\n')" \
+    "a resolved note ending in a key token must not close that key"
+  pass "an end-of-line open closes through the two accepted shapes, never through a trailing token"
+}
+
+# A token with prose after it is still prose, never a stated key: only a
+# token at the head of the note or at its very end states a key. This pins
+# the boundary the end-position tolerance must not cross.
+test_mid_note_token_with_trailing_prose_stays_prose() {
+  local dir
+  dir=$(case_dir end-boundary)
+  printf 'needs-decision: pick [key=red] now\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tpick [key=red] now\n')" \
+    "mid-note token with trailing prose"
+  printf 'needs-decision: see previous [key=red] for context\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tsee previous [key=red] for context\n')" \
+    "a second mid-note mention still shares default"
+  pass "a [key=x] with prose after it stays prose, never an opened key"
+}
+
+# A malformed slug at the end of the line is rejected, never folded as
+# default - identically to both previously accepted positions.
+test_end_of_line_malformed_key_never_collapses_to_default() {
+  local dir
+  dir=$(case_dir end-malformed)
+  printf 'needs-decision: before-colon malformed [key=bad key]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" "" "malformed end-of-line key"
+  pass "a malformed end-of-line key is rejected, never folded as default"
+}
+
+# A bare keyless resolution still closes only default when end-of-line keyed
+# decisions are open beside it: the historical one-open-unkeyed-decision
+# behavior is unchanged by the third position.
+test_bare_resolved_closes_only_default_beside_end_keys() {
+  local dir
+  dir=$(case_dir end-beside-default)
+  printf 'needs-decision: which color\n' > "$dir/t.status"
+  printf 'needs-decision: pick a route [key=route]\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\twhich color\nroute\tneeds-decision\tpick a route\n')" \
+    "keyless and end-of-line opens side by side"
+  printf 'resolved: went with blue\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'route\tneeds-decision\tpick a route\n')" \
+    "bare resolution closes only default"
+  pass "a bare resolved: still closes only the default key"
+}
+
+# Documented precedence, unchanged: when both the before-colon and the
+# note-head positions carry a token, the before-colon one wins and the
+# note-head token stays note text.
+test_both_positions_precedence_unchanged() {
+  local dir
+  dir=$(case_dir precedence)
+  printf 'needs-decision [key=before]: [key=head] pick one\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'before\tneeds-decision\t[key=head] pick one\n')" \
+    "before-colon wins over note-head"
+  pass "a before-colon token wins and a note-head token stays note text"
 }
 
 test_stated_key_is_honored_in_both_positions
@@ -349,6 +479,13 @@ test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision
 test_two_colon_form_decisions_stay_distinct
+test_end_of_line_key_opens_stated_key
+test_two_end_of_line_decisions_stay_distinct
+test_end_of_line_close_across_positions
+test_mid_note_token_with_trailing_prose_stays_prose
+test_end_of_line_malformed_key_never_collapses_to_default
+test_bare_resolved_closes_only_default_beside_end_keys
+test_both_positions_precedence_unchanged
 test_mid_note_prose_mention_is_not_a_stated_key
 test_malformed_stated_key_never_collapses_to_default
 test_reserved_key_bare_answered_note_does_not_close

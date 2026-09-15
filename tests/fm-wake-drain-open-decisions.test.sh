@@ -216,13 +216,14 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 }
 
 # A worker writes `blocked: <text> [key=slug]` with the key token trailing the
-# note instead of in either documented position (before-colon or note-head).
-# The parser correctly ignores it (the stored key is "default"), and the
-# listing must render [key=default] so the generic --resolve-key hint is
-# actionable - previously the default key was hidden and the visible
-# [key=slug] prose misled the reader into trying --resolve-key slug, which
-# the stored "default" key refused.
-test_trailing_key_renders_with_default_key_visible() {
+# note instead of in the documented before-colon position. The trailing
+# position states the key: the listing renders [key=slug] with the token
+# stripped from the note, so the generic --resolve-key hint answers it
+# directly. (Previously the parser read the token as prose under "default",
+# which rendered a well-formed-looking line whose visible key the stored
+# "default" key then refused - and two such lines silently shared one bucket,
+# so the second overwrote the first.)
+test_trailing_key_renders_with_stated_key_visible() {
   local dir state out
   dir=$(make_case trailing-key)
   state="$dir/state"
@@ -234,13 +235,14 @@ test_trailing_key_renders_with_default_key_visible() {
 
   grep -F 'OPEN DECISIONS' "$out" >/dev/null \
     || fail "the trailing-key blocked line produced no OPEN DECISIONS section"
-  grep -F 'task-trailing [key=default] blocked:' "$out" >/dev/null \
-    || fail "the trailing-key decision did not render with [key=default] visible: $(cat "$out")"
-  grep -F '[key=primary-checkout]' "$out" >/dev/null \
-    || fail "the trailing [key=primary-checkout] prose was stripped from the note: $(cat "$out")"
+  grep -F 'task-trailing [key=primary-checkout] blocked: launched in primary checkout, not an isolated worktree' "$out" >/dev/null \
+    || fail "the trailing-key decision did not render with its stated key visible: $(cat "$out")"
+  if grep -F 'launched in primary checkout, not an isolated worktree [key=primary-checkout]' "$out" >/dev/null; then
+    fail "the trailing [key=primary-checkout] token was left in the note instead of stripped: $(cat "$out")"
+  fi
   grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
     || fail "open section is missing the answerer-closes hint"
-  pass "a trailing-key blocked line renders with [key=default] and an actionable --resolve-key hint"
+  pass "a trailing-key blocked line renders with its stated key and an actionable --resolve-key hint"
 }
 
 # A plain keyless decision (no [key=...] anywhere) must also render
@@ -268,5 +270,5 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
-test_trailing_key_renders_with_default_key_visible
+test_trailing_key_renders_with_stated_key_visible
 test_keyless_decision_shows_default_key

@@ -582,7 +582,7 @@ test_secondmate_no_projects_charter() {
     "secondmate charter did not key material routed-work phases"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
     "secondmate charter did not close a quietly ended routed-work phase"
-  assert_grep 'use the same key on its later' "$brief" \
+  assert_grep 'use the same key in the same position on its later' "$brief" \
     "secondmate charter did not supersede working phases with later states"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
@@ -625,7 +625,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter did not limit keyed phases to reportable material changes"
   assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
     "secondmate charter lost keyed working syntax for a reportable material phase"
-  assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
+  assert_grep "use the same key in the same position on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
     "secondmate charter lost same-key closure for a reportable material phase"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
     "secondmate charter lost resolved closure for a keyed material phase"
@@ -879,6 +879,43 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Every scaffold that tells a worker to use a decision key must state WHERE
+# the token goes and show a complete correct example: a bare `[key=<slug>]`
+# with no position is what taught a worker to append the token at the end of
+# the line, where the fold used to read it as prose and two such lines
+# silently shared the "default" bucket.
+test_decision_key_position_is_taught() {
+  local home brief
+  home="$TMP_ROOT/key-position"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" keypos-ship alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship scaffold failed"
+  brief="$home/data/keypos-ship/brief.md"
+  assert_grep 'needs-decision [key=<slug>]: {summary of options}' "$brief" \
+    "ship rule 6 lost the keyed needs-decision example"
+  assert_grep 'resolved [key=<slug>]: {how it cleared}' "$brief" \
+    "ship rule 6 lost the keyed resolved example"
+  assert_no_grep "(same \`[key=<slug>]\` if you opened it with one)" "$brief" \
+    "ship rule 6 retained the position-less bare token"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" keypos-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold failed"
+  brief="$home/data/keypos-scout/brief.md"
+  assert_grep 'needs-decision [key=<slug>]: {summary of options}' "$brief" \
+    "scout rule 6 lost the keyed needs-decision example"
+  assert_grep 'resolved [key=<slug>]: {how it cleared}' "$brief" \
+    "scout rule 6 lost the keyed resolved example"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" keypos-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold failed"
+  brief="$home/data/keypos-sm/brief.md"
+  assert_grep 'resolved [key=<slug>]: {how it cleared}' "$brief" \
+    "secondmate charter lost the keyed resolved example"
+  assert_no_grep "(keyed with \`[key=<slug>]\` if you opened it with one)" "$brief" \
+    "secondmate charter retained the position-less bare token"
+  pass "fm-brief: every scaffold states the decision-key position with a complete example"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -902,6 +939,7 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
+test_decision_key_position_is_taught
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header

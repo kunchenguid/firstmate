@@ -209,6 +209,35 @@ test_colon_first_key_position_is_answerable() {
   pass "fm-send --resolve-key: a colon-first stated key is open under that key and answerable"
 }
 
+# The silent collapse behind this change: a worker that put the key at the
+# end of the line (needs-decision: ... [key=X]) had it folded to "default",
+# so the answer's --resolve-key X refused with "no open decision or blocker
+# with that key" for BOTH stated keys. The end position states the key end
+# to end through the real send.
+test_end_of_line_key_position_is_answerable() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/end-of-line"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home end-of-line)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision: cap the seam at 4 or 8 [key=seam-max-bound]\n' > "$home/state/t8.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=seam-max-bound]' >/dev/null \
+    || fail "precondition: the end-of-line decision should list as open under its stated key: $out"
+
+  run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"; rc=$?
+  expect_code 0 "$rc" "answering an end-of-line stated key should succeed, not refuse as unknown"
+  grep -F 'resolved [key=seam-max-bound]: answered: cap it at 4' "$home/state/t8.status" >/dev/null \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t8.status")"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the answered end-of-line decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: an end-of-line stated key is open under that key and answerable"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"; mkdir -p "$dir"
@@ -722,6 +751,7 @@ test_remote_reserved_pending_reply_key_closes_locally() {
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
+test_end_of_line_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
