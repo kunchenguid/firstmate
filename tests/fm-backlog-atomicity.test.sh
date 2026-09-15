@@ -1003,13 +1003,13 @@ SH
   pass "dispatch refuses dependency-blocked rows before creating resources"
 }
 
-test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
+test_dispatch_refuses_a_recovery_parked_in_flight_row_without_a_task_record() {
   local case_dir id out rc=0
   id=atomic-dispatch-held-in-flight-b16
   case_dir=$(make_home dispatch-held-in-flight "$id")
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+  tasks-axi hold "$id" --reason "worker recovery failed, but no task record remains" --kind parked \
     --file "$(backlog_of "$case_dir")" >/dev/null
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1024,18 +1024,18 @@ SH
   chmod +x "$case_dir/fakebin/tmux"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "spawn accepted a held In-flight backlog row"
+  [ "$rc" -ne 0 ] || fail "fresh spawn accepted a recovery-parked In-flight backlog row"
   assert_contains "$out" "state in_flight yes no" \
-    "held In-flight refusal did not name the actual ineligible state"
+    "parked In-flight refusal did not name the actual ineligible state"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "held In-flight refusal published a task record"
+    "parked In-flight refusal published a task record"
   assert_absent "$case_dir/task-endpoint-created" \
-    "held In-flight refusal created a replacement endpoint"
+    "parked In-flight refusal created a replacement endpoint"
   assert_absent "$case_dir/local-copy-requested" \
-    "held In-flight refusal requested a replacement local copy"
+    "parked In-flight refusal requested a replacement local copy"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
-    || fail "held In-flight refusal changed the backlog state"
-  pass "dispatch refuses held In-flight rows before relaunch"
+    || fail "parked In-flight refusal changed the backlog state"
+  pass "fresh dispatch refuses a recovery-parked In-flight row without an existing task record"
 }
 
 test_dispatch_reads_the_row_from_the_backlog_root() {
@@ -3004,7 +3004,7 @@ test_completion_omits_the_file_for_a_beads_done
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_refuses_a_blocked_row_before_creating_resources
-test_dispatch_refuses_a_held_in_flight_row_before_relaunch
+test_dispatch_refuses_a_recovery_parked_in_flight_row_without_a_task_record
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory

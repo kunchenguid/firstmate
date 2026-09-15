@@ -2739,11 +2739,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
-# Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
-# become the sole owner of the row's In-flight transition, so prove the row is
-# transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
-# costs nothing to unwind, while the same refusal after publication would strand
-# a live pane. The authoritative mutation still runs under the meta lock below.
+# Backlog preflight (bin/fm-backlog-transition-lib.sh). A fresh spawn is about
+# to become the sole owner of the row's In-flight transition; a relaunch may
+# instead be resuming the exact recorded task from a recovery-only `parked`
+# hold. Prove the operation-specific eligibility BEFORE any endpoint, worktree,
+# or record action: a refusal here costs nothing to unwind, while the same
+# refusal after publication would strand a live pane. The authoritative
+# mutation still runs under the meta lock below.
 BACKLOG_TRANSITION=0
 BACKLOG_ROW_STATE=
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
@@ -2757,7 +2759,12 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
   fi
-  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    if ! fm_backlog_row_relaunchable "$BACKLOG_ROW_STATE" "$FM_BACKLOG_ROW_HOLD_KIND"; then
+      echo "error: this home's backlog item $ID cannot be relaunched from state $BACKLOG_ROW_STATE (hold kind ${FM_BACKLOG_ROW_HOLD_KIND:-none}); refusing before replacing its agent" >&2
+      exit 1
+    fi
+  elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
@@ -3969,14 +3976,19 @@ if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_META_TMP=
 fi
 
-# Fuse the backlog In-flight transition into the publication that just created
-# the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
+# Fuse the backlog In-flight transition, or the recovery-only parking-hold
+# release for a relaunch, into the task publication
+# (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
 # this task's own meta lock, so a steer or teardown racing the same id stays
 # serialized exactly as before. The call itself is deferred to the final commit
 # point below so every earlier launch-delivery failure remains unwindable.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  if [ "$RELAUNCH" -eq 1 ]; then
+    fm_backlog_atomic_transition relaunch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  else
+    fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  fi
 }
 
 # The deferred-signal exit path's preservation report. A claim about preserved

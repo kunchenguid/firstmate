@@ -283,9 +283,13 @@ seed_backlog() {  # <case-dir> <id> <queued|in_flight>
   [ "$want" != in_flight ] || tasks-axi start "$id" --file "$file" >/dev/null
 }
 
-backlog_state() {  # <case-dir> <id>
+backlog_field() {  # <case-dir> <id> <field>
   tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
-    sed -n 's/^  state: *//p' | head -1
+    sed -n "s/^  $3: *//p" | head -1
+}
+
+backlog_state() {  # <case-dir> <id>
+  backlog_field "$1" "$2" state
 }
 
 # Shadow tasks-axi so every `start` fails and every other verb is real. A
@@ -1646,6 +1650,93 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
+test_relaunch_resumes_a_recovery_parked_in_flight_item_on_pi() {
+  local dir file out rc=0 show
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case recovery-parked rl45)
+  add_ship_task "$dir" rl45 pi
+  printf 'pi' > "$dir/fake/command"
+  printf 'pi' > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  seed_backlog "$dir" rl45 in_flight
+  file="$dir/home/data/backlog.md"
+  tasks-axi hold rl45 --reason "worker recovery failed; work preserved" --kind parked \
+    --file "$file" >/dev/null
+  show=$(tasks-axi show rl45 --file "$file")
+  assert_contains "$show" "state: in_flight" "the recovery fixture must match the reported task state"
+  assert_contains "$show" "held: yes" "the recovery fixture must carry the reported hold"
+  assert_contains "$show" "blocked: no" "the recovery fixture must remain dependency-ready"
+  assert_contains "$show" "hold_kind: parked" "the recovery fixture must identify a recovery park"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continue the preserved work on Pi") || rc=$?
+  expect_code 0 "$rc" "a genuine relaunch should resume a recovery-parked In-flight task"$'\n'"$out"
+  [ "$(backlog_field "$dir" rl45 held)" = no ] \
+    || fail "a successful relaunch left the resumed task parked"
+  [ "$(backlog_field "$dir" rl45 blocked)" = no ] \
+    || fail "a successful relaunch changed the task's dependency readiness"
+  assert_grep "/quit" "$dir/fake/literal" "the previous Pi agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement Pi agent should have been launched"
+  pass "fm-control relaunch: a recovery-parked In-flight task resumes on Pi and clears its parking hold"
+}
+
+test_relaunch_refuses_a_captain_held_in_flight_item_before_stopping_it() {
+  local dir file out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case captain-held rl46)
+  add_ship_task "$dir" rl46 claude
+  seed_backlog "$dir" rl46 in_flight
+  file="$dir/home/data/backlog.md"
+  tasks-axi hold rl46 --reason "captain decision pending" --kind captain \
+    --file "$file" >/dev/null
+
+  out=$(run_control "$dir" rl46 relaunch --note "must not bypass the captain") || rc=$?
+  expect_code 1 "$rc" "a captain-held In-flight task must not relaunch"
+  assert_contains "$out" "state in_flight yes no" \
+    "the refusal should name the exact structured row state"
+  assert_contains "$out" "hold kind captain" \
+    "the refusal should distinguish a captain hold from a recovery park"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a captain-held refusal stopped the running agent"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "a captain-held refusal must happen before lifecycle input"
+  [ "$(backlog_field "$dir" rl46 held)" = yes ] \
+    || fail "a refused relaunch cleared the captain's hold"
+  pass "fm-control relaunch: a captain-held task refuses before the running agent is touched"
+}
+
+test_relaunch_refuses_a_dependency_blocked_in_flight_item_before_stopping_it() {
+  local dir file out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case dependency-blocked rl47)
+  add_ship_task "$dir" rl47 claude
+  seed_backlog "$dir" rl47 in_flight
+  file="$dir/home/data/backlog.md"
+  tasks-axi add rl47-blocker "unresolved dependency" --kind ship --file "$file" >/dev/null
+  tasks-axi block rl47 --by rl47-blocker --file "$file" >/dev/null
+
+  out=$(run_control "$dir" rl47 relaunch --note "must wait for the dependency") || rc=$?
+  expect_code 1 "$rc" "a dependency-blocked In-flight task must not relaunch"
+  assert_contains "$out" "state in_flight no yes" \
+    "the refusal should name the exact structured row state"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a dependency-blocked refusal stopped the running agent"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "a dependency-blocked refusal must happen before lifecycle input"
+  [ "$(backlog_field "$dir" rl47 blocked)" = yes ] \
+    || fail "a refused relaunch cleared the task's dependency blocker"
+  pass "fm-control relaunch: a dependency-blocked task refuses before the running agent is touched"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -1735,5 +1826,8 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_relaunch_resumes_a_recovery_parked_in_flight_item_on_pi
+test_relaunch_refuses_a_captain_held_in_flight_item_before_stopping_it
+test_relaunch_refuses_a_dependency_blocked_in_flight_item_before_stopping_it
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

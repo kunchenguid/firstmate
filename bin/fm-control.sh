@@ -48,8 +48,12 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
+#              bin/fm-spawn.sh --relaunch. An In-flight task held specifically
+#              as `parked` after failed worker recovery is unparked only when
+#              that replacement launch commits; every other hold or dependency
+#              blocker refuses before the old agent is stopped. A failure
+#              before publication keeps the prior durable record in place and
+#              reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
@@ -128,6 +132,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   exit 1
 }
 
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -700,6 +708,37 @@ resolve_relaunch_profile() {
   fi
 }
 
+# A recovery relaunch may clear only a structured `parked` hold. Read that
+# eligibility before stopping the current agent; fm-spawn rechecks it under the
+# task's metadata lock and owns the eventual start or unhold mutation.
+relaunch_backlog_preflight() {
+  local gate_status row_status
+  if fm_backlog_transition_applies "$FM_HOME/config" "$DATA" "$KIND"; then
+    gate_status=0
+  else
+    gate_status=$?
+  fi
+  case "$gate_status" in
+    0) ;;
+    1) return 0 ;;
+    2) die "task $ID cannot be relaunched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" ;;
+    *) die "task $ID's backlog eligibility returned unexpected status $gate_status" ;;
+  esac
+  if fm_backlog_row_probe "$DATA" "$ID"; then
+    row_status=0
+  else
+    row_status=$?
+  fi
+  if [ "$row_status" -ne 0 ]; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      die "task $ID has no backlog item in this home; refusing to stop its agent for an unowned relaunch"
+    fi
+    die "task $ID's backlog item could not be read before relaunch ($FM_BACKLOG_ROW_ERROR)"
+  fi
+  fm_backlog_row_relaunchable "$FM_BACKLOG_ROW_STATE" "$FM_BACKLOG_ROW_HOLD_KIND" \
+    || die "this home's backlog item $ID cannot be relaunched from state $FM_BACKLOG_ROW_STATE (hold kind ${FM_BACKLOG_ROW_HOLD_KIND:-none}); refusing before stopping its agent"
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -829,6 +868,7 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  relaunch_backlog_preflight
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
