@@ -28,10 +28,10 @@
 // applied on the first resumed frame through the same clamp path.
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
-// The asymmetric three-cell sail is centered over a five-cell hull. The narrow-width
-// small triangle keeps the yellow left sail lighter than the full red right sail.
+// The asymmetric three-cell sail is centered over a five-cell hull. The one-cell
+// quarter triangle keeps the yellow left sail lighter than the full red right sail.
 // The hull's inner cells retain zero-height water glyphs instead of interrupting the trough.
-const LEFT_SAIL = "▸";
+const LEFT_SAIL = "◿";
 const MAST = "│";
 const RIGHT_SAIL = "◣";
 const SAIL = `${LEFT_SAIL}${MAST}${RIGHT_SAIL}`;

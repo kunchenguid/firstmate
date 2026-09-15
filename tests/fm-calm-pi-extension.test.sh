@@ -2371,7 +2371,7 @@ const CYAN = `${ESC}[36m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
 const RESET = `${ESC}[39m`;
-const SAIL = "▸│◣";
+const SAIL = "◿│◣";
 const HULL = "╲▁▁▁╱";
 const WAVE_BARS = "▁▂▃▄";
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
@@ -2528,12 +2528,12 @@ const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
     // The smaller left sail and mast are yellow, the larger right sail is red, and
     // zero-height blue water remains visible through all three hull-interior cells.
     check(
-      sailRow.includes(`${YELLOW}▸│${RESET}${RED}◣${RESET}`),
+      sailRow.includes(`${YELLOW}◿│${RESET}${RED}◣${RESET}`),
       `sail did not keep its restrained asymmetric colors: ${JSON.stringify(sailRow)}`,
     );
     check(
-      visibleWidth("▸") === 1 && visibleWidth(SAIL) === 3,
-      "the neutral-width smaller sail broke the three-cell sprite",
+      visibleWidth("◿") === 1 && visibleWidth(SAIL) === 3,
+      "the width-safe smaller sail broke the three-cell sprite",
     );
     check(
       waterRow.includes(`${YELLOW}╲${RESET}${BLUE}▁▁▁${RESET}${YELLOW}╱${RESET}`),
@@ -3868,13 +3868,13 @@ JS
   done
   cp "$working_snapshot" "$boat_frame_one"
   assert_contains "$(cat "$boat_frame_one")" '╲▁▁▁╱' "Calm did not show the working ship during a real provider wait"
-  assert_contains "$(cat "$boat_frame_one")" '▸│◣' "the working ship lost its centered asymmetric sail"
+  assert_contains "$(cat "$boat_frame_one")" '◿│◣' "the working ship lost its centered asymmetric sail"
   assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
   boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
   boat_hull_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
-  boat_sail_column=$(awk 'index($0,"▸│◣"){print index($0,"▸│◣"); exit}' "$boat_frame_one")
+  boat_sail_column=$(awk 'index($0,"◿│◣"){print index($0,"◿│◣"); exit}' "$boat_frame_one")
   [ "$boat_sail_column" -eq $((boat_hull_column + 1)) ] \
     || fail "the working ship sail was not centered over its five-cell hull"
   assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
@@ -3884,7 +3884,7 @@ JS
   # right sail, and no RGB/256 escapes.
   tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
   boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
-  boat_sail_line=$(grep -F '▸' "$boat_color_snapshot" | head -1)
+  boat_sail_line=$(grep -F '◿' "$boat_color_snapshot" | head -1)
   [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
   [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship sail"
   case "$boat_color_line" in
@@ -4034,9 +4034,9 @@ JS
   # period in this same Pi session can prove freeze/resume continuity.
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
   boat_freeze_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_freeze_snapshot")
-  boat_freeze_sail=$(grep -F '▸│◣' "$boat_freeze_snapshot" | tail -1 || true)
+  boat_freeze_sail=$(grep -F '◿│◣' "$boat_freeze_snapshot" | tail -1 || true)
   case "$boat_freeze_sail" in
-    *'▸│◣'*) boat_freeze_sail='▸│◣' ;;
+    *'◿│◣'*) boat_freeze_sail='◿│◣' ;;
     *) fail "could not read the freeze-frame centered asymmetric sail" ;;
   esac
   [ -n "$boat_freeze_column" ] && [ "$boat_freeze_column" -gt 1 ] \
@@ -4075,9 +4075,9 @@ JS
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
     if grep -Fq '╲▁▁▁╱' "$boat_resume_snapshot"; then
       boat_resume_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resume_snapshot")
-      boat_resume_sail=$(grep -F '▸│◣' "$boat_resume_snapshot" | tail -1 || true)
+      boat_resume_sail=$(grep -F '◿│◣' "$boat_resume_snapshot" | tail -1 || true)
       case "$boat_resume_sail" in
-        *'▸│◣'*) boat_resume_sail='▸│◣' ;;
+        *'◿│◣'*) boat_resume_sail='◿│◣' ;;
       esac
       break
     fi
