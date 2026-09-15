@@ -1378,6 +1378,29 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 
+### Current-state agent status fallback
+
+Measured 2026-09-12 against Herdr 0.9.0 (protocol 22) with a live Codex worker.
+Codex's harness-specific semantic source is unverified, while Herdr's existing `agent get` path reports `agent_status=working`.
+`bin/fm-crew-state.sh` now uses that backend status only after the recovery-grade Herdr classifier proves the registered agent has a live process.
+The result is `state: working · source: herdr-agent-status · agent_status=working`, so a backend-derived state is distinguishable from harness telemetry.
+Unreadable Herdr responses and registrations over shell-only panes remain unknown.
+
+```sh
+FM_CREW_STATE_HERDR_STATUS_LIVE_E2E=1 \
+  FM_CREW_STATE_HERDR_TARGET=default:wH:p2 \
+  bin/fm-test-run.sh tests/fm-crew-state-herdr-status-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real herdr 0.9.0: agent_status=working supplies current state through fm-crew-state
+```
+
+This guard uses an already-running, explicitly named endpoint and performs no Herdr lifecycle operation.
+Run it after a Herdr upgrade with a live endpoint whose `agent_status=working`.
+
 ### Away-mode transport
 
 The away daemon is no longer launched on Pi; the away posture there is the record `bin/fm-afk-contract.sh` owns.
