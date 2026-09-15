@@ -657,6 +657,7 @@ fm_afk_launch_start_native() {
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
+    fm_afk_launch_quota_arm || fm_afk_launch_log "could not refresh the Codex weekly quota watch"
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
   fi

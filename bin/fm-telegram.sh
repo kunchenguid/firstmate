@@ -43,13 +43,19 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 TOKEN_FILE="$CONFIG/telegram-bot-token"
 CHAT_FILE="$CONFIG/telegram-chat-id"
 NOTIFIED_FILE="$STATE/.telegram-notifications"
+PROGRESS_NOTIFIED_FILE="$STATE/.telegram-progress-notifications"
 NOTIFY_LOCK="$STATE/.telegram-notifications.lock"
+POSTURE_LOCK="$STATE/.cursor-park-owner.lock"
 TELEGRAM_NOTIFIED_KEEP=64
+
+TELEGRAM_TOKEN=
+export -n TELEGRAM_TOKEN 2>/dev/null || true
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
-TELEGRAM_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_SESSION=
 TELEGRAM_SETUP_REQUEST_ME=
@@ -299,19 +305,19 @@ telegram_now() {
 }
 
 telegram_notified() {
-  local key=$1
-  [ -f "$NOTIFIED_FILE" ] && [ ! -L "$NOTIFIED_FILE" ] || return 1
-  grep -F -x -- "$key" "$NOTIFIED_FILE" >/dev/null 2>&1
+  local key=$1 file=${2:-$NOTIFIED_FILE}
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  grep -F -x -- "$key" "$file" >/dev/null 2>&1
 }
 
 telegram_record_success() {
-  local key=$1 tmp
-  if [ -e "$NOTIFIED_FILE" ] || [ -L "$NOTIFIED_FILE" ]; then
-    private_file_valid "$NOTIFIED_FILE" || return 1
+  local key=$1 file=${2:-$NOTIFIED_FILE} tmp
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    private_file_valid "$file" || return 1
   fi
-  tmp=$(mktemp "$NOTIFIED_FILE.XXXXXX") || return 1
+  tmp=$(mktemp "$file.XXXXXX") || return 1
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  if [ -f "$NOTIFIED_FILE" ] && ! cat "$NOTIFIED_FILE" > "$tmp"; then
+  if [ -f "$file" ] && ! cat "$file" > "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -321,14 +327,14 @@ telegram_record_success() {
   tail -n "$TELEGRAM_NOTIFIED_KEEP" "$tmp" > "${tmp}.tail" || { rm -f -- "$tmp" "${tmp}.tail"; return 1; }
   mv -f -- "${tmp}.tail" "$tmp" || { rm -f -- "$tmp" "${tmp}.tail"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$NOTIFIED_FILE" || { rm -f -- "$tmp"; return 1; }
-  private_file_valid "$NOTIFIED_FILE"
+  mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+  private_file_valid "$file"
 }
 
 # Send one notification text under the shared bounded lock. Callers supply only
 # local aggregate text or fixed text; no caller can supply a watcher reason.
 telegram_send_text() {
-  local key=$1 text=$2 request response lock_result
+  local key=$1 text=$2 journal=${3:-$NOTIFIED_FILE} request response lock_result
   mkdir -p "$STATE" || return 1
   if ! fm_lock_acquire_wait_bounded "$NOTIFY_LOCK" 2; then
     # Distinguish contention from a successful no-op so progress does not move
@@ -337,7 +343,7 @@ telegram_send_text() {
   fi
   lock_result=0
   trap 'fm_lock_release "$NOTIFY_LOCK" || true' RETURN
-  if telegram_notified "$key"; then
+  if telegram_notified "$key" "$journal"; then
     trap - RETURN
     fm_lock_release "$NOTIFY_LOCK" || true
     return 0
@@ -357,7 +363,7 @@ telegram_send_text() {
   if [ "$lock_result" -eq 0 ] && ! json_ok "$response"; then
     lock_result=1
   fi
-  if [ "$lock_result" -eq 0 ] && ! telegram_record_success "$key"; then
+  if [ "$lock_result" -eq 0 ] && ! telegram_record_success "$key" "$journal"; then
     lock_result=1
   fi
   rm -f -- "${request:-}" "${response:-}"
@@ -366,15 +372,36 @@ telegram_send_text() {
   return "$lock_result"
 }
 
+telegram_posture_lock_acquire() {
+  fm_afk_contract_lock_hold "$STATE" || return 1
+  if ! fm_lock_acquire_wait_bounded "$POSTURE_LOCK" 2; then
+    fm_afk_contract_lock_release || true
+    return 1
+  fi
+}
+
+telegram_posture_lock_release() {
+  local rc=0
+  fm_lock_release "$POSTURE_LOCK" || rc=1
+  fm_afk_contract_lock_release || rc=1
+  return "$rc"
+}
+
 # Send one fixed event. Disabled/unconfigured homes are a successful no-op for
 # watcher callers; malformed configured files are reported to direct callers.
 telegram_send_kind() {
-  local kind=$1 text
-  telegram_away_session_load || return 0
-  telegram_state_prepare || return 1
-  telegram_config_ready || return 1
-  text=$(telegram_event_text "$kind") || return 2
-  telegram_send_text "$(telegram_event_key "$kind")" "$text"
+  local kind=$1 text= rc=0
+  telegram_posture_lock_acquire || return 1
+  if telegram_away_session_load; then
+    telegram_state_prepare || rc=1
+    if [ "$rc" -eq 0 ]; then telegram_config_ready || rc=1; fi
+    if [ "$rc" -eq 0 ]; then text=$(telegram_event_text "$kind") || rc=2; fi
+    if [ "$rc" -eq 0 ]; then
+      telegram_send_text "$(telegram_event_key "$kind")" "$text" || rc=$?
+    fi
+  fi
+  telegram_posture_lock_release || rc=1
+  return "$rc"
 }
 
 telegram_progress_counts() {
@@ -397,28 +424,39 @@ telegram_progress_counts() {
 }
 
 telegram_send_progress() {
-  local interval=${FM_TELEGRAM_PROGRESS_INTERVAL:-600} now last=0 counts total active waiting ready other text slot marker_tmp
-  telegram_away_session_load || return 0
-  telegram_state_prepare || return 1
-  telegram_config_ready || return 1
-  case "$interval" in ''|*[!0-9]*) interval=600 ;; esac
-  [ "$interval" -ge 600 ] 2>/dev/null || interval=600
-  [ "$interval" -le 900 ] 2>/dev/null || interval=900
-  now=$(telegram_now)
-  if [ -e "$STATE/.telegram-progress" ] || [ -L "$STATE/.telegram-progress" ]; then
-    private_file_valid "$STATE/.telegram-progress" || return 1
-    last=$(cat "$STATE/.telegram-progress" 2>/dev/null || true)
+  local interval=${FM_TELEGRAM_PROGRESS_INTERVAL:-600} now last=0 counts total active waiting ready other text slot marker_tmp rc=0
+  telegram_posture_lock_acquire || return 1
+  if telegram_away_session_load; then
+    telegram_state_prepare || rc=1
+    if [ "$rc" -eq 0 ]; then telegram_config_ready || rc=1; fi
+    if [ "$rc" -eq 0 ]; then
+      case "$interval" in ''|*[!0-9]*) interval=600 ;; esac
+      [ "$interval" -ge 600 ] 2>/dev/null || interval=600
+      [ "$interval" -le 900 ] 2>/dev/null || interval=900
+      now=$(telegram_now)
+      if [ -e "$STATE/.telegram-progress" ] || [ -L "$STATE/.telegram-progress" ]; then
+        private_file_valid "$STATE/.telegram-progress" || rc=1
+        if [ "$rc" -eq 0 ]; then last=$(cat "$STATE/.telegram-progress" 2>/dev/null || true); fi
+      fi
+      case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      if [ "$rc" -eq 0 ] && [ $((now - last)) -ge "$interval" ]; then
+        IFS=$'\t' read -r total active waiting ready other <<< "$(telegram_progress_counts)"
+        text="Firstmate away progress update: supervision is active; current work: ${active:-0} active, ${waiting:-0} waiting, ${ready:-0} ready, ${other:-0} needing review (${total:-0} total). Decisions and authority still wait for your return."
+        slot=$((now / interval))
+        if telegram_send_text "$(telegram_event_key "progress:$interval:$slot")" "$text" "$PROGRESS_NOTIFIED_FILE"; then
+          marker_tmp=$(mktemp "$STATE/.telegram-progress.XXXXXX") || rc=1
+          if [ "$rc" -eq 0 ]; then chmod 600 "$marker_tmp" || rc=1; fi
+          if [ "$rc" -eq 0 ]; then printf '%s\n' "$now" > "$marker_tmp" || rc=1; fi
+          if [ "$rc" -eq 0 ]; then mv -f -- "$marker_tmp" "$STATE/.telegram-progress" || rc=1; fi
+          [ "$rc" -eq 0 ] || rm -f -- "${marker_tmp:-}"
+        else
+          rc=$?
+        fi
+      fi
+    fi
   fi
-  case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  [ $((now - last)) -ge "$interval" ] || return 0
-  IFS=$'\t' read -r total active waiting ready other <<< "$(telegram_progress_counts)"
-  text="Firstmate away progress update: supervision is active; current work: ${active:-0} active, ${waiting:-0} waiting, ${ready:-0} ready, ${other:-0} needing review (${total:-0} total). Decisions and authority still wait for your return."
-  slot=$((now / interval))
-  telegram_send_text "$(telegram_event_key "progress:$slot")" "$text" || return $?
-  marker_tmp=$(mktemp "$STATE/.telegram-progress.XXXXXX") || return 1
-  chmod 600 "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
-  printf '%s\n' "$now" > "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
-  mv -f -- "$marker_tmp" "$STATE/.telegram-progress"
+  telegram_posture_lock_release || rc=1
+  return "$rc"
 }
 
 telegram_kind_for_wake() {

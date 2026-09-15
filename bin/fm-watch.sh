@@ -1726,8 +1726,10 @@ event_wait_or_sleep() {
 }
 
 telegram_progress_tick_detached() {
-  local telegram="$SCRIPT_DIR/fm-telegram.sh"
-  [ -f "$STATE/.afk-contract" ] || return 0
+  local telegram="$SCRIPT_DIR/fm-telegram.sh" record
+  record=$(fm_afk_contract_path "$STATE")
+  [ -f "$record" ] || return 0
+  [ "$(fm_afk_contract_read_field "$record" reach_channels)" = telegram ] || return 0
   [ -x "$telegram" ] || return 0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$telegram" notify-progress >/dev/null 2>&1 &
 }
