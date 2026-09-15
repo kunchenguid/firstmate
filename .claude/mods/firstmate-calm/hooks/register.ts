@@ -1,9 +1,9 @@
 // Firstmate Calm for Claude Code: the hooks module of the `firstmate-calm` mod.
 //
-// A Claude Code "mod" is a plugin whose behavior lives in one hooks module, loaded only
-// while Claude Code's default-off early-access function-hooks surface is on
-// (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`). Every handler also checks that exact opt-in,
-// so loading this module through Claude Code's rollout flag remains a complete no-op.
+// A Claude Code "mod" is a plugin whose behavior lives in one hooks module. Claude Code
+// may load this module through its rollout flag or `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
+// but every handler requires that environment variable to equal `1`, so rollout-only
+// loading remains a complete no-op.
 // The plugin carries no command, skill, agent, or classic hook of its own; the `/calm`
 // command below exists only once this module has registered it. docs/calm.md owns the
 // captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
@@ -23,9 +23,10 @@
 // mid-turn working note draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
 //
-// Loading is lazy and cached: a resumed transcript or a hot reload can draw restored
-// rows before `session.start`, so every hook awaits the same one-time load of the
-// per-home preference and restored working notes rather than trusting a stale "off".
+// Loading is lazy and cached within a session: a resumed transcript or a hot reload can
+// draw restored rows before `session.start`, so every hook awaits that session's load of
+// the per-home preference and restored working notes rather than trusting a stale "off".
+// Each `session.start` clears presentation classifications and reloads the new session.
 import type { EngineInterface, Register, RenderElement, RenderInput } from "claude-code";
 import {
   CALM_WORKING_SHIP_TICK_MS,
