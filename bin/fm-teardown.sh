@@ -5,6 +5,13 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# An endpoint whose close could not do its job REFUSES before any record naming
+# it is removed: those records are the only thing that names what survived, so
+# reporting such a close as a completed cleanup strands the endpoint instead of
+# merely leaving it behind. endpoint_close_refusal below owns that refusal and
+# the one site where --force overrides it, and bin/fm-backend.sh's
+# fm_backend_kill owns what each backend can prove about its own close - an
+# already-exited endpoint is not a failure and stays silent.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -2937,6 +2944,50 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
+# endpoint_close_refusal: the one report for an endpoint close that could not
+# do its job, wherever a close is attempted, and the one decision about what
+# that costs. Reporting such a close as a completed cleanup does not merely
+# leave a stray session behind, it STRANDS one: the durable metadata removed
+# below is the only record of which endpoint belongs to this task, so nothing
+# is left on disk naming what survived. The default is therefore to stop
+# without removing the task's records, exactly as the Herdr confirmed-gone
+# gates already do for the same hazard. What each backend can actually prove
+# about its own close is bin/fm-backend.sh's fm_backend_kill contract.
+#
+# Returns 0 when the caller must continue anyway and 1 when it must stop.
+# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca
+# close, where --force is the operator's existing authority to discard this
+# task's records deliberately AND continuing is actually reachable: the
+# worktree is already returned by then and nothing after it needs the backend
+# that could not close.
+# It is 0 everywhere else. The Orca site refuses under --force too, because
+# the step immediately after it removes the Orca worktree through the same CLI
+# whose absence is the only thing that arm ever reports, so a forced continue
+# would die there having removed nothing while this message claimed otherwise.
+# The two forced secondmate child sites refuse because that path is only ever
+# reached under --force, so honoring force would delete the refusal rather
+# than override it, and would contradict the adjacent Herdr child gate that
+# stops forced cleanup for this same hazard.
+#
+# What is retained is this run's records, not a durable guarantee: a task
+# carrying a backlog transition already wrote its pending-close marker, and the
+# next session start replays that marker and removes the retained record. The
+# message says so rather than promising a retention teardown does not own.
+endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
+  local subject=$1 backend=$2 target=$3 honors_force=$4
+  echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
+  if [ "$honors_force" = 1 ] && [ "$FORCE" = "--force" ]; then
+    echo "error: --force authorizes continuing past a close that failed, so this cleanup proceeds toward removing the task's records; reconcile $target yourself, because nothing here can still be relied on to name it." >&2
+    return 0
+  fi
+  echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
+  echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
+  if [ "$honors_force" = 1 ]; then
+    echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
+  fi
+  return 1
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
@@ -2975,9 +3026,11 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
     if [ "$child_kind" = secondmate ]; then
@@ -3313,7 +3366,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T_ORCA" ]; then
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+  fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
@@ -3391,7 +3447,8 @@ elif [ "$BACKEND" = herdr ]; then
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
