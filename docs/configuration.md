@@ -593,6 +593,19 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
+## Telegram bridge (.env)
+
+The optional Telegram bridge turns messages from one allowed chat into captain inbox notes and sends escalations back to that chat.
+It is off unless the home's gitignored `.env` carries a non-empty `TELEGRAM_BOT_TOKEN`, and it needs `curl` and `jq`.
+This section is the single owner of its `.env` keys; [`docs/telegram-bridge.md`](telegram-bridge.md) owns setup and the security boundary.
+For direct invocations, environment values override `.env`, matching the Relay contract.
+
+| Key | Holds |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | The bot credential from @BotFather; its presence is the opt-in. |
+| `TELEGRAM_ALLOWED_CHAT_ID` | The one chat allowed to queue notes and the chat escalations go to; absent or not a numeric chat id drops every inbound message. |
+| `TELEGRAM_BOT_NAME` | Optional bot handle shown by `bin/fm-telegram.sh status`. |
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -1033,6 +1046,16 @@ FM_IMAP_HOST=      # mail-plane IMAP server hostname
 FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
+TELEGRAM_BOT_TOKEN=         # Telegram bridge bot credential, from .env or environment (docs/configuration.md "Telegram bridge")
+TELEGRAM_ALLOWED_CHAT_ID=   # the one chat the Telegram bridge accepts notes from and sends escalations to
+TELEGRAM_BOT_NAME=          # optional bot handle for bin/fm-telegram.sh status
+FM_TELEGRAM_ENV_FILE=       # alternate .env-style file the Telegram bridge reads its keys from
+FM_TELEGRAM_API_BASE=https://api.telegram.org   # Bot API root; exists so tests can drive a local stand-in
+FM_TELEGRAM_HTTP_TIMEOUT=120   # seconds before one Bot API request is abandoned
+FM_TELEGRAM_POLL_TIMEOUT=50    # seconds one getUpdates long-poll waits for a message
+FM_TELEGRAM_POLL_MAX_CYCLES=60 # long-polls before the collector exits and the runner restarts it
+FM_TELEGRAM_POLL_FAIL_LIMIT=5  # consecutive failed requests before the cycle reports an outage
+FM_TELEGRAM_POLL_FAIL_DELAY=10 # seconds between retries during an outage
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
