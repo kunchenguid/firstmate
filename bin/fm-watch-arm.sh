@@ -20,6 +20,19 @@
 # docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
 # pre-execution seatbelt, not a substitute for the verification here.
 #
+# A harness's own background-task supervisor can reap this arm itself as an
+# uncatchable SIGKILL delivered to its whole process group (observed: a memory
+# guard misfiring on a transient, non-authoritative signal). That signal can
+# never be trapped, so the once-confirmed-healthy watcher is spawned into its
+# OWN process group (`set -m` around the fork) rather than the arm's: it stays
+# a normal, waitable child of this shell (`wait "$child"` and the confirm-poll
+# still see its real pid and real exit status), but a group-wide signal aimed
+# at this arm no longer reaches it. A graceful, catchable HUP/TERM/INT sent to
+# this arm still explicitly kills that same child by pid in the trap handlers
+# below, so an intentional stop of the arm still stops an unconfirmed or
+# still-owned watcher exactly as before; only the uncatchable group-wide kill
+# case changes.
+#
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
@@ -442,10 +455,12 @@ if [ "$mode" = arm ] && healthy_watcher; then
   exit $?
 fi
 
-# Start a watcher as a tracked child and confirm it before settling in. The child
-# stays our child for its whole life: we wait on it, so killing this arm (the
-# harness-tracked task) tears the watcher down too, and the watcher's eventual
-# wake exit propagates out so the harness re-notifies firstmate.
+# Start a watcher as a tracked child and confirm it before settling in. The
+# child stays our child for its whole life: we wait on it, so its eventual
+# wake exit propagates out so the harness re-notifies firstmate. A graceful,
+# catchable kill of this arm still explicitly tears the watcher down too (the
+# trap handlers below); only an uncatchable group-wide kill of this arm no
+# longer takes an already-spawned watcher with it (file header).
 child=
 child_out=
 cleanup_child() {
@@ -478,12 +493,17 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+# set -m puts the forked child in a fresh process group of its own (see the
+# file header) while leaving it a normal waitable child of this shell; $! and
+# `wait` below are unaffected.
+set -m
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
   "$WATCH" >"$child_out" &
 fi
 child=$!
+set +m
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
