@@ -1,6 +1,6 @@
-# Pi Calm mode
+# Calm presentation
 
-Calm is a Pi-only conversation presentation toggle.
+`/calm` is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
@@ -58,3 +58,31 @@ tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
+
+## OMP tool visibility
+
+The OMP extension `.omp/extensions/fm-calm-omp.ts` provides `/calm-omp` as a toggle for OMP's native **Hide Tool Activity** setting.
+Start a fresh OMP session after installing the extension, then run `/calm-omp` without arguments.
+The same setting is available through `Ctrl+Shift+O` and `/settings` > Appearance > Display > Hide Tool Activity.
+OMP owns persistence, so command, shortcut, and settings changes stay synchronized without a separate Firstmate preference file.
+
+This hides model tool calls, tool results, and their associated images, including existing transcript history.
+Toggling again restores tool activity with OMP's native collapsed expansion state.
+Session data, model context, and tool execution remain intact.
+While tool activity is hidden and an agent run is active, a two-row blue-water and yellow-boat animation appears above the editor, using the same sprite, cadence, resize behavior, and freeze/resume geometry as Pi Calm.
+The boat follows command, shortcut, and settings changes during a run, and starts automatically when the saved native setting is enabled.
+It stays through tool continuations and disappears when the run finishes, aborts, or fails.
+Hidden time does not advance the boat, and a fresh session or extension reload resets its position.
+The stock working indicator remains alongside the boat because OMP's public extension API cannot hide it.
+Thinking, assistant narration, and Firstmate operational messages retain OMP's normal presentation.
+
+OMP does not expose a public extension API setter for tool visibility.
+The extension briefly uses a zero-height widget factory to obtain the live TUI, removes the widget, then calls the focused editor's existing native visibility action.
+It checks that capability on every command and neither patches components nor caches editor instances.
+If the editor action is unavailable, it reports a warning directing the operator to OMP's native controls.
+This bridge depends on OMP's editor callback and needs the live regression rerun after OMP upgrades.
+The boat reads the live OMP namespace's native display preference and uses the public widget API, with one animation timer running only during an agent run.
+If OMP's native setting accessor is unavailable, the extension warns and leaves tool toggling available without the boat.
+Session shutdown and extension reload dispose the widget and timer without changing transcript content or the native preference.
+
+Run `tests/fm-calm-omp-live-e2e.test.sh` for command capability checks and the installed OMP terminal integration guard.
