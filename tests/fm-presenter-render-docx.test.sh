@@ -25,6 +25,25 @@ PILLOW_PIN=12.3.0
 SUITE="$ROOT/tests/presenter/render_docx"
 TMP_ROOT=$(fm_test_tmproot fm-presenter-render-docx)
 
+# The pinned install is this required lane's only network-dependent step, so a
+# transient hosted-runner network hiccup must not red-flag CI: retry a bounded
+# number of times, then fail loud with the final attempt's log. A genuinely
+# broken pin never passes; it just fails on the last attempt instead of the
+# first.
+install_pinned_test_deps() {
+  local venv_python="$1" log="$2" attempt
+  for attempt in 1 2 3; do
+    if PIP_DISABLE_PIP_VERSION_CHECK=1 "$venv_python" -m pip install --quiet \
+      "pytest==$PYTEST_PIN" \
+      "python-docx==$PYTHON_DOCX_PIN" \
+      "pillow==$PILLOW_PIN" \
+      >"$log" 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 test_python3_prerequisites_are_present() {
   command -v python3 >/dev/null 2>&1 \
     || fail "python3 is required to run the presenter render_docx suite"
@@ -38,12 +57,8 @@ test_pytest_suite_passes_under_pinned_deps() {
   local out summary passed
   python3 -m venv "$TMP_ROOT/venv" >/dev/null 2>&1 \
     || fail "ephemeral venv creation failed"
-  PIP_DISABLE_PIP_VERSION_CHECK=1 "$venv_python" -m pip install --quiet \
-    "pytest==$PYTEST_PIN" \
-    "python-docx==$PYTHON_DOCX_PIN" \
-    "pillow==$PILLOW_PIN" \
-    >"$TMP_ROOT/pip-install.log" 2>&1 \
-    || fail "pinned pytest/python-docx/Pillow install failed; see pip-install.log in the test temp root"
+  install_pinned_test_deps "$venv_python" "$TMP_ROOT/pip-install.log" \
+    || fail "pinned pytest/python-docx/Pillow install failed after 3 attempts; see pip-install.log in the test temp root"
   out=$(PYTHONDONTWRITEBYTECODE=1 "$venv_python" -m pytest "$SUITE" -q 2>&1) \
     || { printf '%s\n' "$out"; fail "presenter render_docx pytest suite failed"; }
   summary=$(printf '%s\n' "$out" | tail -n 1)
