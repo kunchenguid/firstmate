@@ -462,6 +462,41 @@ shell_only_process_info() {  # <shell-pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"],"cmdline":"-zsh"}]}}}' "$1" "$1" "$1"
 }
 
+# spawn_agent_named_descendant_fixture: start a real process tree whose
+# walk-visible descendant is an agent-named `pi` process, setting desc_shell_pid
+# and desc_pi_pid for kill_agent_named_descendant_fixture.
+#
+# Why the stand-in is a shell rather than a symlinked sleep: the kernel must
+# record `pi` as the executable identity, and a symlink to a real binary does
+# that (a copied platform binary fails code signing on macOS). But multi-call
+# sleep implementations (busybox, uutils coreutils) dispatch on argv[0] and
+# exit instantly as an unknown program `pi` when invoked under that name, so
+# the walk would read no live shell at all. A shell tolerates any argv[0]: it
+# keeps the `pi` exec name while a real `sleep` child holds it alive. The
+# trailing `:` at both shell layers blocks the single-command exec
+# optimization, which would otherwise rename the process to `sleep` (inner)
+# or let the outer `sh` exit once the tree dies.
+spawn_agent_named_descendant_fixture() {  # <lab-dir> <sleep-bin>
+  local lab=$1 sleep_bin=$2
+  mkdir -p "$lab"
+  ln -sf "$(command -v bash)" "$lab/pi"
+  sh -c "'$lab/pi' -c \"'$sleep_bin' 300; :\"; :" &
+  desc_shell_pid=$!
+  sleep 0.3
+  desc_pi_pid=$(pgrep -P "$desc_shell_pid" 2>/dev/null | head -n 1)
+}
+
+# kill_agent_named_descendant_fixture: tear the fixture tree down whole - the
+# sleep grandchild first (reparented the moment its `pi` shell dies), then the
+# `pi` shell, then the outer shell.
+kill_agent_named_descendant_fixture() {
+  if [ -n "${desc_pi_pid:-}" ]; then
+    pkill -P "$desc_pi_pid" 2>/dev/null || true
+  fi
+  pkill -P "${desc_shell_pid:-}" 2>/dev/null || true
+  kill "${desc_shell_pid:-}" 2>/dev/null || true
+}
+
 test_stale_registration_over_a_shell_only_pane_is_agent_free() {
   local sleep_bin shell_pid out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
@@ -568,18 +603,13 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
-  lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  lab="$TMP_ROOT/stale-reg-descendant-bin"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
-  sh -c "'$lab/pi' 300; :" &
-  shell_pid=$!
-  sleep 0.3
+  spawn_agent_named_descendant_fixture "$lab" "$sleep_bin"
+  shell_pid=$desc_shell_pid
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
-  pkill -P "$shell_pid" 2>/dev/null || true
-  kill "$shell_pid" 2>/dev/null || true
+  kill_agent_named_descendant_fixture
   [ "$out" = "live alive refused" ] \
     || fail "a registered agent with a live agent-named descendant must stay live/alive, got '$out'"
   # The divergence itself: the identical canned foreground view reads
@@ -600,14 +630,11 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
-  lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
-  sh -c "'$lab/pi' 300; :" &
-  shell_pid=$!
-  sleep 0.3
+  lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"
+  spawn_agent_named_descendant_fixture "$lab" "$sleep_bin"
+  shell_pid=$desc_shell_pid
   out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")
-  pkill -P "$shell_pid" 2>/dev/null || true
-  kill "$shell_pid" 2>/dev/null || true
+  kill_agent_named_descendant_fixture
   [ "$out" = "live alive refused" ] \
     || fail "an agent-named descendant under a spaced install path must stay live/alive, got '$out'"
   pass "herdr stale registration: the descendant walk reads a spaced executable path whole"
