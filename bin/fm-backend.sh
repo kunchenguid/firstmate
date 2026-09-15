@@ -406,7 +406,6 @@ fm_backend_orca_worktree_id_valid() {  # <worktree-id> <worktree>
       ;;
     *) return 1 ;;
   esac
-  case "$rest" in *:*) return 1 ;; esac
   path_part=$rest
   case "$path_part" in /*) ;; *) return 1 ;; esac
   case "$uuid_part" in ????????-????-????-????-????????????) ;; *) return 1 ;; esac
