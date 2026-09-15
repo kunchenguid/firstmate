@@ -345,6 +345,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/pr-dressing-audit.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },

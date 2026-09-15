@@ -1,0 +1,10 @@
+{
+  "repositories": {
+    "owner/repository": {
+      "integration_branch": "develop",
+      "reviewer_team": "owner/team-slug",
+      "assignees": ["login-one", "login-two"],
+      "required_checks": ["CI gate"]
+    }
+  }
+}
