@@ -57,7 +57,11 @@
 # RUNS TWICE SAFELY: the record is staged beside its destination and moved into
 # place whole, a rerun replaces an earlier record rather than merging into it,
 # staging left by a killed run is swept on the next attempt, and a task whose
-# records are already gone is a no-op success.
+# records are already gone is a no-op success. A slot whose source cleanup
+# already removed is carried forward from the record being replaced, gated on
+# that record's meta matching the live one byte for byte so another incarnation
+# can never donate its evidence; a retried cleanup therefore never trades a
+# complete record for an empty slot.
 
 FM_TASK_RECORD_SCHEMA=fm-task-record.v1
 
@@ -104,7 +108,7 @@ _fm_task_record_identical() {
 fm_task_record_retain() {
   local state=$1 data=$2 id=$3
   local meta="$state/$id.meta" status="$state/$id.status" busy="$state/$id.busy-state"
-  local dir staging stale retained_at
+  local dir staging stale donor retained_at
   FM_TASK_RECORD_ERROR=
 
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
@@ -137,6 +141,11 @@ fm_task_record_retain() {
   _fm_task_record_identical "$meta" "$staging/meta" "$meta" \
     || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
 
+  donor=
+  if fm_task_record_present "$data" "$id" && cmp -s -- "$dir/meta" "$meta"; then
+    donor=$dir
+  fi
+
   if [ -f "$status" ] && [ ! -L "$status" ]; then
     cp -p -- "$status" "$staging/status" \
       || _fm_task_record_abandon "$staging" "could not copy $status" || return 1
@@ -144,6 +153,11 @@ fm_task_record_retain() {
       || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
   elif [ -e "$status" ] || [ -L "$status" ]; then
     _fm_task_record_abandon "$staging" "$status is not a regular file" || return 1
+  elif [ -n "$donor" ]; then
+    cp -p -- "$donor/status" "$staging/status" \
+      || _fm_task_record_abandon "$staging" "could not carry forward the earlier retained copy of $status" || return 1
+    _fm_task_record_identical "$donor/status" "$staging/status" "the earlier retained copy of $status" \
+      || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
   else
     : > "$staging/status" \
       || _fm_task_record_abandon "$staging" "could not record an empty status stream" || return 1
@@ -156,6 +170,11 @@ fm_task_record_retain() {
       || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
   elif [ -e "$busy" ] || [ -L "$busy" ]; then
     _fm_task_record_abandon "$staging" "$busy is not a regular file" || return 1
+  elif [ -n "$donor" ]; then
+    cp -p -- "$donor/busy-state" "$staging/busy-state" \
+      || _fm_task_record_abandon "$staging" "could not carry forward the earlier retained copy of $busy" || return 1
+    _fm_task_record_identical "$donor/busy-state" "$staging/busy-state" "the earlier retained copy of $busy" \
+      || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
   else
     : > "$staging/busy-state" \
       || _fm_task_record_abandon "$staging" "could not record an absent turn-activity record" || return 1

@@ -2143,6 +2143,60 @@ test_recovery_retains_the_task_record_before_removing_it() {
   pass "recovery retains the supervisor's record before removing it"
 }
 
+# A teardown killed inside its atomic close dies after retention already
+# captured the full record and the status and busy-state sources were retired,
+# with the task record and the close marker still on disk. The replay's
+# re-retention then runs with those sources gone and must carry the earlier
+# record's copies forward instead of replacing them with empty slots.
+test_replayed_retention_keeps_the_earlier_records_evidence() {
+  local case_dir home id marker record out rc=0
+  id=atomic-reretain-evidence-b13
+  case_dir=$(make_home reretain-evidence "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-reretain" "busy_gen=g9"
+  printf '%s\n' 'working: setup complete' 'done: PR checks green' \
+    > "$home/state/$id.status"
+  printf 'v1 gen=g9 seq=11 state=idle source=pi-ext event=agent-settled ts=1700000000\n' \
+    > "$home/state/$id.busy-state"
+  cp "$home/state/$id.meta" "$case_dir/meta.before"
+  cp "$home/state/$id.status" "$case_dir/status.before"
+  cp "$home/state/$id.busy-state" "$case_dir/busy.before"
+  record="$home/data/$id/record"
+  marker="$home/state/$id.backlog-close"
+  break_verb "$case_dir" "done"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown reported success while its close still failed"
+  assert_contains "$out" "could not be closed" \
+    "teardown did not fail at the atomic close: $out"
+  assert_present "$marker" "the failed close did not leave its recoverable marker"
+  assert_absent "$home/state/$id.status" \
+    "the interrupted cleanup did not retire the status source this case depends on"
+  assert_absent "$home/state/$id.busy-state" \
+    "the interrupted cleanup did not retire the busy-state source this case depends on"
+  cmp -s "$case_dir/status.before" "$record/status" \
+    || fail "the first retention did not capture the status stream"
+  # The close removes the task record before tasks-axi runs, so a kill inside
+  # the close leaves record+marker with the sources already retired. Restore
+  # the record the close had just removed to land the replay in that window.
+  cp "$case_dir/meta.before" "$home/state/$id.meta"
+  rm -f "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "the replayed close left the item In flight: $out"
+  assert_absent "$home/state/$id.meta" "the replay left the runtime task record behind"
+  cmp -s "$case_dir/meta.before" "$record/meta" \
+    || fail "re-retention lost the task's own meta"
+  cmp -s "$case_dir/status.before" "$record/status" \
+    || fail "re-retention replaced the status-event stream with an empty slot"
+  cmp -s "$case_dir/busy.before" "$record/busy-state" \
+    || fail "re-retention replaced the turn-activity record with an empty slot"
+  pass "a replayed cleanup carries the earlier record's evidence forward"
+}
+
 test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   local case_dir id out
   id=atomic-heal-same-incarnation-b11
@@ -3097,6 +3151,7 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_retains_the_task_record_before_removing_it
+test_replayed_retention_keeps_the_earlier_records_evidence
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails
