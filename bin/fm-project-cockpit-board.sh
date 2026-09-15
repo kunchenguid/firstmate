@@ -25,7 +25,7 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 TEMPLATE="${FM_PROJECT_COCKPIT_TEMPLATE:-$SCRIPT_DIR/../assets/project-cockpit-template.html}"
 PLACEHOLDER='__FM_PROJECT_COCKPIT_DATA__'
 BOARD_SCHEMA=fm-project-cockpit.v1
-MAX_BYTES=${FM_PROJECT_COCKPIT_MAX_BYTES:-1048576}
+MAX_BYTES=${FM_PROJECT_COCKPIT_MAX_BYTES:-2097152}
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -55,6 +55,8 @@ validate_payload() {  # <data.json>
       and (.state | text(40))
       and (.state_source | text(40))
       and (.observed_at == null or (.observed_at | stamp))
+      and (.started_at == null or (.started_at | stamp))
+      and (.elapsed_seconds == null or (.elapsed_seconds | nonnegative_integer))
       and (.crew | type == "object")
       and (.crew.summary | text(40))
       and (.decisions | type == "array" and all(.[]; text(240)))
@@ -89,13 +91,22 @@ validate_payload() {  # <data.json>
       (.id | text(128))
       and (.label | text(128))
       and (.rank | nonnegative_integer)
+      and (.attention_count | nonnegative_integer)
+      and (.active_count | nonnegative_integer)
+      and (.blocker_count | nonnegative_integer)
+      and (.latest_phase | text(40))
+      and has("last_observed_at")
+      and (.last_observed_at == null or (.last_observed_at | stamp))
+      and has("oldest_active_seconds")
+      and (.oldest_active_seconds == null or (.oldest_active_seconds | nonnegative_integer))
+      and (.total_task_count | nonnegative_integer)
       and (.tasks | type == "array" and length <= 160 and all(.[]; task)))
     and (.terminal.status == "unavailable")
   ' "$1" >/dev/null
 }
 
 command_build() {  # <payload>
-  local data=$1 board tmp compact extracted canonical_source canonical_embedded bytes
+  local data=$1 board tmp compact extracted canonical_source canonical_embedded bytes line
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] && [ ! -L "$data" ] || fail "cockpit data must be a regular non-symlink file: $data"
   bytes=$(wc -c < "$data" | tr -d '[:space:]')
@@ -112,7 +123,13 @@ command_build() {  # <payload>
   (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
   tmp=$(umask 077; mktemp "${board%/*}/.project-cockpit.XXXXXX") \
     || fail "cannot stage the cockpit artifact"
-  if ! COCKPIT_JSON="$compact" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{COCKPIT_JSON}/" "$TEMPLATE" > "$tmp"; then
+  if ! while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$line" = "$PLACEHOLDER" ]; then
+      printf '%s\n' "$compact"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$TEMPLATE" > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot inject cockpit data"
   fi

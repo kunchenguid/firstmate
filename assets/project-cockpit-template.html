@@ -103,7 +103,7 @@
     .task-list { display: grid; gap: 6px; }
     .task-button {
       width: 100%; min-width: 0; min-height: 58px; display: grid;
-      grid-template-columns: minmax(0, 1.8fr) minmax(72px, .7fr) minmax(72px, .7fr) minmax(88px, 1fr);
+      grid-template-columns: minmax(0, 1.8fr) minmax(72px, .7fr) minmax(72px, .7fr) minmax(88px, 1fr) minmax(54px, .5fr);
       gap: 8px; align-items: center; padding: 9px 10px; color: var(--text); text-align: left;
       background: var(--panel); border: 1px solid var(--line-soft); border-radius: 3px; cursor: pointer;
     }
@@ -117,6 +117,7 @@
     .cell--phase::before { content: "Phase"; }
     .cell--crew::before { content: "Crew"; }
     .cell--gate::before { content: "Gate"; }
+    .cell--elapsed::before { content: "Elapsed"; }
     .state-working, .state-done, .state-complete { color: var(--green); }
     .state-parked, .state-paused, .state-queued, .state-stale, .state-live, .state-aged, .state-dated { color: var(--amber); }
     .state-blocked, .state-failed { color: var(--red); }
@@ -158,9 +159,10 @@
       .project-button { min-height: 64px; padding: 11px 12px; }
       .board { padding: 12px; }
       .project-summary h2 { font-size: 18px; }
-      .task-button { min-height: 76px; grid-template-columns: minmax(0, 1fr); gap: 7px 10px; }
+      .task-button { min-height: 76px; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 10px; }
       .task-primary { grid-column: 1 / -1; }
       .cell--gate { grid-column: 1; }
+      .cell--elapsed { grid-column: 2; text-align: right; }
       .cell--phase, .cell--crew { display: none; }
       .inspector { grid-column: auto; border-left: 0; border-top: 1px solid var(--line); padding: 13px 12px 28px; }
       .toolbar { grid-template-columns: 1fr; }
@@ -302,7 +304,7 @@ __FM_PROJECT_COCKPIT_DATA__
       button.setAttribute("aria-current", project.id === state.projectId ? "true" : "false");
       button.append(el("span", "project-name", project.label));
       if (project.attention_count > 0) button.append(el("span", "count-badge", `${project.attention_count}`));
-      const meta = el("span", "project-meta", `${project.active_count} active · ${project.latest_phase.toUpperCase()} · ${project.last_observed_at || "never observed"}`);
+      const meta = el("span", "project-meta", `${project.active_count} active · ${project.latest_phase.toUpperCase()} · oldest ${duration(project.oldest_active_seconds)} · ${project.last_observed_at || "never observed"}`);
       meta.style.gridColumn = "1 / -1";
       button.append(meta);
       button.addEventListener("click", () => selectProject(project.id, true));
@@ -338,7 +340,8 @@ __FM_PROJECT_COCKPIT_DATA__
       const phase = el("span", `cell cell--phase state-${task.state}`, upper(task.state));
       const crew = el("span", `cell cell--crew state-${task.crew.liveness}`, task.crew.summary);
       const gate = el("span", `cell cell--gate state-${task.gate.status}`, text(task.gate.label));
-      button.append(primary, phase, crew, gate);
+      const elapsed = el("span", "cell cell--elapsed", duration(task.elapsed_seconds));
+      button.append(primary, phase, crew, gate, elapsed);
       button.addEventListener("click", () => selectTask(taskKey(task), true));
       button.addEventListener("keydown", taskKeydown);
       li.append(button);
@@ -368,7 +371,7 @@ __FM_PROJECT_COCKPIT_DATA__
         return;
       }
       byId("project-title").textContent = project.label;
-      byId("project-summary").textContent = `${project.active_count} active · ${project.blocker_count} blocked`;
+      byId("project-summary").textContent = `${project.active_count} active · ${project.blocker_count} blocked · oldest active ${duration(project.oldest_active_seconds)}`;
       lanes.forEach(([lane, label]) => {
         if (state.filter === "active" && lane === "recently_completed") return;
         const tasks = project.tasks.filter((task) => task.lane === lane && (!state.query || `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(state.query.toLocaleLowerCase())));
@@ -427,6 +430,8 @@ __FM_PROJECT_COCKPIT_DATA__
       detailRow(grid, "Source", task.state_source);
       detailRow(grid, "Detail", task.state_detail_status === "unavailable" ? "Unavailable by privacy allowlist" : task.state_detail);
       detailRow(grid, "Observed", task.observed_at);
+      detailRow(grid, "Started", task.started_at);
+      detailRow(grid, "Elapsed", duration(task.elapsed_seconds));
       detailRow(grid, "Crew", `${task.crew.summary} · ${task.crew.kind}`);
       detailRow(grid, "Gate", task.gate.label, task.gate.status);
       detail.append(grid);

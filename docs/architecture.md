@@ -102,6 +102,7 @@ The projector preserves structured task generations, lifecycle states, captain-h
 `bin/fm-project-cockpit-board.sh` validates that model, injects it into the shipped graphite renderer, verifies the embedded JSON round trip, and atomically publishes the private artifact.
 Its optional Lavish path is presentation-only and has no captain-hold binding, process-event registration, watcher, task-control, or terminal-input path.
 The renderer never opens paths from the model or reparses mutable fleet state, and terminal observation remains explicitly unavailable until an identity-bound capture contract can prove task generation and endpoint attribution across capture.
+New task metadata records an explicit `started_at` timestamp for elapsed-time display, while legacy records remain unavailable rather than deriving time from the opaque `spawn_gen` token or filesystem timestamps.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.

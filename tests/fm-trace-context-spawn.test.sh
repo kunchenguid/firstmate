@@ -412,7 +412,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
 }
 
 test_relaunch_reuses_recorded_carrier() {
-  local rec out status meta first second injected
+  local rec out status meta first second injected first_started second_started
   rec=$(make_spawn_case tc-relaunch)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -425,6 +425,11 @@ test_relaunch_reuses_recorded_carrier() {
   assert_contains "$out" "spawned $CASE_ID" "first spawn should report success"
   first=$(meta_traceparent "$meta")
   fm_trace_context_valid "$first" || fail "first spawn must record a valid carrier (got '$first')"
+  first_started=$(sed -n 's/^started_at=//p' "$meta")
+  printf '%s\n' "$first_started" | jq -R -e 'fromdateiso8601' >/dev/null \
+    || fail "first spawn must record a canonical UTC start timestamp"
+  awk -F= '$1 == "started_at" {$0="started_at=2000-01-01T00:00:00Z"} {print}' "$meta" > "$meta.tmp"
+  mv "$meta.tmp" "$meta"
 
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
@@ -435,8 +440,12 @@ test_relaunch_reuses_recorded_carrier() {
   assert_contains "$out" "spawned $CASE_ID" "relaunch spawn should report success"
   second=$(meta_traceparent "$meta")
   injected=$(injected_traceparent "$LAUNCH_LOG")
+  second_started=$(sed -n 's/^started_at=//p' "$meta")
   [ "$second" = "$first" ] || fail "relaunch must reuse the recorded carrier in meta (first='$first' second='$second')"
   [ "$injected" = "$first" ] || fail "relaunch must inject the same recorded carrier (first='$first' injected='$injected')"
+  printf '%s\n' "$second_started" | jq -R -e 'fromdateiso8601' >/dev/null \
+    || fail "relaunch must record a canonical UTC start timestamp"
+  [ "$second_started" != 2000-01-01T00:00:00Z ] || fail "relaunch preserved the prior start timestamp"
   pass "relaunch reuses the recorded carrier verbatim for both the meta record and the injected export"
 }
 

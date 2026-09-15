@@ -73,6 +73,7 @@
       "backend": "tmux",
       "project": "/work/alpha",
       "spawn_gen": "gen-healthy-1",
+      "started_at": "2026-09-15T10:30:00Z",
       "backlog": {
         "structured": true,
         "id": "healthy-work",
@@ -99,6 +100,7 @@
       "backend": "tmux",
       "project": "/work/alpha",
       "spawn_gen": "gen-call-1",
+      "started_at": null,
       "backlog": {
         "structured": true,
         "id": "captain-call",
@@ -125,6 +127,7 @@
       "backend": "herdr",
       "project": "/work/beta",
       "spawn_gen": "gen-blocked-1",
+      "started_at": "2026-09-15T11:00:00Z",
       "backlog": {
         "structured": true,
         "id": "blocked-work",
@@ -148,6 +151,7 @@
       "backend": "unknown",
       "project": "/work/delta",
       "spawn_gen": "gen-unknown-1",
+      "started_at": null,
       "backlog": null,
       "current_state": {"state": "unknown", "source": "none", "detail": "unreachable", "observed_at": "2026-09-15T11:57:00Z"},
       "endpoint": {"status": "unknown", "target": null},

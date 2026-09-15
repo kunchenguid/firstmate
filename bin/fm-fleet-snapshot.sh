@@ -51,6 +51,9 @@
 #     generation changes while observations run, its selected metadata remains
 #     but mutable current-state, status, report, and endpoint evidence is discarded
 #     rather than attributed to the replacement generation.
+#     started_at is the canonical UTC start timestamp recorded by new spawns;
+#     legacy metadata carries null and views must not infer a start from
+#     spawn_gen or filesystem timestamps.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
@@ -724,7 +727,7 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen started_at backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -745,6 +748,7 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     spawn_gen=$(meta_value "$meta" spawn_gen)
+    started_at=$(meta_value "$meta" started_at)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     if [ -n "$remote_host" ]; then
@@ -846,6 +850,7 @@ task_json_lines() {
       --arg home "$home" \
       --arg projects "$projects" \
       --arg spawn_gen "$spawn_gen" \
+      --arg started_at "$started_at" \
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
@@ -874,6 +879,7 @@ task_json_lines() {
         yolo:($yolo // ""),
         project:($project // ""),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        started_at:($started_at | if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") then . else null end),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{

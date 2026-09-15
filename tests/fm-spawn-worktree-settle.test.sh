@@ -118,7 +118,7 @@ run_settle_spawn() {
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
 test_single_stale_first_read_is_not_accepted() {
-  local rec id out status
+  local rec id out status started_at
   id=settle-single-stale-z1
   rec=$(make_settle_case settle-single "$id" 1)
   read_settle_record "$rec"
@@ -131,8 +131,9 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
-  assert_no_grep '^started_at=' "$HOME_DIR/state/$id.meta" \
-    "spawn added elapsed-time metadata to the operational task record"
+  started_at=$(sed -n 's/^started_at=//p' "$HOME_DIR/state/$id.meta")
+  printf '%s\n' "$started_at" | jq -R -e 'fromdateiso8601' >/dev/null \
+    || fail "spawn metadata did not record a canonical UTC start timestamp"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 

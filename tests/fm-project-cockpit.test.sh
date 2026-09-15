@@ -38,17 +38,18 @@ test_projection_is_deterministic_and_allowlisted() {
     and .counts == {running:2,waiting:2,blocked:1,attention:2}
     and [.projects[].id] == ["alpha","beta","delta","gamma"]
     and ([.projects[].tasks[] | select(.id == "healthy-work")][0]
-      | .state == "working" and .crew.summary == "1 LIVE")
+      | .state == "working" and .crew.summary == "1 LIVE" and .elapsed_seconds == 5460)
     and ([.projects[].tasks[] | select(.id == "captain-call")][0]
       | .hold.classification == "live" and .hold.actionable == true
-        and .hold.question == "Keep legacy readers or require version 2?")
+        and .hold.question == "Keep legacy readers or require version 2?"
+        and .elapsed_seconds == null)
     and ([.projects[].tasks[] | select(.id == "blocked-work")][0]
       | .state == "blocked" and .blockers == ["upstream-api"] and .artifacts.pr_url == null)
     and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
       | .state == "unknown" and .crew.summary == "UNKNOWN" and .state != "stopped")
     and ([.projects[].tasks[] | select(.id == "done-work")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
-  ' "$one" >/dev/null || fail "projected state semantics, stable ordering, or safe links are wrong"
+  ' "$one" >/dev/null || fail "projected state semantics, stable ordering, elapsed time, or safe links are wrong"
   for unsafe in PRIVATE-INBOX-TEXT-MUST-NOT-LEAK SECRET-STATUS-DETAIL SECRET-RAW-LINE PRIVATE-EVENT-TEXT PRIVATE-DECISION-TEXT FORBIDDEN-CONTROL-TEXT; do
     ! grep -Fq "$unsafe" "$one" || fail "unsafe source text leaked through the allowlist: $unsafe"
   done
@@ -177,7 +178,8 @@ test_attention_precedes_completed_history_and_project_caps() {
 }
 
 test_builder_is_fail_closed_and_atomic() {
-  local home=$TMP_ROOT/builder-home model=$TMP_ROOT/builder.json prior altered out rc before after
+  local home=$TMP_ROOT/builder-home model=$TMP_ROOT/builder.json prior altered out rc before after field
+  local large=$TMP_ROOT/builder-large.json bytes
   project states.json "$model"
   out=$(FM_HOME="$home" "$BOARD" build "$model") || fail "valid cockpit build failed: $out"
   assert_contains "$out" "board: $home/.lavish/project-cockpit.html" "builder did not report the stable path"
@@ -199,6 +201,52 @@ test_builder_is_fail_closed_and_atomic() {
   assert_contains "$out" "does not satisfy fm-project-cockpit.v1" "unsafe URL refusal did not name the schema"
   after=$(sha256sum "$prior" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "failed validation replaced the previous artifact"
+  for field in attention_count active_count blocker_count latest_phase last_observed_at oldest_active_seconds total_task_count; do
+    jq --arg field "$field" 'del(.projects[0][$field])' "$model" > "$altered"
+    set +e
+    out=$(FM_HOME="$home" "$BOARD" build "$altered" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "builder accepted a project missing $field"
+  done
+  jq '
+    .projects[0].tasks[0] as $task
+    | .projects = [
+        range(0;4) as $project_index
+        | (if $project_index < 3 then 160 else 20 end) as $count
+        | {
+            id:("large-" + ($project_index | tostring)),
+            label:("Large " + ($project_index | tostring)),
+            rank:1,
+            attention_count:0,
+            active_count:$count,
+            blocker_count:0,
+            latest_phase:"working",
+            last_observed_at:"2026-09-15T12:00:00Z",
+            oldest_active_seconds:5460,
+            total_task_count:$count,
+            truncated:false,
+            tasks:[
+              range(0;$count) as $task_index
+              | $task
+              | .id=("task-" + ($project_index | tostring) + "-" + ($task_index | tostring))
+              | .spawn_gen=("gen-" + ($project_index | tostring) + "-" + ($task_index | tostring))
+              | .project_id=("large-" + ($project_index | tostring))
+              | .name=("n" * 160)
+              | .gate.label=("g" * 240)
+              | .artifacts.report.path=("r" * 500)
+              | .runtime_evidence.target=("t" * 240)
+              | .runtime_evidence.worktree=("w" * 500)
+              | .runtime_evidence.home=("h" * 500)
+            ]
+          }
+      ]
+    | .counts={running:500,waiting:0,blocked:0,attention:0}
+  ' "$model" > "$large"
+  bytes=$(wc -c < "$large" | tr -d '[:space:]')
+  [ "$bytes" -gt 1048576 ] || fail "large bounded fixture did not reproduce the former builder limit"
+  FM_HOME="$home" "$BOARD" build "$large" >/dev/null \
+    || fail "builder rejected a valid bounded payload larger than 1 MiB"
   set +e
   out=$(FM_HOME="$home" "$BOARD" path 2>&1)
   rc=$?
