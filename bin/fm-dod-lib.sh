@@ -5,7 +5,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <effective-home> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
@@ -27,6 +27,9 @@
 # and a `## Captain's intent` line opening with a Captain label or address
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
+# The direct-PR block names bin/fm-fork-target.sh as the push-target resolver so
+# a worker in a home that cannot write `origin` does not rediscover the fork by
+# hand; that script, not this one, owns how the target is resolved.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
@@ -38,6 +41,9 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+
+FM_DOD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_DOD_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DOD_LIB_DIR/.." && pwd)}"
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -72,6 +78,13 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
       return 1
       ;;
   esac
+}
+
+fm_no_mistakes_target_instruction() {  # <context> <quoted-home> <quoted-resolver>
+  local context=$1 home_q=$2 resolver_q=$3
+  # shellcheck disable=SC2016  # The generated contract must retain literal shell syntax.
+  printf 'Before %s, run `FM_CONFIG_OVERRIDE= FM_HOME=%s %s init .` and capture its exit status. Status 0 means the target is ready and you may continue. Status 4 is advisory because no fork url is declared and the gate keeps its existing target: report the warning and continue. Any other non-zero status means stop and report the resolver or initialization error; do not start the gate.\n' \
+    "$context" "$home_q" "$resolver_q"
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
@@ -232,8 +245,32 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> <effective-home>
+  local mode=$1 id=$2 home=${3:-} home_q resolver_q
+  [ "$#" -eq 3 ] || {
+    echo "error: fm_dod_block requires an effective FM_HOME" >&2
+    return 1
+  }
+  [ -n "$home" ] || {
+    echo "error: effective FM_HOME is missing" >&2
+    return 1
+  }
+  case "$home" in
+    /*) ;;
+    *)
+      echo "error: effective FM_HOME must be absolute: $home" >&2
+      return 1
+      ;;
+  esac
+  [ -d "$home" ] || {
+    echo "error: effective FM_HOME is not a directory: $home" >&2
+    return 1
+  }
+  home_q=$(printf '%q' "$home")
+  # The resolver path is interpolated into a command the worker runs, so it
+  # is quoted like every other generated argument: a firstmate root
+  # containing a space must not split into two words.
+  resolver_q=$(printf '%q' "$FM_DOD_ROOT/bin/fm-fork-target.sh")
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -242,6 +279,7 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Before pushing, run \`FM_CONFIG_OVERRIDE= FM_HOME=$home_q $resolver_q resolve .\` and check its exit status. If it exits non-zero, stop and report the resolver error instead of pushing; if it succeeds with a url, this home cannot push to \`origin\`, so push your branch to that fork and open the PR against \`origin\` from it; if it succeeds with no output, push to \`origin\` as usual.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -264,6 +302,10 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
+EOF
+      fm_no_mistakes_target_instruction "starting /no-mistakes" "$home_q" "$resolver_q"
+      cat <<EOF
+
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
@@ -282,12 +324,14 @@ Where a harness's own command limit is not established, assume it bounds command
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+- A run that passed every validation step and then failed at \`push\` or \`pr\` is a DELIVERY failure, not a validation failure: your code validated and could not be handed over, and firstmate owns the push target, not you.
+  Report it as \`blocked: pipeline validated but could not deliver - {the exact push or PR error}\` and stop; never as \`failed:\`, and never by retargeting the push yourself.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

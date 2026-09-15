@@ -493,6 +493,46 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path() {
   pass "fm-brief.sh: --herdr-lab uses its quoted Firstmate-owned helper path"
 }
 
+# Same boundary as the Herdr helper above, for the push-target resolver: the
+# generated command must survive a Firstmate root containing a space, or the
+# worker's very first delivery step splits into two words and fails.
+test_fork_target_command_quotes_foreign_firstmate_path() {
+  local home id brief foreign_root resolver_bin resolver_log command mode verb expected
+  home="$TMP_ROOT/fork-target-foreign-home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  resolver_bin="$foreign_root/bin/fm-fork-target.sh"
+  resolver_log="$TMP_ROOT/fork-target-foreign.log"
+  mkdir -p "$home/data" "$(dirname "$resolver_bin")"
+  write_registry "$home"
+  cat > "$resolver_bin" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$FM_HOME" "${1:-}" "${2:-}" > "$FM_TEST_RESOLVER_LOG"
+EOF
+  chmod +x "$resolver_bin"
+  for mode_verb in "no-mistakes:init" "direct-PR:resolve"; do
+    mode=${mode_verb%%:*}
+    verb=${mode_verb##*:}
+    id="brief-fork-target-foreign-${verb}"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" \
+      "$id" foreign --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    # shellcheck disable=SC2016  # The sed expressions must remain literal.
+    case "$verb" in
+      init) command=$(sed -n 's/.*run `\([^`]* init \.\)`.*/\1/p' "$brief" | head -1) ;;
+      resolve) command=$(sed -n 's/.*run `\([^`]* resolve \.\)`.*/\1/p' "$brief" | head -1) ;;
+    esac
+    [ -n "$command" ] || fail "$id: generated contract did not expose an executable resolver command"
+    : > "$resolver_log"
+    ( cd "$ROOT" && FM_TEST_RESOLVER_LOG="$resolver_log" bash -c "$command" ) \
+      || fail "$id: generated resolver command did not execute"
+    expected="$home|$verb|."
+    [ "$(cat "$resolver_log")" = "$expected" ] \
+      || fail "$id: generated resolver command did not preserve its arguments"
+  done
+  pass "fm-brief.sh: the push-target command quotes its Firstmate root"
+}
+
 test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   local home id brief
   home="$TMP_ROOT/herdr-gate-home"
@@ -729,6 +769,17 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
 
   (
     cd "$root" || exit 1
+    FM_HOME=missing-home \
+      "$ROOT/bin/fm-brief.sh" unresolved-ship --mode no-mistakes some-proj >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved ship FM_HOME must fail before rendering a resolver command"
+  assert_absent "$root/data/unresolved-ship/brief.md" \
+    "an unresolved ship FM_HOME emitted a brief with an ambiguous resolver home"
+  assert_grep "FM_HOME directory cannot be resolved: missing-home" "$err" \
+    "unresolved ship FM_HOME did not fail loudly"
+
+  (
+    cd "$root" || exit 1
     FM_HOME="$home" FM_STATE_OVERRIDE=missing-state FM_SECONDMATE_CHARTER=x \
       "$ROOT/bin/fm-brief.sh" unresolved-state --secondmate --no-projects >/dev/null 2>"$err"
   ); status=$?
@@ -938,6 +989,7 @@ test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
+test_fork_target_command_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates

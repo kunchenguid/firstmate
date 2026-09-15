@@ -66,7 +66,15 @@ while IFS= read -r rel; do
     esac
   fi
   case "$rel" in
-    config/*) source="$CONFIG/${rel#config/}" ;;
+    config/*)
+      if ! fm_config_source_dir_safe "$CONFIG"; then
+        if [ -L "$CONFIG" ]; then
+          die "$rel: inherited source config directory is a symlink: $CONFIG"
+        fi
+        die "$rel: inherited source config directory is not a directory: $CONFIG"
+      fi
+      source="$CONFIG/${rel#config/}"
+      ;;
     data/*) source="$DATA/${rel#data/}" ;;
   esac
   source_present=$(fm_config_source_present "$source") || exit 1

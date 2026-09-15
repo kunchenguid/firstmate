@@ -34,6 +34,7 @@ SH
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  fm_test_fake_no_mistakes_init_doctor "$fakebin"
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -96,6 +97,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_NO_MISTAKES_INIT_STATUS="${FM_TEST_NO_MISTAKES_INIT_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -104,6 +106,46 @@ run_spawn() {
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
+}
+
+test_ship_spawn_refreshes_the_push_target_before_launch() {
+  local rec id out status
+  id=profile-refresh-target-z1e
+  rec=$(make_spawn_case profile-refresh-target claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "ship spawn should refresh the no-mistakes target"
+  assert_present "$PROJ_DIR/.no-mistakes-init" "ship spawn did not initialize the no-mistakes target"
+  assert_present "$PROJ_DIR/.no-mistakes-doctor" "ship spawn did not doctor the refreshed target"
+  pass "ship spawn refreshes an existing no-mistakes registration before launch"
+}
+
+test_ship_spawn_discriminates_push_target_init_status() {
+  local rec id out status
+
+  id=profile-advisory-target-z1f
+  rec=$(make_spawn_case profile-advisory-target claude "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/config/fork-url"
+  out=$(FM_TEST_NO_MISTAKES_INIT_STATUS=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an advisory push-target initialization failure must still launch"
+  assert_contains "$out" "no fork url is declared" "the advisory push-target failure must be reported"
+  [ -s "$LAUNCH_LOG" ] || fail "an advisory push-target failure must not suppress the launch"
+
+  id=profile-fatal-target-z1g
+  rec=$(make_spawn_case profile-fatal-target claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'ssh://github.example/contributor/widget.git' > "$HOME_DIR/config/fork-url"
+  out=$(FM_TEST_NO_MISTAKES_INIT_STATUS=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a declared push-target initialization failure must stop the spawn"
+  assert_contains "$out" "could not refresh no-mistakes push target" \
+    "a fatal push-target failure must be reported"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a fatal push-target failure must suppress the launch"
+  pass "fm-spawn discriminates successful, advisory, and fatal target initialization"
 }
 
 read_case_record() {
@@ -1131,10 +1173,9 @@ run_launch_environment_inheritance() {
 }
 
 test_launch_environment_inheritance_preserves_on_source_errors() {
-  local route rec id dest out status
+  local route rec id dest out status real_config
   if [ "$(id -u)" = 0 ]; then
     printf '# skip - inaccessible inheritance sources require a non-root user\n'
-    return
   fi
   for route in local remote; do
     id="env-inherit-$route"
@@ -1167,14 +1208,16 @@ SH
     [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
       || fail "$route inheritance did not publish the allowlist"
 
-    chmod 600 "$HOME_DIR/config" || fail "could not remove source search permission"
-    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 2 2>&1)
-    status=$?
-    chmod 700 "$HOME_DIR/config" || fail "could not restore source search permission"
-    expect_code 1 "$status" "$route inheritance must refuse an inaccessible source: $out"
-    assert_contains "$out" launch-env-allowlist "$route inspection error must identify the allowlist"
-    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
-      || fail "$route inheritance removed or changed the allowlist after an inspection error"
+    if [ "$(id -u)" -ne 0 ]; then
+      chmod 600 "$HOME_DIR/config" || fail "could not remove source search permission"
+      out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 2 2>&1)
+      status=$?
+      chmod 700 "$HOME_DIR/config" || fail "could not restore source search permission"
+      expect_code 1 "$status" "$route inheritance must refuse an inaccessible source: $out"
+      assert_contains "$out" launch-env-allowlist "$route inspection error must identify the allowlist"
+      [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+        || fail "$route inheritance removed or changed the allowlist after an inspection error"
+    fi
 
     rm "$HOME_DIR/config/launch-env-allowlist"
     ln -s missing-allowlist "$HOME_DIR/config/launch-env-allowlist"
@@ -1183,6 +1226,23 @@ SH
     expect_code 1 "$status" "$route inheritance must refuse a dangling source link: $out"
     [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
       || fail "$route inheritance treated a dangling source link as absence"
+
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    real_config="$CASE_DIR/real-config-$route"
+    mv "$HOME_DIR/config" "$real_config"
+    ln -s "$real_config" "$HOME_DIR/config"
+    printf 'FM_TEST_ALLOWED\n' > "$real_config/launch-env-allowlist"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 4 2>&1)
+    status=$?
+    rm "$HOME_DIR/config"
+    mv "$real_config" "$HOME_DIR/config"
+    expect_code 1 "$status" "$route inheritance must refuse a symlinked source config directory: $out"
+    if [ "$route" = remote ]; then
+      assert_contains "$out" "source config directory is a symlink" \
+        "remote inheritance must identify the symlinked source config directory"
+    fi
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance changed the destination after a symlinked source config directory"
 
     rm "$HOME_DIR/config/launch-env-allowlist"
     out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 4 2>&1)
@@ -1371,6 +1431,8 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_ship_spawn_refreshes_the_push_target_before_launch
+test_ship_spawn_discriminates_push_target_init_status
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

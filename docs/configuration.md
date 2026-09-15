@@ -222,6 +222,19 @@ The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-gui
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+## Push target for the no-mistakes gate (config/fork-url)
+
+The no-mistakes gate pushes a validated branch to the repo it was initialized against, which `no-mistakes init` takes from the clone's `origin`.
+When this home's authenticated forge account has only read access to that repo, the run reaches its `push` step with a 403 and the whole run is recorded failed although the code validated.
+[`bin/fm-fork-target.sh`](../bin/fm-fork-target.sh) is the single owner of which push target firstmate initializes a clone against, and its header owns the declaration contract.
+Optional `config/fork-url` holds one complete push URL and is used verbatim.
+The file must contain exactly one line, whether or not that line ends with a newline; a second line makes the declaration unusable rather than silently ignored.
+It must be an `https://`, `http://`, `ssh://`, `git+ssh://`, or `file://` URL with the required host/path shape, or a standard `user@host:path` form. It is LOCAL, gitignored, applies to every project in the home, and is inherited by secondmate homes; invalid declarations or an unreadable file fail closed before initialization. Non-zero resolution means an error, never an absent fork.
+When `config/fork-url` is absent, the gate is initialized against `origin` exactly as before. Resolution is local and does not use `gh` or infer a target from network state.
+
+`bin/fm-fork-target.sh init <dir>` is also the repair path for a home whose gate was already initialized against a target it cannot write, because `no-mistakes init` refreshes an existing registration.
+[CONTRIBUTING.md](../CONTRIBUTING.md) owns the manual contributor setup this automates.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.

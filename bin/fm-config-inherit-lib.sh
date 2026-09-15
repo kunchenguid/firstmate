@@ -66,7 +66,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode fork-url}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -102,6 +102,13 @@ fm_config_source_present() {
     elsif ($! == ENOENT) { print 0 }
     else { die "error: cannot inspect configuration source at $ARGV[0]: $!\n" }
   ' -- "$1"
+}
+
+fm_config_source_dir_safe() {
+  local dir=${1:-}
+  [ -n "$dir" ] || return 1
+  [ ! -L "$dir" ] || return 1
+  [ ! -e "$dir" ] || [ -d "$dir" ]
 }
 
 fm_inherit_file_mode() {
@@ -455,6 +462,18 @@ propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest source_present reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
+  if ! fm_config_source_dir_safe "$src_config"; then
+    if [ -L "$src_config" ]; then
+      reason="primary config directory is a symlink"
+    else
+      reason="primary config directory is not a directory"
+    fi
+    for item in $FM_INHERITABLE_CONFIG; do
+      warn_inheritable_config_error "$item" "$src_config" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+    done
+    return 1
+  fi
   rc=0
   for item in $FM_INHERITABLE_CONFIG; do
     case "$item" in
@@ -468,6 +487,13 @@ propagate_inheritable_config() {
     dest="$dest_config/$item"
     if ! source_present=$(fm_config_source_present "$src"); then
       reason="cannot inspect primary source"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    if [ "$item" = fork-url ] && [ -L "$src" ]; then
+      reason="primary source is a symlink"
       warn_inheritable_config_error "$item" "$src" "$reason"
       record_inheritable_config_result "$item" error "$reason"
       rc=1

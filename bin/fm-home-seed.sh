@@ -18,10 +18,9 @@
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
-#       Seeding is transactional: on validation, clone, init, or registry failure,
-#       generated briefs, new homes, new project clones, and registry edits are
-#       rolled back. Treehouse-acquired homes are returned only when the rollback
-#       target is safe; a failed return warns because the lease may still be held.
+#       Seeding is transactional through publication: validation, clone, and registry
+#       failures roll back generated briefs, new homes, new project clones, and
+#       registry edits. No-mistakes target refresh runs after publication.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -35,12 +34,14 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+PENDING_NO_MISTAKES_MARKER=".fm-secondmate-pending-no-mistakes"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -49,6 +50,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -287,7 +290,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "config/fork-url" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" "$PENDING_NO_MISTAKES_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -515,6 +518,7 @@ seed_registry_lock_release() {
 seed_exit_cleanup() {
   seed_rollback
   seed_registry_lock_release
+  [ -z "${SEED_BACKUP_DIR:-}" ] || rm -rf -- "$SEED_BACKUP_DIR" 2>/dev/null || true
 }
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
@@ -528,8 +532,10 @@ SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_FORK_URL_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
+SEED_PENDING_INIT_EXISTED=0
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -652,6 +658,8 @@ seed_rollback() {
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
+        restore_seed_file "$SEED_FORK_URL_EXISTED" "$SEED_BACKUP_DIR/fork-url" "$SEED_HOME/config/fork-url"
+        restore_seed_file "$SEED_PENDING_INIT_EXISTED" "$SEED_BACKUP_DIR/pending-no-mistakes" "$SEED_HOME/$PENDING_NO_MISTAKES_MARKER"
       fi
     fi
   fi
@@ -676,6 +684,52 @@ project_mode_in_home() {
 $(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   printf '%s\n' "$mode"
+}
+
+pending_no_mistakes_contains() {
+  local home=$1 project=$2
+  local marker="$home/$PENDING_NO_MISTAKES_MARKER"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  grep -Fx -- "$project" "$marker" >/dev/null 2>&1
+}
+
+pending_no_mistakes_write() {
+  local home=$1 project mode project_dst marker tmp dedup
+  shift
+  marker="$home/$PENDING_NO_MISTAKES_MARKER"
+  tmp="$marker.tmp.$$"
+  dedup="$marker.dedup.$$"
+  : > "$tmp"
+  if [ -f "$marker" ]; then
+    cat "$marker" >> "$tmp"
+  fi
+  for project in "$@"; do
+    mode=$(project_mode_in_home "$home" "$project")
+    [ "$mode" = no-mistakes ] || continue
+    project_dst="$home/projects/$project"
+    seed_project_was_created "$project_dst" || continue
+    printf '%s\n' "$project" >> "$tmp"
+  done
+  awk 'NF && !seen[$0]++' "$tmp" > "$dedup"
+  if [ -s "$dedup" ]; then
+    mv -f -- "$dedup" "$marker"
+  else
+    rm -f -- "$marker" "$dedup"
+  fi
+  rm -f -- "$tmp"
+}
+
+pending_no_mistakes_remove() {
+  local home=$1 project=$2 tmp
+  local marker="$home/$PENDING_NO_MISTAKES_MARKER"
+  [ -f "$marker" ] || return 0
+  tmp="$marker.tmp.$$"
+  grep -Fvx -- "$project" "$marker" > "$tmp" || true
+  if [ -s "$tmp" ]; then
+    mv -f -- "$tmp" "$marker"
+  else
+    rm -f -- "$tmp" "$marker"
+  fi
 }
 
 sync_project_registry() {
@@ -706,15 +760,33 @@ sync_project_registry() {
   mv "$tmp" "$sub_reg"
 }
 
+inherit_fork_url() {
+  local home=$1
+  if ! FM_INHERITABLE_CONFIG='fork-url' \
+    propagate_inheritable_config "$CONFIG" "$home/config"; then
+    echo "error: failed to inherit fork target configuration into $home" >&2
+    return 1
+  fi
+  # One declaration form means one file to verify; a loop over a single name
+  # reads as a list that lost its other entries.
+  if [ -f "$CONFIG/fork-url" ] && ! cmp -s "$CONFIG/fork-url" "$home/config/fork-url"; then
+    echo "error: fork-url was not inherited into $home" >&2
+    return 1
+  fi
+  if [ ! -e "$CONFIG/fork-url" ] && [ -e "$home/config/fork-url" ]; then
+    echo "error: stale fork-url remained in $home" >&2
+    return 1
+  fi
+}
+
 initialize_no_mistakes_project() {
   local home=$1 project=$2 created=$3 mode dst
   mode=$(project_mode_in_home "$home" "$project")
   [ "$mode" = no-mistakes ] || return 0
   dst=$(validate_project_destination "$home" "$project") || return 1
   if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
-    return 0
-  fi
-  if [ "$created" != 1 ]; then
+    :
+  elif [ "$created" != 1 ] && ! pending_no_mistakes_contains "$home" "$project"; then
     echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
     return 1
   fi
@@ -722,10 +794,11 @@ initialize_no_mistakes_project() {
     echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
     return 1
   }
-  ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$SCRIPT_DIR/fm-fork-target.sh" init "$dst" >/dev/null || {
     echo "error: failed to initialize no-mistakes for $project at $dst" >&2
     return 1
   }
+  pending_no_mistakes_remove "$home" "$project"
 }
 
 write_registry() {
@@ -850,6 +923,7 @@ seed_home() {
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_FORK_URL_EXISTED=0
   SEED_MARKER_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
@@ -890,6 +964,10 @@ seed_home() {
     SEED_CHARTER_EXISTED=1
     cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
   fi
+  if [ -f "$home/config/fork-url" ]; then
+    SEED_FORK_URL_EXISTED=1
+    cp "$home/config/fork-url" "$SEED_BACKUP_DIR/fork-url"
+  fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
@@ -898,7 +976,12 @@ seed_home() {
     SEED_PARENT_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_PARENT_MARKER" "$SEED_BACKUP_DIR/parent-marker"
   fi
+  if [ -f "$home/$PENDING_NO_MISTAKES_MARKER" ]; then
+    SEED_PENDING_INIT_EXISTED=1
+    cp "$home/$PENDING_NO_MISTAKES_MARKER" "$SEED_BACKUP_DIR/pending-no-mistakes"
+  fi
   SEED_HOME_BACKED_UP=1
+  inherit_fork_url "$home" || return 1
 
   if [ ! -f "$SEED_PARENT_BRIEF" ]; then
     [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
@@ -934,15 +1017,6 @@ seed_home() {
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
-  for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
-    if seed_project_was_created "$project_dst"; then
-      initialize_no_mistakes_project "$home" "$project" 1
-    else
-      initialize_no_mistakes_project "$home" "$project" 0
-    fi
-  done
-
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
@@ -961,7 +1035,16 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
+  pending_no_mistakes_write "$home" "$@"
   SEED_COMMITTED=1
+  for project in "$@"; do
+    project_dst=$(validate_project_destination "$home" "$project") || return 1
+    if seed_project_was_created "$project_dst"; then
+      initialize_no_mistakes_project "$home" "$project" 1
+    else
+      initialize_no_mistakes_project "$home" "$project" 0
+    fi
+  done
   seed_registry_lock_release
   trap - EXIT
   rm -rf -- "$SEED_BACKUP_DIR"
