@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
 # private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# Metadata identity stays bound to the single pr=<url> even when later writers
+# such as fm-captain-hold.sh complete and fm-control.sh relaunch append keys
+# after that line; a genuinely altered or unbound poll is still refused.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1297,6 +1300,107 @@ SH
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
 }
 
+# Arm a GitHub poll the way fm-pr-check.sh does, leaving pr= and pr_head= last.
+arm_github_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  write_task_meta "$dir" "$id"
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" "$id" "$url" >/dev/null 2>/dev/null \
+    || fail "could not arm the merge poll for $id"
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
+    || fail "the armed merge poll for $id was not initially valid"
+}
+
+# fm-captain-hold.sh complete appends decisions_reviewed= and decision_keys=
+# onto the origin metadata. A complete that runs after arming used to land
+# them after pr= and disarm the poll. Drive the real writer.
+test_fm_captain_hold_complete_does_not_disarm_an_armed_poll() {
+  local dir state
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the origin attestation is inert"
+    return 0
+  }
+  dir=$(make_case hold-complete-after-pr)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  cat > "$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$dir/home" && tasks-axi add task-a "poll identity fixture" --kind ship --start >/dev/null) \
+    || fail "could not file the origin for fm-captain-hold.sh complete"
+  PATH="$dir/fakebin:$(dirname "$(command -v tasks-axi)"):$PATH" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-a --none >/dev/null \
+    || fail "fm-captain-hold.sh complete --none failed after the poll was armed"
+  assert_grep "decisions_reviewed=1" "$state/task-a.meta" \
+    "fm-captain-hold.sh complete did not attest on the origin"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "fm-captain-hold.sh complete after pr= disarmed the armed poll"
+  pass "fm-captain-hold.sh complete after pr= leaves the armed poll bound"
+}
+
+# fm-control.sh relaunch / fm-spawn.sh --relaunch preserve unowned keys such as
+# pr= and pr_head=, then write control_relaunch_tx= last. That published shape
+# used to fail the post-pr= whitelist and disarm the poll.
+test_fm_control_relaunch_does_not_disarm_an_armed_poll() {
+  local dir state
+  dir=$(make_case control-relaunch-after-pr)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  printf 'control_relaunch_tx=%s\n' '12345.20260907T000000Z.1' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "fm-control.sh relaunch control_relaunch_tx= after pr= disarmed the armed poll"
+  pass "fm-control.sh relaunch after pr= leaves the armed poll bound"
+}
+
+# The parse still refuses a binding whose pr= no longer matches the sidecar,
+# a second pr= line, garbage after pr=, a malformed key after pr=, and an
+# invalid pr_head= after pr=.
+test_armed_poll_still_refuses_a_tampered_binding() {
+  local dir state before
+  dir=$(make_case tampered-pr-identity)
+  state="$dir/home/state"
+  arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
+  before=$(cat "$state/task-a.meta")
+
+  awk -F= '
+    $1 == "pr" { print "pr=https://github.com/o/r/pull/99"; next }
+    { print }
+  ' "$state/task-a.meta" > "$state/task-a.meta.swapped"
+  mv "$state/task-a.meta.swapped" "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a swapped pr= URL remained bound to the original sidecar"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'pr=https://github.com/o/r/pull/99\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a second pr= line remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf '# not-a-key\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a non-key line after pr= remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'not a key=1\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a malformed key after pr= remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'pr_head=not-a-sha\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an invalid pr_head= after pr= remained an authenticated binding"
+
+  pass "a genuinely altered or unbound poll is still refused"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
@@ -2450,3 +2554,6 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_fm_captain_hold_complete_does_not_disarm_an_armed_poll
+test_fm_control_relaunch_does_not_disarm_an_armed_poll
+test_armed_poll_still_refuses_a_tampered_binding

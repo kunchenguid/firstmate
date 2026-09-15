@@ -12,6 +12,12 @@
 # consumer re-derives the identity from the stored URL and refuses any record
 # whose parts do not reconstruct that exact URL.
 #
+# Task metadata identity is that single pr=<url> line. Unrelated well-formed
+# key=value lines after it, including pr_head= and Relay x_* keys, are not part
+# of the binding. A second pr=, an unparseable pr=, an invalid pr_head= after
+# pr=, or a non-key line after pr= still fails, and consumers still require the
+# parsed identity to match the sidecar.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -285,8 +291,14 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Bind the poll to the single pr=<url> in task metadata. Other well-formed
+# keys may appear after that line because later writers (captain-hold complete,
+# control relaunch, Relay link, and any future key) append to the same file.
+# The identity this function owns is still only that URL; an extra pr=, a
+# garbage line, or an invalid pr_head= after pr= remains a failed binding.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value key pr_count=0 seen_pr=0 post_pr_invalid=0
+  local LC_ALL=C
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -315,7 +327,11 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      *=*)
+        key=${line%%=*}
+        if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        fi
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
