@@ -245,7 +245,7 @@ note_home_activity() {  # <home-dir>
 # --- staging ----------------------------------------------------------------
 
 stage_material() {  # <project> <worktree>
-  local project=$1 wt=$2 material dest excl seen empty=0 record marks= rel since reason
+  local project=$1 wt=$2 material dest excl seen empty=0 record marks='' rel since reason
   material=$(material_dir "$project")
   if [ ! -d "$material" ] ||
     [ -z "$(find "$material" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
@@ -461,6 +461,7 @@ case "$CMD" in
     if [ "$HOME_ACTIVE" -eq 1 ]; then
       printf 'warning: %s was being worked in while this copy was taken, so a file may have been caught mid-write; re-run sync once it is quiet if anything looks truncated\n' "$HOME_DIR" >&2
     elif [ "$HOME_ACTIVITY_UNKNOWN" -eq 1 ]; then
+      # shellcheck disable=SC2016 # Backticks quote the command in the warning text, not a command substitution.
       printf 'warning: could not determine whether %s was in use while this copy was taken (the activity check failed); check it with `fm-project-memory.sh activity --home %s` and re-run sync if anything looks truncated\n' "$HOME_DIR" "$HOME_DIR" >&2
     fi
     ;;

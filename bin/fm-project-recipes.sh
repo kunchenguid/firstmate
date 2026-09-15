@@ -277,7 +277,7 @@ unverified_notes() {  # <recipes file> <out file>
 # packing.
 pack_blocks() {  # <blocks file> <limit bytes>
   local LC_ALL=C
-  local used=0 shown=0 block= block_bytes=0 line
+  local used=0 shown=0 block='' block_bytes=0 line
   while IFS= read -r line; do
     if [ "$line" = "$RECIPE_BREAK" ]; then
       [ -n "$block" ] || continue

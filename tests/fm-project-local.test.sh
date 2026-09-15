@@ -346,8 +346,9 @@ test_the_unverified_date_survives_a_change_of_reason() {
   # test run cannot span two days.
   record="$world/home/data/project-local/demo/unverified"
   assert_present "$record" "the sync recorded nothing about the path it could not refresh"
-  awk -F'\t' -v OFS='\t' '{ $2 = "2026-01-05"; print }' "$record" >"$record.aged" &&
-    mv "$record.aged" "$record" || fail "could not age the record"
+  awk -F'\t' -v OFS='\t' '{ $2 = "2026-01-05"; print }' "$record" >"$record.aged" ||
+    fail "could not age the record"
+  mv "$record.aged" "$record" || fail "could not age the record"
 
   # Later: the folder is back, but now a venv lives inside it, so the reason
   # changes while the store still holds the copy from day zero.
