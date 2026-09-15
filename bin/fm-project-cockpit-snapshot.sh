@@ -296,6 +296,8 @@ jq \
   def secondmate_queued_projection($owner; $record):
     ($record + {id:scoped_id($owner; $record)} | queued_projection);
   def secondmate_decision_projection($owner; $record; $queued; $active; $now):
+    (($record.summary // null) | text(240)) as $decision_summary
+    |
     (($queued // {}) + {
         id:scoped_id($owner; $record),
         title:($record.summary // $queued.title // $record.id),
@@ -307,7 +309,10 @@ jq \
         hold_until:($record.hold_until // $queued.hold_until // null),
         hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
         unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
-      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision") as $decision
+      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision"
+        | if .gate.status == "unavailable" and $decision_summary != null
+          then .gate={status:"decision",label:$decision_summary}
+          else . end) as $decision
     | if $active == null then $decision
       else (secondmate_active_projection($owner; $active; $now)) as $base
       | $base + {
@@ -379,7 +384,7 @@ jq \
       (($snapshot.secondmate_landed.partial // [])[]? | "secondmate inventory partial"),
       (($snapshot.secondmate_landed.truncated // [])[]? | "secondmate landed inventory truncated")
     ] | unique) as $partial_reasons
-  | ([ $project_ids[:80][] as $pid
+  | ([ $project_ids[] as $pid
        | ([ $all_tasks[] | select(.project_id == $pid) ]
           | sort_by([.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end),.id,(.spawn_gen // "")])) as $tasks
        | {
@@ -391,11 +396,13 @@ jq \
            last_observed_at:([ $tasks[].observed_at | select(. != null and test("T")) ] | sort | last // null),
            oldest_active_seconds:([ $tasks[] | select(.lane == "running" or .lane == "waiting") | .elapsed_seconds | select(. != null) ] | max // null),
            rank:(if any($tasks[]; .attention) then 0 elif any($tasks[]; .lane == "running" or .lane == "waiting") then 1 else 2 end),
+           _priority:([ $tasks[] | [.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end)] ] | sort | .[0]),
            total_task_count:($tasks | length),
            truncated:(($tasks | length) > 160),
            tasks:$tasks[:160]
          }
-     ] | sort_by([.rank,.id])) as $projects
+     ] | sort_by([._priority[0],._priority[1],.id])) as $all_projects
+  | ($all_projects[:80] | map(del(._priority))) as $projects
   | ([ $all_tasks[] | select(.lane == "running") ] | length) as $running
   | ([ $all_tasks[] | select(.lane == "waiting") ] | length) as $waiting
   | ([ $all_tasks[] | select(.state == "blocked" or .state == "failed") ] | length) as $blocked
@@ -411,7 +418,7 @@ jq \
       age_seconds:$age,
       stale_after_seconds:$stale_after,
       freshness:(if $age > $stale_after then "stale" else "fresh" end),
-      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > 500 or ($project_ids | length) > 80 or any($projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
+      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > 500 or ($project_ids | length) > 80 or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},

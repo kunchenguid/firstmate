@@ -122,7 +122,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
     and ([.projects[].tasks[] | select(.id == "mate-one:status-call")][0]
       | .lane == "waiting" and .attention == true and .project_id == "omega"
         and .state == "working" and .state_source == "structured-home"
-        and .crew.kind == "scout" and .runtime_evidence.home == "/fleet/mates/one")
+        and .crew.kind == "scout" and .runtime_evidence.home == "/fleet/mates/one"
+        and .gate.status == "decision" and .gate.label == "Choose runtime evidence")
     and ([.projects[].tasks[] | select(.id == "mate-one:queued-child")][0].lane == "queued")
     and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")
@@ -131,8 +132,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
   pass "secondmate structured surfaces project once through the cockpit allowlist"
 }
 
-test_attention_precedes_completed_history_at_global_cap() {
-  local model=$TMP_ROOT/attention-cap.json
+test_attention_precedes_completed_history_and_project_caps() {
+  local model=$TMP_ROOT/attention-cap.json project_model=$TMP_ROOT/attention-project-cap.json
   jq '.tasks=[]
       | .backlog.records=[range(0;500) as $i | {
           structured:true,id:("history-"+($i|tostring)),state:"done",title:("History "+($i|tostring)),
@@ -152,7 +153,26 @@ test_attention_precedes_completed_history_at_global_cap() {
       and ([.projects[].tasks[] | select(.id == "priority-mate:urgent-call" and .attention == true)] | length) == 1
       and ([.projects[].tasks[] | select(.lane == "recently_completed")] | length) == 499' "$model" >/dev/null \
     || fail "the global cap displaced captain attention with completed history"
-  pass "global bounds retain captain attention before completed history"
+  jq '.tasks=[]
+      | .backlog.records=[range(0;80) as $i | {
+          structured:true,id:("project-history-"+($i|tostring)),state:"done",title:("Project history "+($i|tostring)),
+          repo:("a-archive-"+($i|tostring)),kind:"ship",
+          completion:{verb:"done",date:"2026-09-14"},pr_url:null,report_path:null
+        }]
+      | .secondmate_current={records:[{
+          id:"priority-mate",home:"/fleet/mates/priority",provenance:{selected:"structured-home"},
+          freshness:{observed_at:"2026-09-15T12:00:00Z"},active_children:[],
+          decisions_open:[{id:"urgent-call",verb:"captain-hold",summary:"Choose urgent route",reason:"Choose now",hold_bucket:"live",source:"backlog"}],
+          queued:[{id:"urgent-call",title:"Urgent route",repo:"z-urgent",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Choose now",unresolved_blocker_ids:[]}],
+          landed:[],omitted:[]
+        }],total:1,shown:1,truncated:0}' "$FIXTURES/empty.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$project_model"
+  jq -e '.inventory.truncated == true and (.projects | length) == 80
+      and ([.projects[] | select(.id == "z-urgent")
+        | .tasks[] | select(.id == "priority-mate:urgent-call" and .attention == true)] | length) == 1
+      and ([.projects[] | select(.id | startswith("a-archive-"))] | length) == 79' "$project_model" >/dev/null \
+    || fail "the project cap displaced the lexically last captain-attention project"
+  pass "global task and project bounds retain captain attention before history"
 }
 
 test_builder_is_fail_closed_and_atomic() {
@@ -325,7 +345,7 @@ SH
 test_projection_is_deterministic_and_allowlisted
 test_stale_partial_invalid_empty_and_replacement_states
 test_secondmate_structured_surfaces_are_projected_once
-test_attention_precedes_completed_history_at_global_cap
+test_attention_precedes_completed_history_and_project_caps
 test_builder_is_fail_closed_and_atomic
 test_build_path_does_not_mutate_fleet_or_invoke_authority
 test_live_collection_failure_is_explicitly_unavailable
