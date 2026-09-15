@@ -680,7 +680,7 @@ An escape-preserving capture of the boat from the spike, taken before the palett
 
 ### Bounded gaps
 
-1. The whole surface is early access and default-off, and its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 only, refuses nothing newer, and `tests/fm-calm-claude-mod-plugin.test.sh` is the check that says when a newer Claude Code stops accepting it.
+1. The whole surface is early access and default-off, and its API may change between releases without notice; the real TUI behavior is verified on Claude Code 2.1.272, the plugin compatibility guard also passes on 2.1.273, the mod refuses nothing newer, and `tests/fm-calm-claude-mod-plugin.test.sh` is the check that says when a newer Claude Code stops accepting it.
 2. On the main-screen (non-fullscreen) layout a toggle redraws the live screen by clearing and reprinting the whole conversation, and the terminal's own scrollback keeps the previous rendering above it; the fullscreen layout has no such stale copy.
 3. The Raster paints RGB through a quantized palette, so the boat renders as 256-color escapes rather than Pi's standard 16-color ANSI codes.
 
@@ -695,16 +695,16 @@ Working notes are recorded from `turn.step` per text block (a step that stopped 
 
 ```text
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mods/firstmate-calm
-  ❯ ./register.ts hooks: session.start, command.run{command=calm}, turn.step, ui.render{component=Spinner}, ui.render{component=ToolUse}, ui.render{component=ToolResult}, ui.render{component=ToolGroup}, ui.render{component=UserMessage}, ui.render{component=AssistantMessage}
-  ❯ ./register.ts calls: $.clock.every (via load), $.command.register, $.env.get (via isActivated, load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
+  ❯ ./register.ts hooks: session.start, command.run{command=calm}, config.set{key=theme}, turn.step, ui.render{component=Spinner}, ui.render{component=ToolUse}, ui.render{component=ToolResult}, ui.render{component=ToolGroup}, ui.render{component=UserMessage}, ui.render{component=AssistantMessage}
+  ❯ ./register.ts calls: $.clock.every (via load), $.command.register, $.config.list (via readTheme), $.env.get (via isActivated, load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
   ❯ ./register.ts env writes: nothing
   ❯ ./register.ts env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE
 ✔ Validation passed
 
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .claude/mods/firstmate-calm
- 30 pass
+ 40 pass
  0 fail
-Ran 30 tests across 2 files.
+Ran 40 tests across 2 files.
 
 $ bin/fm-test-run.sh tests/fm-calm-claude-mod.test.sh
 ok - the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in
@@ -718,7 +718,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=68438
 ```
 
 The Pi suite above ran against the extracted sprite core with every one of its thirteen cases green, including the working-ship geometry and the interactive TUI case, which is the evidence that the extraction left Pi's drawing unchanged.
-Later the same day the installed Claude Code auto-updated to 2.1.273, and `tests/fm-calm-claude-mod-plugin.test.sh` passed there as well: strict validation still accepts the mod from both paths, now hooking `config.set{key=theme}` and calling `$.config.list` for the theme palette, and the plugin-kit suites pass with the theme cases added.
+Later the same day the installed Claude Code auto-updated to 2.1.273, and `tests/fm-calm-claude-mod-plugin.test.sh` passed there as well: strict validation accepts the mod from both paths, including the theme hook and configuration read shown above, and the plugin-kit suites pass with the theme cases added.
 
 The opt-in live guard, run on this host against the installed Claude Code 2.1.272 with tmux 3.6a and Haiku, through the shipped `.claude/skills` auto-load path, an isolated project and `FM_HOME`, and the preference already `on` before the flag-off session:
 
