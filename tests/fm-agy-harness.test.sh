@@ -502,24 +502,20 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    case " $* " in
-      *' Enter '*)
-        case "$state" in
-          launched)
-            if fake_path_trusted; then
-              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
-            elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
-              printf 'racing\n' > "$FM_FAKE_AGY_STATE"
-            else
-              printf 'dialog\n' > "$FM_FAKE_AGY_STATE"
-            fi
-            ;;
-          dialog)
-            if [ "${FM_FAKE_AGY_ANSWER:-works}" = works ]; then
-              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
-            fi
-            ;;
-        esac
+    case "$state: $* " in
+      launched:*' C-j '*)
+        if fake_path_trusted; then
+          printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+        elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
+          printf 'racing\n' > "$FM_FAKE_AGY_STATE"
+        else
+          printf 'dialog\n' > "$FM_FAKE_AGY_STATE"
+        fi
+        ;;
+      dialog:*' Enter '*)
+        if [ "${FM_FAKE_AGY_ANSWER:-works}" = works ]; then
+          printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+        fi
         ;;
     esac
     exit 0
@@ -720,11 +716,16 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
   pass "fm-spawn: a zero FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
 }
 
-# Bare Enter key presses only: shell setup rides its Enter on the typed text
-# (`send-keys -t <target> export X=Y Enter`), while the launch submit and the
-# trust-dialog answer are lone key sends (`send-keys -t <target> Enter`).
+# Launch-only shell acceptance uses one lone C-j. Generic interactive input,
+# including the folder-trust answer, continues to use physical Enter.
 count_enter_sends() {  # <tmux-call-log>
   grep -c '^send-keys -t [^ ]* Enter$' "$1" || true
+}
+assert_single_launch_accept() {  # <tmux-call-log>
+  local accepts
+  accepts=$(grep -c '^send-keys -t [^ ]* C-j$' "$1" || true)
+  [ "$accepts" -eq 1 ] \
+    || fail "expected exactly one launch C-j, got $accepts C-j sends"
 }
 
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
@@ -745,9 +746,10 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
     || fail "the spawn did not preserve an unrelated agy setting"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
     || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  assert_single_launch_accept "$CASE_DIR/tmux-calls.log"
   enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
-  [ "$enters" -eq 1 ] \
-    || fail "a pre-trusted worktree must receive only the launch Enter, got $enters Enter sends"
+  [ "$enters" -eq 0 ] \
+    || fail "a pre-trusted worktree must receive no generic Enter, got $enters Enter sends"
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful agy spawn must never tear down the endpoint it just launched"
   pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
@@ -764,9 +766,10 @@ test_agy_dialog_despite_registration_is_answered_once() {
   expect_code 0 "$rc" "an agy spawn whose dialog renders despite registration should succeed"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
     || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  assert_single_launch_accept "$CASE_DIR/tmux-calls.log"
   enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
-  [ "$enters" -eq 2 ] \
-    || fail "expected exactly one launch Enter plus one trust-dialog Enter, got $enters Enter sends"
+  [ "$enters" -eq 1 ] \
+    || fail "expected exactly one trust-dialog Enter, got $enters Enter sends"
   pass "fm-spawn: agy answers a dialog that renders anyway exactly once, then confirms busy"
 }
 
@@ -788,9 +791,10 @@ test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered() {
   [ "$before" = "$after" ] || fail "the spawn rewrote an unparseable agy store"
   [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
     || fail "the spawn reported success before the answered dialog turned busy (state: $(cat "$CASE_DIR/agy.state"))"
+  assert_single_launch_accept "$CASE_DIR/tmux-calls.log"
   enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
-  [ "$enters" -eq 2 ] \
-    || fail "a busy verdict before the dialog must not count as ready on an unregistered path; expected the dialog Enter, got $enters Enter sends"
+  [ "$enters" -eq 1 ] \
+    || fail "a busy verdict before the dialog must not count as ready on an unregistered path; expected one dialog Enter, got $enters Enter sends"
   pass "fm-spawn: on an unregistered path a premature busy verdict waits for the dialog to be answered"
 }
 
@@ -808,7 +812,8 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn() {
   assert_contains "$out" "never showed its folder-trust dialog on an unregistered worktree" \
     "the failure did not name the unconfirmed workspace"
   assert_not_contains "$out" "spawned $id" "an unconfirmed workspace still reported a successful spawn"
-  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 1 ] \
+  assert_single_launch_accept "$CASE_DIR/tmux-calls.log"
+  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 0 ] \
     || fail "the gate must not send Enter into a pane that shows no dialog"
   assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a failed agy readiness gate left its launched endpoint running"
@@ -828,7 +833,8 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn() {
   [ "$rc" -ne 0 ] || fail "a dialog that never turns into a busy turn must fail the spawn"
   assert_contains "$out" "did not start processing its brief after the folder-trust dialog was answered" \
     "a stuck trust dialog failed without its concrete reason"
-  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 2 ] \
+  assert_single_launch_accept "$CASE_DIR/tmux-calls.log"
+  [ "$(count_enter_sends "$CASE_DIR/tmux-calls.log")" -eq 1 ] \
     || fail "the gate must answer the dialog exactly once and never hammer Enter"
   assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a failed agy readiness gate left its launched endpoint running"

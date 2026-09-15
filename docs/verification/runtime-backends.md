@@ -107,6 +107,39 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+## Spawn-time shell acceptance with ble.sh
+
+Firstmate's spawn-time interactive-shell commands use a launch-only unconditional accept mapping on the backends proved live: native tmux `C-j` and Herdr `ctrl+j`.
+Generic Enter remains physical Return for trust dialogs, agent composers, popup handling, steering, and other post-launch interaction.
+Zellij, cmux, and Orca retain their prior physical-Enter launch behavior because no unconditional-accept mapping was available to verify, so this guarantee does not cover them.
+
+Verified on 2026-09-14 on Linux under WSL2 with Bash 5.3.9, ble.sh `0.4.0-devel3+1a5c451c`, tmux 3.6, and Herdr 0.8.2.
+Both guards are token-free and run the public `fm-spawn.sh` path with a real linked worktree, a nested interactive Bash transition, and a fake Pi only at the final process boundary.
+The tmux guard uses a private server, covers settled plus deliberately busy shells, and confirms that the worker receives its temporary-directory and trace-context exports while the durable trace carrier matches.
+The Herdr guard provisions and tears down a generated non-default session only through `bin/fm-herdr-lab.sh`, rejects pane operations without the matching explicit trailing session, runs busy-shell launches, and verifies the emitted `ctrl+j` spelling.
+
+```sh
+cd <checkout>
+bin/fm-test-run.sh tests/fm-spawn-shell-accept.test.sh
+bin/fm-test-run.sh tests/fm-blesh-launch-tmux-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-blesh-launch-herdr-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm-spawn commits treehouse, environment, trace, and worker launch shell commands with tmux C-j
+ok - fm-spawn refuses to report a worker start when final launch acceptance fails
+ok - generic tmux Enter remains physical Enter outside launch-shell submission
+ok - unavailable Zellij, Orca, and cmux mappings retain their existing physical-Enter behavior
+# all fm-spawn-shell-accept tests passed
+ok - real tmux and ble.sh executed 50/50 complete token-free worker launches with environment and trace delivery across settled and busy shells
+ok - real Herdr and ble.sh executed 20/20 complete token-free worker launches with explicit lab binding and ctrl+j
+```
+
+The deterministic Herdr adapter regression in `tests/fm-backend-herdr.test.sh` additionally requires literal `pane send-text` followed by `pane send-keys ... ctrl+j` in the same named session, rejects the old `pane run` shell-line path for launches, and proves generic `Enter` still emits Herdr `enter`.
+It also proves that a failed launch accept attempts to clear pending input and distinguishes failed cleanup as unsafe.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

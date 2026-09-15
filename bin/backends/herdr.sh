@@ -2949,22 +2949,40 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
-# the command and submits it in one call (verified).
+# fm_backend_herdr_send_text_line: send one line of TEXT with pane run's
+# physical-Enter behavior. This is the generic operation retained for
+# non-launch callers; fm-spawn.sh uses the launch-shell operation below.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
-# fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
-# caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
+# fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+}
+
+# fm_backend_herdr_launch_shell_accept: unconditionally accept one complete
+# shell command during worker launch. Herdr ctrl+j is the live-proved line-feed
+# mapping; generic Enter remains physical Return for every other caller. A failed
+# accept attempts C-c cleanup, returning 1 when cleared and 2 when pending input
+# may remain.
+fm_backend_herdr_launch_shell_accept() {  # <target>
+  fm_backend_herdr_send_key "$1" ctrl+j && return 0
+  fm_backend_herdr_send_key "$1" C-c >/dev/null 2>&1 && return 1
+  return 2
+}
+
+# fm_backend_herdr_launch_shell_line: pane run hardcodes physical Enter, so the
+# launch path must instead send literal text and the proved ctrl+j separately.
+# Both operations retain the target's parsed session and suppress CLI output in
+# the same way as the generic pane-run operation.
+fm_backend_herdr_launch_shell_line() {  # <target> <text>
+  fm_backend_herdr_send_literal "$1" "$2" || return $?
+  fm_backend_herdr_launch_shell_accept "$1"
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,

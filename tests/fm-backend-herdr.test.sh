@@ -3652,6 +3652,91 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
+test_launch_shell_line_uses_literal_text_then_ctrl_j() {
+  local dir log resp fb calls first second
+  dir="$TMP_ROOT/launch-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launch_shell_line lab-session:w1:p2 "export FM_TASK_ID=probe"' "$ROOT"
+  expect_code 0 $? "launch shell line should succeed"
+  calls=$(grep $'\x1f''pane'$'\x1f' "$log")
+  first=$(printf '%s\n' "$calls" | sed -n '1p')
+  second=$(printf '%s\n' "$calls" | sed -n '2p')
+  assert_contains "$first" "HERDR_SESSION=lab-session" "launch literal send lost the target session binding"
+  assert_contains "$first" $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''export FM_TASK_ID=probe' \
+    "launch shell line did not send literal text first"
+  assert_contains "$second" "HERDR_SESSION=lab-session" "launch shell accept lost the target session binding"
+  assert_contains "$second" $'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''ctrl+j' \
+    "launch shell line did not follow literal text with Herdr ctrl+j"
+  assert_not_contains "$calls" $'\x1f''pane'$'\x1f''run' \
+    "launch shell line still used pane run's physical Enter path"
+  pass "fm_backend_herdr_launch_shell_line: sends literal text then ctrl+j in the same named session"
+}
+
+test_launch_shell_accept_does_not_remap_generic_enter() {
+  local dir log resp fb calls
+  dir="$TMP_ROOT/launch-vs-generic-enter"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_launch_shell_accept lab-session:w1:p2
+      fm_backend_herdr_send_key lab-session:w1:p2 Enter
+    ' "$ROOT"
+  expect_code 0 $? "launch and generic key sends should succeed"
+  calls=$(grep $'\x1f''pane'$'\x1f''send-keys' "$log")
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '1p')" $'\x1f''ctrl+j' \
+    "launch shell accept did not use ctrl+j"
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '2p')" $'\x1f''enter' \
+    "generic Enter was remapped away from physical Enter"
+  pass "Herdr launch shell accept uses ctrl+j while generic Enter remains physical Enter"
+}
+
+test_launch_shell_accept_clears_partial_input_when_accept_fails() {
+  local dir log resp fb status calls
+  dir="$TMP_ROOT/launch-shell-accept-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_send_literal lab-session:w1:p2 "pi --mode json"
+      fm_backend_herdr_launch_shell_accept lab-session:w1:p2
+    ' "$ROOT"
+  status=$?
+  expect_code 1 "$status" "launch shell accept should report failure after clearing input"
+  calls=$(grep $'\x1f''pane'$'\x1f' "$log")
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '1p')" $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''pi --mode json' \
+    "final launch command was not pending before the simulated accept failure"
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '2p')" $'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''ctrl+j' \
+    "launch shell accept did not attempt ctrl+j acceptance"
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '3p')" $'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''ctrl+c' \
+    "launch shell accept did not clear partial input after acceptance failed"
+  pass "fm_backend_herdr_launch_shell_accept: clears a pending final command after acceptance failure"
+}
+
+test_launch_shell_accept_reports_unsafe_input_when_cleanup_fails() {
+  local dir log resp fb status calls
+  dir="$TMP_ROOT/launch-shell-cleanup-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/2.exit"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_send_literal lab-session:w1:p2 "pi --mode json"
+      fm_backend_herdr_launch_shell_accept lab-session:w1:p2
+    ' "$ROOT"
+  status=$?
+  expect_code 2 "$status" "launch shell accept should distinguish uncleared input"
+  calls=$(grep $'\x1f''pane'$'\x1f''send-keys' "$log")
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '1p')" $'\x1f''ctrl+j' \
+    "launch shell accept did not attempt ctrl+j acceptance"
+  assert_contains "$(printf '%s\n' "$calls" | sed -n '2p')" $'\x1f''ctrl+c' \
+    "launch shell accept did not attempt cleanup after acceptance failed"
+  pass "fm_backend_herdr_launch_shell_accept: reports unsafe input when cleanup also fails"
+}
+
 test_kill_is_best_effort() {
   local dir log resp fb
   dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5337,6 +5422,10 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
+test_launch_shell_line_uses_literal_text_then_ctrl_j
+test_launch_shell_accept_does_not_remap_generic_enter
+test_launch_shell_accept_clears_partial_input_when_accept_fails
+test_launch_shell_accept_reports_unsafe_input_when_cleanup_fails
 test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy

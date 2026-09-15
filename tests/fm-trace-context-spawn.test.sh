@@ -23,9 +23,9 @@ Verify the spawned process receives the expected trace context.
 EOF
 }
 
-# Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
-# one per line, in send order, so ordering is observable.
+# Fake tmux: answers the pane-path query and logs every accepted shell-line
+# payload plus the literal final launch command, one per line in send order, so
+# GOTMPDIR and TRACEPARENT injection ordering remains observable.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -67,8 +67,8 @@ case "${1:-}" in
       done
     fi
     # Capture the text payload of both send forms: the literal launch
-    # (`send-keys -t <target> -l <text>`) and a text line
-    # (`send-keys -t <target> <text> Enter`). Skip the flags, the target, and
+    # (`send-keys -t <target> -l <text>`) and an accepted launch shell line
+    # (`send-keys -t <target> <text> C-j`). Skip the flags, the target, and
     # the trailing key so only the payload is logged, one per line, in order.
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       shift
@@ -78,7 +78,7 @@ case "${1:-}" in
         case "$a" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
-          Enter|C-m) continue ;;
+          Enter|C-m|C-j) continue ;;
           *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
