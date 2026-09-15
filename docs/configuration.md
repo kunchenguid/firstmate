@@ -138,6 +138,7 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses the recovery-grade `fm_backend_agent_state` classifier where verified.
 The comment above that function in `bin/fm-backend.sh` is the single owner of its detailed state contract and recovery authorization.
+For overlapping sweeps and unconfirmed local replacements, [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns recovery serialization, evidence retention, and retry conditions.
 The compatibility helper `fm_backend_agent_alive` continues to collapse those detailed results to `alive`, `dead`, or `unknown` for older callers.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.

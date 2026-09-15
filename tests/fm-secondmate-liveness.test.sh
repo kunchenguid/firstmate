@@ -271,6 +271,17 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
+if [ "$mode" = delayed ]; then
+  mode=zsh
+  if [ -f "${FM_TMUX_CALL_LOG:?}.started" ]; then
+    started=$(cat "${FM_TMUX_CALL_LOG}.started")
+    [ "$(date +%s)" -lt "$((started + 2))" ] || mode=claude
+  fi
+elif [ "$mode" = stalled ]; then
+  mode=zsh
+elif [ -f "${FM_TMUX_CALL_LOG:?}.started" ]; then
+  mode=claude
+fi
 case "${1:-}" in
   display-message)
     for a in "$@"; do
@@ -298,7 +309,23 @@ case "${1:-}" in
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
+    if [ "${1:-}" = new-window ]; then
+      date +%s > "${FM_TMUX_CALL_LOG}.started"
+    fi
     exit 0
+    ;;
+  send-keys)
+    [ "${FM_TEST_FAIL_SEND_KEYS:-0}" != 1 ] || exit 1
+    case "$*" in
+      *' -l '*codex*)
+        : > "$FM_TMUX_CALL_LOG.launch-typed"
+        [ "${FM_TEST_FAIL_LAUNCH_SEND:-0}" != 1 ] || exit 1
+        ;;
+    esac
+    if [ "${*: -1}" = Enter ] && [ -e "$FM_TMUX_CALL_LOG.launch-typed" ]; then
+      : > "$FM_TMUX_CALL_LOG.submit-attempt"
+      [ "${FM_TEST_FAIL_SUBMIT:-0}" != 1 ] || exit 1
+    fi
     ;;
   has-session) exit 0 ;;
 esac
@@ -465,7 +492,60 @@ test_sweep_reports_missing_endpoint_relaunch_failure() {
 
   assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after recorded endpoint confidently missing" \
     "a failed missing-endpoint relaunch should retain its authorizing cause"
-  pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
+  [ ! -e "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "definitively missing replacement blocked retries"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+  [ "$(grep -c '^new-window' "$log")" -eq 2 ] || fail "later sweep did not retry failed window creation"
+  assert_not_contains "$out" 'SECONDMATE_LIVENESS:' "retry should recover successfully"
+  pass "sweep: failed window creation permits a later recovery attempt"
+}
+
+test_sweep_preserves_inconclusive_failed_launch() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-partial-failure)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log" FM_TEST_FAIL_SEND_KEYS=1)
+  assert_contains "$out" 'respawn failed after' "send failure must reach failed-spawn handling"
+  [ ! -e "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "pre-submission failure blocked recovery"
+  [ -s "$w/home/state/sm1.meta" ] || fail "pre-submission failure lost the recovery record"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log")
+  [ "$(grep -c '^new-window' "$log")" -eq 2 ] || fail "pre-submission failure did not permit retry"
+  assert_not_contains "$out" 'respawn failed after' "retry should submit the launch successfully"
+  pass "sweep: pre-submission failure preserves the record and permits retry"
+}
+
+test_sweep_retries_literal_send_failure() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-literal-failure)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log" FM_TEST_FAIL_LAUNCH_SEND=1)
+  assert_contains "$out" 'respawn failed after' "literal send failure must fail spawn"
+  [ -e "$log.launch-typed" ] || fail "literal launch send was not attempted"
+  [ ! -e "$log.submit-attempt" ] || fail "literal send failure attempted Enter"
+  [ ! -e "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "literal send failure blocked recovery"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log")
+  [ "$(grep -c '^new-window' "$log")" -eq 2 ] || fail "literal send failure did not permit retry"
+  assert_not_contains "$out" 'respawn failed after' "retry should submit successfully"
+  pass "sweep: failed literal send permits retry before submission"
+}
+
+test_sweep_preserves_uncertain_submission_failure() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-submission-failure)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log" FM_TEST_FAIL_SUBMIT=1)
+  assert_contains "$out" 'respawn failed after' "launch send failure must reach failed-spawn handling"
+  [ -e "$log.submit-attempt" ] || fail "Enter submission was not attempted"
+  [ -s "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "uncertain submission lost its marker"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log")
+  assert_contains "$out" 'previous recovery is unconfirmed' "uncertain submission must remain protected"
+  [ "$(grep -c '^new-window' "$log")" -eq 1 ] || fail "uncertain submission permitted duplicate recovery"
+  pass "sweep: uncertain launch submission remains protected"
 }
 
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
@@ -502,6 +582,39 @@ test_sweep_converges_no_retouch_once_alive() {
   assert_not_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should handle the already-live secondmate silently"
   [ ! -s "$log" ] || fail "round 2 must not re-kill or re-respawn an already-live secondmate: $(cat "$log")"
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
+}
+
+test_sweep_serializes_unconfirmed_replacement() {
+  local mode w fb tmuxfb log first second out
+  for mode in delayed stalled; do
+    w=$(new_world "sweep-overlap-$mode")
+    add_sm_home "$w" sm1 firstmate:fm-sm1
+    fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+    log="$w/calls.log"; : > "$log"
+    run_bootstrap "$tmuxfb:$fb" "$w/home" "$mode" "$log" > "$w/first.out" &
+    first=$!
+    run_bootstrap "$tmuxfb:$fb" "$w/home" "$mode" "$log" > "$w/second.out" &
+    second=$!
+    wait "$first" || fail "first sweep failed"
+    wait "$second" || fail "second sweep failed"
+    [ "$(grep -c '^new-window' "$log")" -eq 1 ] || fail "$mode: overlapping sweeps launched twice"
+    [ "$(grep -c '^kill-window' "$log")" -eq 1 ] || fail "$mode: overlapping sweeps killed twice"
+    if [ "$mode" = delayed ]; then
+      [ ! -e "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "confirmed launch retained pending recovery"
+    else
+      [ -s "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "unconfirmed launch lost recovery evidence"
+      out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" stalled "$log")
+      assert_contains "$out" 'previous recovery is unconfirmed' "later sweep must preserve an inconclusive launch"
+      [ "$(grep -c '^new-window' "$log")" -eq 1 ] || fail "later sweep retried an inconclusive launch"
+      rm -f "$log.started"
+      out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+      [ "$(grep -c '^new-window' "$log")" -eq 2 ] || fail "confirmed endpoint loss did not permit recovery"
+      [ "$(grep -c '^kill-window' "$log")" -eq 1 ] || fail "missing endpoint recovery killed another endpoint"
+      assert_not_contains "$out" 'SECONDMATE_LIVENESS:' "missing endpoint should recover successfully"
+      [ ! -e "$w/home/state/.secondmate-liveness-sm1.pending" ] || fail "confirmed replacement retained pending recovery"
+    fi
+  done
+  pass "sweep: overlapping recovery waits for startup and preserves inconclusive launches"
 }
 
 test_sweep_skipped_under_detect_only() {
@@ -551,8 +664,12 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
+test_sweep_preserves_inconclusive_failed_launch
+test_sweep_retries_literal_send_failure
+test_sweep_preserves_uncertain_submission_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
+test_sweep_serializes_unconfirmed_replacement
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 
