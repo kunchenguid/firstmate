@@ -2593,7 +2593,7 @@ test_ended_worker_inherited_wedge_becomes_wait() {
 }
 
 test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
-  local dir state out capture key
+  local dir state out capture key run_state
   dir=$(make_hold_home ended-unheld-wedge 'working: interrupted by reboot' nohold) \
     || fail "could not build stopped worker recovery fixture"
   state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -2618,13 +2618,20 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
     fail "stopped unheld worker repeated its recovery alarm"
   fi
   reap "$HOLD_WATCH_PID"
-  export FM_HOLD_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  hold_watch_launch "$dir" "$out" "$capture"
-  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+  for run_state in working parked done; do
+    printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+    printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    export FM_HOLD_FAKE_CREW_STATE="state: $run_state · source: run-step · run: surviving-$run_state"
+    hold_watch_launch "$dir" "$out" "$capture"
+    if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+      reap "$HOLD_WATCH_PID"
+      fail "a surviving $run_state run inherited the dead worker's wedge"
+    fi
+    [ ! -e "$state/.stale-since-$key" ] && [ ! -e "$state/.wedge-escalations-$key" ] \
+      || { reap "$HOLD_WATCH_PID"; fail "a surviving $run_state run retained dead-worker wedge state"; }
     reap "$HOLD_WATCH_PID"
-    fail "a surviving run stayed suppressed as an ended worker"
-  fi
-  reap "$HOLD_WATCH_PID"
+  done
   unset FM_HOLD_FAKE_CREW_STATE
   pass "an unheld stopped worker reports recovery once without suppressing a surviving run"
 }
