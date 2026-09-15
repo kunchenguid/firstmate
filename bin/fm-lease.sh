@@ -121,16 +121,17 @@ case "$CMD" in
     # provides one (the Pi branch extension passes the session-lock holder),
     # else the session-lock holder (state/.lock is the harness pid), else this
     # shell; without a matching session lock the resulting lease is stale.
-    # This pid is checked with kill -0, so only a pid in THIS process table can
-    # serve. Take the lock's value whole and require it to be one: a lock holding
-    # an identity from another namespace must yield nothing and fall through to
-    # the shell below, never be reduced to its digits, because those digits name
-    # an unrelated local process rather than the holder.
+    # Take the holder's identity whole through the shared predicate: it accepts
+    # a local pid or a Windows-tagged one, and bin/fm-lease-lib.sh's liveness
+    # check is namespace-aware for the tagged shape. A malformed or empty value
+    # yields nothing and falls through to the shell below, and is never reduced
+    # to its digits, because those digits name an unrelated local process rather
+    # than the holder.
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
-    case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
+    fm_session_pid_valid "$HOLDER_PID" || HOLDER_PID=
     if [ -z "$HOLDER_PID" ]; then
       HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
-      case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
+      fm_session_pid_valid "$HOLDER_PID" || HOLDER_PID=
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")

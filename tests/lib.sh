@@ -477,6 +477,10 @@ fm_touch_epoch() {
 # other pid is an ordinary non-harness shell. `ps -W` answers the Windows-side
 # table from FM_TEST_WIN_TABLE (set by the caller per case, in the same column
 # order the real `ps -W` prints), which is how a tagged win:<pid> is confirmed.
+# FM_TEST_CYG_STIME overrides the STIME column in the Cygwin-side rows, which is
+# how a caller reproduces a process started more than 24 hours ago: the real ps
+# prints "Sep  6" there, two whitespace fields instead of one, moving every later
+# field to the right.
 fm_cygwin_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -513,10 +517,10 @@ case "$pid" in
 esac
 if [ "$full" = 1 ]; then
   printf '%s\n' '     UID     PID    PPID  TTY        STIME COMMAND'
-  printf 'u %s %s ? 00:00:00 %s\n' "$pid" "$ppid" "$comm"
+  printf 'u %s %s ? %s %s\n' "$pid" "$ppid" "${FM_TEST_CYG_STIME:-00:00:00}" "$comm"
 else
   printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
-  printf '%s %s %s 9999 ? 0 00:00:00 %s\n' "$pid" "$ppid" "$pid" "$comm"
+  printf '%s %s %s 9999 ? 0 %s %s\n' "$pid" "$ppid" "$pid" "${FM_TEST_CYG_STIME:-00:00:00}" "$comm"
 fi
 SH
   chmod +x "$fakebin/uname" "$fakebin/ps"

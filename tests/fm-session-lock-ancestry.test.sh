@@ -281,6 +281,11 @@ WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Us
   4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe
   4199454       0       0       5150  ?              0 22:24:48 C:\tools\claude-notes\helper.exe'
 
+# The same table with a process started more than 24 hours ago, where the real
+# ps prints STIME as a two-field date ("Sep  6") instead of one clock field.
+WIN_TABLE_DATE_STIME='  4201508       0       0       7204  ?              0 Sep  6 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 Sep  6 C:\Windows\explorer.exe'
+
 test_windows_session_is_identified_from_its_published_pid() {
   local dir fakebin got
   dir="$TMP_ROOT/win-published"
@@ -363,7 +368,7 @@ test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock() {
 
   # Still fail closed on the shapes a torn or hand-edited lock produces, and on
   # a bare tag carrying no pid at all.
-  for bad in '' 'win:' 'win:abc' 'abc' '70 0' '-1'; do
+  for bad in '' 'win:' 'win:abc' 'abc' '70 0' '-1' 'win:12abc' 'win:1234x' 'win:12 3'; do
     if lib_eval "$fakebin" "fm_session_pid_valid '$bad'"; then
       fail "the malformed lock value '$bad' was accepted as a usable identity"
     fi
@@ -385,6 +390,41 @@ test_cygwin_ps_without_o_still_resolves_a_local_harness() {
     || fail "a harness in the local process table was not resolved when ps rejected -o"
   [ "$got" = 700 ] || fail "expected the untagged local harness pid 700, got '$got'"
   pass "session-lock: a harness in the local process table resolves untagged when ps has no -o option"
+}
+
+test_cygwin_date_form_stime_does_not_truncate_the_command() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-long-running"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A process started more than 24 hours ago gets a two-field date STIME, which
+  # moves COMMAND one whitespace field to the right in every Cygwin row. The
+  # command must still come back whole: reading it from the field number that
+  # only holds while STIME is a single clock field returns the tail of the date
+  # glued to the front of the command instead, and on the Windows side that
+  # truncated path is what decides whether the row names a verified harness.
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_comm 700') \
+    || fail "fm_ps_comm failed on a two-field date STIME"
+  [ "$got" = '/opt/claude/versions/2.1.220' ] \
+    || fail "fm_ps_comm misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_args 700') \
+    || fail "fm_ps_args failed on a two-field date STIME"
+  [ "$got" = '/opt/claude/versions/2.1.220' ] \
+    || fail "fm_ps_args misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_ppid 700') \
+    || fail "fm_ps_ppid failed on a two-field date STIME"
+  [ "$got" = 1 ] || fail "fm_ps_ppid misread a date-form STIME row as '$got'"
+
+  # The Windows-side table is read through the same column logic.
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE_DATE_STIME" lib_eval "$fakebin" 'fm_win_command 7204') \
+    || fail "fm_win_command failed on a two-field date STIME row"
+  [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
+    || fail "fm_win_command misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE_DATE_STIME" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the Windows session was not identified behind a date-form STIME"
+  [ "$got" = 'win:7204' ] || fail "expected win:7204 behind a date-form STIME, got '$got'"
+  pass "session-lock: a two-field date STIME does not truncate the command a ps row reports"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -535,6 +575,7 @@ test_windows_published_pid_is_confirmed_before_it_is_trusted
 test_windows_pid_is_never_resolved_as_a_cygwin_pid
 test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
 test_cygwin_ps_without_o_still_resolves_a_local_harness
+test_cygwin_date_form_stime_does_not_truncate_the_command
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

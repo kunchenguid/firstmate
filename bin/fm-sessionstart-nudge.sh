@@ -26,11 +26,14 @@ lock_is_in_ancestry() {
   local lock_pid pid=$$ _
   [ -f "$STATE/.lock" ] || return 1
   IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
-  case "$lock_pid" in
+  if fm_win_untag_pid "$lock_pid" >/dev/null; then
     # A Windows-tagged holder is not in this process table at all, so a local
     # ancestry comparison cannot answer for it. Defer to the owner of harness
     # identity, which is the only thing that can read across that boundary.
-    "$FM_WIN_PID_PREFIX"[0-9]*) fm_session_lock_owned_by_self "$STATE"; return ;;
+    fm_session_lock_owned_by_self "$STATE"
+    return
+  fi
+  case "$lock_pid" in
     # A lock pid of 1 is legitimate inside a PID namespace, where the harness
     # holding the home lock IS pid 1, so it is no longer rejected outright; the
     # liveness check below still gates it. On a host, a lock file that wrongly

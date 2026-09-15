@@ -53,15 +53,36 @@ fm_harness_path_name() {  # <path>
 # path and cover Linux and macOS. Cygwin's ps, which Git for Windows ships, has
 # no -o option at all and exits with "unknown option -- o", so the primary path
 # fails outright there and the ancestry walk aborts on its first hop. The
-# fallbacks parse Cygwin's fixed columns instead:
+# fallbacks parse Cygwin's columns instead:
 #   ps -p PID     PID PPID PGID WINPID TTY UID STIME COMMAND   (executable path)
 #   ps -f -p PID  UID PID PPID TTY STIME COMMAND               (full argv)
 # A genuinely dead or inaccessible pid still fails both paths, so this widens
 # nothing: it only stops a supported platform from failing on ps syntax alone.
+#
+# Those columns are fixed-width on screen but a whitespace split does NOT give
+# one field per column: STIME occupies two fields for a process started more
+# than 24 hours ago (for example "Sep  6"), which moves every later field one to
+# the right. Reading COMMAND from a hard-coded field number therefore silently
+# truncates the command of such a process. The STIME field is located from the
+# header, and its own shape decides how many fields it takes, so COMMAND comes
+# out whole in both shapes.
+fm_ps_command() {  # ps listing (header + one row) on stdin
+  awk '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i == "STIME") { stime = i; break }; next }
+    NR == 2 && stime {
+      if ($stime ~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) start = stime + 1
+      else if ($(stime + 1) ~ /^[0-9][0-9]?$/) start = stime + 2
+      else exit
+      for (i = start; i <= NF; i++) printf "%s%s", (i > start ? " " : ""), $i
+      exit
+    }
+  '
+}
+
 fm_ps_comm() {  # <pid> -> executable name or path
   local pid=$1 out
   out=$(ps -o comm= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
-  out=$(ps -p "$pid" 2>/dev/null | awk 'NR == 2 { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  out=$(ps -p "$pid" 2>/dev/null | fm_ps_command)
   [ -n "$out" ] || return 1
   printf '%s' "$out"
 }
@@ -69,7 +90,7 @@ fm_ps_comm() {  # <pid> -> executable name or path
 fm_ps_args() {  # <pid> -> full command line
   local pid=$1 out
   out=$(ps -o args= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
-  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR == 2 { for (i = 6; i <= NF; i++) printf "%s%s", (i > 6 ? " " : ""), $i; exit }')
+  out=$(ps -f -p "$pid" 2>/dev/null | fm_ps_command)
   [ -n "$out" ] || return 1
   printf '%s' "$out"
 }
@@ -77,6 +98,8 @@ fm_ps_args() {  # <pid> -> full command line
 fm_ps_ppid() {  # <pid> -> parent pid
   local pid=$1 out
   out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  # PPID precedes STIME in both Cygwin layouts, so its own field number cannot
+  # move and needs no shape handling.
   out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR == 2 { print $3; exit }')
   [ -n "$out" ] || return 1
   printf '%s' "$out"
@@ -153,9 +176,13 @@ fm_win_boundary_applies() {
 }
 
 # Strip the namespace tag from $1, or return 1 when $1 is not a tagged pid.
+# Digits only: "win:12abc" is malformed, not a pid with a trailing suffix, and
+# accepting it would hand junk to the Windows process-table lookup. This is the
+# single owner of the tagged shape; fm_session_pid_valid() below reads it.
 fm_win_untag_pid() {  # <pid>
   case "$1" in
-    "$FM_WIN_PID_PREFIX"[0-9]*) printf '%s' "${1#"$FM_WIN_PID_PREFIX"}"; return 0 ;;
+    "$FM_WIN_PID_PREFIX"*[!0-9]*|"$FM_WIN_PID_PREFIX") return 1 ;;
+    "$FM_WIN_PID_PREFIX"*) printf '%s' "${1#"$FM_WIN_PID_PREFIX"}"; return 0 ;;
   esac
   return 1
 }
@@ -167,8 +194,10 @@ fm_win_untag_pid() {  # <pid>
 # holder - which reads as "startup never completed" and repeats the whole
 # sequence on every clear or compact.
 fm_session_pid_valid() {  # <value>
+  if fm_win_untag_pid "$1" >/dev/null; then
+    return 0
+  fi
   case "$1" in
-    "$FM_WIN_PID_PREFIX"[0-9]*) return 0 ;;
     ''|*[!0-9]*) return 1 ;;
   esac
   return 0
@@ -192,7 +221,13 @@ fm_win_command() {  # <winpid>
   case "$winpid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  out=$(ps -W 2>/dev/null | awk -v w="$winpid" '$4 == w { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  # Select the row first (WINPID precedes STIME, so its field number cannot
+  # move), then let the shared reader take COMMAND from whatever field STIME
+  # actually ended at.
+  out=$(ps -W 2>/dev/null | awk -v w="$winpid" '
+    NR == 1 { header = $0; next }
+    $4 == w { print header; print; exit }
+  ' | fm_ps_command)
   [ -n "$out" ] || return 1
   fm_win_normalize_command "$out"
 }
