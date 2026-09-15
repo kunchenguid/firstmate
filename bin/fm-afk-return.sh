@@ -10,7 +10,7 @@
 #                            active, exit 4 while return catch-up is pending.
 #   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
 #
-# THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
+# THE RETURN BRIEF (stdout, after successful staging on begin/check) is rendered from durable
 # records, never from conversation memory: the archived away-posture record
 # (bin/fm-afk-contract.sh), the supervision outcome store
 # (bin/fm-branch-outcome.sh), the held set in the backlog (tasks-axi), and the
@@ -39,7 +39,12 @@
 # so a crash between stopping, wake presentation, and blocker handling fails
 # closed. It retains the presented wake, buffered-escalation, wedge-marker,
 # health, and posture-record evidence until every live open blocker is closed
-# and `check` succeeds. Repeated begin/check calls are idempotent. `guard` and
+# and `check` succeeds.
+# Brief/evidence staging or publication failure retains catch-up and delivery
+# artifacts for retry; staging failure publishes no partial brief or evidence.
+# These failures return 3; failure to create staging files or persist the gate
+# returns 1. Retry with `check` after restoring writable storage/output.
+# Repeated begin/check calls are idempotent. `guard` and
 # `catchup-summary` never mutate state and are suitable for ordinary read
 # entrypoints such as fm-bearings-snapshot.sh. `guard` separates its two
 # refusal branches by exit status so a reporting surface can keep refusing
@@ -219,13 +224,13 @@ write_gate() {  # <evidence-file> <blockers-file>
   window_epoch=$(gate_window_epoch)
   contract_epoch=$(gate_contract_epoch)
   {
-    printf 'schema\tfm-afk-return.v1\n'
-    printf 'started\t%s\n' "$started"
-    printf 'phase\tblocked\n'
-    [ -z "$window_epoch" ] || printf 'window\t%s\n' "$window_epoch"
-    [ -z "$contract_epoch" ] || printf 'contract\t%s\n' "$contract_epoch"
-    grep -Ev "^(window|contract)$(printf '\t')" "$evidence" 2>/dev/null || true
-    cat "$blockers" 2>/dev/null || true
+    printf 'schema\tfm-afk-return.v1\n' &&
+    printf 'started\t%s\n' "$started" &&
+    printf 'phase\tblocked\n' &&
+    { [ -z "$window_epoch" ] || printf 'window\t%s\n' "$window_epoch"; } &&
+    { [ -z "$contract_epoch" ] || printf 'contract\t%s\n' "$contract_epoch"; } &&
+    awk -F '\t' '$1 != "window" && $1 != "contract"' "$evidence" &&
+    cat "$blockers"
   } > "$pending" || { rm -f "$pending"; return 1; }
   mv "$pending" "$GATE"
 }
@@ -234,7 +239,7 @@ print_evidence() {  # <file>
   local file=$1 kind text
   while IFS="$(printf '\t')" read -r tag kind text; do
     [ "$tag" = evidence ] || continue
-    printf 'catch-up %s: %s\n' "$kind" "$text"
+    printf 'catch-up %s: %s\n' "$kind" "$text" || return 1
   done < "$file"
 }
 
@@ -373,26 +378,26 @@ render_mandate_record() {  # <record> [superseded-time]
   while IFS="$(printf '\t')" read -r id action object when stop; do
     [ -n "$id" ] || continue
     MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    printf '  - %s. %s ' "$id" "$action"
-    fm_afk_contract_unescape "$object"
-    printf ' when '
-    fm_afk_contract_unescape "$when"
+    printf '  - %s. %s ' "$id" "$action" || return 1
+    fm_afk_contract_unescape "$object" || return 1
+    printf ' when ' || return 1
+    fm_afk_contract_unescape "$when" || return 1
     if [ "$stop" != - ]; then
-      printf ' stop '
-      fm_afk_contract_unescape "$stop"
+      printf ' stop ' || return 1
+      fm_afk_contract_unescape "$stop" || return 1
     fi
     flag=$("$CONTRACT" flags --path "$record" | awk -F '\t' -v id="$id" '$1 == id { print $2 }')
-    [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable" "$flag"
-    printf '%s - recorded, not executed by this release\n' "$suffix"
+    [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable" "$flag" || return 1
+    printf '%s - recorded, not executed by this release\n' "$suffix" || return 1
   done <<EOF
 $("$CONTRACT" clauses --path "$record")
 EOF
   while IFS="$(printf '\t')" read -r id text missing; do
     [ -n "$id" ] || continue
     MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    printf '  - %s. "' "$id"
-    fm_afk_contract_unescape "$text"
-    printf '"%s - refused at entry: missing %s\n' "$suffix" "$missing"
+    printf '  - %s. "' "$id" || return 1
+    fm_afk_contract_unescape "$text" || return 1
+    printf '"%s - refused at entry: missing %s\n' "$suffix" "$missing" || return 1
   done <<EOF
 $("$CONTRACT" refused --path "$record")
 EOF
@@ -400,12 +405,12 @@ EOF
   words=${words%x}
   if [ -n "$words" ]; then
     if [ -n "$superseded" ]; then
-      printf '  your words superseded at %s:\n' "$superseded"
+      printf '  your words superseded at %s:\n' "$superseded" || return 1
     else
-      printf '  your words at entry:\n'
+      printf '  your words at entry:\n' || return 1
     fi
-    printf '%s' "$words" | sed 's/^/    /'
-    case "$words" in *$'\n') ;; *) printf '\n' ;; esac
+    printf '%s' "$words" | sed 's/^/    /' || return 1
+    case "$words" in *$'\n') ;; *) printf '\n' || return 1 ;; esac
   fi
 }
 
@@ -413,18 +418,18 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
   local tag task key summary count routine captain live held_err last verb rows status
   now=$(date +%s)
-  printf '=== Return brief'
+  printf '=== Return brief' || return 1
   if [ -n "$since" ]; then
-    printf ' (away %s -> %s, %s)' "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))"
+    printf ' (away %s -> %s, %s)' "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))" || return 1
   fi
-  printf ' ===\n'
+  printf ' ===\n' || return 1
 
   # 1. health, first, always.
-  printf 'Supervisor health:\n'
-  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record (unreadable|missing):/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence"
+  printf 'Supervisor health:\n' || return 1
+  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record (unreadable|missing):/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence" || return 1
 
   # 2. the mandate.
-  printf 'Mandate clauses:\n'
+  printf 'Mandate clauses:\n' || return 1
   record=""
   MANDATE_COUNT=0
   [ -z "$since" ] || record=$("$CONTRACT" archived "$since" 2>/dev/null || true)
@@ -436,33 +441,33 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
       stamp=${stamp%%-*}
       stamp=${stamp%.afk-contract}
       case "$stamp" in ''|*[!0-9]*) superseded_at=unknown ;; *) superseded_at=$(epoch_to_iso "$stamp") ;; esac
-      render_mandate_record "$superseded" "$superseded_at"
+      render_mandate_record "$superseded" "$superseded_at" || return 1
     done
-    render_mandate_record "$record"
-    [ "$MANDATE_COUNT" -gt 0 ] || printf '  (none recorded)\n'
+    render_mandate_record "$record" || return 1
+    [ "$MANDATE_COUNT" -gt 0 ] || printf '  (none recorded)\n' || return 1
   else
-    printf '  (no away-posture record for this window; legacy away flag only)\n'
+    printf '  (no away-posture record for this window; legacy away flag only)\n' || return 1
   fi
 
   # 3. waiting on the captain.
-  printf 'Waiting on you:\n'
+  printf 'Waiting on you:\n' || return 1
   count=0
   HELD_READ_FAILED=0
-  HELD_READ_PATH=$(fm_backlog_file "$DATA" 2>/dev/null || printf '%s/backlog.md' "$DATA")
+  HELD_READ_PATH=$(fm_backlog_file "$DATA" 2>/dev/null || printf '%s/backlog.md' "$DATA") || return 1
   if held=$(fm_backlog_row_list "$DATA" --state held --fields hold_kind,hold_reason,hold_until 2>&1); then
     rows=$(printf '%s\n' "$held" | strip_axi_help | grep -v '^count: ' | grep -v '^tasks\[0\]' || true)
     if printf '%s\n' "$held" | grep -q '^count: 0'; then
       :
     elif [ -n "$rows" ]; then
       count=$((count + 1))
-      printf '  held in the backlog:\n'
-      printf '%s\n' "$rows" | sed 's/^/    /'
+      printf '  held in the backlog:\n' || return 1
+      printf '%s\n' "$rows" | sed 's/^/    /' || return 1
     fi
   else
     held_err=$(printf '%s' "$held" | head -1 | clean_field)
     count=$((count + 1))
     HELD_READ_FAILED=1
-    printf '  held listing unavailable: %s: %s; catch-up stays gated\n' "$HELD_READ_PATH" "$held_err"
+    printf '  held listing unavailable: %s: %s; catch-up stays gated\n' "$HELD_READ_PATH" "$held_err" || return 1
   fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -472,7 +477,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = needs-decision ] || continue
       count=$((count + 1))
-      printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)"
+      printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)" || return 1
     done <<EOF
 $(status_open_decisions "$status")
 EOF
@@ -480,18 +485,18 @@ EOF
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { printf "  - %s: %s\n", $2, $5 }')
   if [ -n "$rows" ]; then
     count=$((count + 1))
-    printf '  escalated by the away session:\n'
-    printf '%s\n' "$rows" | sed 's/^/  /'
+    printf '  escalated by the away session:\n' || return 1
+    printf '%s\n' "$rows" | sed 's/^/  /' || return 1
   fi
-  [ "$count" -gt 0 ] || printf '  (nothing)\n'
+  [ "$count" -gt 0 ] || printf '  (nothing)\n' || return 1
 
   # 4. tried and failed, or could not be fixed.
-  printf 'Tried and failed, or could not be fixed:\n'
+  printf 'Tried and failed, or could not be fixed:\n' || return 1
   count=0
   while IFS="$(printf '\t')" read -r tag task key summary; do
     [ "$tag" = blocker ] || continue
     count=$((count + 1))
-    printf '  - %s [key=%s] still blocked, firstmate remediates before ordinary work: %s\n' "$task" "$key" "$summary"
+    printf '  - %s [key=%s] still blocked, firstmate remediates before ordinary work: %s\n' "$task" "$key" "$summary" || return 1
   done < "$blockers"
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -501,31 +506,31 @@ EOF
     last=$(last_status_line "$status")
     [ "$(status_line_verb "$last")" = failed ] || continue
     count=$((count + 1))
-    printf '  - %s: %s\n' "$task" "$(printf '%s' "$last" | clean_field)"
+    printf '  - %s: %s\n' "$task" "$(printf '%s' "$last" | clean_field)" || return 1
   done
-  [ "$count" -gt 0 ] || printf '  (nothing)\n'
+  [ "$count" -gt 0 ] || printf '  (nothing)\n' || return 1
 
   # 5. handled while away.
-  printf 'Handled while away:\n'
+  printf 'Handled while away:\n' || return 1
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
   if [ "$routine" -gt 0 ]; then
-    printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
-    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
+    printf '  %s routine outcome(s) recorded; the latest:\n' "$routine" || return 1
+    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5 || return 1
   else
-    printf '  (no routine outcomes recorded in the store for this window)\n'
+    printf '  (no routine outcomes recorded in the store for this window)\n' || return 1
   fi
 
   # 6. cost.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
   printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
-    "$((routine + captain))" "$routine" "$captain" "$live"
+    "$((routine + captain))" "$routine" "$captain" "$live" || return 1
 }
 
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
-  local archived_contract tag kind text retained_live restored_epoch
+  local archived_contract tag kind text retained_live restored_epoch brief published_evidence
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -574,6 +579,8 @@ return_reconcile() {
   done <<EOF
 $(cat "$evidence")
 EOF
+
+  write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ] || fm_afk_contract_present "$STATE"; then
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
@@ -668,41 +675,60 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since"
+  brief=$(mktemp "$STATE/.afk-return-brief.XXXXXX") || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+  published_evidence=$(mktemp "$STATE/.afk-return-published.XXXXXX") || { rm -f "$evidence" "$blockers" "$drain_err" "$brief"; return 1; }
+  # The brief and the published evidence render into files first, and only cat
+  # writes them to stdout.
+  # A builtin printf that fails on an unwritable stdout leaves its bytes in
+  # bash's stdio buffer, and the next command substitution flushes them into
+  # its capture, corrupting the run before the publication check can fire.
+  if ! render_return_brief "$evidence" "$blockers" "$since" > "$brief"; then
+    printf 'fm-afk-return: return rendering failed; catch-up remains pending\n' >&2
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
+    return 3
+  fi
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   else
     remove_evidence_prefix lifecycle 'held set unreadable:' "$evidence" || lifecycle_ok=0
   fi
+  if ! print_evidence "$evidence" > "$published_evidence"; then
+    printf 'fm-afk-return: return rendering failed; catch-up remains pending\n' >&2
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
+    return 3
+  fi
   if [ "$lifecycle_ok" -ne 1 ] || grep -q "^blocker$(printf '\t')" "$blockers"; then
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    cat "$brief" >&1 || true
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
-    rm -f "$evidence" "$blockers" "$drain_err"
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
     return 3
   fi
 
-  if ! print_evidence "$evidence"; then
+  # cat owns stdout publication because an external command reports a write
+  # failure as an exit status without poisoning bash's own output buffer.
+  if ! { cat "$brief" && cat "$published_evidence"; }; then
     append_evidence lifecycle 'recovery evidence publication failed; retry catch-up before ordinary work' "$evidence"
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"; return 1; }
     printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
-    rm -f "$evidence" "$blockers" "$drain_err"
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
     return 3
   fi
 
   if [ -n "$wake_ack_line" ] && ! printf '%s\n' "$wake_ack_line" >&2; then
     append_evidence lifecycle 'durable wake acknowledgement command publication failed; retry catch-up before ordinary work' "$evidence"
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
-    rm -f "$evidence" "$blockers" "$drain_err"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"; return 1; }
+    rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
     return 3
   fi
 
   rm -f "$GATE"
   clear_delivery_artifacts
-  rm -f "$evidence" "$blockers" "$drain_err"
+  rm -f "$evidence" "$blockers" "$drain_err" "$brief" "$published_evidence"
   printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
   return 0
 }

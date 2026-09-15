@@ -255,6 +255,94 @@ EOF
   pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
 }
 
+test_gate_write_failure_prevents_shutdown() {
+  local dir stage out rc
+  for stage in header evidence blockers; do
+    dir="$TMP_ROOT/gate-write-failure-$stage"
+    install_runner "$dir"
+    date +%s > "$dir/home/state/.afk"
+    touch "$dir/home/state/.last-watcher-beat"
+    cat > "$dir/fail-gate-write.sh" <<'SH'
+fail_gate_write() {
+  command cp "$FM_HOME/state/.afk-return-catchup" "$FM_HOME/expected-gate"
+  builtin printf 'partial gate'
+  return 1
+}
+printf() {
+  if [ "${FUNCNAME[1]:-}" = write_gate ] && [ "$FAIL_STAGE" = header ]; then
+    fail_gate_write
+    return 1
+  fi
+  builtin printf "$@"
+}
+awk() {
+  if [ "${FUNCNAME[1]:-}" = write_gate ] && [ "$FAIL_STAGE" = evidence ] && [ "${!#}" != "$FM_HOME/state/.afk-return-catchup" ]; then
+    fail_gate_write
+    return 1
+  fi
+  command awk "$@"
+}
+cat() {
+  if [ "${FUNCNAME[1]:-}" = write_gate ] && [ "$FAIL_STAGE" = blockers ]; then
+    fail_gate_write
+    return 1
+  fi
+  command cat "$@"
+}
+SH
+    rc=0
+    out=$(BASH_ENV="$dir/fail-gate-write.sh" FAIL_STAGE="$stage" run_return "$dir" begin) || rc=$?
+    [ "$rc" -eq 1 ] || fail "$stage gate write failure should refuse shutdown (rc=$rc): $out"
+    cmp -s "$dir/home/expected-gate" "$dir/home/state/.afk-return-catchup" || fail "$stage gate write failure replaced the previous gate"
+    [ -e "$dir/home/state/.afk" ] || fail "$stage gate write failure removed the away flag"
+    [ ! -e "$dir/home/stop.log" ] || fail "$stage gate write failure attempted shutdown"
+    out=$(run_return "$dir" check) || fail "$stage gate write retry failed: $out"
+    assert_contains "$out" 'GAP: the away daemon was not running at return' "$stage gate write retry lost the health gap"
+    [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "$stage gate write retry left catch-up gated"
+  done
+  pass "gate write failures preserve the previous gate and prevent shutdown"
+}
+
+test_staging_write_failure_preserves_catchup() {
+  local dir stage out rc
+  for stage in brief evidence; do
+    dir="$TMP_ROOT/staging-failure-$stage"
+    install_runner "$dir"
+    date +%s > "$dir/home/state/.afk"
+    touch "$dir/home/state/.last-watcher-beat"
+    printf '1784074271\t7\tsignal\trecovery-task.status\tsignal: retry staging\n' > "$dir/home/state/.fake-drain"
+    printf 'retained escalation\n' > "$dir/home/state/.subsuper-escalations"
+    cat > "$dir/fail-write.sh" <<'SH'
+printf() {
+  case "$FAIL_STAGE:$1" in
+    'brief:=== Return brief'|'evidence:catch-up %s: %s\n')
+      builtin printf 'partial output'
+      return 1 ;;
+  esac
+  builtin printf "$@"
+}
+SH
+    rc=0
+    BASH_ENV="$dir/fail-write.sh" FAIL_STAGE="$stage" run_return "$dir" begin > "$dir/output" || rc=$?
+    [ "$rc" -eq 3 ] || fail "$stage staging failure should retain catch-up (rc=$rc)"
+    [ -s "$dir/home/state/.afk-return-catchup" ] || fail "$stage staging failure removed the gate"
+    [ ! -e "$dir/home/state/.afk" ] || fail "$stage staging failure did not reach shutdown"
+    assert_contains "$(cat "$dir/home/state/.afk-return-catchup")" 'GAP: the away daemon was not running at return' "$stage staging failure lost the initial health snapshot"
+    [ -s "$dir/home/state/.fake-drain" ] || fail "$stage staging failure consumed the wake"
+    [ -s "$dir/home/state/.subsuper-escalations" ] || fail "$stage staging failure removed delivery artifacts"
+    [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "$stage staging failure acknowledged the wake"
+    out=$(cat "$dir/output")
+    assert_not_contains "$out" 'partial output' "$stage staging failure published incomplete output"
+    touch "$dir/home/state/.last-watcher-beat"
+    out=$(run_return "$dir" check) || fail "$stage staging retry failed: $out"
+    assert_contains "$out" 'GAP: the away daemon was not running at return' "$stage staging retry lost the pre-shutdown gap"
+    assert_not_contains "$out" 'no detected gap' "$stage staging retry incorrectly reported a healthy window"
+    assert_contains "$out" 'catch-up wake: 1784074271' "$stage staging retry lost wake evidence"
+    [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "$stage staging retry left the gate"
+  done
+  pass "staging write failures retain catch-up and delivery artifacts until retry"
+}
+
 test_evidence_publication_failure_preserves_wake_for_redrain() {
   local dir out rc gate
   dir="$TMP_ROOT/evidence-publication-failure"
@@ -606,6 +694,7 @@ SH
   assert_not_contains "$waiting" '(nothing)' "an unavailable held set was also reported as empty"
   out=$(run_return "$dir" check) || fail "catch-up did not clear after the held-set reader recovered: $out"
   assert_contains "$out" 'catch-up clear' "the recovered held-set reader did not clear catch-up"
+  assert_not_contains "$out" 'held set unreadable:' "the recovered held-set reader published a stale refusal"
   [ ! -e "$gate" ] || fail "the recovered held-set reader left the return gate behind"
   pass "an unavailable held listing gates catch-up until a successful reread"
 }
@@ -788,6 +877,8 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
+test_staging_write_failure_preserves_catchup
+test_gate_write_failure_prevents_shutdown
 test_away_reentry_refuses_pending_return_gate
 test_return_is_mode_agnostic_for_quiet_mode
 test_check_retries_recorded_terminal_teardown
