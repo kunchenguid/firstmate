@@ -508,9 +508,6 @@ observe_run() { # <task> <incarnation> <state-line>
   fi
   case "$line" in
     *"source: run-step"*) ;;
-    'state: done '*|'state: failed '*|'state: blocked '*)
-      [ -n "$previous" ] || return 1
-      ;;
     *)
       case "$previous" in
         'state: working '*|'state: parked '*|'state: unknown '*)

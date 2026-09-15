@@ -1254,11 +1254,9 @@ stale_wait_throttled() {  # <window-key> <declaration>
 # and a failure alarm exactly as they do today.
 # Returns 0 to absorb this sighting; 1 to alarm, after which the caller records
 # the throttle through stale_wait_record once its own wake append has succeeded.
-# Record a fired wake against the bounded cadence, and ONLY after that wake was
-# durably appended. A marker written ahead of the append outlives a failed one:
-# the watcher exits with no wake queued, and the next sighting reads the fresh
-# marker and absorbs the retry, which is the single way this bound could swallow
-# an alarm outright rather than delay it.
+# Record a declaration against the bounded cadence after its disposition is
+# durable. Wake callers record only after the queue append; authoritative run
+# absorption records after the successful state read.
 stale_wait_record() {  # <window-key>
   [ -n "$STALE_WAIT_DECLARATION" ] || return 0
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
@@ -1314,7 +1312,7 @@ ended_worker_stale_check() {  # <window> <task>
   fi
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
-    *"source: run-step"*) clear_stale_hash_tracking "$key"; return 0 ;;
+    *"source: run-step"*) clear_stale_hash_tracking "$key"; stale_wait_record "$key"; return 0 ;;
     'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
     'state: unknown '*|'state: stopped '*) ;;
     *) return 1 ;;
