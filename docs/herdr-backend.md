@@ -321,11 +321,12 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
+The terminal-backed path is preferred whenever the backend supports a non-visible terminal, including for harnesses that also have their own native tracked-background tool (Claude, Grok): a terminal-backed daemon sits outside the harness's own job table and survives low-memory-guard kills that have silently taken a harness-native daemon job (`.agents/skills/afk/SKILL.md`).
 Pi and pi-signed no longer launch the away daemon; their ordinary supervision session continues under the posture record.
-For another harness without native tracked background execution, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+For Herdr, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
-Recovery reconciles only the recorded exact id.
+Only a backend with no non-visible-terminal primitive (neither tmux nor Herdr) falls back to the harness-native tracked-background path (`bin/fm-afk-launch.sh start-native`).
+Recovery reconciles only the recorded exact id; a recorded daemon whose pid is no longer alive is reconciled and relaunched automatically, so `stop` first is never required.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
