@@ -216,3 +216,27 @@ Include `skippedInert` (the names rejected for this reason) in the gate's `value
 - `policy-rules.yaml` — no rule changes. If you find yourself adding a knob here, re-read the constraints.
 - Live validation: re-run Step 2's query across all 29 enrolled repos after deploying, and confirm no repository's *baseline* checks are `inert`. The expected result is that `inert` appears zero times on baseline checks and the thirteen decorative jobs listed above are untouched, because none of them is required. A gate that changes no verdict today is the correct outcome — this closes a hole rather than fixing a symptom, and the PR description should say so plainly so nobody reads "no verdicts changed" as "no effect".
 - File the follow-up ticket for the wrong-subset problem named in "What this plan deliberately does not fix", linked to PLAT-1312.
+
+- [ ] **Step 7: The other two `GREEN` sets**
+
+The same three-value set is defined independently in three modules for three different purposes. PLAT-1312 named the second; the third was found while writing this plan and is the most consequential of the three. **Verify each before changing it** — the direction of the error differs, so one fix does not transfer.
+
+```bash
+grep -rn "'success', 'neutral', 'skipped'" src/
+```
+
+**`src/pipeline/ledger/post-merge.ts:31` — over-attribution.** The green-to-red attribution rule asks whether the failing check was green on the *parent* commit, and its own comment states the doctrine:
+
+> ABSENT IS NOT GREEN. A check that did not run on the parent cannot have gone from green to red, and treating its absence as a pass would manufacture a transition that never happened.
+
+A `skipped` parent run is a check that did not run, so the module contradicts its own comment: `previous.conclusion === 'skipped'` passes the `GREEN.has(...)` test and an attribution is recorded. The effect is to blame a merge for a failure that has no prior green observation, inflating the post-merge failure count that feeds merge confidence. Fix: exclude `skipped` here. There is no legitimate-conditional-skip case to preserve, because the question being asked is specifically "did this check previously pass", and a skip is not a pass. This is a genuine one-line change, unlike gate 12.
+
+**`src/pipeline/03-risk/signals/scan-findings.ts:34` (`CLEAN`) — a false `low`.** A Cycode check with conclusion `skipped` is in `CLEAN`, so it is not `missing`, not `unfinished`, not `indeterminate`, and not counted in `failed`. The signal therefore grades **`low`** — "scanners ran, no findings" — on a scan that did not run. The function's own doc comment promises `unknown` *"when any expected scanner is missing or has not finished"*; a skipped scan is neither, and the code has no category for completed-without-working.
+
+This one matters more than the gates, for two reasons. First, a risk signal grading `low` is an affirmative safety claim, not a missing check — and `combine()` is worst-known-wins, so a false `low` is silently absorbed. Second, `scannerFindings` is one of only **three** signals that do not require parsed dependency bumps, and per PLAT-1320 a `lockfile-only` candidate reaches exactly **two** graded signals in practice. So for the change class with the thinnest evidence base, a skipped scanner supplies half the graded signal budget as a false clean.
+
+Fix: move `skipped` out of `CLEAN` and into the `indeterminate` path so the signal reads `unknown` with the reason naming the skipped scanner. `unknown` is first-class here and already blocks candidacy through `minSignalsGraded`, so this fails closed correctly and needs no new machinery.
+
+Tests for both, in their existing suites. For `scan-findings`, assert the `unknown` reason names the skipped scanner — a bare `unknown` is not actionable for the repo owner.
+
+**Do not unify the three sets into one shared constant.** They answer three different questions — gate green-ness, prior-commit passed-ness, scanner clean-ness — and after this plan they no longer hold the same values. `scan-findings.ts` already carries a comment explaining why it keeps its own; preserve that reasoning and extend it to `post-merge.ts`.
