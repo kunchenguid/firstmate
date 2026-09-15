@@ -924,6 +924,39 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_container_cleanup_clause_in_ship_and_scout_scaffolds_only() {
+  local home id brief
+  home="$TMP_ROOT/container-cleanup-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-containers-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "$kind scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+        || fail "$kind scaffold exited non-zero"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "# Container cleanup" "$brief" "$kind brief missing the container-cleanup clause"
+    assert_grep "fm-$id-" "$brief" "$kind brief did not bind the container name prefix to the task id"
+    assert_grep "reuse it instead of starting a duplicate" "$brief" \
+      "$kind brief missing the reuse-over-duplicate rule"
+    assert_grep "Stop and remove every container you started before you report done." "$brief" \
+      "$kind brief missing the remove-before-done rule"
+  done
+
+  # The clause scopes to ship and scout work; a persistent charter carries no
+  # container contract of its own.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" brief-containers-charter --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold exited non-zero"
+  assert_no_grep "# Container cleanup" "$home/data/brief-containers-charter/brief.md" \
+    "secondmate charter must not carry the ship/scout container-cleanup clause"
+  pass "fm-brief.sh: ship and scout scaffolds carry the container-cleanup clause"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -948,4 +981,5 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_container_cleanup_clause_in_ship_and_scout_scaffolds_only
 test_scout_lavish_line_follows_presentation_floor
