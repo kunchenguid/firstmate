@@ -502,6 +502,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. For a command that outlasts one tool call (a full test suite, a pipeline round), register it once and wake on its completion within seconds instead of polling it in sleep slices: \`$FM_ROOT/bin/fm-waiter.sh --fm-home $FM_HOME register $ID [--hold <seconds>] [--tail <lines>] -- <command> [...]\`, then run \`$FM_ROOT/bin/fm-waiter.sh wait <registration-id>\` about once per slice (that helper's header owns the contract; FM_HOME in your pane works in place of --fm-home when it names this home).
 
 $INBOX_SECTION
 
