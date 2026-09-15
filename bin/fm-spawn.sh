@@ -3947,6 +3947,9 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # A registered PR poll treats the `pr=`/`pr_head=` block as its metadata
+  # identity boundary. Keep relaunch-owned fields before preserved metadata so
+  # this writer's `control_relaunch_tx=` cannot invalidate authentication.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
@@ -4133,6 +4136,9 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # `traceparent=` is another relaunch-owned field. Insert it before the
+  # `pr=` identity block when a poll is registered; appending it after that
+  # block would fail the strict metadata parse and reject the authenticated poll.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= -v carrier="traceparent=$SPAWN_TRACEPARENT" '
           $1 == "traceparent" { next }

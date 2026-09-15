@@ -285,6 +285,11 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Keep this allowlist explicit. Once the first `pr=` establishes the canonical
+# identity, only a validated `pr_head`, X-link fields, or captain-completion
+# fields may follow it; `complete` appends `decisions_reviewed=1` and
+# `decision_keys=` after that identity. Arbitrary post-PR metadata remains
+# invalid so a poll cannot be rebound by an unrelated writer.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
