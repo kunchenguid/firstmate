@@ -82,7 +82,10 @@
 # A direct record binds pid, process identity, random token, owning state root,
 # and canonical artifact; a dead or PID-reused direct owner is reclaimed on the
 # next operation, while an unreadable live identity is preserved and refused.
-# A process-event record remains authoritative while its registration or claim
+# A process-event record also binds the arming PID and process identity so the
+# reservation stays protected before registration publication. Direct polling,
+# another arm, and retirement refuse while that armer is live or uncertain.
+# It remains authoritative while its registration or claim
 # exists, including between runner generations; explicit retirement removes it,
 # and a record left by terminal retirement or a removed home is reclaimed lazily.
 # `arm` is idempotent only for the same state root and path;
@@ -251,8 +254,8 @@ lavish_direct_owner_state_locked() {
   return 0
 }
 
-# A process-event reservation remains active while its registration or runner
-# claim exists. This lazy check reclaims a reservation left after terminal
+# A process-event reservation remains active while its armer is live or uncertain,
+# or its registration or runner claim exists. This lazy check reclaims a reservation left after terminal
 # retirement or removal of its old home without weakening a live generation.
 lavish_registered_owner_active_locked() {  # <source-id>
   local registration rc

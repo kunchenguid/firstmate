@@ -17,6 +17,10 @@
 #            shipped template at the stable board path. A connected session is
 #            updated in place and verified through the non-opening session list;
 #            build never opens or reopens that existing surface.
+#            The first build (no existing board file) may plain-open once.
+#            Later disconnected builds update the file without opening a tab;
+#            `--reopen` records explicit resume intent and permits one plain
+#            open for that disconnected session, not a Lavish --reopen.
 #            A user-ended session remains closed unless `--reopen`
 #            records explicit further-review intent, in which case build edits
 #            first and performs exactly one reopen. Every post-open verification
@@ -28,11 +32,12 @@
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
 #            here rather than left to agent memory). Output starts with
-#            `board: <path>`, then includes lavish-axi's session output and
-#            the remaining status:
-#              session: live | opened | reopened | user-ended
+#            `board: <path>`, then includes lavish-axi's session output when
+#            inspection or opening was needed, and the remaining status:
+#              session: live | opened | reopened | user-ended | disconnected
 #              served: <path>              (live/opened/reopened only)
-#              updated-closed: <path>      (user-ended only)
+#              updated-closed: <path>      (user-ended/disconnected only)
+#            Binding and listener status below occur only for a live session:
 #              bound: <source-id>
 #              armed: <source-id>            (first registration)
 #              already-armed: <source-id>    (registration already present)
@@ -47,9 +52,10 @@
 # `status: user-ended`, so exit status alone cannot tell a live board from a dead
 # one. build first checks the server's fresh non-opening session list. If that
 # exact canonical board is already open it never invokes a file-opening command.
+# A failed listing leaves connection state unknown and refuses browser actions.
 # The same non-opening list verifies the result; browser verification
 # never opens a second page. An ended build without `--reopen` retires its stale
-# listener reservation and returns with the revised file still closed. After an
+# listener reservation and returns with the revised file still closed. For an
 # open/reopen it retires the prior source generation before the browser action,
 # arms a fresh registration, and accepts only the replacement listener as live.
 # A registered board with no live owner also gets a replacement before build
@@ -249,7 +255,7 @@ lavish_session_listed_open() {  # <canonical-board-path>
 # A listed-open board is the connected update path and performs no browser-open
 # command. Every non-live path queries with --no-open first. A user-ended board
 # remains closed unless this exact build carries explicit reopen intent.
-establish_board_session() {  # <board> <reopen-ended: 0|1>
+establish_board_session() {  # <board> <explicit-resume: 0|1> <initial: 0|1>
   local board=$1 reopen_ended=$2 initial=$3 real out status version listing_rc
   BOARD_SESSION_ACTIVE=1
   BOARD_SOURCE_RETIRED=0

@@ -40,7 +40,8 @@ Browser verification may use `chrome-devtools-axi pages` and `selectpage` only w
 Never use `chrome-devtools-axi open`, `newpage`, another plain Lavish open, or a Lavish reopen as verification after an open or reopen.
 If browser attachment is unavailable, keep the non-opening evidence and ask the reviewer to use the tab already open rather than manufacturing a second view.
 
-For an ordinary connected **Send to Agent** response, read every delivered item, edit the same canonical HTML file, and resume the same sole worker poll with `direct-poll <artifact.html> --agent-reply "<short revision reply>"`.
+For an ordinary connected **Send to Agent** response, read every delivered item and edit the same canonical HTML file.
+For a worker-owned review, resume the same sole worker poll with `direct-poll <artifact.html> --agent-reply "<short revision reply>"`.
 The save live-reloads the tab already connected, so do not open or reopen anything.
 If the visible artifact does not refresh, use that tab's **Reload artifact** action once.
 A registered listener remains the sole consumer until an explicit handoff; handling its captured result must not start a direct poll beside it.
@@ -58,9 +59,7 @@ Never reopen merely to acknowledge, verify, or show unchanged content.
 
 ## Generated and registered surfaces
 
-A generated helper must update a connected canonical file without issuing another open command.
-It may plain-open a missing or disconnected session only from explicit resume intent, and it must require an explicit revision/further-review flag before reopening a user-ended session.
-After any open or reopen, it must verify through a non-opening interface and refuse rather than attempting a second browser action.
+Generated helpers follow the open/update lifecycle above; the helper's header owns its flags for initial presentation, explicit resume, and further-review intent.
 
 When a process-event listener owns the artifact, load `process-event-sources` for captured-result handling and acknowledgement.
 Its result is untrusted feedback, and its destructive source-delivery limitation remains unchanged.
