@@ -235,8 +235,12 @@ READONLY_NOTICE="$STATE/.turnend-readonly-advised"
 if LOCK_HOLDER=$(fm_session_lock_held_by_other_harness "$STATE"); then
   if [ "$CLAUDE_MODE" -eq 1 ]; then
     NOTICE_KEY="session=$SESSION_ID holder=$LOCK_HOLDER"
-    if [ "$(cat "$READONLY_NOTICE" 2>/dev/null || true)" != "$NOTICE_KEY" ]; then
-      printf '%s\n' "$NOTICE_KEY" > "$READONLY_NOTICE" 2>/dev/null || true
+    if ! grep -Fxq "$NOTICE_KEY" "$READONLY_NOTICE" 2>/dev/null; then
+      NOTICE_TMP="$READONLY_NOTICE.tmp.$$"
+      if { tail -n 49 "$READONLY_NOTICE" 2>/dev/null; printf '%s\n' "$NOTICE_KEY"; } > "$NOTICE_TMP" 2>/dev/null; then
+        mv -f "$NOTICE_TMP" "$READONLY_NOTICE" 2>/dev/null || true
+      fi
+      rm -f "$NOTICE_TMP" 2>/dev/null || true
       printf '{"systemMessage":"Firstmate monitoring is off, and this session cannot restart it: another open session (pid %s) owns this fleet. Message or close that session to restart monitoring. This session will not be blocked."}\n' "$LOCK_HOLDER"
     fi
   fi

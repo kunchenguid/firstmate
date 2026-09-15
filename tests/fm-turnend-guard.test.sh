@@ -1736,6 +1736,7 @@ run_guard_as_lock_owner() {  # <dir> <payload> [guard-args...]
 test_hook_stands_down_while_another_live_session_holds_the_fleet_lock() {
   local dir holder out status
   local payload='{"stop_hook_active":false,"session_id":"sess-read-only"}'
+  local other_payload='{"stop_hook_active":false,"session_id":"sess-read-only-other"}'
   dir=$(make_primary_dir "$TMP_ROOT/hook-read-only-session")
   : > "$dir/state/task1.meta"
   ln -s /bin/bash "$dir/fake-claude"
@@ -1752,6 +1753,16 @@ test_hook_stands_down_while_another_live_session_holds_the_fleet_lock() {
   out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
   expect_code 0 "$status" "a repeated read-only Claude stop must still be allowed"
   [ -z "$out" ] || fail "the read-only notice must appear once per session and holder, got: $out"
+
+  out=$(run_guard_under_fake_harness "$dir" "$other_payload" --claude); status=$?
+  expect_code 0 "$status" "a second read-only Claude session must be allowed to end its turn"
+  assert_contains "$out" "pid $holder" "a second read-only session must get its own notice naming the lock holder"
+  out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
+  expect_code 0 "$status" "the first read-only session must still be allowed after the second one stops"
+  [ -z "$out" ] || fail "another read-only session's stop re-showed the first session's notice: $out"
+  out=$(run_guard_under_fake_harness "$dir" "$other_payload" --claude); status=$?
+  expect_code 0 "$status" "the second read-only session must still be allowed on a repeated stop"
+  [ -z "$out" ] || fail "alternating read-only sessions re-showed the second session's notice: $out"
 
   out=$(run_guard_under_fake_harness "$dir" "$payload"); status=$?
   expect_code 0 "$status" "a read-only session in the default blocking mode must also be allowed"

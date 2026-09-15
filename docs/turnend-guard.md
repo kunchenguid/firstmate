@@ -118,7 +118,8 @@ Charging only epoch changes let the count freeze with that ledger, so the guard 
 A read-only session, whose fleet lock a different live harness holds, is not blocked in any mode.
 Its own auto-arm is inert by identity and it may not repair supervision, so a block could never cause recovery and, lacking a verified failure episode, would re-block forever.
 `fm_session_lock_held_by_other_harness` in `bin/fm-session-lock-lib.sh` owns that proof, and a missing, malformed, or dead lock or an unresolvable ancestry keeps the ordinary block.
-Claude mode names the lock holder in one `systemMessage` per session and holder, recorded in `state/.turnend-readonly-advised`, and spends none of the block budget; the lock owner's own Stop boundary stays guarded as above.
+Claude mode names the lock holder in one `systemMessage` per session and holder, and spends none of the block budget; the lock owner's own Stop boundary stays guarded as above.
+`state/.turnend-readonly-advised` records each advised pair as one `session=<id> holder=<pid>` line, keeping only the last 50 lines, so several read-only sessions sharing a home each see the notice once.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
