@@ -154,16 +154,15 @@ class Azure:
         iterations = self.listing("pullRequestIterations")
         require(iterations and all(type(x.get("id")) is int for x in iterations), "unreadable Azure iterations")
         iteration = max(iterations, key=lambda x: x["id"])
-        require(iteration.get("sourceRefCommit", {}).get("commitId") == head and
-                iteration.get("targetRefCommit", {}).get("commitId") == target,
-                "Azure iteration does not match the candidate source and target revision")
+        require(iteration.get("sourceRefCommit", {}).get("commitId") == head,
+                "Azure iteration does not match the candidate source revision")
         reviewers = pr.get("reviewers")
         require(isinstance(reviewers, list), "unreadable Azure reviewers")
         for r in reviewers:
             require(isinstance(r, dict) and type(r.get("vote")) is int and r["vote"] in (-10, -5, 0, 5, 10),
                     "unreadable Azure reviewer vote")
-            require(r["vote"] >= 0 and (not r.get("isRequired") or r["vote"] in (5, 10)),
-                    "Azure reviewer rejected, requested changes, or has not supplied a required approval")
+            require(not r.get("isRequired") or r["vote"] in (5, 10),
+                    "Azure required reviewer has not supplied an approval")
         # The server's applicable policy evaluations own approval counts, group
         # membership, author exclusions, resets, build expiry and required status
         # contexts. Never derive these requirements from a fixed vote count.
@@ -224,7 +223,7 @@ class Azure:
                         build.get("repository", {}).get("id") == pr["repository"]["id"] and
                         build.get("sourceVersion") in (head, sha(pr.get("lastMergeCommit", {}).get("commitId"))),
                         "Azure required build did not succeed at the candidate revision")
-            if policy_type == "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd":
+            if policy_type == "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab":
                 settings = config.get("settings", {})
                 keys = {"noFastForward": "allowNoFastForward", "squash": "allowSquash",
                         "rebase": "allowRebase", "rebaseMerge": "allowRebaseMerge"}
@@ -259,20 +258,6 @@ class Azure:
             require(sum(s["id"] == latest["id"] for s in group) == 1,
                     "contradictory Azure check records")
             require(latest.get("state") in ("succeeded", "notApplicable"), "Azure PR check is not successful")
-        # A mandatory comment-resolution policy is evaluated above. Reading the
-        # actual threads also rejects contradictory unresolved user discussions.
-        for thread in self.listing("pullRequestThreads"):
-            if thread.get("isDeleted") is True:
-                continue
-            comments = thread.get("comments")
-            require(isinstance(comments, list), "unreadable Azure discussion")
-            require(all(isinstance(c, dict) and c.get("commentType") in ("text", "codeChange", "system")
-                        and type(c.get("isDeleted", False)) is bool for c in comments),
-                    "unreadable Azure discussion comments")
-            user_comments = [c for c in comments if c.get("commentType") != "system" and c.get("isDeleted") is not True]
-            if user_comments:
-                require(thread.get("status") in ("fixed", "wontFix", "closed", "byDesign"),
-                        "Azure PR discussion remains unresolved")
         options = pr.get("completionOptions") or {}
         method = options.get("mergeStrategy")
         if method is None and type(options.get("squashMerge")) is bool:
@@ -280,7 +265,7 @@ class Azure:
         if method is None and len(methods) == 1:
             method = next(iter(methods))
         require(method in methods, "Azure merge strategy is unset, disallowed or ambiguous; select it on the PR first")
-        # Re-read after policy/check/discussion reads. PATCH lastMergeSourceCommit
+        # Re-read after policy/check reads. PATCH lastMergeSourceCommit
         # provides the server-side source compare-and-swap; normal (non-bypass)
         # completion rechecks current mandatory policies on the server.
         final = self.pr()

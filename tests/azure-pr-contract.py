@@ -19,6 +19,8 @@ TARGET = "b" * 40
 MERGE = "c" * 40
 PROJECT = "11111111-1111-1111-1111-111111111111"
 REPO = "22222222-2222-2222-2222-222222222222"
+MIN_APPROVER_POLICY = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
+MERGE_STRATEGY_POLICY = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab"
 
 FAKE = r'''#!/usr/bin/env python3
 import json,os,sys
@@ -71,19 +73,30 @@ class AzureContract(unittest.TestCase):
                        sourceRefName="refs/heads/users/example/fix", targetRefName="refs/heads/main",
                        lastMergeSourceCommit=dict(commitId=HEAD), lastMergeTargetCommit=dict(commitId=TARGET),
                        lastMergeCommit=dict(commitId=MERGE), completionOptions=dict(mergeStrategy="squash"),
-                       reviewers=[dict(id="reviewer", vote=10, isRequired=True)])
-        self.config = dict(id=1, revision=1, isEnabled=True, isBlocking=True,
-                           type=dict(id="fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"),
-                           settings=dict(allowSquash=True, allowRebase=False, allowRebaseMerge=False, allowNoFastForward=False))
-        self.policies = [dict(configuration=self.config, status="approved",
-                              artifactId=f"vstfs:///CodeReview/CodeReviewId/{PROJECT}/7",
-                              context=dict(iterationId=2, sourceCommitId=HEAD))]
+                       reviewers=[dict(id="reviewer", vote=10, isRequired=True), dict(id="optional", vote=-10, isRequired=False)])
+        self.approval_config = dict(id=1, revision=1, isEnabled=True, isBlocking=True,
+                                    type=dict(id=MIN_APPROVER_POLICY),
+                                    settings=dict(minimumApproverCount=1, allowDownvotes=True))
+        self.merge_config = dict(id=2, revision=1, isEnabled=True, isBlocking=True,
+                                 type=dict(id=MERGE_STRATEGY_POLICY),
+                                 settings=dict(allowSquash=True, allowRebase=False, allowRebaseMerge=False, allowNoFastForward=False))
+        self.configs = [self.approval_config, self.merge_config]
+        self.policies = [
+            dict(configuration=self.approval_config, status="approved",
+                 artifactId=f"vstfs:///CodeReview/CodeReviewId/{PROJECT}/7",
+                 context=dict(iterationId=2, sourceCommitId=HEAD,
+                              lastMergeTargetCommitId=TARGET, lastMergeCommitId=MERGE)),
+            dict(configuration=self.merge_config, status="approved",
+                 artifactId=f"vstfs:///CodeReview/CodeReviewId/{PROJECT}/7",
+                 context=dict(iterationId=2, sourceCommitId=HEAD,
+                              lastMergeTargetCommitId=TARGET, lastMergeCommitId=MERGE)),
+        ]
         self.save("pullRequests", self.pr)
-        self.rows("policyConfigurations", [self.config])
+        self.rows("policyConfigurations", self.configs)
         self.rows("evaluations", self.policies)
-        self.rows("pullRequestIterations", [dict(id=2, sourceRefCommit=dict(commitId=HEAD), targetRefCommit=dict(commitId=TARGET))])
+        self.rows("pullRequestIterations", [dict(id=2, sourceRefCommit=dict(commitId=HEAD), targetRefCommit=dict(commitId="d" * 40))])
         self.rows("pullRequestStatuses", [dict(id=1, state="succeeded", iterationId=2, context=dict(name="ci"))])
-        self.rows("pullRequestThreads", [dict(status="fixed", comments=[dict(commentType="text", content="Reviewed")])])
+        self.rows("pullRequestThreads", [dict(status="active", comments=[dict(commentType="text", content="Reviewed")])])
         (self.dir / "state/task.meta").write_text("kind=ship\nmode=no-mistakes\nyolo=off\n")
 
     def save(self, resource, value):
@@ -134,7 +147,7 @@ class AzureContract(unittest.TestCase):
     def test_refusal_matrix(self):
         cases = [dict(status="abandoned"), dict(isDraft=True), dict(mergeStatus="conflicts"),
                  dict(mergeStatus="queued"), dict(autoCompleteSetBy=dict(id="someone")),
-                 dict(reviewers=[dict(vote=-10)]), dict(reviewers=[dict(vote=-5)]),
+                 dict(reviewers=[dict(vote=-10, isRequired=True)]), dict(reviewers=[dict(vote=-5, isRequired=True)]),
                  dict(reviewers=[dict(vote=0, isRequired=True)]), dict(reviewers=None),
                  dict(completionOptions=dict(mergeStrategy="rebase")),
                  dict(repository=dict(id=REPO, name="wrong", project=dict(id=PROJECT, name="Project")))]
@@ -148,26 +161,26 @@ class AzureContract(unittest.TestCase):
     def test_policy_refusal_matrix(self):
         for status in ("queued", "running", "rejected", "broken", None):
             with self.subTest(status=status):
-                self.rows("evaluations", [dict(self.policies[0], status=status)])
+                self.rows("evaluations", [dict(self.policies[0], status=status), self.policies[1]])
                 self.assertNotEqual(self.run_helper("complete").returncode, 0)
-        self.rows("evaluations", [])
+        self.rows("evaluations", [self.policies[1]])
         self.assertIn("missing", self.run_helper("complete").stderr)
-        self.rows("evaluations", [dict(self.policies[0], context=dict(iterationId=1))])
+        self.rows("evaluations", [dict(self.policies[0], context=dict(iterationId=1)), self.policies[1]])
         self.assertIn("older iteration", self.run_helper("complete").stderr)
-        self.rows("evaluations", [dict(self.policies[0], context=dict(sourceCommitId=TARGET))])
+        self.rows("evaluations", [dict(self.policies[0], context=dict(sourceCommitId=TARGET)), self.policies[1]])
         self.assertIn("different source", self.run_helper("complete").stderr)
         for context in (dict(lastMergeSourceCommitId=TARGET), dict(lastMergeTargetCommitId=HEAD),
                         dict(lastMergeCommitId=HEAD), dict(isExpired=True), dict(buildIsNotCurrent=True)):
-            self.rows("evaluations", [dict(self.policies[0], context=context)])
+            self.rows("evaluations", [dict(self.policies[0], context=context), self.policies[1]])
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
-        self.rows("evaluations", [dict(self.policies[0], configuration=dict(self.config, revision=0))])
+        self.rows("evaluations", [dict(self.policies[0], configuration=dict(self.approval_config, revision=0)), self.policies[1]])
         self.assertIn("outdated", self.run_helper("complete").stderr)
         self.assertFalse((self.dir / "patch").exists())
 
     def test_required_build_exact_revision(self):
-        c = dict(self.config, type=dict(id="0609b952-1397-4640-95ec-e00a01b2c241"))
-        self.rows("policyConfigurations", [c])
-        self.rows("evaluations", [dict(self.policies[0], configuration=c, context=dict(buildId=10))])
+        c = dict(self.merge_config, id=3, type=dict(id="0609b952-1397-4640-95ec-e00a01b2c241"))
+        self.rows("policyConfigurations", [self.approval_config, c])
+        self.rows("evaluations", [self.policies[0], dict(self.policies[1], configuration=c, context=dict(buildId=10))])
         build = dict(status="completed", result="succeeded", repository=dict(id=REPO), sourceVersion=MERGE)
         self.save("builds", build)
         self.assertEqual(self.run_helper("verify").returncode, 0)
@@ -176,18 +189,18 @@ class AzureContract(unittest.TestCase):
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
         self.assertFalse((self.dir / "patch").exists())
 
-    def test_check_and_discussion_refusals(self):
+    def test_check_refusals_and_unresolved_discussions_without_policy(self):
         for check in (dict(state="pending", iterationId=2), dict(state="failed", iterationId=2),
                       dict(state="succeeded", iterationId=1), dict(state="succeeded")):
             self.rows("pullRequestStatuses", [dict(id=1, context=dict(name="ci"), **check)])
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
         self.rows("pullRequestStatuses", [])
         self.rows("pullRequestThreads", [dict(status="active", comments=[dict(commentType="text")])])
-        self.assertIn("unresolved", self.run_helper("complete").stderr)
+        self.assertEqual(self.run_helper("verify").returncode, 0)
         self.assertFalse((self.dir / "patch").exists())
 
     def test_status_policy_record_is_revision_bound(self):
-        self.rows("evaluations", [dict(self.policies[0], context=dict(latestStatusId=1))])
+        self.rows("evaluations", [dict(self.policies[0], context=dict(latestStatusId=1)), self.policies[1]])
         p = self.run_helper("verify")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.rows("pullRequestStatuses", [dict(id=1, state="succeeded", iterationId=1, context=dict(name="ci")),
@@ -219,7 +232,7 @@ class AzureContract(unittest.TestCase):
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
             self.assertEqual(self.run_helper("merged").stdout, "")
             (self.dir / flag).unlink()
-        self.save("evaluations", dict(count=1, value=self.policies, continuation_token="next"))
+        self.save("evaluations", dict(count=len(self.policies), value=self.policies, continuation_token="next"))
         self.assertIn("partial", self.run_helper("complete").stderr)
         self.assertFalse((self.dir / "patch").exists())
 
