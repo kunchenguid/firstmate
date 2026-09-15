@@ -490,7 +490,7 @@ test_matrix_opencode_leftbar_signals() {
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
-  local screen typed dim_screen captured_idle captured_pending out
+  local screen typed dim_screen captured_idle captured_pending placeholder_prefixed furniture_only out
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -505,6 +505,10 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode 1.18.30 completed-turn idle hint on tmux" empty "$CAPS_TMUX" "$captured_idle" 3
   captured_pending=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
   assert_screen "opencode 1.18.30 completed-turn typed composer on tmux" pending "$CAPS_TMUX" "$captured_pending" 3
+  placeholder_prefixed=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mAsk anything... please reply${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.18.30 placeholder-prefixed draft on tmux" pending "$CAPS_TMUX" "$placeholder_prefixed" 3
+  furniture_only=$'  ┃\n  ┃  Ask anything...\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
+  assert_screen "opencode furniture-only left-bar lacks empty proof" unknown "$CAPS_TMUX" "$furniture_only" 1
   # Signal separation: with the idle pattern overridden to something that
   # cannot match, a DIM-styled hint still proves empty through the ghost strip.
   out=$(FM_COMPOSER_IDLE_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_TMUX" "$dim_screen" 1)
@@ -742,6 +746,10 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'hello captain' ] \
     || fail "left-bar extraction should join user rows without footer furniture, got '$out'"
+  screen=$'┃\n┃ Ask anything... please reply\n┃\n┃ Build · GPT-5.5 Fast OpenAI · high'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'Ask anything... please reply' ] \
+    || fail "left-bar extraction should preserve placeholder-prefixed user input, got '$out'"
   screen=$'╭────────────────────╮\n│ ❯ '"${ESC}[2mType a message...${ESC}[0m"$'│\n╰────────────────────╯'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ -z "$out" ] \
