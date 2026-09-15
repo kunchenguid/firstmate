@@ -232,7 +232,6 @@ In Claude Code that `until` loop in a single Bash call is the sanctioned foregro
 Bound that command by what your harness lets one command run: in Pi pass the bash tool a `timeout` of at most 2700 seconds, because Pi sets none by default; in Claude Code pass the Bash tool its maximum `timeout` of 600000 ms, because its default is 2 minutes; in Codex keep waiting on a still-running command with empty `write_stdin` polls of up to 300000 ms; elsewhere assume 10 minutes.
 Give any `--wait` a duration a little under that bound.
 When the bound passes with nothing changed, run the same blocking command again, with no status check in between.
-A wait your shell can watch this way is not a `paused:` wait: stay in the command instead of declaring one.
 EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
 

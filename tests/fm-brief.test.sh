@@ -817,6 +817,9 @@ test_ship_and_scout_teach_validation_round_pause() {
     brief="$home/data/$id/brief.md"
     assert_grep "your own validation round" "$brief" \
       "$kind brief did not teach workers to declare their validation-round wait"
+    # shellcheck disable=SC2016
+    assert_no_grep 'A wait your shell can watch this way is not a `paused:` wait' "$brief" \
+      "$kind brief contradicts validation-round pauses when the command can block"
   done
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }

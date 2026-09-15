@@ -108,7 +108,7 @@ case "$provider" in
     # constant, meaning a maintainer acting on the busiest pull requests would
     # never wake anyone. /repos/<path>/pulls/<number> answers the same question
     # with .comments and .review_comments, which are scalars no page size
-    # bounds, in the same single round trip bin/fm-pr-state.sh already makes.
+    # bounds, in a single round trip.
     # updated_at is deliberately NOT part of the fingerprint: it is the
     # underlying issue's timestamp, bumped by a label, an assignee, a milestone
     # or a bot edit, none of which void a wait on a maintainer, and waking on
