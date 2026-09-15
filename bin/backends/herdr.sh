@@ -1110,6 +1110,39 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   [ "$close_status" -eq 0 ]
 }
 
+# fm_backend_herdr_projection_close_tab_focus_preserving: close one exact
+# response-derived tab without leaving the captain focused anywhere else.
+# Callers must already have a second tab in the same workspace; closing a
+# workspace's last tab deletes the workspace, which this helper never plans
+# around. A live foreground client viewing the target tab refuses.
+fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
+  local session=$1 tab_id=$2
+  local before active_tab skip_restore=0 close_status
+  [ -n "$tab_id" ] || return 0
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe tab close" >&2
+    return 1
+  }
+  active_tab=${before#*$'\t'}
+  [ "$tab_id" != "$active_tab" ] || skip_restore=1
+  if ! fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab_id"; then
+    return 1
+  fi
+  if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+    before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+    skip_restore=0
+  fi
+  if fm_backend_herdr_explicit_close_tab_confirmed "$session" "$tab_id"; then
+    close_status=0
+  else
+    close_status=1
+  fi
+  if [ "$skip_restore" -eq 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "tab close" || return 2
+  fi
+  [ "$close_status" -eq 0 ]
+}
+
 # Herdr 0.7.5 workspace-removal focus rules (verified against the installed
 # 0.7.5 binary, its v0.7.5 tag source, and the isolated named lab):
 # - An EXPLICIT close that empties a workspace (API pane.close of its last
@@ -1863,10 +1896,17 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # Defense in depth on top of that gate (not the primary safety mechanism):
 # re-verify <seeded_tab_id> is still present, still carries label "1" (a
 # human could have renamed or repurposed it in the interim), and refuse to
-# close it if its pane hosts an actively working agent per herdr's own
-# agent-state detection (`agent get`) - belt-and-suspenders against any other
-# unforeseen path landing a live agent in a tab this function was about to
-# close.
+# close it if ANY pane in that tab hosts an actively working agent per
+# herdr's own agent-state detection (`agent get`) - belt-and-suspenders
+# against any other unforeseen path landing a live agent in a tab this
+# function was about to close.
+#
+# The prune closes the exact tab, not only the create-response root pane.
+# On Herdr 0.9 a workspace.created plugin hook can split a sibling pane
+# into that starter tab after create returns one root pane; closing only
+# the root pane then leaves the starter tab alive and the disposable
+# presentation workspace fails one-pane convergence. Tab close of the
+# exact seeded tab removes those siblings with it.
 #
 # Verified real-herdr behavior (not modeled by the canned-response fake-CLI
 # unit tests; modeled by make_herdr_statefake): closing a workspace's LAST
@@ -1876,22 +1916,28 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
-  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
+  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label panes pane_ids pane_id agent_out agent_status
   [ -n "$tab_id" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
   case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
   current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
   [ "$current_label" = "1" ] || return 0
-  pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
-  [ -n "$pane_id" ] || return 0
-  agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
-  agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-  [ "$agent_status" = working ] && return 0
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 0
+  pane_ids=$(printf '%s' "$panes" | jq -r --arg t "$tab_id" \
+    '.result.panes[]? | select(.tab_id == $t) | .pane_id' 2>/dev/null)
+  while IFS= read -r pane_id; do
+    [ -n "$pane_id" ] || continue
+    agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
+    agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+    [ "$agent_status" = working ] && return 0
+  done <<EOF
+$pane_ids
+EOF
   if [ "$close_mode" = focus-preserving ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id"
+    fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$tab_id"
   else
-    fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
+    fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
   fi
 }
 
@@ -2062,6 +2108,29 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   local session=$1 pane_id=$2 presence
   fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+  [ "$presence" = dead ]
+}
+
+# fm_backend_herdr_tab_presence_state: classify one exact tab get response as
+# dead|present|unknown from its JSON body, never from process exit status.
+fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 out code found
+  out=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "tab_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  found=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  [ "$found" = "$tab_id" ] && printf 'present' || printf 'unknown'
+}
+
+# fm_backend_herdr_explicit_close_tab_confirmed: issue one explicit tab close
+# and succeed only when a structured follow-up proves the exact tab is gone.
+fm_backend_herdr_explicit_close_tab_confirmed() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 presence
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  presence=$(fm_backend_herdr_tab_presence_state "$session" "$tab_id")
   [ "$presence" = dead ]
 }
 

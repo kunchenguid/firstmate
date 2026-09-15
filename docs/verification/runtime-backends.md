@@ -892,6 +892,11 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+Measured 2026-09-15 against Herdr 0.9.0 protocol 22 in an isolated `fm-lab-` session: `workspace create` still returns one tab labeled `"1"` and one root pane, then a `workspace.created` plugin hook can split a sibling pane into that starter tab before Firstmate prunes it.
+`pane close` of the create-response root pane left the sibling pane and the starter tab, so the disposable presentation workspace failed one-pane convergence.
+`tab close` of the exact seeded tab left one task tab and one task pane, kept the parent workspace focused, and the sibling pane did not reappear after a two-second wait.
+The portable pin is `tests/fm-backend-herdr.test.sh`; refresh the live shape through the guarded lab helper after a Herdr upgrade that changes workspace-create seeding or plugin pane attachment.
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:
