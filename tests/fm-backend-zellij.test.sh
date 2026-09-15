@@ -429,6 +429,55 @@ test_server_ensure_skips_attach_when_already_exists() {
   pass "fm_backend_zellij_server_ensure: reuses an existing session without calling attach"
 }
 
+# make_zellij_birth_fakebin: a `zellij` stub for the BIRTH path, which the
+# shared fake above cannot model - `attach` must be observable AND must make
+# the session appear, or server_ensure's existence poll never finishes. This
+# one records the environment the launched session would inherit, then marks
+# the session live so the poll returns.
+make_zellij_birth_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf 'zellij 0.44.0\n'; exit 0 ;;
+  list-sessions) [ -f "${FM_ZELLIJ_BORN:?}" ] && printf 'firstmate\n'; exit 0 ;;
+  attach)
+    for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE FM_ZELLIJ_LAUNCH_SENTINEL; do
+      eval 'value=${'"$name"'-<unset>}'
+      printf '%s=%s\n' "$name" "$value"
+    done > "${FM_ZELLIJ_BIRTH_ENV:?}"
+    : > "$FM_ZELLIJ_BORN"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/zellij"
+  printf '%s' "$fb"
+}
+
+# The launcher's color preference describes the LAUNCHER's terminal; a session
+# birthed here outlives that launch and hands its startup environment to every
+# pane created later, so none of it may ride along (the tmux half of this is
+# measured against a real server in tests/fm-backend-tmux-smoke.test.sh).
+test_server_ensure_scrubs_color_control_at_session_birth() {
+  local dir fb out name
+  dir="$TMP_ROOT/server-birth-color"; mkdir -p "$dir"
+  fb=$(make_zellij_birth_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_BORN="$dir/born" FM_ZELLIJ_BIRTH_ENV="$dir/birth-env" \
+    NO_COLOR=1 FORCE_COLOR=0 CLICOLOR=0 CLICOLOR_FORCE=1 FM_ZELLIJ_LAUNCH_SENTINEL=kept \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
+  expect_code 0 $? "server_ensure should bring the session up under a color-polluted launcher environment"
+  out=$(cat "$dir/birth-env" 2>/dev/null)
+  for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
+    assert_contains "$out" "$name=<unset>" "server_ensure leaked $name into the zellij session it birthed"
+  done
+  assert_contains "$out" "FM_ZELLIJ_LAUNCH_SENTINEL=kept" "server_ensure removed an unrelated launch environment variable"
+  pass "fm_backend_zellij_server_ensure: drops the launcher's color control from the session it births, leaving unrelated launch environment intact"
+}
+
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
 
 test_dispatch_routes_zellij_backend() {
@@ -1315,6 +1364,7 @@ test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists
+test_server_ensure_scrubs_color_control_at_session_birth
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label

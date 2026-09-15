@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-backend-launch-env-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-backend-launch-env-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -62,11 +64,19 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
+#
+# When no server is running yet, this `new-session` BIRTHS the tmux server, and
+# the server hands its startup environment to every window created later. The
+# launcher's color control must not be part of that inheritance, so the birth
+# runs in a subshell that drops it first (bin/fm-backend-launch-env-lib.sh).
+# The reuse branch touches no environment: an already-running server keeps
+# whatever it was started with, exactly as before.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t firstmate 2>/dev/null ||
+      ( fm_backend_launch_env_color_scrub; tmux new-session -d -s firstmate )
     printf 'firstmate'
   fi
 }
