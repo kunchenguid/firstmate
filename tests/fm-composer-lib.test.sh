@@ -401,8 +401,6 @@ test_matrix_codex_idle_starfield_furniture() {
     || fail "the row below the glyph must keep starfield cells after ghost stripping"
   _fm_composer_row_is_braille_furniture "$stripped" \
     || fail "the row below the glyph must be recognized as braille furniture"
-  _fm_composer_row_is_codex_status 'gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief' \
-    || fail "the codex status footer must be recognized as furniture"
   fm_composer_row_has_edge '  gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief' \
     && fail "fixture drift: the footer must carry no structural edge, or the boundary rule is untested"
 
@@ -437,12 +435,7 @@ test_matrix_codex_idle_starfield_furniture() {
   # a wrapped row alike.
   assert_screen "braille mixed into the glyph row" pending "$CAPS_STYLED" $'transcript line\n\n› fix ⠂ the tests'
   assert_screen "braille mixed into a wrapped row" pending "$CAPS_STYLED" $'transcript line\n\n› please\nfix ⠂ the tests'
-  # (iii) a typed row carrying a spaced middle dot without the footer anchor is
-  # composer input, not the status footer.
-  _fm_composer_row_is_codex_status 'fix · tests before pushing' \
-    && fail "a typed row with a middle dot must not be mistaken for the codex footer"
-  _fm_composer_row_is_codex_status 'gpt-6-astra high · tests' \
-    && fail "an effort token without a path cell must not be mistaken for the codex footer"
+  # (iii) a typed row carrying a spaced middle dot is composer input.
   assert_screen "wrapped typed row with a middle dot on herdr" pending "$CAPS_STYLED" $'transcript line\n\n› deploy\nfix · tests before pushing'
   assert_screen "wrapped typed row with a middle dot on tmux" pending "$CAPS_TMUX" $'transcript line\n\n› deploy\nfix · tests before pushing' 3
   # (iv) the footer or a starfield row alone, with no bare glyph above, gains
@@ -450,7 +443,7 @@ test_matrix_codex_idle_starfield_furniture() {
   assert_screen "codex footer alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$footer"
   assert_screen "codex footer alone on tmux" unknown "$CAPS_TMUX" $'transcript line\n\n'"$footer" 2
   assert_screen "starfield row alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$below"
-  pass "matrix: codex 0.154's starfield and status footer are furniture; typed, mixed, and unanchored rows keep their verdicts"
+  pass "matrix: codex 0.154's starfield rows are furniture; typed, mixed, and unanchored rows keep their verdicts"
 }
 
 test_matrix_pi_separated_needs_identity() {

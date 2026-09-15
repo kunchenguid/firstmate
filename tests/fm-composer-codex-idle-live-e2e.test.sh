@@ -4,7 +4,7 @@
 #
 # codex-cli 0.154.0 draws animation furniture around its idle composer: a
 # braille "starfield" on the rows around the bare `›` prompt (and behind its
-# dim `Ask Codex to do anything` placeholder) plus a bright model/path/title
+# dim `Ask Codex to do anything` placeholder), with a bright model/path/title
 # status footer beneath it. The shared classifier (bin/fm-composer-lib.sh)
 # must read those rows as furniture, not typed input, or every steering
 # doorbell into an idle codex pane is deferred as "pending text". Those rows
@@ -21,9 +21,9 @@
 # the gate is default-on wherever codex and tmux are installed (fm_live_gate):
 # FM_COMPOSER_CODEX_IDLE_LIVE=1 forces it (an absent codex then fails instead
 # of skipping) and =0 disables it. A run that verified nothing fails rather
-# than passing vacuously. Whether the starfield and the footer were actually
-# drawn during the read is reported as a note, because codex need not animate
-# them under every model or mode; the `empty` verdict is required either way.
+# than passing vacuously. Whether the starfield was actually drawn during the
+# read is reported as a note, because codex need not animate it under every
+# model or mode; the `empty` verdict is required either way.
 # Refresh docs/verification/runtime-backends.md ("Composer classification
 # matrix") from this guard's output after any codex upgrade.
 #
@@ -120,7 +120,7 @@ while [ "$i" -lt "$budget" ]; do
 done
 
 # Report what codex actually drew, so a refreshed verification record can say
-# whether the starfield and footer were exercised rather than assuming it.
+# whether the starfield was exercised rather than assuming it.
 plain=$(printf '%s\n' "$styled" | fm_composer_strip_ansi)
 starfield=no
 while IFS= read -r row; do
@@ -128,17 +128,9 @@ while IFS= read -r row; do
 done <<PLAIN
 $plain
 PLAIN
-footer=no
-while IFS= read -r row; do
-  trimmed=$row
-  fm_composer_normalize_trim_var trimmed
-  if _fm_composer_row_is_codex_status "$trimmed"; then footer=yes; break; fi
-done <<PLAIN
-$plain
-PLAIN
 placeholder=no
 case "$plain" in *'Ask Codex to do anything'*) placeholder=yes ;; esac
-note "codex ($VERSION): starfield furniture observed=$starfield status footer observed=$footer placeholder observed=$placeholder"
+note "codex ($VERSION): starfield furniture observed=$starfield placeholder observed=$placeholder"
 
 if [ "$tmux_verdict" = empty ] && [ "$cursorless_verdict" = empty ]; then
   CHECKED=$((CHECKED + 1))
