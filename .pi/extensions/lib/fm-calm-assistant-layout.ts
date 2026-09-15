@@ -1,10 +1,11 @@
-// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
+// Verified against Pi 0.85.1, which exports AssistantMessageComponent with an
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi.
-// This layout removes collapsed thinking and the mid-turn assistant text blocks
-// classified as "assistant-working-note" from a shallow presentation copy. The message
-// itself, model context, session storage, and export rendering are never touched.
+// This layout removes thinking blocks and the mid-turn assistant text blocks
+// classified as "assistant-working-note" from a shallow presentation copy whenever Calm
+// is active, independent of Pi's own hide-thinking setting. The message itself, model
+// context, session storage, and export rendering are never touched.
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
@@ -14,7 +15,6 @@ type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>
 
 type AssistantMessagePresentationState = {
   hiddenThinkingLabel: string;
-  hideThinkingBlock: boolean;
   lastMessage?: AssistantMessage;
 };
 
@@ -68,12 +68,11 @@ export function installCalmAssistantLayout(): void {
 
   AssistantMessageComponent.prototype.updateContent = function (
     message: AssistantMessage,
+    isStreaming?: boolean,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
     const hideThinking =
-      state.hiddenThinkingLabel === "" &&
-      state.hideThinkingBlock &&
-      patch.hidesThinking();
+      state.hiddenThinkingLabel === "" && patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
     const presentationMessage =
@@ -88,7 +87,7 @@ export function installCalmAssistantLayout(): void {
           }
         : message;
 
-    originalUpdateContent.call(this, presentationMessage);
+    originalUpdateContent.call(this, presentationMessage, isStreaming);
     if (presentationMessage !== message) state.lastMessage = message;
   };
 

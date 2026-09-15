@@ -1361,11 +1361,37 @@ if (assistantThinkingTool.render(100).length !== 0) {
 if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
   throw new Error("Calm-hidden thinking changed final assistant row geometry");
 }
+const streamingContexts = [];
+const streamingAssistant = new AssistantMessageComponent(undefined, true, undefined, undefined, undefined, [
+  (markdown, context) => {
+    streamingContexts.push(context.isStreaming);
+    return markdown;
+  },
+]);
+streamingAssistant.updateContent({
+  ...assistantBase,
+  content: [{ type: "thinking", thinking: "HIDDEN_STREAMING_THINKING" }, { type: "text", text: "STREAMING_TEXT" }],
+}, true);
+streamingAssistant.render(100);
+if (streamingContexts.length === 0 || streamingContexts.some((isStreaming) => isStreaming !== true)) {
+  throw new Error(`Calm assistant layout dropped Pi's streaming flag: ${JSON.stringify(streamingContexts)}`);
+}
 assistantThinkingTool.setHideThinkingBlock(false);
-if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
-  throw new Error("expanding thinking did not restore the original reasoning content");
+assistantThinkingText.setHideThinkingBlock(false);
+if (assistantThinkingTool.render(100).length !== 0) {
+  throw new Error("Calm left expanded thinking visible while Pi hide-thinking was off");
+}
+if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("Calm left expanded thinking content visible while Pi hide-thinking was off");
+}
+if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
+  throw new Error("Calm-hidden expanded thinking changed final assistant row geometry");
+}
+if (assistantThinkingText.render(100).join("\n").includes("HIDDEN_FINAL_THINKING")) {
+  throw new Error("Calm left final expanded thinking content visible while Pi hide-thinking was off");
 }
 assistantThinkingTool.setHideThinkingBlock(true);
+assistantThinkingText.setHideThinkingBlock(true);
 if (assistantThinkingTool.render(100).length !== 0) {
   throw new Error("collapsing thinking again restored residual Calm rows");
 }
@@ -1404,6 +1430,14 @@ if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get
 }
 if (!assistantThinkingTool.render(100).join("\n").includes("Thinking...")) {
   throw new Error("turning Calm off did not restore the collapsed thinking label");
+}
+assistantThinkingTool.setHideThinkingBlock(false);
+if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("turning Calm off did not restore expanded thinking under Pi hide-thinking off");
+}
+assistantThinkingTool.setHideThinkingBlock(true);
+if (!assistantThinkingTool.render(100).join("\n").includes("Thinking...")) {
+  throw new Error("re-collapsing thinking after Calm off did not restore the Thinking label");
 }
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "off\n") {
   throw new Error("Calm did not persist the inactive choice in the effective Firstmate home");
@@ -2268,18 +2302,18 @@ TS
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
-    || fail "thinking expansion did not restore Calm-hidden reasoning"
-  assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
+  wait_for_geometry_text "$expanded_snapshot" "Thinking blocks: visible" \
+    || fail "Ctrl+T did not expand Pi hide-thinking while Calm was active"
+  assert_not_contains "$(cat "$expanded_snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
+    "Pi hide-thinking expand restored reasoning while Calm was active"
+  assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" \
+    "Pi hide-thinking expand restored Calm-hidden tool rows"
+  assert_geometry_gap "$expanded_snapshot" "Calm transcript with Pi hide-thinking expanded"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  i=0
-  while [ "$i" -lt 120 ]; do
-    capture_geometry_viewport "$snapshot"
-    grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
+  wait_for_geometry_text "$snapshot" "Thinking blocks: hidden" \
+    || fail "Ctrl+T did not re-collapse Pi hide-thinking while Calm was active"
+  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
+    "re-collapsing Pi hide-thinking restored reasoning while Calm was active"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
@@ -2287,6 +2321,19 @@ TS
   wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
     || fail "turning Calm off did not restore the tool-call row"
   assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
+    || fail "expanding thinking after Calm off did not restore reasoning"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$calm_off_snapshot"
+    grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$calm_off_snapshot" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." \
+    "re-collapsing thinking after Calm off did not restore the Thinking label"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   i=0
@@ -2314,7 +2361,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
+  pass "Pi Calm native /skill:ahoy geometry keeps every thinking and tool block at zero height even with Pi hide-thinking expanded, while preserving history, restart, and Calm-off thinking restore"
 }
 
 test_working_ship_geometry_and_lifecycle() {

@@ -79,15 +79,16 @@ The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` 
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `AssistantMessageComponent.updateContent` method.
+The fix installs one idempotent presentation adapter, verified on Pi 0.85.1 by the [2026-09-14 record](#2026-09-14-pi-0851-calm-owned-thinking-hide-verification), on the exported `AssistantMessageComponent.updateContent` method.
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
-Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
-The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
-Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
+While Calm is active, the adapter passes a shallow thinking-free presentation copy into Pi's ordinary layout calculation, independent of Pi's own hide-thinking setting, then retains the original message on the component for invalidation.
+The persisted assistant message, provider context, tool execution, export data, and Pi's own hide-thinking preference remain unchanged.
+Thinking-only assistant messages render zero rows under Calm, and thinking before visible assistant text adds no spacing beyond the text-only baseline.
+Turning Calm off restores whatever Pi hide-thinking setting the captain already had; `/export` and `/share` keep full thinking because they render from session data, which the display-only copy never touches.
 
 The disconfirming checks deliberately retain supported boundaries.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
-Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
+Pi hide-thinking expansion while Calm is active does not restore reasoning; turning Calm off does.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
 
 ## Duplicate-turn regression and semantic boundary
@@ -225,7 +226,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The text blocks are removed from the shallow presentation copy before layout, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Reasoning is removed from the shallow presentation copy before layout and occupies zero rows whenever Calm is active, independent of Pi's hide-thinking setting (verified on Pi 0.85.1); turning Calm off restores ordinary Pi thinking display, and exports keep full thinking. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -611,3 +612,43 @@ ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-
 ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
+
+## 2026-09-14 Pi 0.85.1 Calm-owned thinking-hide verification
+
+Calm now hides assistant thinking on its own, whether Pi's hide-thinking (`Ctrl+T`) is collapsed or expanded.
+This record was taken against installed `@earendil-works/pi-coding-agent` 0.85.1 and covers that guarantee, the Calm-off restore, and the `isStreaming` argument the adapter forwards to Pi's `updateContent`.
+
+```text
+$ pi --version
+0.85.1
+```
+
+The transcript-visibility case renders thinking-only and thinking-plus-text messages with Pi hide-thinking set to expanded, and asserts zero rows, no reasoning text, and text-only geometry while Calm is on.
+It then asserts that turning Calm off shows the expanded reasoning again and that re-collapsing brings back Pi's `Thinking...` label.
+The same case sends a streaming update with `isStreaming` set to `true` and asserts that every markdown transformer context Pi builds from it still reports `true`.
+The native `/skill:ahoy` geometry case presses `Ctrl+T` in a real Pi TUI and waits for Pi's `Thinking blocks: visible` and `Thinking blocks: hidden` status lines before each check, so a lost keypress cannot pass.
+In both states the reasoning stayed hidden and the transcript gap stayed at baseline.
+After Calm was turned off, expanding showed the reasoning and collapsing restored the `Thinking...` label.
+
+The complete Calm suite against installed Pi 0.85.1, with `FM_CHROME_BIN` naming the Chrome the render step used:
+
+```text
+$ FM_CHROME_BIN=<chrome> tests/fm-calm-pi-extension.test.sh
+ok - Pi calm resolves its persistent home independently of Pi's launch directory
+ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
+ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
+ok - missing Pi presentation class exports reach the independent adapter degradation path
+ok - Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on
+ok - Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
+ok - Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
+ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
+ok - Pi Calm native /skill:ahoy geometry keeps every thinking and tool block at zero height even with Pi hide-thinking expanded, while preserving history, restart, and Calm-off thinking restore
+ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched
+ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
+ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
+```
+
+The suite exited 0 with 13 passing cases, no failures, and no capability skips.
+It does not check exported thinking text directly.
+The claim that exports keep full thinking rests on Pi 0.85.1's `dist/core/export-html/template.js`, which builds each `thinking-block` from the saved session entry's content blocks and never goes through `AssistantMessageComponent`, plus the suite's check that Calm never mutates the message.
