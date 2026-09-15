@@ -188,6 +188,7 @@ jq \
     | (($task.started_at // null) | time) as $started_at
     | (($task.current_state.observed_at // null) | time) as $observed
     | (($task.paths.report.path // null) | text(500)) as $report_path
+    | (($work.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null))) as $blockers
     | {
         id:(($task.id | ident) // "invalid-task"),
         spawn_gen:(($task.spawn_gen // null) | if . == null then null else ident end),
@@ -224,7 +225,8 @@ jq \
           until:(($work.hold_until // null) | date_or_time),
           evidence:"structured backlog hold"
         } end),
-        blockers:(($work.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:$max_blockers]),
+        blockers:$blockers[:$max_blockers],
+        _truncated:(($blockers | length) > $max_blockers),
         gate:(if (($work.unresolved_blocker_ids // []) | arr | length) > 0 then
                  {status:"blocked",label:(((($work.unresolved_blocker_ids // []) | arr | map(text(80)) | join(", ")) | text(240)))}
               elif $hold_bucket != null then {status:$hold_bucket,label:(($work.hold_reason // "Captain hold") | text(240))}
@@ -243,7 +245,8 @@ jq \
         terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."}
       };
   def queued_projection:
-    {
+    ((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null))) as $blockers
+    | {
       id:((.id | ident) // "invalid-queued"),spawn_gen:null,
       name:((.title | text(160)) // ((.id // "Unnamed queued item") | text(128))),
       project_id:backlog_project_id,lane:(if (.captain_actionable // false) == true then "waiting" else "queued" end),state:"queued",state_source:"backlog",
@@ -253,7 +256,8 @@ jq \
       attention:((.captain_actionable // false) == true),
       attention_rank:(if (.captain_actionable // false) == true then 0 else 2 end),
       hold:(if .hold_bucket == null then null else {classification:.hold_bucket,actionable:(.captain_actionable // false),question:(.hold_reason | text(240)),age_days:(.hold_age_days // null),until:(.hold_until | date_or_time),evidence:"structured backlog hold"} end),
-      blockers:((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:$max_blockers]),
+      blockers:$blockers[:$max_blockers],
+      _truncated:(($blockers | length) > $max_blockers),
       gate:(if ((.unresolved_blocker_ids // []) | arr | length) > 0 then {status:"blocked",label:(((.unresolved_blocker_ids | map(text(80)) | join(", ")) | text(240)))} elif .hold_bucket != null then {status:.hold_bucket,label:((.hold_reason // "Captain hold") | text(240))} else {status:"unavailable",label:"Unavailable"} end),
       artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_path == null then "missing" else "available" end),path:(.report_path | text(500))}},
       runtime_evidence:{endpoint_status:"not_started",target:null,worktree:null,home:null},
@@ -314,7 +318,9 @@ jq \
         hold_until:($record.hold_until // $queued.hold_until // null),
         hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
         unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
-      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision" | .decisions=$summaries
+      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision"
+        | .decisions=$summaries[:$max_decisions]
+        | ._truncated=((._truncated // false) or (($summaries | length) > $max_decisions))
         | if .gate.status == "unavailable" and $decision_summary != null
           then .gate={status:"decision",label:$decision_summary}
           else . end) as $decision
@@ -322,11 +328,12 @@ jq \
       else (secondmate_active_projection($owner; $active; $now)) as $base
       | $base + {
           lane:"waiting",
-          decisions:$summaries,
+          decisions:$summaries[:$max_decisions],
           attention:true,
           attention_rank:0,
           hold:$decision.hold,
           blockers:$decision.blockers,
+          _truncated:(($base._truncated // false) or ($decision._truncated // false)),
           gate:$decision.gate,
           artifacts:{
             pr_url:($decision.artifacts.pr_url // $base.artifacts.pr_url),
@@ -364,7 +371,7 @@ jq \
           | sort_by([.id,(if .hold_bucket != null then 0 else 1 end),(.key // ""),(.verb // ""),(.summary // "")])
           | group_by(.id)[]) as $decision_group
        | $decision_group[0] as $decision
-       | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null)) | .[:$max_decisions]) as $decision_summaries
+       | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null))) as $decision_summaries
        | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
        | ([ $mate.active_children[]? | select(.id == $decision.id) ][0] // null) as $active_record
        | secondmate_decision_projection($mate; $decision; $decision_summaries; $queued_record; $active_record; $now)
@@ -374,7 +381,9 @@ jq \
        | $mate.landed[]?
        | secondmate_completed_projection($mate; .)
        | . + {_identity:("secondmate:" + .id),_priority:3} ]) as $secondmate_completed
-  | (($live_tasks + $queued + $completed + $secondmate_active + $secondmate_queued + $secondmate_decisions + $secondmate_completed)
+  | ($live_tasks + $queued + $completed + $secondmate_active + $secondmate_queued + $secondmate_decisions + $secondmate_completed) as $projected_tasks
+  | (any($projected_tasks[]; ._truncated == true)) as $nested_truncated
+  | ($projected_tasks
       | sort_by([._identity,._priority,.id])
       | group_by(._identity)
       | map(.[0])) as $combined_tasks
@@ -382,7 +391,7 @@ jq \
   | ($combined_tasks
       | sort_by([.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end),._identity])
       | .[:$max_total_tasks]
-      | map(del(._identity,._priority))) as $all_tasks
+      | map(del(._identity,._priority,._truncated))) as $all_tasks
   | ([ $all_tasks[].project_id ] | unique | sort) as $project_ids
   | ([
       if $snapshot.main_inventory.valid != true then ($snapshot.main_inventory.reason // "invalid main inventory") | text(240) else empty end,
@@ -430,7 +439,7 @@ jq \
       age_seconds:$age,
       stale_after_seconds:$stale_after,
       freshness:(if $age > $stale_after then "stale" else "fresh" end),
-      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
+      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or $nested_truncated or (($snapshot.secondmate_current.truncated // 0) != 0) or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},

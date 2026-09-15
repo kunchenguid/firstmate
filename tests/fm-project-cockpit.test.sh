@@ -70,7 +70,8 @@ test_stale_partial_invalid_empty_and_replacement_states() {
     || fail "stale age classification is wrong"
   jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$partial"
-  jq -e '.inventory.status == "partial" and .inventory.partial_reasons == ["secondmate inventory partial","secondmate inventory truncated"]' "$partial" >/dev/null \
+  jq -e '.inventory.status == "partial" and .inventory.truncated == true
+      and .inventory.partial_reasons == ["secondmate inventory partial","secondmate inventory truncated"]' "$partial" >/dev/null \
     || fail "partial inventory disclosure is wrong"
   jq '.main_inventory.valid=false | .main_inventory.reason="in-flight backlog item has no child metadata"' "$FIXTURES/empty.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
@@ -113,6 +114,62 @@ test_stale_partial_invalid_empty_and_replacement_states() {
       and (.projects[0].tasks | length) == 160' "$large_projection" >/dev/null \
     || fail "large canonical snapshot was not projected through the shared bounds"
   pass "projection distinguishes stale, partial, invalid, empty, and replacement-generation states"
+}
+
+test_nested_bounds_disclose_only_real_omissions() {
+  local blockers_exact=$TMP_ROOT/blockers-exact.json blockers_over=$TMP_ROOT/blockers-over.json
+  local decisions_exact=$TMP_ROOT/decisions-exact.json decisions_over=$TMP_ROOT/decisions-over.json
+  jq --argjson count 20 '
+      (.tasks[] | select(.id == "healthy-work") | .backlog.unresolved_blocker_ids) =
+        [range(0;$count) | ("blocker-" + tostring)]' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$blockers_exact"
+  jq --argjson count 21 '
+      (.tasks[] | select(.id == "healthy-work") | .backlog.unresolved_blocker_ids) =
+        [range(0;$count) | ("blocker-" + tostring)]' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$blockers_over"
+  jq -e '.inventory.truncated == false
+      and ([.projects[].tasks[] | select(.id == "healthy-work")][0].blockers | length) == 20' "$blockers_exact" >/dev/null \
+    || fail "an exactly-at-limit blocker list was reported truncated"
+  jq -e '.inventory.truncated == true
+      and ([.projects[].tasks[] | select(.id == "healthy-work")][0].blockers | length) == 20' "$blockers_over" >/dev/null \
+    || fail "an over-limit blocker list did not disclose its omitted item"
+  jq --argjson count 20 '
+      .tasks=[] | .backlog.records=[]
+      | .secondmate_current={
+          records:[{
+            id:"bounded-mate",home:"/fleet/mates/bounded",provenance:{selected:"structured-home"},
+            freshness:{observed_at:"2026-09-15T12:00:00Z"},active_children:[],
+            decisions_open:[range(0;$count) | {
+              id:"bounded-call",key:("question-" + tostring),verb:"needs-decision",
+              summary:("Question " + tostring),reason:null,source:"status"
+            }],
+            queued:[{id:"bounded-call",title:"Bounded call",repo:"bounded",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Choose",unresolved_blocker_ids:[]}],
+            landed:[],omitted:[]
+          }],total:1,shown:1,truncated:0
+        }' "$FIXTURES/empty.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$decisions_exact"
+  jq --argjson count 21 '
+      .tasks=[] | .backlog.records=[]
+      | .secondmate_current={
+          records:[{
+            id:"bounded-mate",home:"/fleet/mates/bounded",provenance:{selected:"structured-home"},
+            freshness:{observed_at:"2026-09-15T12:00:00Z"},active_children:[],
+            decisions_open:[range(0;$count) | {
+              id:"bounded-call",key:("question-" + tostring),verb:"needs-decision",
+              summary:("Question " + tostring),reason:null,source:"status"
+            }],
+            queued:[{id:"bounded-call",title:"Bounded call",repo:"bounded",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Choose",unresolved_blocker_ids:[]}],
+            landed:[],omitted:[]
+          }],total:1,shown:1,truncated:0
+        }' "$FIXTURES/empty.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$decisions_over"
+  jq -e '.inventory.truncated == false
+      and ([.projects[].tasks[] | select(.id == "bounded-mate:bounded-call")][0].decisions | length) == 20' "$decisions_exact" >/dev/null \
+    || fail "an exactly-at-limit decision list was reported truncated"
+  jq -e '.inventory.truncated == true
+      and ([.projects[].tasks[] | select(.id == "bounded-mate:bounded-call")][0].decisions | length) == 20' "$decisions_over" >/dev/null \
+    || fail "an over-limit decision list did not disclose its omitted item"
+  pass "nested evidence bounds disclose only genuine omissions"
 }
 
 test_secondmate_structured_surfaces_are_projected_once() {
@@ -433,6 +490,7 @@ SH
 
 test_projection_is_deterministic_and_allowlisted
 test_stale_partial_invalid_empty_and_replacement_states
+test_nested_bounds_disclose_only_real_omissions
 test_secondmate_structured_surfaces_are_projected_once
 test_attention_precedes_completed_history_and_project_caps
 test_builder_is_fail_closed_and_atomic
