@@ -8,8 +8,11 @@
 //
 // Raster colors are RGB, and the terminal paints them through a quantized 256-color
 // palette rather than the standard 16-color ANSI codes Pi's widget emits, which
-// docs/calm-mode-feasibility.md records as a bounded gap. The hues below approximate
-// the standard ANSI blue and yellow of a common dark palette.
+// docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
+// own: the water takes the theme's spinner blue and the whole boat takes the Claude
+// orange of the stock spinner, one set per theme family. The family follows the
+// `theme` setting's prefix (`dark*` or `light*`); `auto` and custom themes fall back to
+// the dark set. The Pi extension keeps its standard ANSI colors and is unaffected.
 import type {
   CalmWorkingShipColor,
   CalmWorkingShipFrame,
@@ -31,11 +34,29 @@ export const CALM_SHIP_RASTER_DEFAULT_VIEWPORT_COLUMNS = 80;
 export const CALM_SHIP_RASTER_DEFAULT_COLOR = 0x01000000;
 
 /** Foreground per sprite color class, as `0x00RRGGBB`, or the terminal default. */
-export const CALM_SHIP_RASTER_FOREGROUND: Readonly<Record<CalmWorkingShipColor, number>> = {
-  plain: CALM_SHIP_RASTER_DEFAULT_COLOR,
-  blue: 0x3b78ff,
-  yellow: 0xe5e510,
+export type CalmShipRasterPalette = Readonly<Record<CalmWorkingShipColor, number>>;
+
+/** The two theme families Claude Code's built-in themes fall into. */
+export type CalmShipPaletteFamily = "dark" | "light";
+
+/**
+ * Claude Code's own colors per theme family: the dark and light spinner blues for the
+ * water and the Claude orange of the stock spinner for the boat, from the app's
+ * built-in theme tables.
+ */
+export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
+  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
+  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
 };
+
+/**
+ * The palette family for a `theme` setting value: `light`, `light-daltonized`, and
+ * `light-ansi` select the light set; every dark theme, `auto`, a custom theme, and a
+ * missing or non-string value select the dark set.
+ */
+export function calmShipPaletteFamily(theme: unknown): CalmShipPaletteFamily {
+  return typeof theme === "string" && theme.startsWith("light") ? "light" : "dark";
+}
 
 /** How many Raster columns a Spinner site of `viewportColumns` gets: the row minus its margin, within the Raster's limits. */
 export function calmShipRasterColumns(viewportColumns: number | undefined): number {
@@ -88,6 +109,7 @@ export type CalmShipRasterCells = {
 export function packCalmShipRasterCells(
   frame: CalmWorkingShipFrame,
   columns: number,
+  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.dark,
 ): CalmShipRasterCells {
   const rows = Math.max(1, frame.length);
   const words = new Uint32Array(columns * rows * 3);
@@ -104,7 +126,7 @@ export function packCalmShipRasterCells(
     }
     let column = 0;
     for (const run of frame[row] ?? []) {
-      const foreground = CALM_SHIP_RASTER_FOREGROUND[run.color];
+      const foreground = palette[run.color];
       for (const glyph of Array.from(run.text)) {
         put(row, column, glyph.codePointAt(0) ?? 0x20, foreground);
         column += 1;

@@ -2,13 +2,16 @@
 // working row while Calm is on, its cadence on the mocked clock, its size against the
 // viewport, and how it lets go of a site the surface no longer draws.
 import { describe, expect, test } from "claude-code/testing";
-import { calmCommand, decodeCells, isStock, rasterOf, spinner, unmeasuredSpinner, world } from "./support.ts";
+import { calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, world } from "./support.ts";
 
 const SAIL = "◿│◣";
 const HULL = "╲▁▁▁╱";
 const DEFAULT = 0x01000000;
-const BLUE = 0x3b78ff;
-const YELLOW = 0xe5e510;
+// Claude Code's own theme tables: the spinner blue of each family for the water and
+// the Claude orange of the stock spinner for the boat.
+const DARK_WATER = 0x93a5ff;
+const LIGHT_WATER = 0x5769f7;
+const BOAT = 0xd77757;
 const TICK = 220;
 const TICKS_PER_MOVE = 4;
 
@@ -28,14 +31,14 @@ describe("the working ship", () => {
     expect(glyphs[0]!.indexOf(SAIL)).toBe(1);
     expect(glyphs[0]!.slice(4)).toBe(" ".repeat(34));
     expect(glyphs[1]!.replace(HULL, "▁▁▁▁▁")).toMatch(/^[▁▂▃▄]+$/);
-    // Colors: the whole boat one yellow (both sail halves, mast, and the complete hull
-    // including its interior), every water cell blue whatever its height, default-colored
-    // padding, default backgrounds everywhere.
-    expect(foregrounds[1]!.slice(0, 5)).toEqual([YELLOW, YELLOW, YELLOW, YELLOW, YELLOW]);
-    expect(foregrounds[0]!.slice(1, 4)).toEqual([YELLOW, YELLOW, YELLOW]);
+    // Colors on the default dark theme: the whole boat one Claude orange (both sail halves,
+    // mast, and the complete hull including its interior), every water cell the dark
+    // spinner blue whatever its height, default-colored padding, default backgrounds.
+    expect(foregrounds[1]!.slice(0, 5)).toEqual([BOAT, BOAT, BOAT, BOAT, BOAT]);
+    expect(foregrounds[0]!.slice(1, 4)).toEqual([BOAT, BOAT, BOAT]);
     expect(foregrounds[0]![0]).toBe(DEFAULT);
     expect(foregrounds[0]!.slice(4).every((color) => color === DEFAULT)).toBe(true);
-    expect(foregrounds[1]!.slice(5).every((color) => color === BLUE)).toBe(true);
+    expect(foregrounds[1]!.slice(5).every((color) => color === DARK_WATER)).toBe(true);
     expect(glyphs[1]!.slice(5)).toMatch(/[▃▄]/);
     expect(backgrounds.flat().every((color) => color === DEFAULT)).toBe(true);
   });
@@ -123,5 +126,63 @@ describe("the working ship", () => {
     expect(isStock(await $.ui.render(desktop as never))).toBe(true);
     await clock.advance(TICK * 4);
     expect(journal.blits).toHaveLength(0);
+  });
+
+  test("paints the light theme family's spinner blue for the water and the same Claude orange boat", async ($, on) => {
+    world(on, { preference: "on\n", theme: "light" });
+    const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
+    const { foregrounds } = decodeCells(raster.cells, 38, 2);
+    expect(foregrounds[1]!.slice(0, 5)).toEqual([BOAT, BOAT, BOAT, BOAT, BOAT]);
+    expect(foregrounds[1]!.slice(5).every((color) => color === LIGHT_WATER)).toBe(true);
+  });
+
+  // Each theme value needs its own world, so the family rule gets one test per value.
+  for (const [theme, expected, family] of [
+    ["dark-ansi", DARK_WATER, "dark"],
+    ["dark-daltonized", DARK_WATER, "dark"],
+    ["light", LIGHT_WATER, "light"],
+    ["light-daltonized", LIGHT_WATER, "light"],
+    ["light-ansi", LIGHT_WATER, "light"],
+    ["auto", DARK_WATER, "dark"],
+    ["custom:rose-pine", DARK_WATER, "dark"],
+  ] as const) {
+    test(`paints the ${family} family for the theme value ${JSON.stringify(theme)}`, async ($, on) => {
+      world(on, { preference: "on\n", theme });
+      const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
+      const { foregrounds } = decodeCells(raster.cells, 38, 2);
+      expect(foregrounds[1]!.slice(5).every((color) => color === expected)).toBe(true);
+      expect(foregrounds[1]![0]).toBe(BOAT);
+    });
+  }
+
+  test("re-paints in the new family after the theme changes, through the next drawing and every later blit", async ($, on) => {
+    const { clock, journal } = world(on, { preference: "on\n", theme: "dark" });
+    await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
+    await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 }));
+    await clock.advance(TICK);
+    expect(decodeCells(journal.blits.at(-1)!.cells, 38, 2).foregrounds[1]!.at(-1)).toBe(DARK_WATER);
+    const redrawsBefore = journal.invalidations.length;
+    const changed = await $.config.set(themeChange("light", "dark"));
+    expect(changed.value).toBe("light");
+    expect(journal.invalidations.length).toBe(redrawsBefore + 1);
+    await clock.advance(TICK);
+    expect(decodeCells(journal.blits.at(-1)!.cells, 38, 2).foregrounds[1]!.at(-1)).toBe(LIGHT_WATER);
+    const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
+    expect(decodeCells(raster.cells, 38, 2).foregrounds[1]!.at(-1)).toBe(LIGHT_WATER);
+    // A change within the same family redraws nothing.
+    const redrawsAfter = journal.invalidations.length;
+    await $.config.set(themeChange("light-ansi", "light"));
+    expect(journal.invalidations.length).toBe(redrawsAfter);
+  });
+
+  test("leaves a theme change to the engine while Calm is off, and paints the new family once Calm turns on", async ($, on) => {
+    const { journal } = world(on, { theme: "dark" });
+    await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
+    const redrawsBefore = journal.invalidations.length;
+    await $.config.set(themeChange("light", "dark"));
+    expect(journal.invalidations.length).toBe(redrawsBefore);
+    await $.command.run(calmCommand());
+    const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
+    expect(decodeCells(raster.cells, 38, 2).foregrounds[1]!.at(-1)).toBe(LIGHT_WATER);
   });
 });

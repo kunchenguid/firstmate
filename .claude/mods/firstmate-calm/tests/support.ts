@@ -25,6 +25,8 @@ export type Journal = {
   fsReads: string[];
   /** Number of transcript reads that reached the mocked session. */
   sessionMessageReads: number;
+  /** Number of `/config` listings that reached the mocked menu. */
+  configLists: number;
 };
 
 export type World = {
@@ -48,6 +50,8 @@ export type WorldOptions = {
   home?: string | undefined;
   /** What `$.session.messages()` answers. */
   messages?: readonly { role: "user" | "assistant"; text: string; toolUses: readonly unknown[] }[];
+  /** The `theme` row's value as `$.config.list()` reports it; omitted means `dark`. */
+  theme?: unknown;
 };
 
 /** The engine's own drawing, as the bottom of every `ui.render` chain. */
@@ -72,7 +76,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     stock: [],
     fsReads: [],
     sessionMessageReads: 0,
+    configLists: 0,
   };
+  let theme: unknown = "theme" in options ? options.theme : "dark";
   let blitDenial: string | undefined;
   let writeFailure: string | undefined;
 
@@ -106,6 +112,27 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: [...(options.messages ?? [])] as SessionMessage[] };
   });
   on("session.start", async (_$, e) => ({ cwd: e.cwd }));
+  on("config.list", async () => {
+    journal.configLists += 1;
+    return {
+      value: [
+        {
+          key: "theme",
+          label: "Theme",
+          kind: "choice",
+          value: theme as never,
+          options: ["auto", "dark", "light", "light-daltonized", "dark-daltonized", "light-ansi", "dark-ansi"],
+          provider: { plugin: "engine", tier: "core" },
+          isLocked: false,
+        },
+      ],
+    };
+  });
+  // The menu writes the row: the value lands for later listings and the hook above sees it.
+  on("config.set", async (_$, e) => {
+    if (e.key === "theme") theme = e.value;
+    return { value: e.value };
+  });
   on("ui.render", async (_$, e) => {
     journal.stock.push(e.component);
     return { type: "Text", props: {}, children: [STOCK_TEXT] };
@@ -280,4 +307,15 @@ export function operational(kind: string, body: string): string {
 /** The established from-firstmate routing carrier. */
 export function fromFirstmate(body: string): string {
   return `[fm-from-firstmate]\u2063${body}`;
+}
+
+/** A `config.set` of the `theme` row from the `/config` menu, as the engine raises it. */
+export function themeChange(value: string, previous: string) {
+  return {
+    key: "theme",
+    value,
+    previous,
+    provider: { plugin: "engine", tier: "core" as const },
+    origin: { kind: "composer" as const },
+  };
 }

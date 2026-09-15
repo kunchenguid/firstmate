@@ -44,6 +44,7 @@ describe("activation", () => {
     expect(journal.toasts).toHaveLength(0);
     expect(journal.fsReads).toHaveLength(0);
     expect(journal.sessionMessageReads).toBe(0);
+    expect(journal.configLists).toBe(0);
   }
 
   test("is fully inert when the function-hooks opt-in is absent", async ($, on) => {

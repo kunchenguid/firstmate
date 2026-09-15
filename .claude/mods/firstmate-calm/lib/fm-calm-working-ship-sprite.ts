@@ -66,12 +66,13 @@ export const CALM_WORKING_SHIP_TICK_MS = 220;
 export const CALM_WORKING_SHIP_TICKS_PER_MOVE = 4;
 
 /**
- * The color classes a frame uses. `plain` is uncolored padding; `blue` is every water
- * cell whatever its height, so the swell reads through glyph height alone; `yellow` is
+ * The color classes a frame uses. `plain` is uncolored padding; `water` is every water
+ * cell whatever its height, so the swell reads through glyph height alone; `boat` is
  * the whole boat, both sail halves, the mast, and the complete hull including its
- * zero-height interior. Each harness maps a class to its own escape or palette entry.
+ * zero-height interior. Each harness maps a class to its own color: Pi paints them as
+ * standard ANSI blue and yellow, the Claude Code mod as Claude Code's theme colors.
  */
-export type CalmWorkingShipColor = "plain" | "blue" | "yellow";
+export type CalmWorkingShipColor = "plain" | "water" | "boat";
 
 /** One same-colored run of cells inside a frame row. */
 export type CalmWorkingShipRun = {
@@ -214,7 +215,7 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
     ticks = renderedTicks;
   };
 
-  /** One all-blue run per cell of low water covering absolute columns [from, from + count). */
+  /** One water-colored run per cell of low water covering absolute columns [from, from + count). */
   const water = (
     from: number,
     count: number,
@@ -225,15 +226,15 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
       const level = waveLevel(column, hullCenter, direction, phase);
       runs.push({
         text: CALM_WORKING_SHIP_WAVE_BARS[level] ?? CALM_WORKING_SHIP_WAVE_BARS[0],
-        color: "blue",
+        color: "water",
       });
     }
     return runs;
   };
 
-  // The boat is one yellow run per row, so its halves never split into mismatched colors.
-  const sail = (): CalmWorkingShipRun[] => [{ text: CALM_WORKING_SHIP_SAIL, color: "yellow" }];
-  const hull = (): CalmWorkingShipRun[] => [{ text: CALM_WORKING_SHIP_HULL, color: "yellow" }];
+  // The boat is one boat-colored run per row, so its halves never split into mismatched colors.
+  const sail = (): CalmWorkingShipRun[] => [{ text: CALM_WORKING_SHIP_SAIL, color: "boat" }];
+  const hull = (): CalmWorkingShipRun[] => [{ text: CALM_WORKING_SHIP_HULL, color: "boat" }];
 
   return {
     position: () => position,

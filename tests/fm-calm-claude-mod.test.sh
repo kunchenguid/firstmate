@@ -78,7 +78,7 @@ import { pathToFileURL } from "node:url";
 const pi = await import(pathToFileURL(${PI_SHIP@Q}).href);
 const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
-const ANSI = { blue: ESC + "[34m", yellow: ESC + "[33m" };
+const ANSI = { water: ESC + "[34m", boat: ESC + "[33m" };
 const RESET = ESC + "[39m";
 const paint = (row) => row.map((run) => (run.color === "plain" ? run.text : ANSI[run.color] + run.text + RESET)).join("");
 const cells = (row) => row.map((run) => run.text).join("");
@@ -101,16 +101,16 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
       check(cells(water).length === width, \`water row is \${cells(water).length} cells at width \${width}\`);
       for (const row of frame) {
         check(cells(row).length <= width, \`a row overflowed width \${width}\`);
-        for (const run of row) check(["plain", "blue", "yellow"].includes(run.color), \`unknown color \${run.color}\`);
+        for (const run of row) check(["plain", "water", "boat"].includes(run.color), \`unknown color \${run.color}\`);
       }
       if (width >= 5) {
         check(frame.length === 2, \`width \${width} did not paint two rows\`);
-        check(JSON.stringify(frame[0].slice(1)) === JSON.stringify([{ text: "◿│◣", color: "yellow" }]), "the sail is not one yellow run");
+        check(JSON.stringify(frame[0].slice(1)) === JSON.stringify([{ text: "◿│◣", color: "boat" }]), "the sail is not one boat-colored run");
         check(frame[0][0].color === "plain" && /^ +$/.test(frame[0][0].text), "sail padding is not plain spaces");
         const hullAt = frame[1].findIndex((run) => run.text === "╲▁▁▁╱");
         check(hullAt >= 0, "the hull is not one run");
-        check(frame[1][hullAt].color === "yellow", "the hull is not yellow");
-        check(frame[1].filter((_run, index) => index !== hullAt).every((run) => run.text.length === 1 && run.color === "blue"), "water outside the hull is not one blue bar per cell");
+        check(frame[1][hullAt].color === "boat", "the hull is not boat-colored");
+        check(frame[1].filter((_run, index) => index !== hullAt).every((run) => run.text.length === 1 && run.color === "water"), "water outside the hull is not one water-colored bar per cell");
       } else if (width >= 3) {
         check(frame.length === 1 && cells(frame[0]).includes("◿│◣"), \`width \${width} lost the sail-only fallback\`);
       } else {
@@ -171,13 +171,19 @@ const decode = (cells, columns, rows) => {
   }
   return grid;
 };
-const colors = raster.CALM_SHIP_RASTER_FOREGROUND;
-check(colors.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
-for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
+// Claude Code's own theme tables: spinner blue water per family, Claude orange boat.
+const palettes = raster.CALM_SHIP_RASTER_PALETTES;
+check(palettes.dark.water === 0x93a5ff && palettes.dark.boat === 0xd77757, "dark palette is not Claude Code's dark spinner blue and Claude orange");
+check(palettes.light.water === 0x5769f7 && palettes.light.boat === 0xd77757, "light palette is not Claude Code's light spinner blue and Claude orange");
+check(palettes.dark.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR && palettes.light.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
+for (const [theme, family] of [["dark", "dark"], ["dark-ansi", "dark"], ["dark-daltonized", "dark"], ["light", "light"], ["light-ansi", "light"], ["light-daltonized", "light"], ["auto", "dark"], ["custom:rose", "dark"], [undefined, "dark"], [42, "dark"], ["", "dark"]]) {
+  check(raster.calmShipPaletteFamily(theme) === family, \`theme \${JSON.stringify(theme)} chose \${raster.calmShipPaletteFamily(theme)}, not \${family}\`);
+}
+for (const [family, colors] of Object.entries(palettes)) for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
   const sprite = core.createCalmWorkingShipSprite();
   for (let step = 0; step < 6; step += 1) {
     const frame = sprite.frame(width);
-    const packed = raster.packCalmShipRasterCells(frame, width);
+    const packed = family === "dark" ? raster.packCalmShipRasterCells(frame, width) : raster.packCalmShipRasterCells(frame, width, colors);
     check(packed.rows === frame.length, \`rows \${packed.rows} for a \${frame.length}-row frame\`);
     const grid = decode(packed.cells, width, packed.rows);
     for (let row = 0; row < frame.length; row += 1) {
@@ -186,7 +192,7 @@ for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
         for (const glyph of Array.from(run.text)) {
           const cell = grid[row][column];
           check(cell.glyph === glyph, \`glyph mismatch at \${row},\${column}: \${cell.glyph} vs \${glyph}\`);
-          check(cell.fg === colors[run.color], \`color mismatch at \${row},\${column}\`);
+          check(cell.fg === colors[run.color], \`\${family} color mismatch at \${row},\${column}\`);
           column += 1;
         }
       }
@@ -201,7 +207,7 @@ for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
 }
 // A run wider than the grid is clipped, never wrapped into the next row.
 {
-  const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "blue" }], [{ text: "◿│◣", color: "yellow" }]], 4);
+  const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "water" }], [{ text: "◿│◣", color: "boat" }]], 4);
   check(packed.rows === 2, "clip changed the row count");
   const grid = decode(packed.cells, 4, 2);
   check(grid[0].map((c) => c.glyph).join("") === "▁▁▁▁" && grid[1].map((c) => c.glyph).join("") === "◿│◣ ", "clip wrapped or dropped cells");
@@ -215,7 +221,7 @@ console.log("raster-ok");
 JS
   out=$(run_node "$TMP_ROOT/raster.mjs" 2>&1) || fail "raster packing: $out"
   assert_contains "$out" "raster-ok" "the raster packing check did not complete"
-  pass "the Raster packing lays the shared frame out row-major with the sprite's palette, plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
+  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, chosen by the theme setting's family with a dark fallback, with plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
 }
 
 test_presentation_policy() {

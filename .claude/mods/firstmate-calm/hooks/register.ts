@@ -22,6 +22,8 @@
 // classifier recognizes draws as zero height; an `AssistantMessage` block recorded as a
 // mid-turn working note draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
+// The boat is painted in Claude Code's own theme colors: the family is read from the
+// `theme` setting at load and re-read when a `config.set` changes it.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
@@ -34,8 +36,11 @@ import {
 } from "../lib/fm-calm-working-ship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
+  CALM_SHIP_RASTER_PALETTES,
+  calmShipPaletteFamily,
   calmShipRasterColumns,
   packCalmShipRasterCells,
+  type CalmShipRasterPalette,
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
@@ -60,6 +65,7 @@ let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
 const sprite = createCalmWorkingShipSprite();
+let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.dark;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -82,6 +88,15 @@ async function readPreference($: EngineInterface, path: string): Promise<string 
   }
 }
 
+/** The `theme` setting's current value, or undefined when the menu cannot be read. */
+async function readTheme($: EngineInterface): Promise<unknown> {
+  try {
+    return (await $.config.list()).find((row) => row.key === "theme")?.value;
+  } catch {
+    return undefined;
+  }
+}
+
 async function load($: EngineInterface): Promise<void> {
   preferencePath = calmPreferencePath(
     {
@@ -92,6 +107,7 @@ async function load($: EngineInterface): Promise<void> {
     $.plugin.root,
   );
   calm = parseCalmPreference(await readPreference($, preferencePath));
+  palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
     const restored = restoredAssistantText(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
@@ -121,6 +137,7 @@ async function resetSession($: EngineInterface): Promise<void> {
   finalReplies.clear();
   sites.clear();
   sprite.reset();
+  palette = CALM_SHIP_RASTER_PALETTES.dark;
   await ensureLoaded($);
 }
 
@@ -129,7 +146,7 @@ async function repaintShip($: EngineInterface): Promise<void> {
   if (!calm || sites.size === 0) return;
   sprite.tick();
   for (const [requestId, site] of sites) {
-    const packed = packCalmShipRasterCells(sprite.frame(site.columns), site.columns);
+    const packed = packCalmShipRasterCells(sprite.frame(site.columns), site.columns, palette);
     const result = await $.ui.blit({
       requestId,
       key: CALM_SHIP_RASTER_KEY,
@@ -181,6 +198,20 @@ export const register: Register = (on) => {
     return {};
   });
 
+  // Follow a theme change: the next drawing and every later blit use the new family.
+  on("config.set", { key: "theme" }, async ($, e, next) => {
+    if (!(await isActivated($))) return next(e);
+    const result = await next(e);
+    if (result.deny === undefined) {
+      const chosen = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(result.value)];
+      if (chosen !== palette) {
+        palette = chosen;
+        if (calm) $.ui.invalidate("ui.render");
+      }
+    }
+    return result;
+  });
+
   // Record mid-turn narration as it streams: the text blocks of a model step that
   // stopped to call tools. Subagent steps never draw in the main transcript.
   on("turn.step", async function* ($, e, next) {
@@ -229,7 +260,7 @@ export const register: Register = (on) => {
       return next(e);
     }
     const columns = calmShipRasterColumns(e.viewport?.columns);
-    const packed = packCalmShipRasterCells(sprite.frame(columns), columns);
+    const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
     sites.set(e.requestId, { columns, rows: packed.rows });
     const { Box, Raster } = $.ui.resolve(e);
     return Box({

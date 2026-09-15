@@ -656,7 +656,7 @@ Every capture came from real Claude Code 2.1.272 TUIs under tmux at 160 by 44 ce
 - A trusted project folder holding only `.claude/skills/<mod>` (a symlink to the plugin) loaded the mod with no launch flag once the flag was on, logging `hooks module <name> loaded (worker, environment 1, tier user)`; without the flag the same folder logged `hooks modules not loaded: rollout flag (tengu_plugin_hooks_modules) is off`.
 - Each render dispatch settled well under 3ms in the debug log.
 
-An escape-preserving capture of the boat from the spike, taken before the palette was unified on 2026-09-15 and so still showing a cyan crest and a red sail half, shows the Raster's RGB quantized to 256-color escapes; the shipped mod paints the unified palette, every water cell one blue and the whole boat one yellow, through the same quantization:
+An escape-preserving capture of the boat from the spike, taken before the palette was unified on 2026-09-15 and so still showing a cyan crest and a red sail half, shows the Raster's RGB quantized to 256-color escapes; the shipped mod paints Claude Code's own theme colors through the same quantization, the spinner blue of the active family for every water cell (`#93a5ff` dark, `#5769f7` light) and the Claude orange of the stock spinner (`#d77757`) for the whole boat, choosing the family from the `theme` setting's prefix at load and on every theme change, with `auto` and custom themes falling back to the dark set, while the Pi extension keeps standard ANSI blue and yellow:
 
 ```text
 \x1b[38;5;184m◿│\x1b[38;5;167m◣\x1b[39m
@@ -718,6 +718,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=68438
 ```
 
 The Pi suite above ran against the extracted sprite core with every one of its thirteen cases green, including the working-ship geometry and the interactive TUI case, which is the evidence that the extraction left Pi's drawing unchanged.
+Later the same day the installed Claude Code auto-updated to 2.1.273, and `tests/fm-calm-claude-mod-plugin.test.sh` passed there as well: strict validation still accepts the mod from both paths, now hooking `config.set{key=theme}` and calling `$.config.list` for the theme palette, and the plugin-kit suites pass with the theme cases added.
 
 The opt-in live guard, run on this host against the installed Claude Code 2.1.272 with tmux 3.6a and Haiku, through the shipped `.claude/skills` auto-load path, an isolated project and `FM_HOME`, and the preference already `on` before the flag-off session:
 
