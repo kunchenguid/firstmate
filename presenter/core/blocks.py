@@ -117,7 +117,9 @@ def _choice(
     default: str,
     location: str | None,
 ) -> str:
-    value = block.get(key, default)
+    value = block.get(key)
+    if value is None:
+        return default
     if not isinstance(value, str) or value not in choices:
         raise _fail(
             f"field {key!r} must be one of {', '.join(choices)}, got {value!r}", location

@@ -66,7 +66,7 @@ Shared block contract (plain JSON-serializable dicts):
 
 Validation rules layered on that contract by `presenter.core.blocks`:
 
-- `style` defaults to `body` for text and `grid` for tables when omitted; any other omitted optional field normalizes to `null`.
+- `style` defaults to `body` for text and `grid` for tables when omitted or `null`; every other optional field normalizes to `null` the same way, so an explicit `null` is always equivalent to omitting the field.
 - A table's rows must each have exactly as many values as there are headers, and a value is a string, number, boolean, or `null`.
 - `width_in` and `font_size_pt` must be positive numbers when given.
 - `source` and `latex` must be non-empty strings.

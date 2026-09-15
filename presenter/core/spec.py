@@ -17,6 +17,7 @@ dataclasses directly.
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -81,7 +82,7 @@ class SlideSpec:
             "title": self.title,
             "layout": self.layout,
             "notes": self.notes,
-            "blocks": [dict(b) for b in self.blocks],
+            "blocks": [copy.deepcopy(b) for b in self.blocks],
         }
 
     @classmethod
@@ -203,7 +204,9 @@ class DocumentSpec:
             metadata=dict(metadata) if isinstance(metadata, Mapping) else metadata,  # type: ignore[arg-type]
             slides=[SlideSpec.from_dict(s, location=f"slides[{i}]") for i, s in enumerate(slides)],
         )
-        return spec.validate()
+        spec.validate()
+        spec.metadata = copy.deepcopy(spec.metadata)
+        return spec
 
     @classmethod
     def from_json(cls, text: str) -> "DocumentSpec":

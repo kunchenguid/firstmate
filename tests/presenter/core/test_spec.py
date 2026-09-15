@@ -40,11 +40,29 @@ def test_round_trip_dict_and_json() -> None:
     assert DocumentSpec.from_json(spec.to_json()) == spec
 
 
-def test_to_dict_does_not_alias_internal_blocks() -> None:
+def test_to_dict_does_not_alias_internal_state() -> None:
     spec = _sample()
+    spec.metadata["tags"] = ["a"]
     d = spec.to_dict()
     d["slides"][0]["blocks"][0]["text"] = "changed"
+    d["slides"][1]["blocks"][1]["headers"].append("H2")
+    d["slides"][1]["blocks"][1]["rows"].append(["corrupted"])
+    d["metadata"]["tags"].append("b")
     assert spec.slides[0].blocks[0]["text"] == "hi"
+    assert spec.slides[1].blocks[1]["headers"] == ["A"]
+    assert spec.slides[1].blocks[1]["rows"] == [[1]]
+    assert spec.metadata == {"part": "X1", "tags": ["a"]}
+    assert spec.to_dict()["slides"][1]["blocks"][1]["rows"] == [[1]]
+    assert spec.to_dict()["metadata"] == {"part": "X1", "tags": ["a"]}
+
+
+def test_from_dict_does_not_alias_input_metadata() -> None:
+    source = {"title": "T", "metadata": {"tags": ["a"]}}
+    spec = DocumentSpec.from_dict(source)
+    spec.metadata["tags"].append("b")
+    assert source["metadata"] == {"tags": ["a"]}
+    source["metadata"]["tags"].append("c")
+    assert spec.metadata == {"tags": ["a", "b"]}
 
 
 def test_from_dict_defaults_and_optional_keys() -> None:

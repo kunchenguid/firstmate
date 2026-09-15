@@ -43,6 +43,34 @@ def test_text_bad_style_rejected() -> None:
         validate_block({"type": "text", "style": "title", "text": "x"})
 
 
+@pytest.mark.parametrize("style", [1, True, "title", ""])
+def test_invalid_text_style_values_rejected(style: object) -> None:
+    with pytest.raises(BlockValidationError, match="style"):
+        validate_block({"type": "text", "style": style, "text": "x"})
+
+
+def test_explicit_null_style_normalizes_to_default() -> None:
+    assert validate_block({"type": "text", "style": None, "text": "x"}) == {
+        "type": "text",
+        "style": "body",
+        "text": "x",
+    }
+    out = validate_block({"type": "table", "headers": ["A"], "rows": [[1]], "style": None})
+    assert out == {
+        "type": "table",
+        "caption": None,
+        "headers": ["A"],
+        "rows": [[1]],
+        "style": "grid",
+    }
+
+
+def test_explicit_null_style_survives_round_trip() -> None:
+    typed = TextBlock.from_dict({"type": "text", "style": None, "text": "x"})
+    assert typed.style == "body"
+    assert typed.to_dict() == {"type": "text", "style": "body", "text": "x"}
+
+
 def test_table_block_full_normalization() -> None:
     out = validate_block(
         {"type": "table", "headers": ["A", "B"], "rows": [["1", 2], [None, True]]}
