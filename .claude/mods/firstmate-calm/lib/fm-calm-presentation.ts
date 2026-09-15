@@ -95,30 +95,28 @@ export type CalmSessionRow = {
  * called tools, or when a tool-calling assistant row follows it before the next user row.
  */
 export function restoredWorkingNotes(rows: readonly CalmSessionRow[]): string[] {
-  const notes: string[] = [];
+  const notes = new Set<string>();
+  const finalReplies = new Set<string>();
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index]!;
     if (row.role !== "assistant") continue;
     const key = workingNoteKey(row.text);
     if (key === "") continue;
-    if (row.toolUses.length > 0) {
-      notes.push(key);
-      continue;
-    }
+    let followedByToolCall = row.toolUses.length > 0;
     for (let later = index + 1; later < rows.length && rows[later]!.role === "assistant"; later += 1) {
       if (rows[later]!.toolUses.length > 0) {
-        notes.push(key);
+        followedByToolCall = true;
         break;
       }
     }
+    if (followedByToolCall) notes.add(key);
+    else finalReplies.add(key);
   }
-  return notes;
+  for (const key of finalReplies) notes.delete(key);
+  return [...notes];
 }
 
 /** Whether a user row's text is a canonically classified Firstmate operational input. */
 export function userTextIsOperational(text: string): boolean {
   return classifyFirstmateOperationalText(text) !== undefined;
 }
-
-/** The transcript components Calm hides outright while on. */
-export const CALM_HIDDEN_COMPONENTS = ["ToolUse", "ToolResult", "ToolGroup"] as const;

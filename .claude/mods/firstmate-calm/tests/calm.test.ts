@@ -230,16 +230,29 @@ describe("mid-turn working notes", () => {
     expect(isStock(await $.ui.render(assistantMessage("Something else")))).toBe(true);
   });
 
-  test("keeps the genuine reply that ends a response visible", async ($, on) => {
-    world(on, { preference: "on\n" });
+  test("keeps a final reply visible when its text matches an earlier working note", async ($, on) => {
+    const { journal } = world(on, { preference: "on\n" });
     const set = stepper(on);
+    set({
+      chunks: [
+        { kind: "text", index: 0, text: "Done." },
+        { kind: "tool", index: 1, id: "t1", name: "Bash" },
+        { kind: "stop", stopReason: "tool_use", usage: null },
+      ],
+      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+    });
+    await runStep($);
+    expect(isHidden(await $.ui.render(assistantMessage("Done.", "working-note")))).toBe(true);
+
     set({
       chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
       result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
     });
+    const redrawsBeforeFinal = journal.invalidations.length;
     const { result } = await runStep($);
     expect(result.stopReason).toBe("end_turn");
-    expect(isStock(await $.ui.render(assistantMessage("Done.")))).toBe(true);
+    expect(journal.invalidations.length).toBeGreaterThan(redrawsBeforeFinal);
+    expect(isStock(await $.ui.render(assistantMessage("Done.", "final-reply")))).toBe(true);
   });
 
   test("treats a response cut off while calling tools as a working note, but not a plain cut-off", async ($, on) => {
@@ -283,7 +296,7 @@ describe("mid-turn working notes", () => {
     expect(isHidden(await $.ui.render(assistantMessage("Checking.")))).toBe(true);
   });
 
-  test("seeds notes from a restored transcript before anything draws", async ($, on) => {
+  test("seeds notes from a restored transcript without hiding a colliding final reply", async ($, on) => {
     world(on, {
       preference: "on\n",
       messages: [
@@ -292,6 +305,9 @@ describe("mid-turn working notes", () => {
         { role: "assistant", text: "Narration before a tool row", toolUses: [] },
         { role: "assistant", text: "", toolUses: [{ name: "Read" }] },
         { role: "assistant", text: "The final answer", toolUses: [] },
+        { role: "user", text: "again", toolUses: [] },
+        { role: "assistant", text: "Done.", toolUses: [{ name: "Bash" }] },
+        { role: "assistant", text: "Done.", toolUses: [] },
         { role: "user", text: "thanks", toolUses: [] },
         { role: "assistant", text: "Welcome", toolUses: [] },
       ],
@@ -299,6 +315,7 @@ describe("mid-turn working notes", () => {
     expect(isHidden(await $.ui.render(assistantMessage("Narration with its own call")))).toBe(true);
     expect(isHidden(await $.ui.render(assistantMessage("Narration before a tool row")))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage("The final answer")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Done.")))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage("Welcome")))).toBe(true);
   });
 });

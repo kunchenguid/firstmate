@@ -3,9 +3,10 @@
 // bin/fm-operational-input.sh is the single owner of the Firstmate operational-input
 // protocol; this module mirrors only its classification so the Claude Code mod can
 // recognize operational user rows inside a render hook, where no host process may be
-// spawned per row. tests/fm-calm-claude-mod.test.sh runs both over the same corpus and
-// fails on any divergence, so a change to the shell owner must land here in the same
-// change. Never widen this beyond what the owner recognizes.
+// spawned per row. tests/fm-calm-claude-mod.test.sh deterministically runs both over
+// the full envelope and near-miss contract and is this port's drift guard, so a change
+// to the canonical shell owner must land here in the same change. Never widen this
+// beyond what the owner recognizes.
 //
 // Current generic wire form:
 //   U+2063 FIRSTMATE_OP: v1 <kind>: <body>

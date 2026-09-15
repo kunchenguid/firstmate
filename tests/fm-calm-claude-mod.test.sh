@@ -247,11 +247,13 @@ const notes = policy.restoredWorkingNotes([
   { role: "assistant", text: "", toolUses: [{}] },
   { role: "assistant", text: "final", toolUses: [] },
   { role: "user", text: "again", toolUses: [] },
+  { role: "assistant", text: "collision", toolUses: [{}] },
+  { role: "assistant", text: "collision", toolUses: [] },
+  { role: "user", text: "last", toolUses: [] },
   { role: "assistant", text: "plain reply", toolUses: [] },
 ]);
 check(JSON.stringify(notes) === JSON.stringify(["own call", "before a tool row"]), \`restored notes \${JSON.stringify(notes)}\`);
 check(policy.userTextIsOperational("\\u2063FIRSTMATE_OP: v1 watcher: x") && !policy.userTextIsOperational("hello"), "operational recognition");
-check(JSON.stringify(policy.CALM_HIDDEN_COMPONENTS) === JSON.stringify(["ToolUse", "ToolResult", "ToolGroup"]), "hidden components");
 console.log("policy-ok");
 JS
   out=$(run_node "$TMP_ROOT/policy.mjs" 2>&1) || fail "presentation policy: $out"
@@ -265,7 +267,7 @@ write_parity_corpus() {
   local dir=$1 kind index=0 body
   mkdir -p "$dir"
   for kind in session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome from-firstmate; do
-    for body in 'plain body' $'multi\nline\n\nbody' $'trailing newline\n' 'colon: inside: body' 'ünïcödé body ✓' ' '; do
+    for body in 'plain body' $'multi\nline\n\nbody' $'trailing newline\n' $'two trailing newlines\n\n' 'colon: inside: body' 'ünïcödé body ✓' ' '; do
       index=$((index + 1))
       printf '%s' "$body" | "$OPERATIONAL_INPUT" encode "$kind" >"$dir/case-$index.txt" \
         || fail "the owner could not encode kind $kind for the parity corpus"

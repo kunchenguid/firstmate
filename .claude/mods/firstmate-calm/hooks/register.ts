@@ -164,15 +164,22 @@ export const register: Register = (on) => {
       yield chunk;
     }
     const result = await stream.result;
-    if (e.agentId === undefined && stepTextIsWorkingNote(result)) {
-      let recorded = false;
-      for (const text of [...blocks.values(), result.answer]) {
-        const key = workingNoteKey(text);
-        if (key === "" || workingNotes.has(key)) continue;
-        workingNotes.add(key);
-        recorded = true;
+    if (e.agentId === undefined) {
+      let changed = false;
+      if (stepTextIsWorkingNote(result)) {
+        for (const text of [...blocks.values(), result.answer]) {
+          const key = workingNoteKey(text);
+          if (key === "" || workingNotes.has(key)) continue;
+          workingNotes.add(key);
+          changed = true;
+        }
+      } else {
+        for (const text of [...blocks.values(), result.answer]) {
+          const key = workingNoteKey(text);
+          if (key !== "" && workingNotes.delete(key)) changed = true;
+        }
       }
-      if (recorded && calm) $.ui.invalidate("ui.render");
+      if (changed && calm) $.ui.invalidate("ui.render");
     }
     return result;
   });
