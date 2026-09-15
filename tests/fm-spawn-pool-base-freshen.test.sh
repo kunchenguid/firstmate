@@ -794,9 +794,11 @@ test_acquisition_receipt_follows_state_override() {
 # A retained record whose managed copy vanished cannot prove its pool, so
 # allocation still refuses; the refusal must name the record, the recorded
 # copy, the resolver's reason and the guarded route rather than only the error.
+# The subshell body keeps this test's exported pool and home environment isolated.
+# shellcheck disable=SC2030,SC2031
 test_unprovable_retained_record_names_its_record_and_route() (
   set -u
-  local rec id='pool-unprovable-r1' fakebin root pool out status before
+  local rec id='pool-unprovable-r1' fakebin root pool slot out status before
   rec=$(make_case unprovable "$id")
   read_case_record "$rec"
   fakebin=$(fm_fakebin "$CASE_DIR/native")
@@ -806,14 +808,14 @@ test_unprovable_retained_record_names_its_record_and_route() (
   pool=$(python3 "$ROOT/bin/fm-treehouse-identity.py" "$PROJECT_DIR" | jq -er '.pool') \
     || fail "the real resolver could not name the fixture pool"
   mkdir -p "$pool/1"
-  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$pool/1/project"
-  POOL_DIR="$pool/1/project"
-  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$POOL_DIR" > "$pool/treehouse-state.json"
+  slot="$pool/1/project"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot" > "$pool/treehouse-state.json"
   fm_write_meta "$HOME_DIR/state/vanished.meta" \
     "window=isolated:fm-vanished" "endpoint_task_id=vanished" "harness=codex" \
     "kind=ship" "project=$PROJECT_DIR" "worktree=$pool/2/project"
   before=$(cat "$pool/treehouse-state.json")
-  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_FAKE_PANE_PATH="$POOL_DIR" \
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_FAKE_PANE_PATH="$slot" \
     PATH="$fakebin:$PATH" bash -c '
       . "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-backend.sh"; . "$1/bin/fm-wake-lib.sh"
       fm_treehouse_acquire_preflight "$2" "$3"' _ "$ROOT" "$PROJECT_DIR" "$id" 2>&1); status=$?
@@ -971,6 +973,8 @@ test_retained_records_and_interrupted_acquisitions() {
 # Real Treehouse, ordinary subprocesses only. No backend, agent or Herdr call.
 # This counterfactual remains useful on newer Treehouse versions that protect
 # unlanded commits: a clean/landed task copy is still reserved by its metadata.
+# The subshell body keeps this test's exported pool and home environment isolated.
+# shellcheck disable=SC2030,SC2031
 test_native_process_exit_vs_durable_reservation() (
   local native lab project ready get_pid='' shell_pid='' slot native_slot other_slot json n out status before
   native=${FM_TREEHOUSE_TEST_BIN:-}
@@ -1031,6 +1035,8 @@ HOLD
 )
 
 
+# The subshell body keeps this test's exported pool and home environment isolated.
+# shellcheck disable=SC2030,SC2031
 test_pinned_pool_identity_and_recovery() (
   set -eu
   local native=${FM_TREEHOUSE_TEST_BIN:-} lab="$TMP_ROOT/pinned-review" project a b c pool_a slot_a state_a before head_a meta_a json out id expected root pool slot marker state returned
