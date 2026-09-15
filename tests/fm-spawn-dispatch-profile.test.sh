@@ -874,6 +874,54 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_grok_forwards_firstmate_home_when_set() {
+  local rec id out status launch
+  id=profile-grok-home-z24
+  rec=$(make_spawn_case profile-grok-home grok "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "grok spawn with GROK_HOME set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "GROK_HOME='$HOME_DIR/grok-home' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI grok --always-approve" \
+    "grok launch did not forward firstmate's GROK_HOME to the crewmate pane"
+  pass "grok forwards firstmate's GROK_HOME so the crewmate uses the isolated config home"
+}
+
+test_grok_omits_home_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-grok-nohome-z25
+  rec=$(make_spawn_case profile-grok-nohome grok "$id")
+  read_case_record "$rec"
+
+  : > "$LAUNCH_LOG"
+  out=$(CLAUDE_CONFIG_DIR='' GROK_HOME='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "grok spawn without GROK_HOME should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "GROK_HOME=" \
+    "grok launch must not add a home prefix when firstmate has no GROK_HOME set"
+  pass "grok omits the home prefix when firstmate has no GROK_HOME"
+}
+
+test_non_grok_harness_ignores_grok_home() {
+  local rec id out status launch
+  id=profile-codex-nogrokhome-z26
+  rec=$(make_spawn_case profile-codex-nogrokhome codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with GROK_HOME set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "GROK_HOME=" \
+    "non-grok harness launch must not receive the grok-specific home prefix"
+  pass "non-grok harnesses do not receive the GROK_HOME prefix"
+}
+
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1410,6 +1458,9 @@ test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_grok_forwards_firstmate_home_when_set
+test_grok_omits_home_prefix_when_unset
+test_non_grok_harness_ignores_grok_home
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
