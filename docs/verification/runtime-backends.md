@@ -491,7 +491,8 @@ ok - opencode (1.18.31): real idle composer classifies empty
 
 The same matrix run passed claude 2.1.259 and codex-cli 0.154.0, while pi 0.85.1 failed on a new first-launch folder-trust dialog in its worktree - a pre-existing drift the guard correctly reports loudly, unrelated to the footer change.
 The live proof of the `--auto` footer is the 2026-09-15 steering-inbox doorbell rerun ([Steering-inbox doorbell](#steering-inbox-doorbell)), which launched `opencode --auto` on 1.18.31 and reached a proven `empty` verdict on that composer before its doorbell went out (a non-empty verdict there is noted in the run output, as grok's was).
-This guard now launches opencode under the shipped `--auto` posture too (`tests/fm-composer-matrix-live-e2e.test.sh`), departing from its bare-binary convention for the one harness whose shipped launch differs, so matrix refreshes prove the surface Firstmate actually runs directly; the first such run, on 2026-09-15, printed `ok - opencode (1.18.31): real idle composer classifies empty` against a real `opencode --auto` pane.
+This guard now launches opencode under the shipped `--auto` posture too (`tests/fm-composer-matrix-live-e2e.test.sh`), departing from its bare-binary convention for the one harness whose shipped launch differs, so matrix refreshes prove the surface Firstmate actually runs directly.
+A rerun of the changed guard on 2026-09-15 printed `ok - opencode (1.18.31): real idle composer classifies empty` against a real `opencode --auto` pane, with claude 2.1.259 and codex-cli 0.154.0 passing and pi 0.85.1's pre-existing trust-dialog failure persisting identically, so that run still ends nonzero on its pi leg alone.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
