@@ -67,17 +67,20 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
-3. **Record the note.**
+3. **Publish the continuation record.**
+   Every relaunch also builds or updates `state/<id>.continuation`, the harness-neutral cross-harness continuation record merged onto whatever the previous relaunch already recorded; its schema, fields, and rendering are owned by [`bin/fm-continuation-lib.sh`](../bin/fm-continuation-lib.sh).
+   It is delivered to the replacement alongside its existing durable instructions and is never a substitute for `--note` or the conversation a relaunch cannot carry forward.
+4. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Stop the old agent** through the `exit` verb, with its postcondition.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
 ### Failure and rollback
 
-- A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
+- A refusal **before** the agent is stopped leaves the durable record, the instructions, and the continuation record byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
@@ -124,4 +127,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-continuation.test.sh` - the continuation record's schema, atomic write, and validation, then its integration into the relaunch transaction: cross-harness delivery, freshness, refusal on a corrupt or foreign record, and rollback preservation.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
