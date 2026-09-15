@@ -2435,7 +2435,7 @@ run_hold() {  # <dir> <args...>
 }
 
 make_hold_home() {  # <name> <status-line> <hold|nohold>
-  local name=$1 line=$2 hold=$3 dir state
+  local name=$1 line=$2 hold=$3 dir state crew_state
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/data" "$dir/config"
   cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || return 1
@@ -2448,14 +2448,27 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
   printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
     > "$state/held-merge.meta"
   printf '%s\n' "$line" > "$state/held-merge.status"
+  # The crew state bin/fm-crew-state.sh really emits for this fixture. Its agent
+  # has exited, so no run is attributed and the pane carries no busy signature:
+  # the reader falls back to the status log and reports that log's own verb
+  # (fm-crew-state.sh's map_log_state). There is no `stopped` state in that
+  # vocabulary, so pinning one here would exercise a shape no reader produces.
+  crew_state=$(status_line_verb "$line")
+  case "$crew_state" in
+    working|blocked|done|failed) ;;
+    needs-decision)              crew_state=parked ;;
+    *)                           crew_state=unknown ;;
+  esac
+  printf 'state: %s · source: status-log · %s\n' "$crew_state" "$line" > "$dir/crew-state"
   printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
   printf '%s\n' "$dir"
 }
 
 # Launch one watcher against a hold fixture, armed the way parked_watch_round
-# arms one, plus the home the backlog read resolves against. The crew reads
-# stopped: a delivered worker's agent has exited, and that is the population
-# whose alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
+# arms one, plus the home the backlog read resolves against. The crew state is
+# the one make_hold_home derived for this fixture - a worker whose agent exited
+# still reads as its own last status line, and that is the population whose
+# alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
 # stdout: a command substitution would background the watcher inside a subshell,
 # leaving the caller unable to wait on or reap its own watcher.
 HOLD_WATCH_PID=
@@ -2463,7 +2476,7 @@ hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="${FM_HOLD_CURRENT_COMMAND:-zsh}" \
-    FM_FAKE_CREW_STATE="${FM_HOLD_FAKE_CREW_STATE:-state: stopped · source: pane · bare shell}" \
+    FM_FAKE_CREW_STATE="${FM_HOLD_FAKE_CREW_STATE:-$(cat "$dir/crew-state")}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -2593,7 +2606,7 @@ test_ended_worker_inherited_wedge_becomes_wait() {
 }
 
 test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
-  local dir state out capture key run_state calls pane='Ctrl+c:cancel preserved shell'
+  local dir state out capture key run_state stale_state calls pane='Ctrl+c:cancel preserved shell'
   dir=$(make_hold_home ended-unheld-wedge 'resolved [key=prior]: reboot interrupted recovery' nohold) \
     || fail "could not build stopped worker recovery fixture"
   state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; calls="$dir/crew-state-calls"
@@ -2618,6 +2631,29 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
     fail "stopped unheld worker repeated its recovery alarm"
   fi
   reap "$HOLD_WATCH_PID"
+  # The two evidence shapes a reboot leaves behind a dead worker: the pane's
+  # busy signature from its last active turn, and the status log's last line.
+  # Both read `working` from bin/fm-crew-state.sh, neither describes now, so
+  # neither may revive the inherited wedge.
+  for stale_state in 'state: working · source: pane · harness busy' \
+                     'state: working · source: status-log · working: still tidying the branch'
+  do
+    rm -f "$state/.paused-resurfaced-$key"
+    printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+    printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    : > "$out"
+    export FM_HOLD_FAKE_CREW_STATE="$stale_state"
+    hold_watch_launch "$dir" "$out" "$capture"
+    wait_for_exit "$HOLD_WATCH_PID" 150 \
+      || { reap "$HOLD_WATCH_PID"; fail "[$stale_state] dead worker did not report recovery"; }
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "[$stale_state] stale worker evidence revived a false wedge: $(cat "$out")"
+    grep -F 'preserved state needs recovery' "$out" >/dev/null \
+      || fail "[$stale_state] dead worker did not report recovery: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "[$stale_state] could not acknowledge the recovery"
+  done
+  unset FM_HOLD_FAKE_CREW_STATE
   export FM_FAKE_CREW_STATE_COUNT_FILE="$calls"
   for run_state in working parked 'done'; do
     : > "$calls"
