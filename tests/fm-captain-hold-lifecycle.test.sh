@@ -970,6 +970,58 @@ EOF
   pass "captain holds become visible only after their hold-set timestamp is durable"
 }
 
+# A running ship does not pass through the investigation completion gate.
+# Holding the ship itself therefore has to transfer an exact keyed status
+# decision after the backlog hold is verified. A different key is the safety
+# boundary: it remains open and captain-relevant rather than being hidden by a
+# captain-held line for unrelated work.
+test_hold_transfers_only_its_matching_status_decision() {
+  local home open last
+  home=$(make_home hold-status-transfer)
+  tasks_in "$home" add sample-route-call "Choose the sample route" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held ship fixture"
+  printf 'working: implementation reached its decision point\nneeds-decision [key=sample-route-call]: choose north or south\n' \
+    > "$home/state/sample-route-call.status"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" \
+    "$home/state/sample-route-call.status" \
+    || fail "could not prime the matching decision baseline"
+
+  run_captain "$home" hold sample-route-call \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "holding the ship did not transfer its matching status decision"
+  last=$(tail -n 1 "$home/state/sample-route-call.status")
+  [ "$last" = 'captain-held [key=sample-route-call]: tracked by sample-route-call' ] \
+    || fail "the held ship did not end on its verified captain-held transfer: $last"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/sample-route-call.status")
+  [ -z "$open" ] || fail "the matching status decision remained open after its hold: $open"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" \
+    "$home/state/sample-route-call.status" \
+    || fail "the matching captain-held transfer re-woke its own session"
+
+  home=$(make_home hold-status-mismatch)
+  tasks_in "$home" add sample-held-work "Hold the sample work" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the mismatch fixture"
+  printf 'needs-decision [key=sample-real-stall]: the worker still needs intervention\n' \
+    > "$home/state/sample-held-work.status"
+  run_captain "$home" hold sample-held-work \
+    --reason "captain is considering the separate work item" >/dev/null \
+    || fail "could not hold the mismatch fixture"
+  last=$(tail -n 1 "$home/state/sample-held-work.status")
+  [ "$last" = 'needs-decision [key=sample-real-stall]: the worker still needs intervention' ] \
+    || fail "an unrelated hold hid the real open decision: $last"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/sample-held-work.status")
+  printf '%s' "$open" | grep -F $'sample-real-stall\tneeds-decision\t' >/dev/null \
+    || fail "the unrelated open decision was swallowed by the hold: $open"
+  pass "hold transfers an exact status decision while an unrelated decision remains visible"
+}
+
 test_interrupted_answer_preserves_hold_age() {
   local home snap show
   home=$(make_home interrupted-answer-age)
@@ -3987,6 +4039,7 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
+test_hold_transfers_only_its_matching_status_decision
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable

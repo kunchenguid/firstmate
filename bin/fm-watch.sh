@@ -32,9 +32,11 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          both surfaced at once. At the wedge threshold, an
+#                          authoritative active pipeline step resets the quiet
+#                          timer; every other verdict continues to the worktree
+#                          write probe and then surfaces with an "escalation N"
+#                          count in the reason. At FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
@@ -244,13 +246,13 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
-# provably-working stale past the threshold, or anything unknown) is written to
-# the durable queue and exits. That wakes the LLM through the background-task
-# completion. The same classifier
+# stale pane whose pipeline is no longer actively running at the threshold, or
+# anything unknown) is written to the durable queue and exits. That wakes the
+# LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a stale pane without an active run-step escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -923,9 +925,10 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
+# rechecks the authoritative run step once STALE_ESCALATE_SECS has elapsed.
+# An actively running pipeline step resets the timer instead of alarming; every
+# other verdict continues to the existing write probe and possible-wedge alarm.
+# Shared by both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
@@ -945,6 +948,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_has_active_run_step "$task"; then
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "absorbed $label (active run-step at wedge boundary, idle ${age}s): $win"
+          return 0
+        fi
+        if [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] \
+          && task_captain_call_open "$task"; then
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "absorbed $label (completed task has an open captain call, idle ${age}s): $win"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -999,7 +1017,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.paused-override-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -1103,7 +1121,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.paused-override-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -2380,14 +2399,36 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
+            of="$STATE/.paused-override-$key"
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
+                         : > "$of"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)
+                  # An in-flight override marker means an earlier poll already
+                  # found this pane provably working under the declared pause and
+                  # put it on the wedge boundary's clock (the "working" case
+                  # above). A later inconclusive verdict (the crew is alive but no
+                  # longer evidences a run-step) must not silently hand it back to
+                  # the low-urgency declared-pause cadence - that would let a real
+                  # wedge hide behind the pause declaration for up to
+                  # FM_PAUSE_RESURFACE_SECS. Let wedge_timer_check's own recheck
+                  # decide instead; it self-heals a missing/corrupt timer rather
+                  # than assuming one wedge escalation clearing it means the
+                  # override ended. No override in flight means this hash was
+                  # never classified working, so the ordinary declared-pause
+                  # cadence applies exactly as it always has, discarding any
+                  # unrelated leftover wedge timer.
+                  if [ -e "$of" ]; then
+                    wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+                  else
+                    handle_paused_stale "$w" "$task" "$h"
+                  fi
+                  ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
