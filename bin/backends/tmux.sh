@@ -293,6 +293,26 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_endpoint_confirmed_gone: 0 ONLY when a SUCCESSFUL session
+# inventory omits the exact recorded window. The recovery-grade state below is
+# deliberately wider - it also answers `missing` for a definitive
+# missing-session or missing-server response, which is the tmux server being
+# unreachable rather than proof about this endpoint - and callers of this
+# predicate retire durable records on a 0, so every unreachable server, failed
+# inventory, and malformed target must refuse here.
+fm_backend_tmux_endpoint_confirmed_gone() {  # <target>
+  local target=$1 session window windows
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) || return 1
+  ! printf '%s\n' "$windows" | grep -Fqx "$window"
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for

@@ -1156,11 +1156,65 @@ clear_pause_tracking() {  # <window-key>
 # anyone. Only proof retires them (fm_backend_endpoint_confirmed_gone): a window
 # that still exists keeps every marker. The task's own durable records - its
 # metadata, status log, worktree - are never touched here; teardown owns those.
+#
+# The retirement itself is durable, in one more per-window marker of the same
+# family: .retired-<key>. Without it the window is retired once per three polls
+# forever, because recorded_windows enumerates state/*.meta and the meta stays -
+# each round paying a backend probe and writing another triage line, which is
+# neither "one line" nor free. A marker older than its own meta is stale
+# evidence (the task was relaunched onto that recorded target), so it is dropped
+# and the window rejoins ordinary triage.
 retire_gone_window_records() {  # <window> <window-key>
   local w=$1 key=$2
   clear_pause_tracking "$key"
   rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.churn-since-$key"
+  : > "$STATE/.retired-$key"
   triage_log "retired stale records (the backend confirms this endpoint no longer exists): $w"
+}
+
+# 0 when this window was already retired and that retirement is still current.
+window_retired() {  # <window> <window-key>
+  local w=$1 key=$2 meta marker_at meta_at
+  local marker="$STATE/.retired-$key"
+  [ -e "$marker" ] || return 1
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    marker_at=$(stat_mtime "$marker")
+    meta_at=$(stat_mtime "$meta")
+    case "$marker_at$meta_at" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$meta_at" -gt "$marker_at" ]; then
+          rm -f "$marker"
+          return 1
+        fi
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# Drop the per-window records of every retired key this home no longer records,
+# so a retirement marker leaves with the metadata it was recorded against
+# instead of outliving it. A home with no retired window pays one glob that
+# matches nothing, and the metadata scan runs only for a marker that exists.
+prune_orphan_window_records() {
+  local marker key w found
+  for marker in "$STATE"/.retired-*; do
+    [ -e "$marker" ] || continue
+    key=${marker##*/.retired-}
+    found=0
+    while IFS= read -r w; do
+      [ "$(window_key "$w")" = "$key" ] || continue
+      found=1
+      break
+    done < <(recorded_windows)
+    [ "$found" -eq 0 ] || continue
+    rm -f "$marker" "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.stale-$key" \
+      "$STATE/.stale-since-$key" "$STATE/.churn-since-$key" "$STATE/.wedge-escalations-$key" \
+      "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" "$STATE/.paused-$key" \
+      "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  done
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -2057,7 +2111,7 @@ while :; do
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || watch_fail "state check could not be captured: $(basename "$c")"
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
@@ -2073,18 +2127,18 @@ while :; do
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
           PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
-          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || watch_fail "PR poll control lock could not be acquired for $id"
           if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-            pr_poll_control_release || exit 1
+            pr_poll_control_release || watch_fail "PR poll control lock could not be released for $id"
             triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
             continue
           fi
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" || watch_fail "PR poll check could not be captured for $id"
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
+          run_check_capture "$custom_snapshot" || watch_fail "state check could not be captured: $(basename "$c")"
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
@@ -2107,17 +2161,17 @@ while :; do
             "$merge_authority" || merge_outcome_rc=$?
           if [ "$merge_outcome_rc" -ne 0 ]; then
             triage_log "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"
-            exit 1
+            watch_fail "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"
           fi
           if [ -n "$merge_authority_record_identity" ] \
             && ! fm_merge_authority_remove_if_matches "$STATE" "$id" \
               "$provider" "$host" "$path" "$number" "$merge_authority" \
               "$merge_authority_record_identity"; then
             triage_log "published merge outcome for $id but could not retire its authority record"
-            exit 1
+            watch_fail "published merge outcome for $id but its authority record could not be retired"
           fi
           retire_merged_pr_poll "$id"
-          pr_poll_control_release || exit 1
+          pr_poll_control_release || watch_fail "PR poll control lock could not be released for $id"
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
@@ -2125,12 +2179,12 @@ while :; do
           fi
           wake "$reason"
         fi
-        pr_poll_control_release || exit 1
+        pr_poll_control_release || watch_fail "PR poll control lock could not be released for $id"
         fm_wake_append check "$c" "$reason" || watch_fail "check wake could not be queued"
         touch "$STATE/.last-check"
         wake "$reason"
       fi
-      pr_poll_control_release || exit 1
+      pr_poll_control_release || watch_fail "PR poll control lock could not be released for $id"
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
@@ -2271,13 +2325,21 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
+  # Before the scan, not after it: a cycle that surfaces a wake exits inside the
+  # loop below and would never reach a trailing sweep.
+  prune_orphan_window_records
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    key=$(window_key "$w")
+    # A window already retired as a proven-gone endpoint costs nothing more:
+    # no capture, no backend probe, no second triage line.
+    if window_retired "$w" "$key"; then
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
-    key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"

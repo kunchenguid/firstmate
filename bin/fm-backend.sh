@@ -927,24 +927,22 @@ fm_backend_agent_alive() {  # <backend> <target>
 
 # fm_backend_endpoint_confirmed_gone: PROOF that the exact recorded endpoint no
 # longer exists. 0 only when the backend positively proves absence; every
-# ambiguity - an unreadable inventory, a pane that exists without an agent, a
-# malformed target, a backend with no such proof - returns nonzero, because the
-# callers act on a 0 by retiring durable records, and a live endpoint must never
-# lose them. Herdr answers from the exact pane's structured presence (a pane
-# husk that still exists is NOT gone); tmux answers from the recovery-grade
-# agent state, whose `missing` already requires a successful session inventory
-# that omits the recorded window.
+# ambiguity - an unreachable server, a failed inventory, a pane that exists
+# without an agent, a malformed target, a backend with no such proof - returns
+# nonzero, because the callers act on a 0 by retiring durable records, and a
+# live endpoint must never lose them. Each adapter owns its own proof: herdr
+# reads the exact pane's structured presence (a husk that still exists is NOT
+# gone), tmux requires a successful session inventory that omits the recorded
+# window. Neither uses the recovery-grade agent state, whose `missing` is wider:
+# it also answers a definitive missing-server response, which proves the server
+# unreachable rather than this endpoint gone.
 fm_backend_endpoint_confirmed_gone() {  # <backend> <target>
   local backend=$1 target=$2
   [ -n "$target" ] || return 1
+  fm_backend_source "$backend" || return 1
   case "$backend" in
-    herdr)
-      fm_backend_source herdr || return 1
-      fm_backend_herdr_endpoint_confirmed_gone "$target"
-      ;;
-    tmux)
-      [ "$(fm_backend_agent_state "$backend" "$target")" = missing ]
-      ;;
+    herdr) fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
+    tmux) fm_backend_tmux_endpoint_confirmed_gone "$target" ;;
     *) return 1 ;;
   esac
 }

@@ -47,8 +47,11 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # `env` and not a bare "$@": a word produced by expansion is a command word,
+  # never an assignment, so the positional form silently ran `VAR=value` as the
+  # command and never launched the watcher at all.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -1979,7 +1982,7 @@ test_nonterminal_stale_not_working_surfaced() {
 # halves apart: state/*.meta is globbed in order, so the ghost is triaged first
 # and the live window's own stale is what ends the cycle.
 test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
-  local dir state fakebin out drain_out capture_file ghost live ghost_key live_key pane_hash sig pid
+  local dir state fakebin out drain_out capture_file ghost live ghost_key live_key pane_hash sig pid retirements
   dir=$(make_case stale-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   ghost="test:fm-a-ghost"; live="test:fm-z-live"
@@ -2006,8 +2009,8 @@ test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   # The session inventory names only the live window, which is what makes the
   # ghost's absence PROVEN rather than merely unreadable.
-  FM_FAKE_TMUX_WINDOWS='fm-z-live' FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999 \
-    watch_bg "$state" "$fakebin" "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
   pid=$!
   wait_for_exit "$pid" 150 || fail "watcher did not surface the live window's stale"
   grep -Fx "stale: $live" "$out" >/dev/null || fail "the live window's stale was not surfaced: $(cat "$out")"
@@ -2018,6 +2021,7 @@ test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
     [ ! -e "$state/.$suffix-$ghost_key" ] \
       || fail ".$suffix-$ghost_key survived the retirement of a confirmed-gone endpoint"
   done
+  [ -e "$state/.retired-$ghost_key" ] || fail "the retirement itself was not recorded durably"
   # Retirement is scoped to that one key: the live window keeps its own records,
   # with the stale suppressor advanced by the surface exactly as before.
   [ -e "$state/.churn-since-$live_key" ] || fail "retirement removed a live window's records"
@@ -2026,6 +2030,36 @@ test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$live" >/dev/null || fail "the live stale wake was not queued"
   grep -F "$ghost" "$drain_out" >/dev/null && fail "a confirmed-gone window reached the durable queue"
+
+  # Durability: a second cycle must not re-probe the backend and retire the same
+  # window again. The ghost is skipped outright, so the triage log gains no
+  # second retirement line while the live window surfaces exactly as before.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first cycle"
+  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
+  printf '1\n' > "$state/.count-$live_key"
+  printf 'an-older-hash' > "$state/.stale-$live_key"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "the second cycle did not surface the live window's stale"
+  retirements=$(grep -c -F "retired stale records" "$state/.watch-triage.log")
+  [ "$retirements" = 1 ] \
+    || fail "a retired window was retired again on a later cycle ($retirements triage lines)"
+
+  # The marker leaves with the metadata it was recorded against, together with
+  # the rest of that key's now-orphaned records.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second cycle"
+  rm -f "$state/a-ghost.meta"
+  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
+  printf '1\n' > "$state/.count-$live_key"
+  printf 'an-older-hash' > "$state/.stale-$live_key"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "the third cycle did not surface the live window's stale"
+  [ ! -e "$state/.retired-$ghost_key" ] \
+    || fail "the retirement marker outlived the metadata it was recorded against"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the third cycle"
   unset FM_FAKE_CREW_STATE
   pass "a stale pane whose endpoint the backend proves is gone has its records retired without a wake, and a live window keeps its own"
 }

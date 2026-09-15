@@ -94,10 +94,9 @@ case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 # anywhere. The child's stderr is captured, relayed unchanged to this arm's
 # stderr, and kept in this bounded log.
 ARM_STDERR_LOG="$STATE/.watch-arm-stderr.log"
-ARM_STDERR_MAX_BYTES=${FM_WATCH_ARM_STDERR_MAX_BYTES:-262144}
-ARM_STDERR_KEEP_LINES=${FM_WATCH_ARM_STDERR_KEEP_LINES:-1000}
-case "$ARM_STDERR_MAX_BYTES" in ''|*[!0-9]*|0) ARM_STDERR_MAX_BYTES=262144 ;; esac
-case "$ARM_STDERR_KEEP_LINES" in ''|*[!0-9]*|0) ARM_STDERR_KEEP_LINES=1000 ;; esac
+ARM_STDERR_LOCK="$STATE/.watch-arm-stderr.lock"
+ARM_STDERR_MAX_BYTES=262144
+ARM_STDERR_KEEP_LINES=1000
 # Set once a flushed stderr carried its own typed `watcher: FAILED` line, so the
 # arm never synthesizes a vaguer one over the watcher's own reason.
 CHILD_STDERR_EXPLAINED=
@@ -391,16 +390,30 @@ print_watch_output() {
 # the child has been reaped, so a signal trap's final reason line is already on
 # disk. Best-effort and bounded: losing this evidence must never stall a cycle.
 child_stderr_flush() {
-  local size
+  local size i=0
   [ -n "$child_err" ] || return 0
   if [ -s "$child_err" ]; then
     grep -q '^watcher: FAILED' "$child_err" 2>/dev/null && CHILD_STDERR_EXPLAINED=1
+    # The relay to this arm's own stderr is unconditional; only the shared file
+    # takes the lock its sibling ledger already takes, so two arms in one home
+    # cannot interleave a multi-line append with the other's trim. A lock this
+    # arm cannot get within the bound drops the durable copy rather than
+    # stalling the cycle - the reason is already on the adapter's stream.
+    cat "$child_err" >&2 || true
+    while ! fm_lock_try_acquire "$ARM_STDERR_LOCK"; do
+      if [ "$i" -ge 20 ]; then
+        rm -f "$child_err" 2>/dev/null || true
+        child_err=
+        return 0
+      fi
+      sleep 0.02
+      i=$((i + 1))
+    done
     {
       printf '[%s] arm_pid=%s watcher_pid=%s\n' \
         "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ARM_PID" "$(cycle_clean_field "$cycle_watcher_pid")"
       cat "$child_err"
     } >> "$ARM_STDERR_LOG" 2>/dev/null || true
-    cat "$child_err" >&2 || true
     size=$(wc -c < "$ARM_STDERR_LOG" 2>/dev/null | tr -d '[:space:]')
     case "$size" in
       ''|*[!0-9]*) ;;
@@ -412,6 +425,7 @@ child_stderr_flush() {
         fi
         ;;
     esac
+    fm_lock_release "$ARM_STDERR_LOCK"
   fi
   rm -f "$child_err" 2>/dev/null || true
   child_err=

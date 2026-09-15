@@ -107,6 +107,11 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
+The arm layer also captures the watcher child's stderr, relays it unchanged to its own stderr, and appends it under one `[timestamp] arm_pid=<pid> watcher_pid=<pid>` header to `state/.watch-arm-stderr.log`, serialized against concurrent arms in the same home.
+That file is where a failed or signaled cycle's `watcher: FAILED - <reason>` line survives: an adapter that keeps the arm's stderr in memory, as the omp and Pi extensions do, drops it the moment the arm exits.
+A cycle whose own stderr already carried that typed line is reported with it rather than the arm's generic synthesized failure.
+The file is size-capped at 262144 bytes, trimmed to the newest 1000 lines.
+
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
