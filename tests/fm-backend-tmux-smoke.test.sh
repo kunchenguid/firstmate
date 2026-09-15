@@ -95,6 +95,21 @@ fm_backend_target_exists tmux "$TARGET" \
 if fm_backend_target_exists tmux "$SESSION:no-such-window-xyz"; then
   fail "fm_backend_target_exists must not read a vanished window name as a live endpoint"
 fi
+# tmux's "=" exact-match modifier is not part of the window name, so both
+# spellings must resolve to the same live endpoint and refuse an absent one.
+if ! tmux display-message -p -t "=$SESSION:=$WINDOW" '#{pane_id}' >/dev/null 2>&1; then
+  fail "fixture drifted: real tmux must resolve the '=' exact-match target of a live window"
+fi
+fm_backend_target_exists tmux "$SESSION:=$WINDOW" \
+  || fail "an '=' exact-match window name must read as a live endpoint"
+fm_backend_target_exists tmux "=$SESSION:=$WINDOW" \
+  || fail "an '=' exact-match session and window name must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:=no-such-window-xyz"; then
+  fail "an '=' exact-match name tmux does not hold must not read as a live endpoint"
+fi
+if fm_backend_target_exists tmux "=$SESSION:=no-such-window-xyz"; then
+  fail "an '=' exact-match session and absent name must not read as a live endpoint"
+fi
 # The away-mode daemon addresses the supervisor PANE (its own $TMUX_PANE), so
 # the bare pane-id shape must keep reading present, while a missing pane id - for
 # which real tmux answers an empty pane_id and exit 0 - must not.
