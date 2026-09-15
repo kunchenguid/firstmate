@@ -1415,9 +1415,8 @@ test_changed_asset_selects_its_consumers() {
     || fail "the refusal did not name the unread asset: $(cat "$tmp/err")"
   git -C "$repo" checkout -q -- tests/assets/unread-asset.mjs
 
-  # A retired asset its consumer still names selects that consumer, the same
-  # rule the bin/ and fixture arms apply, instead of refusing on a mapping the
-  # deletion cannot satisfy.
+  # A retired asset must still select an unchanged consumer, matching the
+  # default source-path arm's deletion handling.
   git -C "$repo" rm -q tests/assets/probe-render-harness.mjs
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
