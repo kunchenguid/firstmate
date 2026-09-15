@@ -496,6 +496,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-continuation-lib.sh
+. "$SCRIPT_DIR/fm-continuation-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -2605,6 +2607,41 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
     BRIEF="$DATA/$ID/brief.md"
+  fi
+  # A relaunch's continuation record (bin/fm-continuation-lib.sh; written by
+  # bin/fm-control.sh as part of the same transaction) is delivered to the
+  # replacement the same way a ship/scout's progress note is - overlaid onto a
+  # one-shot launch instructions file - because a secondmate's standing
+  # charter is never rewritten (AGENTS.md section 7). No record, or one that
+  # fails validation (foreign or corrupt), launches on the charter unchanged;
+  # this is delivery only, so it never blocks the spawn.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    SM_CONTINUATION=$(fm_continuation_path "$STATE" "$ID")
+    if [ -f "$SM_CONTINUATION" ] && fm_continuation_validate "$SM_CONTINUATION" "$ID" >/dev/null 2>&1; then
+      mkdir -p "$DATA/$ID" || {
+        echo "error: could not create $DATA/$ID for the continuation-record overlay" >&2
+        exit 1
+      }
+      SM_LAUNCH_BRIEF="$DATA/$ID/launch-charter.md"
+      SM_LAUNCH_BRIEF_TMP="$DATA/$ID/.launch-charter.md.${BASHPID:-$$}"
+      {
+        cat "$BRIEF" &&
+          printf '\n' &&
+          echo "## Continuation record" &&
+          echo &&
+          fm_continuation_render_markdown "$SM_CONTINUATION"
+      } > "$SM_LAUNCH_BRIEF_TMP" || {
+        rm -f -- "$SM_LAUNCH_BRIEF_TMP"
+        echo "error: could not render current launch instructions for $BRIEF" >&2
+        exit 1
+      }
+      if ! mv "$SM_LAUNCH_BRIEF_TMP" "$SM_LAUNCH_BRIEF"; then
+        rm -f -- "$SM_LAUNCH_BRIEF_TMP"
+        echo "error: could not publish current launch instructions for $BRIEF" >&2
+        exit 1
+      fi
+      BRIEF="$SM_LAUNCH_BRIEF"
+    fi
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
