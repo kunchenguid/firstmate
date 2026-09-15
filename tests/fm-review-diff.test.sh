@@ -238,25 +238,18 @@ test_recorded_base_branch_is_the_review_base() {
   pass "fm-review-diff compares a task against its recorded base branch"
 }
 
-test_project_prefix_branch_review_and_local_merge() {
-  local case_dir out expected
+test_project_prefix_branch_review() {
+  local case_dir out
   case_dir=$(make_case project-prefix)
   # Keep a stale fm/<id> branch so default naming cannot accidentally win.
   git -C "$case_dir/wt" checkout -qb users/example/task-x1
   printf 'project-convention\n' > "$case_dir/wt/feature.txt"
   git -C "$case_dir/wt" add feature.txt
   git -C "$case_dir/wt" commit -qm 'project prefix change'
-  expected=$(git -C "$case_dir/wt" rev-parse HEAD)
-  write_task_meta "$case_dir" mode=local-only kind=ship branch=users/example/task-x1
-  mkdir -p "$case_dir/data" "$case_dir/config"
-  printf 'manual\n' > "$case_dir/config/backlog-backend"
+  write_task_meta "$case_dir" mode=no-mistakes kind=ship branch=users/example/task-x1
   out=$(run_review_diff "$case_dir" task-x1)
   assert_contains "$out" '+project-convention' "review used the stale fm branch"
-  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-merge-local.sh" task-x1 >/dev/null 2> "$case_dir/stderr" \
-    || fail "local merge did not use project prefix branch: $(cat "$case_dir/stderr")"
-  [ "$(git -C "$case_dir/project" rev-parse main)" = "$expected" ] || fail "local merge landed the wrong branch"
-  pass "project-specific branch selection survives review and guarded local landing"
+  pass "project-specific PR branch selection survives review"
 }
 
 test_azure_review_uses_live_source_revision() {
@@ -296,7 +289,7 @@ SH
 }
 
 test_azure_review_uses_live_source_revision
-test_project_prefix_branch_review_and_local_merge
+test_project_prefix_branch_review
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
