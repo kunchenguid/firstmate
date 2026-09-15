@@ -36,9 +36,10 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 Registering a source is not the same fact as listening to it: arming records the source, and a separate runner still has to pick it up.
 After arming by hand, confirm `bin/fm-procevent.sh list` reports that source as `live`, and run `bin/fm-procevent.sh reconcile` when it does not.
 Reconcile reports every launch that did not prove it took its claim within the confirm window as `failed=` and exits non-zero, so a source that cannot be started says so instead of looking armed, and it wakes you once per failure episode about it because the watcher discards that count; `start` does not fix that - if the source stays unowned, run `start` attached to read the runner's refusal, then check the source command and adapter binary the registration names, and if a later reconcile finds the source owned the episode closes on its own.
-A source `list` reports as `orphaned` is one reconcile will not relaunch, because something may still be polling it; reconcile wakes you once about it, and that wake's payload says which of two recoveries applies.
-If the claim's recorded pid is alive under a different identity, `bin/fm-procevent.sh start <source-id>` takes the source back once you have checked nothing is still polling it - provided the dead generation's reservation records can still be tidied; otherwise it refuses with `cannot claim source`.
-If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: verify whether the dead runner's polling child is still attached to the source, and once that group is empty the next reconcile reclaims the source on its own.
+A source `list` reports as `orphaned` is one reconcile will not relaunch, because something may still be polling it; reconcile wakes you once about it, and that wake's payload says which of two recoveries applies and whether the runner's own recorded poll child is still alive.
+A runner pid the kernel has provably handed to another process is not one of these: reconcile reads that generation as gone and relaunches the source on its own.
+If the claim's recorded pid is alive but no longer reads as the runner that claimed, `bin/fm-procevent.sh start <source-id>` takes the source back once you have checked nothing is still polling it - stop a poll child the wake names as alive first - provided the dead generation's reservation records can still be tidied; otherwise it refuses with `cannot claim source`.
+If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: the wake says whether the runner's poll child is still attached to the source or whether the surviving members are ones the home cannot identify, and once that group is empty the next reconcile reclaims the source on its own.
 Nothing signals that group automatically.
 
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
@@ -119,7 +120,7 @@ Two rules the commands cannot enforce for you:
 
 `process-event source stranded` or `process-event source failed to start` (queue keys `procevent:<source-id>:stranded:<claim-token>` and `procevent:<source-id>:launch-failed:<registration-identity>-<episode-nonce>`)
 : Nothing was captured: the source named in the payload is registered but nothing is confirmed to be collecting from it. There is no result file to read and no `handled` call to make; the ordinary drain acknowledgement consumes the row.
-: The payload says which shape it is and what clears it. Follow it exactly as the arming section above describes - a `start` is named only for the reused-pid strand, a leaderless group is a human check and reclaims itself once its group is empty, and a launch that never proved its claim closes its own episode if a later cycle finds the source owned.
+: The payload says which shape it is and what clears it. Follow it exactly as the arming section above describes - a `start` is named only for the stale-leader strand, a leaderless group is a human check and reclaims itself once its group is empty, either payload says whether the runner's recorded poll child is still alive, and a launch that never proved its claim closes its own episode if a later cycle finds the source owned.
 
 ## What the runner guarantees, exactly
 
@@ -132,7 +133,7 @@ Supported by tests:
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
-- leaderless PID/PGID-reuse ambiguity preserves the claim without signalling or replacement, as owned by the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
+- a runner pid that is provably reused reads as a gone generation and is relaunched, while a live poll child, a reuse that cannot be proved, and group members nobody can identify all preserve the claim without signalling or replacement, as owned by the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
 - runner lifetime, owner-lease, and launch-pacing guarantees follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
 - oversized output is bounded rather than published whole or silently dropped.

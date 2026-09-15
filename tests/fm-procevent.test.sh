@@ -1156,6 +1156,8 @@ pe_register "$HG" lavish orphan-src -- \
 pe "$HG" reconcile >/dev/null
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "leader-crash fixture never claimed its source"
 wait_for "$ORPHAN_LOG" || fail "leader-crash fixture source never started"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.child" \
+  || fail "fixture invalid: the runner recorded no poll child before the leader was killed"
 orphan_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim")
 case "$orphan_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $orphan_leader" ;; esac
 printf '%s\n' "$orphan_leader" > "$ORPHAN_GROUP"
@@ -1190,6 +1192,15 @@ assert_contains "$orphan_wake" "orphan-src" \
   "the leaderless stranded wake does not name the source it is about: $orphan_wake"
 assert_contains "$orphan_wake" "polling" \
   "the leaderless stranded wake does not say what a human should check: $orphan_wake"
+# The runner recorded the child it spawned, so the surviving group is not a
+# guess here: the wake names the child it found alive.
+orphan_child=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.child" 2>/dev/null || true)
+case "$orphan_child" in ''|*[!0-9]*) fail "the runner recorded no poll child beside the crashed generation's claim" ;; esac
+kill -0 "$orphan_child" 2>/dev/null || fail "fixture invalid: the recorded poll child is not alive"
+assert_contains "$orphan_wake" "pid $orphan_child" \
+  "the leaderless strand does not name the poll child it found alive: $orphan_wake"
+assert_contains "$orphan_wake" "still attached" \
+  "the leaderless strand does not say the poll child is still attached: $orphan_wake"
 # `start` reports this claim as owned and reclaims nothing, so a wake that
 # named it as the clearing command would send someone to a no-op.
 case "$orphan_wake" in
@@ -1467,6 +1478,274 @@ assert_contains "$(cat "$TMP_ROOT/reused-plain-start.out")" "captured:" \
 for _ in $(seq 1 50); do kill -0 -"$sr5_leader" 2>/dev/null || break; sleep 0.1; done
 pe "$HSR5" retire reused-plain-src >/dev/null 2>&1 || true
 pass "start reclaims a reused-pid claim whose leftovers can still be tidied"
+
+# --- a stranger wearing the runner's pid is not the runner -------------------
+# The group probe is a bare number. Once a runner and its child are gone, the
+# kernel is free to hand the runner's pid to anything, and whatever then makes
+# itself a group leader revives a process group with the runner's number. Read
+# without identity, that is "the generation's group still has members", and
+# the source sat stranded against a stranger for as long as it lived. This
+# constructs exactly that shape rather than tampering a live runner's record:
+# a process group led by a process that is no runner, a claim naming its pid
+# under the identity of the runner that once had it, and a poll-child record
+# naming a process that has already exited. Linux and Darwin both reserve a
+# group's number while the group has members, so a live pid that started after
+# the claim was written proves the whole generation was gone before it did.
+claim_lib() {  # <function> [args...]: run one fm-procevent-lib function
+  bash -c '. "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-procevent-lib.sh"; "${@:2}"' _ "$ROOT" "$@"
+}
+write_stranger_claim() {  # <home> <source-id> <pid> <identity> <token>
+  local home=$1 id=$2 pid=$3 identity=$4 token=$5 reg_identity state_identity
+  reg_identity=$(claim_lib fm_pr_file_identity "$home/state/procevent/$id.source") \
+    || fail "could not read the $id registration identity"
+  state_identity=$(claim_lib fm_procevent_claim_state_root_identity "$home/state") \
+    || fail "could not read the $id state-root identity"
+  {
+    printf '%s\n%s\n%s\n%s\n' "$home" "$pid" "$token" "$identity"
+    printf '%s\n%s\nactive\n' "$home/state/procevent" "$reg_identity"
+    printf '%s\n' "$state_identity" | tr '\t' '\n'
+  } > "$FM_PROCEVENT_CLAIM_ROOT/$id.claim"
+  chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$id.claim"
+}
+write_child_record() {  # <source-id> <token> <pid> <start-identity>
+  printf '%s\n%s\n%s\n' "$2" "$3" "$4" > "$FM_PROCEVENT_CLAIM_ROOT/$1.child"
+  chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$1.child"
+}
+# A process whose identities are captured while it lives and which is then
+# gone: the runner and poll child of a generation that has ended.
+sleep 30 & rp_gone=$!
+rp_gone_identity=$(claim_lib fm_pid_identity "$rp_gone") \
+  || fail "could not read the ended generation's identity"
+rp_gone_start=$(claim_lib fm_pid_start_identity "$rp_gone") \
+  || fail "could not read the ended generation's start identity"
+kill "$rp_gone" 2>/dev/null || true
+wait "$rp_gone" 2>/dev/null || true
+kill -0 "$rp_gone" 2>/dev/null && fail "fixture invalid: the ended generation is still alive"
+# The stranger: a sleeper that made itself a process group leader.
+stranger_group() {  # sets stranger to a live group leader's pid
+  perl -e 'setpgrp(0, 0) or exit 1; exec "sleep", "300"' & stranger=$!
+  for _ in $(seq 1 50); do
+    [ "$(ps -o pgid= -p "$stranger" 2>/dev/null | tr -d '[:space:]')" = "$stranger" ] && return 0
+    sleep 0.1
+  done
+  fail "could not start a stranger process group"
+}
+stranger_group
+rp_stranger=$stranger
+HRP="$TMP_ROOT/hrp"; new_home "$HRP"
+RP_TRIGGER="$TMP_ROOT/reused-real-trigger"
+RP_LOG="$TMP_ROOT/reused-real-executions"
+pe_register "$HRP" lavish reused-real-src -- "$RACE_BLOCKER" "$RP_LOG" "$RP_TRIGGER" >/dev/null
+write_stranger_claim "$HRP" reused-real-src "$rp_stranger" "$rp_gone_identity" ended-token
+write_child_record reused-real-src ended-token "$rp_gone" "$rp_gone_start"
+# The claim predates the stranger, as it must in the real shape: the runner
+# claimed, the generation ended, and only then did the number come back.
+touch -t 202001010000 "$FM_PROCEVENT_CLAIM_ROOT/reused-real-src.claim" \
+  || fail "could not date the reused-pid claim before the stranger"
+kill -0 -"$rp_stranger" 2>/dev/null || fail "fixture invalid: the stranger's group is not alive"
+rp_out=$(pe "$HRP" reconcile)
+assert_contains "$rp_out" "started=1" \
+  "a stranger wearing the runner's pid stranded the source: $rp_out"
+wait_for "$RP_LOG" || fail "reconcile reported a start but the replacement source never ran"
+[ "$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/reused-real-src.claim")" != "$rp_stranger" ] \
+  || fail "the claim still names the stranger's pid after the reclaim"
+kill -0 "$rp_stranger" 2>/dev/null || fail "reclaiming the source killed the stranger"
+kill -0 -"$rp_stranger" 2>/dev/null || fail "reclaiming the source signalled the stranger's process group"
+[ "$(stranded_wake_count "$HRP" reused-real-src)" = 0 ] \
+  || fail "a provably reused pid was announced as a strand: $(stranded_wake_payloads "$HRP" reused-real-src)"
+[ "$(pe "$HRP" list | awk '$1 == "reused-real-src" { print $3 }')" = live ] \
+  || fail "the reclaimed source is not listed as live"
+: > "$RP_TRIGGER"
+pe "$HRP" retire reused-real-src >/dev/null
+kill -0 -"$rp_stranger" 2>/dev/null || fail "retiring the source signalled the stranger's process group"
+pass "a pid provably reused after the claim was written no longer strands the source"
+
+# Retirement takes the same read: a proved reuse leaves nothing to signal, so
+# the source retires cleanly instead of refusing forever, and the stranger's
+# group is never touched.
+stranger_group
+rr_stranger=$stranger
+HRR="$TMP_ROOT/hrr"; new_home "$HRR"
+pe_register "$HRR" lavish reused-retire-src -- "$RACE_BLOCKER" "$TMP_ROOT/rr-log" "$TMP_ROOT/rr-trigger" >/dev/null
+write_stranger_claim "$HRR" reused-retire-src "$rr_stranger" "$rp_gone_identity" retire-token
+write_child_record reused-retire-src retire-token "$rp_gone" "$rp_gone_start"
+touch -t 202001010000 "$FM_PROCEVENT_CLAIM_ROOT/reused-retire-src.claim"
+rr_out=$(pe "$HRR" retire reused-retire-src 2>&1) \
+  || fail "retire refused a claim whose pid was provably reused: $rr_out"
+assert_contains "$rr_out" "retired: reused-retire-src" "retire did not report the reused-pid source retired: $rr_out"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/reused-retire-src.claim" "retire left the reused-pid claim behind"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/reused-retire-src.child" "retire left the dead generation's poll-child record behind"
+kill -0 "$rr_stranger" 2>/dev/null || fail "retiring the source killed the stranger"
+kill -0 -"$rr_stranger" 2>/dev/null || fail "retiring the source signalled the stranger's process group"
+kill -KILL -"$rr_stranger" 2>/dev/null || true
+pass "retire releases a claim whose pid was provably reused without signalling the stranger"
+
+# The bound that keeps this from ever calling a live runner a stranger: a
+# process that predates the claim cannot be a reuse of the pid that wrote it,
+# whatever its identity string reads today. fm_pid_identity's lstart form is a
+# local-time rendering, so a runner read under another TZ than it claimed under
+# mismatches without any reuse, and that mismatch alone must preserve, never
+# relaunch beside the live runner. The stranger here started BEFORE the claim.
+stranger_group
+rp2_stranger=$stranger
+HRP2="$TMP_ROOT/hrp2"; new_home "$HRP2"
+RP2_TRIGGER="$TMP_ROOT/predates-trigger"
+RP2_LOG="$TMP_ROOT/predates-executions"
+pe_register "$HRP2" lavish predates-src -- "$RACE_BLOCKER" "$RP2_LOG" "$RP2_TRIGGER" >/dev/null
+write_stranger_claim "$HRP2" predates-src "$rp2_stranger" "$rp_gone_identity" predates-token
+write_child_record predates-src predates-token "$rp_gone" "$rp_gone_start"
+rp2_out=$(pe "$HRP2" reconcile)
+assert_contains "$rp2_out" "started=0" \
+  "a live pid that predates the claim was treated as a reuse: $rp2_out"
+assert_contains "$rp2_out" "uncertain=1" \
+  "reconcile did not report the claim it could not settle: $rp2_out"
+sleep 0.3
+assert_absent "$RP2_LOG" "a replacement source ran beside a pid that predates the claim"
+[ "$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/predates-src.claim")" = "$rp2_stranger" ] \
+  || fail "the claim of an unproved reuse was replaced"
+[ "$(stranded_wake_count "$HRP2" predates-src)" = 1 ] \
+  || fail "an unproved reuse was not announced as a strand: $rp2_out"
+assert_contains "$(stranded_wake_payloads "$HRP2" predates-src)" "bin/fm-procevent.sh start predates-src" \
+  "the unproved-reuse strand does not name the command that clears it"
+kill -KILL -"$rp2_stranger" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$rp2_stranger" 2>/dev/null || break; sleep 0.1; done
+kill -KILL -"$rp_stranger" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$rp_stranger" 2>/dev/null || break; sleep 0.1; done
+rp2_after=$(pe "$HRP2" reconcile)
+assert_contains "$rp2_after" "started=1" \
+  "the source was not reclaimed once the unidentified group emptied: $rp2_after"
+wait_for "$RP2_LOG" || fail "the replacement source never ran after the group emptied"
+: > "$RP2_TRIGGER"
+pe "$HRP2" retire predates-src >/dev/null
+pass "a live pid that predates the claim is never read as a reuse"
+
+# --- a live poll child is the generation, whatever its group or image ---------
+# The mirror error: reading a live child as dead and starting a second poller
+# beside it. The runner records the child it spawned by pid and start time, so
+# the child is recognized even after it has left the runner's process group
+# and exec'd into another program - the two signals are driven apart here on
+# purpose: the process image the runner spawned is gone while the recorded
+# start identity still matches, because the record keys the child on its pid
+# plus its process start time, not its program image. With the runner's whole
+# group stopped and the child alive on its own, the generation is not gone,
+# and the wake says which child is still polling.
+REGROUP="$TMP_ROOT/regroup.sh"
+cat > "$REGROUP" <<'SH'
+#!/usr/bin/env bash
+exec perl -e 'setpgrp(0, 0) or exit 1; exec @ARGV; exit 127' "$@"
+SH
+chmod +x "$REGROUP"
+HRG="$TMP_ROOT/hrg"; new_home "$HRG"
+RG_TRIGGER="$TMP_ROOT/regroup-trigger"
+RG_LOG="$TMP_ROOT/regroup-executions"
+pe_register "$HRG" lavish regroup-src -- "$REGROUP" "$RACE_BLOCKER" "$RG_LOG" "$RG_TRIGGER" >/dev/null
+pe "$HRG" reconcile >/dev/null
+rg_claim="$FM_PROCEVENT_CLAIM_ROOT/regroup-src.claim"
+rg_child_record="$FM_PROCEVENT_CLAIM_ROOT/regroup-src.child"
+wait_for "$rg_claim" || fail "regroup fixture never claimed its source"
+wait_for "$RG_LOG" || fail "regroup fixture source never started"
+wait_for "$rg_child_record" || fail "the runner recorded no poll child beside its claim"
+rg_leader=$(sed -n '2p' "$rg_claim")
+[ "$(sed -n '1p' "$rg_child_record")" = "$(sed -n '3p' "$rg_claim")" ] \
+  || fail "the poll-child record is not bound to the claim's generation"
+rg_child=$(sed -n '2p' "$rg_child_record")
+rg_child_start=$(sed -n '3p' "$rg_child_record")
+case "$rg_child" in ''|*[!0-9]*) fail "the poll-child record names no pid: $rg_child" ;; esac
+[ -n "$rg_child_start" ] || fail "the poll-child record carries no start identity"
+for _ in $(seq 1 50); do
+  case "$(ps -o args= -p "$rg_child" 2>/dev/null)" in *"$RACE_BLOCKER"*) break ;; esac
+  sleep 0.1
+done
+rg_image_now=$(ps -o args= -p "$rg_child" 2>/dev/null) \
+  || fail "could not read the exec'd child's process image"
+case "$rg_image_now" in
+  *"$REGROUP"*|*perl*) fail "fixture invalid: the child has not exec'd away from the spawned image: $rg_image_now" ;;
+  *"$RACE_BLOCKER"*) ;;
+  *) fail "fixture invalid: the child is not the blocker: $rg_image_now" ;;
+esac
+[ "$(claim_lib fm_pid_start_identity "$rg_child")" = "$rg_child_start" ] \
+  || fail "the recorded start identity did not survive the child's exec"
+[ "$(ps -o pgid= -p "$rg_child" | tr -d '[:space:]')" = "$rg_child" ] \
+  || fail "fixture invalid: the child did not leave the runner's process group"
+kill -KILL -"$rg_leader" 2>/dev/null || fail "could not stop the runner's process group"
+for _ in $(seq 1 50); do kill -0 -"$rg_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 -"$rg_leader" 2>/dev/null && fail "the runner's process group survived SIGKILL"
+kill -0 "$rg_child" 2>/dev/null || fail "fixture invalid: the regrouped child did not survive its runner"
+rg_out=$(pe "$HRG" reconcile)
+assert_contains "$rg_out" "started=0" \
+  "reconcile started a second poller beside the live poll child: $rg_out"
+assert_contains "$rg_out" "uncertain=1" \
+  "reconcile did not report the claim it preserved: $rg_out"
+sleep 0.3
+[ "$(wc -l < "$RG_LOG" | tr -d ' ')" = 1 ] \
+  || fail "a second source ran beside the live poll child: $(cat "$RG_LOG")"
+[ "$(sed -n '2p' "$rg_claim")" = "$rg_leader" ] \
+  || fail "the live poll child's claim was replaced"
+kill -0 "$rg_child" 2>/dev/null || fail "reconcile killed the live poll child"
+[ "$(stranded_wake_count "$HRG" regroup-src)" = 1 ] \
+  || fail "the preserved generation was not announced: $rg_out"
+rg_wake=$(stranded_wake_payloads "$HRG" regroup-src)
+assert_contains "$rg_wake" "pid $rg_child" \
+  "the strand does not name the poll child it found alive: $rg_wake"
+assert_contains "$rg_wake" "still alive" \
+  "the strand does not say the poll child is alive: $rg_wake"
+[ "$(pe "$HRG" list | awk '$1 == "regroup-src" { print $3 }')" = orphaned ] \
+  || fail "a claim held by a live poll child is not listed as orphaned"
+# Once the child is gone, the same claim reads as gone and the next cycle
+# reclaims it on its own, which is what the wake promised.
+kill -KILL "$rg_child" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 "$rg_child" 2>/dev/null || break; sleep 0.1; done
+rg_after=$(pe "$HRG" reconcile)
+assert_contains "$rg_after" "started=1" \
+  "the source was not reclaimed after its poll child ended: $rg_after"
+wait_for_lines "$RG_LOG" 2 || fail "no replacement ran after the poll child ended"
+: > "$RG_TRIGGER"
+pe "$HRG" retire regroup-src >/dev/null
+pass "a live poll child keeps its generation owned after its group is gone and its image changed"
+
+# --- members nobody can identify still preserve --------------------------
+# Both the runner and its recorded poll child are gone, yet a group with the
+# runner's number has members: something the child spawned, or a stranger's
+# leftovers after their own leader exited. Nothing observable tells those
+# apart, so the claim stays preserved and the wake says exactly that, naming
+# the check a human makes rather than a command.
+perl -e 'setpgrp(0, 0) or exit 1; my $pid = fork; exit 0 if $pid; exec "sleep", "300"' & rp3_leader=$!
+wait "$rp3_leader" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$rp3_leader" 2>/dev/null && break; sleep 0.1; done
+kill -0 -"$rp3_leader" 2>/dev/null || fail "could not start a leaderless stranger group"
+kill -0 "$rp3_leader" 2>/dev/null && fail "fixture invalid: the stranger leader is still alive"
+HRP3="$TMP_ROOT/hrp3"; new_home "$HRP3"
+RP3_TRIGGER="$TMP_ROOT/unidentified-trigger"
+RP3_LOG="$TMP_ROOT/unidentified-executions"
+pe_register "$HRP3" lavish unidentified-src -- "$RACE_BLOCKER" "$RP3_LOG" "$RP3_TRIGGER" >/dev/null
+write_stranger_claim "$HRP3" unidentified-src "$rp3_leader" "$rp_gone_identity" unidentified-token
+write_child_record unidentified-src unidentified-token "$rp_gone" "$rp_gone_start"
+touch -t 202001010000 "$FM_PROCEVENT_CLAIM_ROOT/unidentified-src.claim"
+rp3_out=$(pe "$HRP3" reconcile)
+assert_contains "$rp3_out" "started=0" \
+  "reconcile relaunched beside a group it could not identify: $rp3_out"
+assert_contains "$rp3_out" "uncertain=1" \
+  "reconcile did not report the claim it could not settle: $rp3_out"
+sleep 0.3
+assert_absent "$RP3_LOG" "a replacement source ran beside an unidentified group"
+kill -0 -"$rp3_leader" 2>/dev/null || fail "reconcile signalled a group it could not identify"
+rp3_wake=$(stranded_wake_payloads "$HRP3" unidentified-src)
+assert_contains "$rp3_wake" "cannot identify" \
+  "the strand does not say the members are unidentified: $rp3_wake"
+assert_contains "$rp3_wake" "polling" \
+  "the strand does not name the check a human makes: $rp3_wake"
+case "$rp3_wake" in
+  *"start unidentified-src"*) fail "the unidentified strand names start as clearing it: $rp3_wake" ;;
+esac
+kill -KILL -"$rp3_leader" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$rp3_leader" 2>/dev/null || break; sleep 0.1; done
+rp3_after=$(pe "$HRP3" reconcile)
+assert_contains "$rp3_after" "started=1" \
+  "the source was not reclaimed once the unidentified group emptied: $rp3_after"
+wait_for "$RP3_LOG" || fail "no replacement ran after the unidentified group emptied"
+: > "$RP3_TRIGGER"
+pe "$HRP3" retire unidentified-src >/dev/null
+pass "a group whose members nobody can identify preserves the claim until it empties"
 
 # --- a launch that cannot confirm is announced once per failure episode ------
 # `bin/fm-watch.sh` discards reconcile's `failed=` count and exit status, so a
