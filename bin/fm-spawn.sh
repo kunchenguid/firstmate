@@ -194,7 +194,19 @@
 #   out as a transient rather than adopted and then refused, so a home that is
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   naming the last path seen and why it was rejected, and carrying whatever the
+#   pool inspection or the task terminal itself can say about the cause.
+#   Those backends preflight the treehouse pool first, under the shared
+#   allocation lock and before any endpoint, worktree, or record exists: a pool
+#   whose worktrees are all in use or dirty at max_trees, or a treehouse.toml
+#   treehouse will not load, refuses there with the slot breakdown, per blocked
+#   slot either its unlanded commits or the commands that preserve and then
+#   clear its leftovers, and the exact way to raise the cap
+#   (bin/fm-treehouse-pool-lib.sh). Nothing is ever cleared for you. An
+#   inspection that cannot settle the question launches as before. A
+#   `treehouse get` that fails outright in the pane is reported as soon as it
+#   does, with its exit status and cause, rather than being waited out.
+#   FM_SPAWN_WORKTREE_WAIT overrides that wait's length in seconds (default 60).
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -500,6 +512,15 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-treehouse-pool-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-pool-lib.sh"
+# Seconds to wait for the task pane to settle in its isolated copy. This is the
+# backstop for a pane that hangs with nothing to report; a `treehouse get` that
+# fails outright is reported as soon as it does, without spending this wait.
+SPAWN_WORKTREE_WAIT=${FM_SPAWN_WORKTREE_WAIT:-60}
+case "$SPAWN_WORKTREE_WAIT" in
+  ''|*[!0-9]*|0) echo "error: FM_SPAWN_WORKTREE_WAIT must be a positive whole number of seconds, not '$SPAWN_WORKTREE_WAIT'" >&2; exit 1 ;;
+esac
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2515,6 +2536,22 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  # Pool preflight (bin/fm-treehouse-pool-lib.sh). The `treehouse get` that
+  # allocates this task's copy is typed into the task pane far below, where its
+  # exit status and diagnosis are unreachable, so a pool that cannot hand out a
+  # copy used to surface only as that wait's timeout. Establish it here instead,
+  # under the allocation lock and before any endpoint, worktree, or record
+  # exists, and refuse only on a proven cause the report names a remedy for.
+  # An inconclusive inspection launches as before and leaves that wait as the
+  # backstop, because a wrong refusal costs more than the wait it replaces.
+  fm_treehouse_pool_inspect "$PROJ_ABS"
+  case "$FM_TREEHOUSE_POOL_VERDICT" in
+    full|config)
+      echo "error: task $ID cannot be given an isolated copy of $PROJ_ABS, so it was not launched:" >&2
+      printf '%s\n' "$FM_TREEHOUSE_POOL_DETAIL" >&2
+      exit 1
+      ;;
+  esac
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
@@ -3230,6 +3267,38 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+# The marker a failing `treehouse get` prints into the task pane, split so the
+# shell's echo of the command that would print it cannot be mistaken for the
+# printed line itself. bin/fm-spawn.sh sends the command; nothing else reads it.
+SPAWN_TREEHOUSE_FAIL_PREFIX='FM_TREEHOUSE_GET_'
+
+# Echo the exit status a failing `treehouse get` reported and return 0, or
+# return 1 while it has not failed. A get that succeeded is still inside its
+# subshell and has printed no marker, so this stays silent for the whole wait.
+spawn_treehouse_get_exit_status() {
+  local line
+  line=$(fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
+    | grep -o "${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9][0-9]*" | tail -n 1) || true
+  [ -n "$line" ] || return 1
+  printf '%s\n' "${line##* }"
+}
+
+# What to tell the captain about a `treehouse get` that did not deliver a copy.
+# Prefer the pool inspection, which names the cause and the command that clears
+# it; fall back to treehouse's own words as the pane rendered them, so an
+# unrecognized failure still reports what the tool said rather than a guess.
+spawn_treehouse_get_diagnosis() {
+  fm_treehouse_pool_inspect "$PROJ_ABS"
+  if [ "$FM_TREEHOUSE_POOL_VERDICT" != available ] && [ -n "$FM_TREEHOUSE_POOL_DETAIL" ]; then
+    printf '%s\n' "$FM_TREEHOUSE_POOL_DETAIL"
+    return 0
+  fi
+  printf 'the pool reports a copy is obtainable, so this is what the task terminal last showed:\n'
+  fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
+    | grep -v "${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9]" | grep . | tail -n 12 \
+    | sed 's/^/  /'
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -3464,7 +3533,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # `treehouse get` opens a subshell the worker then lives in, so its streams
+  # cannot be redirected away from the pane without swallowing the worker's own.
+  # What CAN be read is the one thing a failing get leaves behind: it never
+  # opens that subshell, so the `||` branch runs immediately and prints a marker
+  # carrying the exit status. The marker is assembled from a format argument so
+  # the shell's echo of this very command line cannot itself match the search
+  # below. Its whole job is to turn a failure into a fast, explained refusal
+  # instead of a blind wait for a directory change that will never come.
+  spawn_send_text_line "$WT_TARGET" \
+    "treehouse get || printf '$SPAWN_TREEHOUSE_FAIL_PREFIX%s %s\\n' FAILED \"\$?\""
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3501,7 +3579,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$SPAWN_WORKTREE_WAIT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -3516,10 +3594,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate=""
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
+    if get_status=$(spawn_treehouse_get_exit_status); then
+      echo "error: treehouse get could not hand task $ID an isolated copy of $PROJ_ABS; it exited $get_status:" >&2
+      printf '%s\n' "$(spawn_treehouse_get_diagnosis)" >&2
+      echo "inspect window $T" >&2
+      exit 1
+    fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${SPAWN_WORKTREE_WAIT}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    printf '%s\n' "$(spawn_treehouse_get_diagnosis)" >&2
     exit 1
   fi
 
