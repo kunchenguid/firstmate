@@ -5,6 +5,9 @@
 # clones, child-worktree protection, and backlog-handoff safety. The happy-path
 # operator flow lives in fm-secondmate-lifecycle-e2e.test.sh; this file keeps the
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
+#
+# docs/remote-secondmates.md#provision-a-route owns the origin-diagnostic
+# safety contract and its scope; the credential fixtures below exercise it.
 set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
@@ -19,6 +22,36 @@ file_mode() {
   else
     stat -c %a "$1"
   fi
+}
+
+# A MANIFESTLY FALSE credential, deliberately not shaped like any real token, on
+# a reserved-TLD host that resolves nowhere. The origin validator accepts a
+# user:pass@host authority, so this is the supported configuration whose secret
+# an ordinary seeding error must never repeat.
+LEAK_USER=fm-not-a-real-user
+LEAK_SECRET=fm-not-a-real-secret
+LEAK_HOST=not-a-real-host.invalid
+LEAK_PATH=/not-a-real-path.git
+# Accepted by bin/fm-project-origin-lib.sh, so it reaches the mismatch and
+# missing-origin errors that compare two clones.
+LEAK_ORIGIN="https://$LEAK_USER:$LEAK_SECRET@$LEAK_HOST$LEAK_PATH"
+# The same credential on an origin the validator REFUSES - the port is not
+# numeric - so it reaches the rejection errors instead.
+LEAK_ORIGIN_REFUSED="https://$LEAK_USER:$LEAK_SECRET@$LEAK_HOST:notaport$LEAK_PATH"
+
+# Every part of the origin separately, because a message that dropped only the
+# password would still hand over the account name and the host it opens.
+assert_no_origin_leak() { # <what> <file>...
+  local what=$1 part file
+  shift
+  for file in "$@"; do
+    [ -f "$file" ] || fail "$what: expected captured output at $file"
+    for part in "$LEAK_USER" "$LEAK_SECRET" "$LEAK_HOST" "$LEAK_PATH"; do
+      if grep -F -- "$part" "$file" >/dev/null; then
+        fail "$what repeated \"$part\" from a credential-bearing origin: $(cat "$file")"
+      fi
+    done
+  done
 }
 
 install_fake_process_event_sweep() {
@@ -1094,13 +1127,17 @@ test_home_seed_refuses_remote_backed_project_without_origin() {
 }
 
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
-  local home subhome subhome_abs err expected
+  local home home_abs subhome subhome_abs err out
   home="$TMP_ROOT/wrong-origin-home"
   subhome="$TMP_ROOT/wrong-origin-subhome"
   err="$TMP_ROOT/wrong-origin.err"
+  out="$TMP_ROOT/wrong-origin.out"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
-  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/wrong-alpha.git"
+  # The source origin carries a credential; the seeded clone points somewhere
+  # else, which is exactly the misconfiguration an operator meets and pastes.
+  git -C "$home/projects/alpha" remote add origin "$LEAK_ORIGIN"
+  home_abs=$(cd "$home" && pwd -P)
   git clone --quiet "$ROOT" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   mkdir -p "$subhome/projects"
@@ -1108,15 +1145,84 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for wrong-origin seed test"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >"$out" 2>"$err"; then
     fail "seed accepted existing remote-backed project with wrong origin"
   fi
-  expected=$(git -C "$home/projects/alpha" remote get-url origin)
-  grep -F "seeded project alpha at $subhome_abs/projects/alpha has origin" "$err" >/dev/null \
-    || fail "seed did not identify wrong origin for existing remote-backed project"
-  grep -F "expected $expected" "$err" >/dev/null \
-    || fail "seed did not report expected origin for existing remote-backed project"
-  pass "remote-backed subhome seeding validates existing destination origins"
+  grep -F "seeded project alpha at $subhome_abs/projects/alpha has a different origin than the source clone at $home_abs/projects/alpha" "$err" >/dev/null \
+    || fail "seed did not name both clones of the origin mismatch: $(cat "$err")"
+  assert_no_origin_leak "the origin-mismatch error" "$err" "$out"
+  pass "remote-backed subhome seeding names the mismatched clones without repeating their origins"
+}
+
+test_home_seed_refuses_seeded_project_without_origin_without_printing_source() {
+  local home home_abs subhome subhome_abs err out
+  home="$TMP_ROOT/missing-dst-origin-home"
+  subhome="$TMP_ROOT/missing-dst-origin-subhome"
+  err="$TMP_ROOT/missing-dst-origin.err"
+  out="$TMP_ROOT/missing-dst-origin.out"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  git -C "$home/projects/alpha" remote add origin "$LEAK_ORIGIN"
+  home_abs=$(cd "$home" && pwd -P)
+  git clone --quiet "$ROOT" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  mkdir -p "$subhome/projects"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  # A seeded clone that has lost its origin entirely: the error used to answer
+  # "expected <source origin>" with the credential-bearing URL spelled out.
+  git -C "$subhome/projects/alpha" remote remove origin
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for missing destination origin test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >"$out" 2>"$err"; then
+    fail "seed accepted a seeded project with no origin remote"
+  fi
+  grep -F "seeded project alpha at $subhome_abs/projects/alpha has no origin remote; it must match the origin of the source clone at $home_abs/projects/alpha" "$err" >/dev/null \
+    || fail "seed did not point at the source clone for the missing destination origin: $(cat "$err")"
+  assert_no_origin_leak "the missing-destination-origin error" "$err" "$out"
+  pass "seeding points at the source clone instead of printing its origin when the seeded clone has none"
+}
+
+test_remote_home_seed_refuses_supplied_origin_without_printing_it() {
+  local home err out
+  home="$TMP_ROOT/remote-supplied-origin-home"
+  err="$TMP_ROOT/remote-supplied-origin.err"
+  out="$TMP_ROOT/remote-supplied-origin.out"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-remote-home-seed.sh" \
+    design remote-mac /srv/fm-root /srv/fm-home "alpha=$LEAK_ORIGIN_REFUSED" >"$out" 2>"$err"; then
+    fail "remote seeding accepted an origin the validator refuses"
+  fi
+  grep -F 'project alpha origin is not an accepted clone URL; check the origin you passed as alpha=<origin-url>' "$err" >/dev/null \
+    || fail "remote seeding did not point at the refused command-line argument: $(cat "$err")"
+  assert_no_origin_leak "the refused command-line origin" "$err" "$out"
+  pass "remote seeding names the refused command-line argument without echoing the origin back"
+}
+
+test_remote_home_seed_refuses_clone_origin_without_printing_it() {
+  local home home_abs err out
+  home="$TMP_ROOT/remote-clone-origin-home"
+  err="$TMP_ROOT/remote-clone-origin.err"
+  out="$TMP_ROOT/remote-clone-origin.out"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  # No origin on the command line, so the refused value is the one this home's
+  # own clone carries and the operator never typed.
+  git -C "$home/projects/alpha" remote add origin "$LEAK_ORIGIN_REFUSED"
+  home_abs=$(cd "$home" && pwd -P)
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for remote clone-origin test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-remote-home-seed.sh" \
+    design remote-mac /srv/fm-root /srv/fm-home alpha >"$out" 2>"$err"; then
+    fail "remote seeding accepted a clone origin the validator refuses"
+  fi
+  grep -F "project alpha origin is not an accepted clone URL; inspect the origin of the clone at $home_abs/projects/alpha" "$err" >/dev/null \
+    || fail "remote seeding did not name the clone that supplied the refused origin: $(cat "$err")"
+  assert_no_origin_leak "the refused clone origin" "$err" "$out"
+  pass "remote seeding names the clone that supplied a refused origin without printing it"
 }
 
 test_home_seed_resolves_relative_source_origins() {
@@ -2990,6 +3096,9 @@ test_home_seed_refuses_reassigning_existing_id_to_different_home
 test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
+test_home_seed_refuses_seeded_project_without_origin_without_printing_source
+test_remote_home_seed_refuses_supplied_origin_without_printing_it
+test_remote_home_seed_refuses_clone_origin_without_printing_it
 test_home_seed_resolves_relative_source_origins
 test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project

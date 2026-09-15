@@ -137,6 +137,12 @@ A bare `<project>` is still accepted when this machine happens to have `projects
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
 The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
 
+An accepted origin may carry a `user:pass@host` authority, so errors for an existing seeded clone with a missing or mismatched origin in `bin/fm-home-seed.sh` and origin-validation errors in `bin/fm-remote-home-seed.sh` name clones or arguments instead of printing the URL.
+To compare mismatched origins, run `git remote get-url origin` in both named clones; when the seeded clone has no origin, inspect the named source clone.
+For a rejected origin, inspect the supplied `<project>=<origin-url>` argument or the named clone, as directed by the error.
+This guarantee covers those diagnostics only: Git subprocess output and receiving-host validation in [`bin/fm-remote-home-provision.sh`](../bin/fm-remote-home-provision.sh) can still include origin URLs.
+The credential-bearing origin cases in [`tests/fm-secondmate-safety.test.sh`](../tests/fm-secondmate-safety.test.sh) cover these four diagnostics.
+
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
 In the primary home, its durable registration effects are limited to that route and the charter brief under `data/<id>`; launch records are created only when the secondmate is launched.
 Readiness starts with a read-only check; when that check reports a gap, it runs `--fix` and then a second read-only check whose verdict decides, so the operator never has to run the repair by hand and a repair is never trusted on its own word.

@@ -380,10 +380,12 @@ source_origin_url() {
   normalize_origin_url "$src" "$url"
 }
 
+# See docs/remote-secondmates.md#provision-a-route for the origin-diagnostic safety contract.
+# Pass the source clone path here so diagnostics do not need its origin URL.
 seeded_origin_url() {
-  local project=$1 dst=$2 expected=$3 url
+  local project=$1 dst=$2 src=$3 url
   url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
-  [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $expected" >&2; return 1; }
+  [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; it must match the origin of the source clone at $src" >&2; return 1; }
   normalize_origin_url "$dst" "$url"
 }
 
@@ -473,9 +475,9 @@ EOF
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
     url=$(source_origin_url "$project" "$mode" "$src") || return 1
-    dst_url=$(seeded_origin_url "$project" "$dst" "$url") || return 1
+    dst_url=$(seeded_origin_url "$project" "$dst" "$src") || return 1
     [ "$dst_url" = "$url" ] || {
-      echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
+      echo "error: seeded project $project at $dst has a different origin than the source clone at $src; read each clone's \"git remote get-url origin\" to compare them" >&2
       return 1
     }
     return 0
