@@ -36,8 +36,22 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
 # liveness questions are decided by the process table alone.
+#
+# fm_windows_env branches these functions on the real `uname -s`, so a case
+# that means to drive the POSIX `ps`-based path must not accidentally take the
+# Windows path merely because this suite happens to run ON Windows/MSYS. A
+# default non-Windows `uname` stub is dropped into the fakebin unless the case
+# already supplied its own (fm_windows_fakebin does, to drive the Windows
+# path instead), so every existing POSIX case stays host-independent.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
+  if [ ! -e "$fakebin/uname" ]; then
+    cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+    chmod +x "$fakebin/uname"
+  fi
   PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
@@ -404,11 +418,165 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# --- Windows (MSYS/Git Bash/Cygwin) unit layer --------------------------------
+#
+# Git Bash/MSYS `ps` cannot see across the POSIX/Windows process boundary, so
+# the Windows branch asks Win32_Process via a fake powershell.exe instead of
+# `ps`. A fake `uname` puts the library in Windows mode from any host, and a
+# fake `ps` answers only `-o winpid=` (the /proc/<pid>/winpid fallback this
+# suite's non-Windows host cannot exercise directly).
+
+fm_windows_fakebin() {  # <dir> -> echoes fakebin, always reporting Windows
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "-s" ] && printf 'MINGW64_NT-10.0-26200\n' || printf 'MINGW64\n'
+SH
+  chmod +x "$fakebin/uname"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$field" = "winpid=" ] && printf '%s\n' "${FM_TEST_OWN_WINPID:-5000}"
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s' "$fakebin"
+}
+
+# Fake powershell.exe: the ancestry walk's -Command script is the only one that
+# mentions ParentProcessId, so that substring tells the two call shapes apart
+# without parsing PowerShell. Scenario is read from FM_TEST_WIN_ROWS (ancestry:
+# tab-separated "pid|name|cmdline" triples joined by ';') and FM_TEST_WIN_ALIVE
+# (liveness: "name|cmdline", empty meaning no such process).
+fm_windows_fake_powershell() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+set -u
+argv="$*"
+case "$argv" in
+  *ParentProcessId*)
+    IFS=';' read -r -a rows <<< "${FM_TEST_WIN_ROWS:-}"
+    for row in "${rows[@]}"; do
+      IFS='|' read -r rpid rname rcmd <<< "$row"
+      printf '%s\t%s\t%s\n' "$rpid" "$rname" "$rcmd"
+    done
+    ;;
+  *)
+    [ -n "${FM_TEST_WIN_ALIVE:-}" ] || exit 0
+    IFS='|' read -r aname acmd <<< "$FM_TEST_WIN_ALIVE"
+    printf '%s\t%s\n' "$aname" "$acmd"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/powershell.exe"
+}
+
+test_windows_ancestry_finds_claude_past_exe_suffixes() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-basic"
+  fakebin=$(fm_windows_fakebin "$dir")
+  fm_windows_fake_powershell "$fakebin"
+  mkdir -p "$dir/state"
+
+  got=$(FM_TEST_WIN_ROWS='5000|bash.exe|/usr/bin/bash script;4000|claude.exe|C:\claude.exe --resume' \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Windows ancestry did not find claude.exe past its .exe suffix"
+  [ "$got" = 4000 ] || fail "Windows ancestry resolved '$got', expected claude.exe's pid 4000"
+  pass "session-lock windows: the Win32_Process walk finds claude.exe and normalizes its .exe suffix"
+}
+
+test_windows_ancestry_stops_at_a_gap() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-gap"
+  fakebin=$(fm_windows_fakebin "$dir")
+  fm_windows_fake_powershell "$fakebin"
+  mkdir -p "$dir/state"
+
+  # An inner claude.exe match sits below an unrelated bash.exe gap, itself
+  # below a second, unrelated claude.exe further up. Only the inner match is
+  # this session's contiguous run; the outer one must never be reached.
+  got=$(FM_TEST_WIN_ROWS='4000|claude.exe|C:\claude.exe;4500|bash.exe|bash;5000|claude.exe|C:\claude.exe --other' \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Windows ancestry did not resolve the inner contiguous claude.exe run"
+  [ "$got" = 4000 ] || fail "Windows ancestry crossed a non-harness gap, resolved '$got' instead of 4000"
+  pass "session-lock windows: ownership stops at the first non-harness gap, same as the POSIX walk"
+}
+
+test_windows_pid_alive_uses_win32_process() {
+  local dir fakebin
+  dir="$TMP_ROOT/windows-alive"
+  fakebin=$(fm_windows_fakebin "$dir")
+  fm_windows_fake_powershell "$fakebin"
+  mkdir -p "$dir/state"
+
+  FM_TEST_WIN_ALIVE='claude.exe|C:\claude.exe --resume' \
+    lib_eval "$fakebin" 'fm_harness_pid_alive 4000' \
+    || fail "a live claude.exe Windows pid was not recognized as a harness"
+  if FM_TEST_WIN_ALIVE='' lib_eval "$fakebin" 'fm_harness_pid_alive 9999'; then
+    fail "a Windows pid with no such process was read as a live harness"
+  fi
+  if FM_TEST_WIN_ALIVE='notepad.exe|C:\notepad.exe' lib_eval "$fakebin" 'fm_harness_pid_alive 4000'; then
+    fail "a live non-harness Windows process was read as a harness"
+  fi
+  pass "session-lock windows: harness liveness is decided from Win32_Process, not MSYS ps/kill"
+}
+
+test_windows_ancestry_falls_back_without_powershell() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-no-powershell"
+  fakebin=$(fm_windows_fakebin "$dir")
+  # No powershell.exe stub, and PATH is exactly this fakebin plus the minimal
+  # system dirs the fixture shell itself needs - never the real host PATH -
+  # so this stays host-independent even on a real Windows/MSYS dev machine.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  777:comm=) printf '%s\n' claude ;;
+  777:args=) printf '%s\n' claude ;;
+  777:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 777 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  mkdir -p "$dir/state"
+
+  got=$(PATH="$fakebin:/usr/bin:/bin" bash -c "
+    . \"$LIB\"
+    kill() { return 0; }
+    fm_harness_ancestry_pid
+  ") || fail "the legacy ps-based walk did not run when powershell.exe was unavailable"
+  [ "$got" = 777 ] || fail "fallback ancestry resolved '$got', expected the ps-walk's harness pid 777"
+  pass "session-lock windows: the ps-based walk still runs as a fallback when powershell.exe is unavailable"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_ancestry_finds_claude_past_exe_suffixes
+test_windows_ancestry_stops_at_a_gap
+test_windows_pid_alive_uses_win32_process
+test_windows_ancestry_falls_back_without_powershell
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

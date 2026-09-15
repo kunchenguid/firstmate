@@ -90,6 +90,86 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Git Bash/MSYS/Cygwin's own `ps` only sees the POSIX-emulation process tree it
+# manages itself. A harness that launched this shell as an ordinary Windows
+# child process (for example Claude Code's own host process running bash.exe as
+# a tool) sits outside that tree entirely, and `ps` reports a synthetic ppid of
+# 1 the moment the walk below would need to cross that boundary - so it can
+# never find the harness on this platform, no matter how many hops it is given.
+# Ask Windows directly instead, keyed from this shell's own real Windows pid
+# (exposed at /proc/<pid>/winpid under MSYS and Cygwin).
+fm_windows_env() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print this shell's own real Windows pid, or return 1.
+fm_windows_own_pid() {
+  local pid
+  if [ -r "/proc/$$/winpid" ]; then
+    pid=$(cat "/proc/$$/winpid" 2>/dev/null) || pid=
+    case "$pid" in [0-9]*) printf '%s' "$pid"; return 0 ;; esac
+  fi
+  pid=$(ps -p "$$" -o winpid= 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$pid" in [0-9]*) printf '%s' "$pid"; return 0 ;; esac
+  return 1
+}
+
+# Print "<pid>\t<name>\t<commandline>" for real Windows pids from $1 up through
+# its parents (16 hops), one per line, innermost first - the same shape
+# fm_harness_ancestry_pids walks below, sourced from Win32_Process instead of
+# `ps` so it sees the real ancestry regardless of the POSIX/Windows boundary.
+# One powershell.exe per call, the whole chain in one round trip.
+fm_windows_ancestry_rows() {  # <starting real windows pid>
+  local start=$1
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  command -v powershell.exe >/dev/null 2>&1 || return 1
+  powershell.exe -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "SilentlyContinue"
+    # $fmPid, never $pid: PowerShell reserves $PID (case-insensitive) as a
+    # read-only automatic variable naming THIS powershell.exe process, so
+    # assigning to $pid silently fails under SilentlyContinue and the walk
+    # would just keep re-querying its own process instead of climbing.
+    $fmPid = '"$start"'
+    for ($i = 0; $i -lt 16; $i++) {
+      $p = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $fmPid)
+      if (-not $p) { break }
+      Write-Output ("$($p.ProcessId)`t$($p.Name)`t$($p.CommandLine)")
+      if (-not $p.ParentProcessId -or $p.ParentProcessId -eq $fmPid) { break }
+      $fmPid = $p.ParentProcessId
+    }
+  ' 2>/dev/null
+}
+
+# Windows counterpart of the ancestry walk below: same contiguous-run and
+# Claude-extends contract, fed by fm_windows_ancestry_rows instead of `ps`.
+# Win32_Process names carry a trailing .exe that the shared classifier's exact
+# harness-name patterns (^pi$, ^omp$, ...) do not expect, so it is stripped
+# before matching.
+fm_harness_ancestry_pids_windows() {
+  local start rows pid comm args extending=0 printed=0
+  start=$(fm_windows_own_pid) || return 1
+  rows=$(fm_windows_ancestry_rows "$start") || return 1
+  [ -n "$rows" ] || return 1
+  while IFS=$'\t' read -r pid comm args; do
+    [ -n "$pid" ] || continue
+    comm=${comm%.[Ee][Xx][Ee]}
+    if fm_harness_process_matches "$comm" "$args"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done <<EOF
+$rows
+EOF
+  [ "$printed" -eq 1 ]
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -108,7 +188,17 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# On Windows (MSYS/Git Bash/Cygwin) this defers to the Win32_Process-based walk
+# above, which alone can see across the POSIX/Windows process boundary; it
+# falls back to the `ps`-based walk below only if that native path itself could
+# not run (own pid unreadable, or no powershell.exe on PATH), never merely
+# because it found no harness match.
 fm_harness_ancestry_pids() {
+  if fm_windows_env; then
+    fm_harness_ancestry_pids_windows && return 0
+    fm_windows_own_pid >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1 && return 1
+  fi
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -151,8 +241,29 @@ EOF
 }
 
 # True if $1 is a live process that looks like a verified harness.
+#
+# On Windows a lock pid is a real Windows pid (see fm_harness_ancestry_pids
+# above), which `kill -0`/`ps -p` cannot resolve - MSYS/Cygwin only recognizes
+# pids in its own POSIX-emulation numbering, never arbitrary Windows pids - so
+# this asks Win32_Process directly instead.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm args row
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if fm_windows_env; then
+    command -v powershell.exe >/dev/null 2>&1 || return 1
+    row=$(powershell.exe -NoProfile -NonInteractive -Command '
+      $ErrorActionPreference = "SilentlyContinue"
+      $p = Get-CimInstance Win32_Process -Filter ("ProcessId=" + '"$pid"')
+      if ($p) { Write-Output ("$($p.Name)`t$($p.CommandLine)") }
+    ' 2>/dev/null) || return 1
+    [ -n "$row" ] || return 1
+    IFS=$'\t' read -r comm args <<EOF
+$row
+EOF
+    comm=${comm%.[Ee][Xx][Ee]}
+    fm_harness_process_matches "$comm" "$args"
+    return $?
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
