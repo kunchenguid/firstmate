@@ -862,16 +862,20 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # without a scoped declaration keep the timestamp body. Shared by the
 # declared-pause absorb and the worktree-write deferral so the two cadences cannot
 # drift apart; each caller owns its own marker and reason.
-# Returns without waking while either the absorb or the throttle is inside the
-# window; wake() itself exits the cycle, exactly as it does inline. An optional
-# <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
-# declared `until` time that has just passed re-surface at once), while the
-# throttle keeps the cadence between repeats.
+# Returns without waking while the absorb is younger than <min-age>, regardless
+# of scope. A throttle inside the cadence also suppresses the wake, but only for
+# the same declaration or an unscoped caller: a replacement reaches its own
+# <min-age> instead of waiting out the previous declaration's throttle.
+# An optional <min-age> defaults to PAUSE_RESURFACE_SECS; 0 lets a declared `until`
+# time that has just passed re-surface at once, while the throttle keeps the
+# cadence between repeats. wake() itself exits the cycle, exactly as it does inline.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
+  # Keep the age gate outside the scope check: the replacement's status append
+  # already woke firstmate, so an early recheck here would duplicate that wake.
+  [ "$age" -ge "$min_age" ] || return 0
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -995,13 +999,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
+  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  last=$(last_status_line "$statusf")
+  # This read order is load-bearing: taking mtime last means a concurrent append
+  # can pair an old declaration only with a fresher age, never the reverse.
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
   age=$(( now - mtime ))
-  last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
