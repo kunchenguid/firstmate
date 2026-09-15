@@ -996,6 +996,8 @@ pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without befor
 # acknowledgement tools. Only the provider's synthetic responses are scripted:
 # first ignore two requests, then perform an idempotent private marker action.
 # A newer outcome must reach that action without any intervening user prompt.
+# Optional FM_PI_BRANCH_PROCESSING_EVIDENCE names a JSON output file for the
+# synthetic provider transcript and persisted outcome/action checkpoints.
 processinghome="$TMP_ROOT/processing-home"
 processingdir="$TMP_ROOT/processing-agent"
 mkdir -p "$processinghome/state" "$processinghome/config" "$processingdir"
@@ -1018,6 +1020,14 @@ writeFileSync(`${home}/state/probe.meta`, `project=${home}/projects/probe\nwindo
 writeFileSync(`${home}/state/probe.status`, "working: synthetic test\n");
 const events = [];
 const requests = [];
+const checkpoints = [];
+const checkpoint = (stage) => checkpoints.push({
+  stage,
+  processedThrough: Number(readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim()),
+  action: existsSync(`${home}/action`) ? readFileSync(`${home}/action`, "utf8") : null,
+  markerCalls,
+  ordinaryPrompts: events.filter((event) => event.type === "prompt").map((event) => event.text),
+});
 const bus = createEventBus();
 let branchCalls = 0;
 let mainCalls = 0;
@@ -1114,6 +1124,7 @@ if (!firstMain[0].messages.some((m) => m.role === "user" && textOf(m.content).in
 for (const request of firstMain.slice(1)) {
   if (!request.messages.some((m) => m.role === "user" && textOf(m.content).includes("[seq 1] probe: older action"))) throw new Error("custom request persisted but was absent at provider boundary");
 }
+checkpoint("older outcome ignored twice; no action or acknowledgement");
 await report(2);
 await waitFor(() => existsSync(`${home}/action`), "new outcome action WITHOUT captain input");
 await waitFor(() => readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() === "2", "explicit post-action acknowledgement");
@@ -1124,17 +1135,34 @@ const actionRequest = requests.filter((item) => !item.isBranch)[3];
 if (!actionRequest.messages.some((m) => textOf(m.content).includes("[seq 1]") && textOf(m.content).includes("[seq 2]"))) throw new Error("new request dropped old unprocessed action");
 const visible = session.sessionManager.getEntries().filter((entry) => entry.customType === "fm-branch-visible-outcome");
 if (visible.length !== 2) throw new Error("visible outcome loss or duplication");
+checkpoint("new outcome handled once with older outcome retained; no new captain prompt");
 // Prove the bounded passive recovery path uses the real before_agent_start
 // injection and reaches provider input too, without an auto-loop.
 await report(3);
 await waitFor(() => mainCalls === 8 && session.isIdle, "passive budget exhausted");
 await new Promise((resolve) => setTimeout(resolve, 200));
 if (mainCalls !== 8) throw new Error("exhausted passive request auto-looped");
+checkpoint("passive recovery budget exhausted without an automatic loop");
 await session.prompt("ordinary passive recovery input");
 const passiveRequest = requests.filter((item) => !item.isBranch)[8];
 if (!passiveRequest.messages.some((m) => textOf(m.content).includes("[seq 3] probe: passive recovery canary"))) throw new Error("passive request absent at provider boundary");
 if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== "3") throw new Error("passive recovery did not acknowledge explicitly");
 if (markerCalls !== 1) throw new Error("passive recovery duplicated the prior action");
+checkpoint("ordinary prompt delivered passive recovery and explicit acknowledgement");
+if (process.env.FM_PI_BRANCH_PROCESSING_EVIDENCE) {
+  writeFileSync(process.env.FM_PI_BRANCH_PROCESSING_EVIDENCE, JSON.stringify({
+    sdkVersion: JSON.parse(readFileSync(`${pkg}/package.json`, "utf8")).version,
+    transport: "In-process synthetic OpenAI-compatible responses; no network or real model evaluation",
+    checkpoints,
+    providerRequests: requests.map(({ isBranch, messages }) => ({
+      actor: isBranch ? "branch" : "main",
+      messages: messages.filter((message) => message.role !== "system"),
+    })),
+    events,
+    persistedOutcomes: readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    visibleOutcomes: session.sessionManager.getEntries().filter((entry) => entry.customType === "fm-branch-visible-outcome"),
+  }, null, 2) + "\n");
+}
 session.dispose();
 console.log("PROCESSING_OK provider-visible=ordinary,custom,passive keyed-retries=2 new-action=1 processed=3");
 process.exit(0);

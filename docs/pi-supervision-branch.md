@@ -9,7 +9,7 @@ Fleet supervision on the Pi primary harness runs on a second conversation - the 
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
-Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
+Captain-relevant branch outcomes reach the transcript and main's processing path under the [two-stage noise filter](#two-stage-noise-filter) contract below.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
 The supervision branch itself is Pi-only by construction:
@@ -111,12 +111,12 @@ Pi custom session entries persist in the transcript but do not enter model conte
 The store sequence is the idempotency key: reload after entry persistence but before cursor advancement finds the matching entry, avoids a duplicate, and advances the cursor; conflicting content for one sequence fails closed.
 Reconciliation runs at session start when that generation already owns the fleet lock and at the first post-lock `turn_end`, so a cold start that acquires the lock through the startup digest still delivers stored captain outcomes without waiting for another wake.
 Display is only half of a captain outcome; the other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
-After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`) listing each `[seq N] task: summary`, and that request opens exactly one main turn.
+After the visible entry exists and the read cursor has passed it, the extension groups every still-unprocessed captain row into one hidden, typed `fm-branch-process` request (kind `branch-outcome`) listing each `[seq N] task: summary`.
 Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed, which advances a processed marker that `bin/fm-branch-outcome.sh` keeps separately from the read cursor and never moves past it or backwards.
 A lower listed captain sequence is accepted only as a partial acknowledgement and leaves every newer captain sequence open.
-Nothing else advances that marker: an unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed, and the extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
+Nothing else advances that marker: an unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed, and the extension reconciles the current unprocessed sequence set at main run boundaries and session start under the pacing rules below.
 A presentation already handed to a run is not resent or widened; once that run settles, the extension presents the then-current sequence set.
-The first two presentations of a given sequence set open a turn of their own; after that the extension stages the request locally and injects it through Pi's `before_agent_start` on the next actual prompt rather than reserving a `nextTurn` queue slot.
+The first two presentations of a given sequence set trigger main processing, opening a turn when idle or joining the active run as a follow-up; after that the extension stages the request locally and injects it through Pi's `before_agent_start` on the next actual prompt rather than reserving a `nextTurn` queue slot.
 A staged request is not pending delivery and cannot suppress a newer outcome: changed sequence membership immediately restarts the triggered budget with all still-unprocessed rows, while a session replacement also starts that budget over.
 Repeatedly ignored requests with unchanged membership still wait for the next prompt after the two-attempt budget; this prevents an unbounded loop, not model noncompliance.
 Routine outcomes never enter this path and stay turn-free.
