@@ -729,10 +729,25 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
   local backend=$1
   shift
+  if [ "${7:-}" = humanlayer ]; then
+    local screen
+    . "$FM_BACKEND_LIB_DIR/fm-humanlayer-lib.sh"
+    fm_humanlayer_require_backend "$backend" || return 1
+    if ! screen=$(fm_humanlayer_capture "$backend" "$1" "${6:-}") ||
+      [ "$(printf '%s' "$screen" | fm_humanlayer_screen_state)" != idle ]; then
+      printf 'unknown'
+      return 1
+    fi
+  fi
   fm_backend_source "$backend" || return 1
+  if [ "${7:-}" = humanlayer ]; then
+    case "$backend" in
+      herdr) fm_humanlayer_backend_submit "$backend" "$screen" "$@"; return $? ;;
+    esac
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;

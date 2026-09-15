@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # fm-busy-lib.sh - the ONE owner of firstmate's semantic busy-state contract.
 #
 # Design source: the captain-approved semantic busy-state redesign
@@ -6,10 +7,11 @@
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
 # unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
-# owned by the watcher, not current-state truth.
+# general process-level override and yields dead, never busy. The scoped
+# HumanLayer tool-activity exception is described below; CPU, process sleep
+# state, marker mtimes, and the old global UI-regex OR are not state signals.
+# state/<id>.turn-ended files remain wake NOTIFICATIONS owned by the watcher,
+# not current-state truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
@@ -42,7 +44,8 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex,
+#   humanlayer-anchor, humanlayer-process, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -55,14 +58,19 @@
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      task from its rendered tail; the humanlayer anchor classifies a
+#      humanlayer task via fm_humanlayer_screen_state, with tmux tool
+#      activity as a busy fallback, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
-# in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
-# path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
+# Grok, Rovo, and AGY are the ONLY positive rendered-marker classifications
+# that survive the redesign, because none of their structured lifecycles was
+# credited-live-verified in the approved audit (Rovo's clean ACP stopReason
+# lives outside the TUI path firstmate drives, see references/harness/rovo.md;
+# agy 1.2.0 exposes no hook surface at all, see references/harness/agy.md);
+# each is scoped to its own harness= and can never classify another adapter.
+# HumanLayer also lacks hooks; fm-humanlayer-lib.sh owns its conservative
+# idle-screen classifier. Rendered text cannot prove HumanLayer busy;
+# only the tmux process-activity fallback can supply that verdict. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
 # recorded worker state source.
@@ -91,6 +99,9 @@
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
+
+# shellcheck source=bin/fm-humanlayer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-humanlayer-lib.sh"
 
 FM_BUSY_LIB_VERSION=v1
 
@@ -867,11 +878,22 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# Fresh-launch readiness anchor only; this plain tail test cannot distinguish
+# draft history. Ongoing state classification uses fm_humanlayer_screen_state.
+fm_busy_humanlayer_tail_idle() {
+  local last
+  last=$(grep -v '^[[:space:]]*$' | tail -1) || return 1
+  [ -n "$last" ] || return 1
+  last=${last%"${last##*[![:space:]]}"}
+  [ "$last" = '>' ]
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the grok, rovo, and agy arms; when absent each captures through
+# busy|idle|unknown plus the producing source (see header). Never classifies
+# process liveness, but HumanLayer may probe tool activity on tmux.
+# <tail40> is optional pre-captured plain output used only by
+# the grok, rovo, agy, and humanlayer arms; when absent each captures through
 # fm_backend_capture if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
@@ -1014,6 +1036,40 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       else
         printf 'unknown agy-regex'
       fi
+      return 0
+      ;;
+    humanlayer)
+      # Re-read styling: plain history cannot distinguish a pasted draft.
+      if command -v fm_backend_capture >/dev/null 2>&1; then
+        tail40=$(fm_humanlayer_capture "$backend" "$target") || {
+          printf 'unknown capture-failed'
+          return 0
+        }
+      fi
+      out=$(printf '%s' "$tail40" | fm_humanlayer_screen_state)
+      if [ "$out" != idle ] && command -v fm_backend_source >/dev/null 2>&1; then
+        # A non-idle screen alone cannot separate a running turn from a
+        # parked draft, so tmux proves busy from the pane tty's process
+        # table: tool children of the identified foreground HumanLayer
+        # worker. herdr deliberately has NO process probe: its pane
+        # process-info never surfaces a tool call's children and its agent
+        # registry does not register codelayer (both verified against herdr
+        # 0.8.0 and humanlayer 0.31.0; the descendant walk measured zero
+        # non-agent children over 60 samples of an actively-running
+        # multi-tool task), so busy on herdr stays unknown and supervision
+        # reads the worker's status log instead (there is no turn-end hook). Pure
+        # model thinking has no tool child on tmux either and stays unknown
+        # there, the same partial coverage the grok/rovo/agy arms accept.
+        case "$backend" in
+          tmux)
+            if fm_backend_source tmux && fm_backend_tmux_humanlayer_busy "$target"; then
+              printf 'busy humanlayer-process'
+              return 0
+            fi
+            ;;
+        esac
+      fi
+      printf '%s humanlayer-anchor' "$out"
       return 0
       ;;
   esac

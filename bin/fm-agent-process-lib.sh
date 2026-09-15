@@ -46,6 +46,11 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
     # unrelated commands containing that fragment.
     agy) printf 'agent' ;;
+    # humanlayer (HumanLayer CLI) is anchored for the same reason as agy: its
+    # native child's live process name is the bare word `humanlayer` (verified,
+    # humanlayer 0.31.0: a platform-native binary under a node shim), and a
+    # glob would claim unrelated commands containing that fragment.
+    humanlayer) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

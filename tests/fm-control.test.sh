@@ -81,6 +81,9 @@ make_tmux_stub() {  # <dir> -> echoes fakebin dir
 set -u
 D=$FM_FAKE_DIR
 case "${1:-}" in
+  pipe-pane)
+    if [ "$2" = -O ]; then printf '%s' "${!#}" > "$D/pipe-command"; else rm -f "$D/pipe-command"; fi
+    exit 0 ;;
   send-keys)
     shift
     literal=0
@@ -94,6 +97,9 @@ case "${1:-}" in
     payload=${1:-}
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
+      if [ "$(cat "$D/command")" = humanlayer ]; then
+        printf '> %s\n' "$payload" > "$D/pane"
+      fi
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"
@@ -103,6 +109,25 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = Enter ] && [ "$(cat "$D/command")" = humanlayer ]; then
+        [ ! -e "$D/hl-enter-failed" ] || exit 1
+        if [ ! -e "$D/hl-swallow" ]; then
+          if [ -e "$D/hl-complete" ]; then
+            printf '[Assistant] Finished\n[Done] complete\n>\n' >> "$D/pane"
+          else
+            printf '[Tool] bash command=sleep 30\n' >> "$D/pane"
+          fi
+          if [ -f "$D/pipe-command" ]; then bash -c "$(cat "$D/pipe-command")" < "$D/pane"; fi
+        fi
+      fi
+      if [ "$payload" = C-c ] && [ "$(cat "$D/command")" = humanlayer ]; then
+        if [ "$(cat "$D/pane")" = '>' ]; then
+          printf 'zsh' > "$D/command"
+        else
+          : > "$D/hl-settling"
+          rm -f "$D/hl-active"
+        fi
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -119,6 +144,7 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *pane_tty*) printf 'fm-humanlayer-test-tty\n'; exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
@@ -135,8 +161,31 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-t fm-humanlayer-test-tty -o pid=,pgid=,tpgid=,comm=')
+    if [ "$(cat "$FM_FAKE_DIR/command")" = humanlayer ]; then printf '700 700 700 humanlayer\n'; fi
+    ;;
+  '-axo pid=,ppid=,pgid=,stat=,comm=')
+    printf '700 1 700 S humanlayer\n'
+    if [ -e "$FM_FAKE_DIR/hl-active" ]; then printf '701 700 700 S sleep\n'; fi
+    ;;
+  *) exec /bin/ps "$@" ;;
+esac
+SH
+  chmod +x "$fb/ps"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+if [ -e "$FM_FAKE_DIR/hl-start-later" ]; then
+  rm "$FM_FAKE_DIR/hl-start-later"
+  : > "$FM_FAKE_DIR/hl-active"
+  printf '[Tool] bash command=sleep 90\n' > "$FM_FAKE_DIR/pane"
+fi
+if [ -e "$FM_FAKE_DIR/hl-settling" ] && [ ! -e "$FM_FAKE_DIR/hl-stuck" ]; then
+  printf '>\n' > "$FM_FAKE_DIR/pane"
+  rm "$FM_FAKE_DIR/hl-settling"
+fi
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
    && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
   rm -f "$FM_FAKE_DIR/muse-ack-pending"
@@ -914,3 +963,109 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+
+test_humanlayer_lifecycle() {
+  local dir out rc
+  dir=$(new_case hl-idle)
+  add_task "$dir" t1 humanlayer
+  alive_as "$dir" humanlayer
+  printf '>\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  [ "$rc" -ne 0 ] || fail "idle HumanLayer interrupt must refuse"
+  [ ! -s "$dir/fake/keys" ] || fail "idle interrupt must send no key"
+  [ "$(cat "$dir/fake/command")" = humanlayer ] || fail "idle worker must survive"
+  local pending
+  for pending in $'> Investigate this log:\n[Tool] bash command=sleep 30' \
+    $'> Investigate this log:\n[Assistant] example' \
+    $'> Investigate this log:\n[Done] complete\n' \
+    $'> Investigate this log:\nwrapped input\n[Tool] bash command=sleep 30'; do
+    printf '%s\n' "$pending" > "$dir/fake/pane"
+    out=$(run_control "$dir" t1 interrupt); rc=$?
+    [ "$rc" -ne 0 ] || fail "pending HumanLayer interrupt must refuse"
+    [ ! -s "$dir/fake/keys" ] || fail "pending interrupt must send no key"
+    [ "$(cat "$dir/fake/command")" = humanlayer ] || fail "pending worker must survive"
+  done
+  printf '[Tool] bash command=sleep 30\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous HumanLayer output must refuse exit"
+  [ ! -s "$dir/fake/keys" ] || fail "ambiguous output must not authorize Ctrl+C"
+  : > "$dir/fake/hl-settling"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "HumanLayer exit must wait for idle: $out"
+  [ "$(keys_sent "$dir")" = C-c ] || fail "settled exit must send one key"
+
+  alive_as "$dir" humanlayer
+  : > "$dir/fake/keys"
+  : > "$dir/fake/hl-active"
+  printf '> Run sleep 90\n[Tool] bash command=sleep 90\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "active HumanLayer tool must be cancellable: $out"
+  [ "$(keys_sent "$dir")" = C-c ] || fail "active tool interruption must send one key"
+  [ "$(cat "$dir/fake/command")" = humanlayer ] || fail "interrupt must preserve the worker"
+  : > "$dir/fake/keys"
+  : > "$dir/fake/hl-active"
+  printf '> Run sleep 90\n[Tool] bash command=sleep 90\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "active HumanLayer exit must cancel before exiting: $out"
+  [ "$(keys_sent "$dir")" = $'C-c\nC-c' ] || fail "active exit must send two keys"
+  alive_as "$dir" humanlayer
+  : > "$dir/fake/keys"
+  : > "$dir/fake/hl-start-later"
+  printf '> Waiting for model response\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "HumanLayer exit must cancel newly observed activity: $out"
+  [ ! -e "$dir/fake/hl-start-later" ] || fail "the worker must become busy during the exit wait"
+  [ "$(keys_sent "$dir")" = $'C-c\nC-c' ] || fail "newly busy exit must interrupt once, then exit"
+  pass "HumanLayer cancels active tools and refuses ambiguous composer input"
+}
+test_humanlayer_lifecycle
+
+test_humanlayer_direct_delivery() {
+  local dir mode out rc
+  for mode in working complete swallow enter-failed busy pending continuation; do
+    dir=$(new_case "hl-send-$mode")
+    add_task "$dir" t1 humanlayer
+    alive_as "$dir" humanlayer
+    printf '> older prompt\n[Tool] bash command=old\n\033[38;2;34;197;94m[Done]\033[39m complete\n>\n' > "$dir/fake/pane"
+    case "$mode" in
+      working) ;;
+      busy) printf '[Tool] bash command=sleep 30\n' > "$dir/fake/pane" ;;
+      pending) printf '> old pending text\n' > "$dir/fake/pane" ;;
+      continuation) printf '> Investigate this log:\n[Done] complete\n\n' > "$dir/fake/pane" ;;
+      *) : > "$dir/fake/hl-$mode" ;;
+    esac
+    out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+      FM_SEND_RETRIES=2 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+      "$SEND" fmses:fm-t1 'inspect delivery' 2>&1); rc=$?
+    case "$mode" in
+      working|complete) expect_code 0 "$rc" "HumanLayer direct send should confirm $mode: $out" ;;
+      *) [ "$rc" -ne 0 ] || fail "HumanLayer must refuse unproven $mode delivery" ;;
+    esac
+    case "$mode" in
+      busy|pending|continuation) [ ! -s "$dir/fake/literal" ] || fail "HumanLayer must not type into $mode input" ;;
+      swallow|enter-failed)
+        [ "$(cat "$dir/fake/literal")" = 'inspect delivery' ] || fail "HumanLayer must type the $mode submission"
+        grep -qx Enter "$dir/fake/keys" || fail "HumanLayer must attempt Enter for $mode delivery"
+        ;;
+    esac
+  done
+  pass "HumanLayer direct steering confirms output and rejects pending or lost submissions"
+}
+test_humanlayer_direct_delivery
+
+test_humanlayer_task_id_doorbell_preserves_pending_input() {
+  local dir out rc
+  dir=$(new_case hl-inbox-pending)
+  add_task "$dir" t1 humanlayer
+  alive_as "$dir" humanlayer
+  printf '> Investigate this log:\n[Done] complete\n\n' > "$dir/fake/pane"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$SEND" t1 'inspect the delivery' 2>&1); rc=$?
+  expect_code 0 "$rc" "the instruction must be durably queued: $out"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the queued instruction must survive a skipped doorbell"
+  [ ! -s "$dir/fake/literal" ] || fail "the inbox doorbell must not concatenate onto pending HumanLayer input"
+  [ ! -s "$dir/fake/keys" ] || fail "the inbox doorbell must not submit pending input"
+  [ "$(cat "$dir/fake/pane")" = $'> Investigate this log:\n[Done] complete' ] || fail "pending input must remain intact"
+  pass "HumanLayer task-id steering queues its record without submitting pending input"
+}
+test_humanlayer_task_id_doorbell_preserves_pending_input

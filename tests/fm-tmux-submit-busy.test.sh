@@ -353,3 +353,110 @@ test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+
+
+test_humanlayer_continuation_and_scrollback() (
+  local verdict real_tmux socket target mode screen
+  verdict=$(printf '>\n>\n' | fm_humanlayer_screen_state)
+  [ "$verdict" = unknown ] || fail "blank first line plus literal prompt continuation must defer"
+  verdict=$(printf '>\n>\n\033[38;2;34;197;94m[Done]\033[39m complete\n>\n' | fm_humanlayer_screen_state)
+  [ "$verdict" = idle ] || fail "genuine completion must retire continuation state"
+  real_tmux=$(command -v tmux) || fail "tmux required for scrollback regression"
+  socket="fm-submit-history-$$"
+  trap '"$real_tmux" -L "$socket" kill-server 2>/dev/null || true' EXIT
+  tmux() { "$real_tmux" -L "$socket" "$@"; }
+  cat > "$TMP_ROOT/scroll-worker.py" <<'PYWORKER'
+import sys, tty, time
+if sys.argv[1] == "repeated":
+    print("> instruction\n[Tool] bash\n\033[38;2;34;197;94m[Done]\033[39m complete", flush=True)
+print("> ", end="", flush=True)
+tty.setraw(sys.stdin.fileno())
+text = ""
+while True:
+    char = sys.stdin.read(1)
+    if char in "\r\n":
+        if sys.argv[1] in ("accepted", "delayed"):
+            if sys.argv[1] == "delayed":
+                time.sleep(2)
+            print("\r\n[Tool] bash command=produce-output", flush=True)
+            for i in range(2000):
+                print("\r\noutput " + str(i), end="")
+            print("\r\n> example\r\n[Done] complete", flush=True)
+            sys.stdout.flush()
+        text = ""
+    else:
+        text += char
+        # HumanLayer renders input while typing, without echoing it on Enter.
+        print(char, end="", flush=True)
+PYWORKER
+  tmux -f /dev/null new-session -d -s submit
+  tmux set-option -g history-limit 20
+  for mode in accepted delayed swallowed repeated; do
+    target="submit:$mode"
+    tmux new-window -d -t submit -n "$mode" "python3 '$TMP_ROOT/scroll-worker.py' '$mode'"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      screen=$(tmux capture-pane -p -t "$target")
+      [ "$(printf '%s' "$screen" | fm_humanlayer_screen_state)" != idle ] || break
+      sleep 0.1
+    done
+    verdict=$(FM_HUMANLAYER_CONFIRM_POLLS=12 FM_HUMANLAYER_CONFIRM_INTERVAL=0.3 \
+      fm_tmux_submit_core "$target" instruction 3 0.3 0.1 '' humanlayer)
+    if [ "$mode" = accepted ] || [ "$mode" = delayed ]; then
+      [ "$verdict" = empty ] || fail "submission evidence must survive lost history: $verdict"
+      screen=$(tmux capture-pane -p -t "$target" -S -)
+      printf '%s' "$screen" | fm_humanlayer_submission_seen instruction && fail "fixture must lose the prompt from retained history"
+    else
+      [ "$verdict" = unknown ] || fail "unsubmitted echo must not confirm delivery"
+    fi
+    [ "$(tmux display-message -p -t "$target" '#{pane_pipe}')" = 0 ] || fail "submission capture must be released"
+  done
+  pass "HumanLayer rejects bare continuations and confirms delivery beyond retained history"
+)
+test_humanlayer_continuation_and_scrollback || exit 1
+
+
+printf '> instruction\n[Tool] bash\n> example\n[Done] complete\n' | fm_humanlayer_submission_seen instruction \
+  || fail "later blockquotes must retain established submission proof"
+printf '> first\nwrong\n[Tool] bash\n' | fm_humanlayer_submission_seen $'first\nsecond' \
+  && fail "mismatched immediate continuation must reject submission proof"
+pass "HumanLayer submission proof survives later output but rejects mismatched continuations"
+
+
+printf '> instruction\n[Tool] bash\n[Done] complete\n> instruction\n' | fm_humanlayer_submission_seen instruction \
+  && fail "a repeated unsubmitted prompt must not inherit earlier proof"
+printf '> first\nsecond\n[Done] complete\n> first\nwrong\n[Tool] bash\n' | fm_humanlayer_submission_seen $'first\nsecond' \
+  && fail "a repeated prompt with a mismatched continuation must not inherit proof"
+[ "$(printf 'retained log row\n>\n' | fm_humanlayer_screen_state)" = unknown ] \
+  || fail "truncated draft ending in a prompt glyph must defer"
+[ "$(printf 'retained log row\n\033[38;2;34;197;94m[Done]\033[39m complete\n>\n' | fm_humanlayer_screen_state)" = idle ] \
+  || fail "styled completion must establish idle provenance after truncation"
+pass "HumanLayer rejects historical delivery proof and ambiguous truncated drafts"
+
+
+# Replay the readline redraw sequence captured from HumanLayer v0.31.0 at
+# 80 columns. These bytes are terminal output, not implementation snapshots.
+test_humanlayer_wrapped_pipe_delivery() (
+  local prompt verdict mode
+  prompt='Read the brief at /Users/krishnateja/.no-mistakes/worktrees/8371016727df/01M2KEHMBHW96ED00C6BD23C6B/.test-humanlayer/machine-a/data/hl-scout2/launch-brief.md and follow it exactly.'
+  tmux() { return 0; }
+  for mode in accepted swallowed changed erased; do
+    {
+      printf '%s\033[1G\033[0J> %s \033[1G%s\033[1A\033[1G\033[0J> %s  \033[1G%s' \
+        "${prompt:0:77}" "${prompt:0:78}" "${prompt:78:79}" "${prompt:0:157}" "${prompt:158}"
+      case "$mode" in
+        accepted) printf '\r\r\n\033[38;2;59;130;246m[Tool]\033[39m read\r\n' ;;
+        swallowed) ;;
+        changed) printf 'x\r\n[Tool] read\r\n' ;;
+        erased) printf '\033[1G\033[0J> different instruction\r\n[Tool] read\r\n' ;;
+      esac
+    } > "$TMP_ROOT/redraw.ansi"
+    verdict=$(fm_tmux_submit_enter_core fixture 1 0 1 humanlayer "$prompt" "$TMP_ROOT/redraw.ansi")
+    if [ "$mode" = accepted ]; then
+      [ "$verdict" = empty ] || fail "wrapped current submission must confirm: $verdict"
+    else
+      [ "$verdict" = unknown ] || fail "$mode redraw must not confirm: $verdict"
+    fi
+  done
+  pass "HumanLayer pipe redraws confirm only the exact submitted instruction"
+)
+test_humanlayer_wrapped_pipe_delivery || exit 1

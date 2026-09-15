@@ -135,7 +135,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|humanlayer)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -284,6 +284,7 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __HLBIN__     resolved, humanlayer-verified executable for a humanlayer launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -292,6 +293,15 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse, gemini, and agy are crewmate/scout only and are refused for --secondmate.
+# humanlayer installs no hook either - it exposes no hook surface at all - so
+# it carries no busy-source wiring and no turn-end hook; nothing is armed
+# because no writer could ever clear a seeded record. It has no interactive
+# launch flag that carries a prompt (--prompt runs non-interactively and
+# exits at turn end), so it launches BARE exactly like kimi and rovo and
+# receives an absolute brief pointer only after a TUI readiness gate, then a
+# delivery-confirmation gate. bin/fm-busy-lib.sh owns its state classification,
+# and it is crewmate/scout only and is refused
+# for --secondmate, like muse, gemini, and agy.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1527,7 +1537,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | humanlayer)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -1745,6 +1755,24 @@ launch_template() {
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # humanlayer (HumanLayer CLI `codelayer`): launches bare - there is no
+  # interactive launch flag that carries a prompt (--prompt runs
+  # non-interactively and exits at turn end), so the brief pointer is
+  # submitted through the `>` composer after the readiness gate below, the
+  # kimi/rovo launch-then-confirm shape. --provider codex is the verified
+  # provider (the captain's own HumanLayer setup authenticates Codex through
+  # AgentLayer file auth); codelayer's provider auto-runs tool calls with no
+  # approval prompt, which an unattended crewmate needs (verified live,
+  # humanlayer 0.31.0: bash commands and file writes landed with no gate).
+  # The foreign primary markers are cleared for the same reason cursor and
+  # agy clear them: humanlayer publishes no marker of its own and does not
+  # clear an inherited CLAUDECODE/PI_CODING_AGENT (verified in the
+  # environment of a live 0.31.0 tool subprocess), so bin/fm-harness.sh must
+  # not read a humanlayer worker as its launcher. No turn-end hook exists,
+  # so nothing is armed; bin/fm-busy-lib.sh owns its state classification.
+  # Discard the previous process display at launch, before the new composer
+  # exists; retained shell prompts must not become draft history for the new worker.
+  humanlayer) printf '%s' 'printf "\033[H\033[2J\033[3J"; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __HLBIN__ codelayer --provider codex __MODELFLAG____EFFORTFLAG__' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -1911,6 +1939,11 @@ case "$ARG3" in
   ;;
 esac
 
+if [ "$HARNESS" = humanlayer ]; then
+  . "$SCRIPT_DIR/fm-humanlayer-lib.sh"
+  fm_humanlayer_require_backend "$BACKEND" || exit 1
+fi
+
 # muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
@@ -1923,7 +1956,10 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+# humanlayer has none either: it exposes no hook surface at all and
+# docs/supervision-protocols/ carries no humanlayer wake protocol (humanlayer
+# 0.31.0), so it is refused for the same reason.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = humanlayer ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1980,6 +2016,12 @@ omp)
 agy)
   AGY_BIN=$(resolve_pi_executable agy) || {
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
+humanlayer)
+  HUMANLAYER_BIN=$(resolve_pi_executable humanlayer) || {
+    echo "error: humanlayer executable not found on PATH; install the HumanLayer CLI or select a different verified harness" >&2
     exit 1
   }
   ;;
@@ -2142,7 +2184,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | humanlayer)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2183,6 +2225,16 @@ effort_flag_for_harness() {
     # omitted rather than passed as known-bad values (record-and-omit).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  humanlayer)
+    # codelayer --thinking maps the shared effort vocabulary straight across
+    # through xhigh (verified live on humanlayer 0.31.0 with the codex
+    # provider: low and xhigh both ran); max is known-bad - the provider
+    # rejects it with "OpenAI Responses does not support reasoning effort max"
+    # - so it is omitted rather than passed (record-and-omit).
+    case "$effort" in
+    low | medium | high | xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   pi | pi-signed)
@@ -2268,6 +2320,9 @@ case "$LAUNCH" in
 *__ROVOBIN__*)
   ROVO_BIN=$(resolve_rovo_binary) || exit 1
   LAUNCH=${LAUNCH//__ROVOBIN__/$(shell_quote "$ROVO_BIN")}
+  ;;
+*__HLBIN__*)
+  LAUNCH=${LAUNCH//__HLBIN__/$(shell_quote "$HUMANLAYER_BIN")}
   ;;
 esac
 
@@ -3430,6 +3485,51 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+humanlayer_capture() {
+  if [ "$BACKEND" = tmux ]; then
+    tmux capture-pane -p -J -t "$T" -S - 2>/dev/null || true
+  else
+    fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+  fi
+}
+
+humanlayer_pane_is_ready() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq 'codelayer - provider:' || return 1
+  printf '%s' "$1" | fm_busy_humanlayer_tail_idle
+}
+
+humanlayer_wait_for_ready() {
+  local pane i=0 max=${FM_HUMANLAYER_READY_POLLS:-60} interval=${FM_HUMANLAYER_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(humanlayer_capture)
+    humanlayer_pane_is_ready "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+humanlayer_delivery_is_confirmed() {
+  printf '%s\n' "$1" | fm_humanlayer_submission_seen "$HUMANLAYER_POINTER"
+}
+
+humanlayer_wait_for_delivery() {
+  local pane i=0 max=${FM_HUMANLAYER_DELIVERY_POLLS:-40} interval=${FM_HUMANLAYER_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(humanlayer_capture)
+    humanlayer_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+humanlayer_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3639,11 +3739,11 @@ if [ "$KIND" != secondmate ]; then
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
-  # incarnation is rejected as stale. Grok and rovo stay on their isolated
-  # rendered-tail fallbacks and standalone Kimi stays unknown until
-  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
-  # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
-  # open-close pair.
+  # incarnation is rejected as stale. Grok, rovo, and humanlayer use their
+  # classifier-only sources and standalone Kimi stays unknown
+  # until fm_busy_kimi_verified opens, so none of the four is armed here.
+  # Gemini IS armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a
+  # verified open-close pair.
   BUSY_GEN=
   case "$HARNESS" in
   codex*)
@@ -4242,10 +4342,11 @@ cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+humanlayer) LAUNCH=${LAUNCH//__HLBIN__/"$(shell_quote "$HUMANLAYER_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | humanlayer)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -4414,6 +4515,34 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = humanlayer ]; then
+  if ! humanlayer_wait_for_ready; then
+    humanlayer_spawn_fail "humanlayer did not show a verified ready signal before brief delivery in window $T"
+    exit 1
+  fi
+  HUMANLAYER_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  HUMANLAYER_SUBMIT_RETRIES=${FM_HUMANLAYER_SUBMIT_RETRIES:-3}
+  HUMANLAYER_SUBMIT_SLEEP=${FM_HUMANLAYER_SUBMIT_SLEEP:-${FM_HUMANLAYER_POLL_INTERVAL:-0.5}}
+  HUMANLAYER_SUBMIT_SETTLE=${FM_HUMANLAYER_SUBMIT_SETTLE:-0}
+  if ! HUMANLAYER_SUBMIT_VERDICT=$(
+    FM_HUMANLAYER_CONFIRM_POLLS=${FM_HUMANLAYER_DELIVERY_POLLS:-40} \
+    FM_HUMANLAYER_CONFIRM_INTERVAL=${FM_HUMANLAYER_POLL_INTERVAL:-0.5} \
+    fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$HUMANLAYER_POINTER" "$HUMANLAYER_SUBMIT_RETRIES" \
+    "$HUMANLAYER_SUBMIT_SLEEP" "$HUMANLAYER_SUBMIT_SETTLE" "$W" humanlayer); then
+    humanlayer_spawn_fail "humanlayer brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if [ "$HUMANLAYER_SUBMIT_VERDICT" = send-failed ]; then
+    humanlayer_spawn_fail "humanlayer brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if [ "$HUMANLAYER_SUBMIT_VERDICT" != empty ] \
+    && { [ "$BACKEND" = tmux ] || ! humanlayer_wait_for_delivery; }; then
+    humanlayer_spawn_fail "humanlayer brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
 fi
