@@ -75,6 +75,8 @@ type CloseClassification = {
   message: string;
 };
 
+type ArmReadiness = "ready" | "deferred" | "failed";
+
 type PendingActionableClose = {
   version: 1;
   token: string;
@@ -175,7 +177,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
   return created;
 }
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
@@ -708,6 +710,17 @@ export default function (pi: ExtensionAPI) {
             releaseClaim();
             return;
           }
+          if (restoration.handoff) {
+            settleClaim("delivered");
+            pending.delivered = true;
+            try {
+              finishPendingActionable(owner, pending);
+            } catch (error) {
+              surfaceCleanupFailure(owner, error);
+            }
+            releaseClaim();
+            continue;
+          }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
           const delivered = await deliverActionableWake(owner, message, pending, restoration.recovery);
           if (!delivered) {
@@ -782,11 +795,11 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("failed");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("failed"), armReadyTimeoutMs);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -813,6 +826,7 @@ export default function (pi: ExtensionAPI) {
 
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<{
     failure: string;
+    handoff?: true;
     recovery?: { generation: string; watcherPid: string };
   }> {
     let failure = "";
@@ -820,9 +834,11 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      const readiness = successorChild ? await waitForReadiness(successorChild) : "failed";
+      if (replacement.ok && successorChild && readiness === "ready") {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
+      if (replacement.ok && readiness === "deferred") return { failure: "", handoff: true };
       if (replacement.ok) {
         failure = "watcher: FAILED - omp extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
@@ -909,9 +925,9 @@ export default function (pi: ExtensionAPI) {
     let settled = false;
     let readinessSettled = false;
     let verified = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
+    let resolveReadiness: (ready: ArmReadiness) => void = () => {};
     let resolveClosed: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
@@ -919,10 +935,10 @@ export default function (pi: ExtensionAPI) {
       resolveClosed = resolveClosedChild;
     });
     armClose.set(armChild, closed);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (ready: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      verified = ready;
+      verified = ready === "ready";
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
@@ -930,7 +946,10 @@ export default function (pi: ExtensionAPI) {
       const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
       if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
-        settleReadiness(true);
+        settleReadiness("ready");
+      }
+      if (/^watcher: deferred\b/m.test(combined)) {
+        settleReadiness("deferred");
       }
       const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
       if (reason && !armPendingActionable.has(armChild)) {
@@ -954,9 +973,9 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
-      releaseChild();
       const classification = classifyClose(stdout, stderr, code, signal);
+      settleReadiness(classification.kind === "deferred" ? "deferred" : "failed");
+      releaseChild();
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
@@ -987,7 +1006,7 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      settleReadiness("failed");
       releaseChild();
       if (!generationIsLive(owner)) return;
       if (owner.restoring) return;

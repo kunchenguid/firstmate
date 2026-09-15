@@ -884,6 +884,58 @@ test_arm_defers_to_a_live_away_daemon() {
   pass "watch-arm: --restart defers to a live away-mode daemon without displacing its watcher"
 }
 
+test_arm_defers_during_away_entry() {
+  local dir home state fakebin out armout status
+  dir=$(make_case away-entry-deferral)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must yield while away-mode entry is in progress"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not report the away-entry deferral: $(cat "$armout")"
+  is_live_non_zombie "$SEED_PID" || fail "entry-window arm displaced the existing watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "entry-window arm changed the watcher singleton"
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  pass "watch-arm: --restart defers during away-mode entry without displacing its watcher"
+}
+
+test_legacy_afk_without_daemon_or_entry_still_arms() {
+  local dir home state fakebin armout status watcher_pid
+  dir=$(make_case legacy-afk-arm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  date '+%s' > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "legacy .afk without a daemon did not arm: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "legacy .afk did not start a live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a legacy .afk without daemon ownership still arms"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -900,3 +952,5 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_defers_to_a_live_away_daemon
+test_arm_defers_during_away_entry
+test_legacy_afk_without_daemon_or_entry_still_arms

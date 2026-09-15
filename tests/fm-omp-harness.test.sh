@@ -613,6 +613,59 @@ EOF
   pass ".omp watch extension: an away-mode daemon deferral is a benign no-op"
 }
 
+test_watch_extension_hands_actionable_close_to_away_daemon() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-handoff/repo"; home="$TMP_ROOT/watch-handoff/home"
+  log="$TMP_ROOT/watch-handoff/arms.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: omp away handoff\n'
+  exit 0
+fi
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+let tool = null;
+const sent = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_omp") tool = candidate; },
+  sendUserMessage(message) { sent.push(message); },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 200; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length === 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`expected one successor handoff, got ${rows.join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (sent.length !== 0) throw new Error(`away-daemon handoff delivered ${sent.length} wake(s)`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp must hand an actionable close to the away daemon without retrying or delivering it"
+  [ -z "$out" ] || fail "omp away-daemon handoff test printed output: $out"
+  pass ".omp watch extension: an actionable close hands off to the away daemon without delivery"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -625,3 +678,4 @@ test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_treats_away_daemon_deferral_as_noop
+test_watch_extension_hands_actionable_close_to_away_daemon

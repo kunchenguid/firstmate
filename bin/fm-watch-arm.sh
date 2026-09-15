@@ -416,10 +416,9 @@ fi
 # An arm that stopped that child (--restart) or forked a competitor would
 # displace per-wake triage and leave only the catch-all scan, with the daemon's
 # restarted children colliding on the held lock. Defer without touching the lock
-# or starting a child. This requires a LIVE daemon (fm_afk_daemon_owns_supervision
-# in bin/fm-wake-lib.sh), not merely state/.afk, so a legacy flag with no daemon
-# (the Pi posture) still arms normally.
-if fm_afk_daemon_owns_supervision "$STATE"; then
+# or starting a child. A live daemon or an in-progress daemon launch owns this
+# handoff; a legacy flag with neither still arms normally.
+if fm_afk_daemon_owns_supervision "$STATE" || fm_afk_launch_in_progress "$STATE"; then
   echo "watcher: deferred - away-mode daemon owns supervision"
   exit 0
 fi

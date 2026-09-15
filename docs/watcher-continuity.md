@@ -96,7 +96,7 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
 An actionable child output returns that reason normally.
-While a live, identity-matched away-mode daemon owns supervision (`fm_afk_daemon_owns_supervision`), every arm mode yields before stopping or starting anything and prints `watcher: deferred - away-mode daemon owns supervision`, because the daemon's own one-shot watcher child is then the home's one singleton; the persistent adapters treat that typed line as a benign no-op and never retry, surface, or deliver from it.
+While a live, identity-matched away-mode daemon owns supervision (`fm_afk_daemon_owns_supervision`), or its entry marker is present, every arm mode yields before stopping or starting anything and prints `watcher: deferred - away-mode daemon owns supervision`, because the daemon's own one-shot watcher child is then the home's one singleton; the persistent adapters treat that typed line as a benign no-op and never retry, surface, or deliver from it.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.

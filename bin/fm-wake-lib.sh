@@ -327,6 +327,10 @@ fm_afk_daemon_owns_supervision() {
   [ "$current" = "$recorded" ]
 }
 
+fm_afk_launch_in_progress() {
+  [ -e "$1/.afk-launching" ]
+}
+
 # fm_afk_mode <state>
 # The single owner of reading state/.afk's declared mode. Always prints
 # exactly one of "away" or "quiet" and always succeeds - every caller gets a
