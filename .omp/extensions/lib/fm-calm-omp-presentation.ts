@@ -96,10 +96,20 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
     patch(mode, "renderCompactStatusLine", function (this: ObjectLike, width: number, childLines: readonly string[]) {
       return isHidden() ? childLines : renderCompact.call(this, width, childLines);
     });
-    // Do not synchronously rebuild while an agent_start hook is running: OMP's
-    // rebuild awaits filesystem/session work and can deadlock the turn. Startup
-    // replay occurs after session_start; subsequent advisor cards are wrapped as
-    // they are added. Existing cards are intentionally left untouched.
+    // Cover cards already restored into the live chat tree. This only inspects
+    // card metadata; it does not rebuild history or mutate stored messages.
+    for (const card of mode.chatContainer.children) {
+      const message = (card as ObjectLike).message ?? (card as ObjectLike).entry ?? (card as ObjectLike).data ?? card;
+      if (message?.customType === "advisor" && typeof (card as ObjectLike).render === "function") {
+        const render = (card as ObjectLike).render;
+        patch(card as ObjectLike, "render", function (this: ObjectLike, width: number) {
+          return isHidden() ? [] : render.call(this, width);
+        });
+        cards.add(card as object);
+      } else {
+        wrapCard(card as ObjectLike);
+      }
+    }
     live.resetDisplay();
     return dispose;
   } catch (error) {
