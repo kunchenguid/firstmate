@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "audience": "public-product"
+    },
+    {
       "path": ".greptile/rules.md",
       "audience": "maintainer-architecture"
     },
