@@ -7,7 +7,7 @@ Herdr is an agent-native terminal backend with native per-pane agent state and p
 Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
-Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
+Legacy presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Legacy presentation spaces](#legacy-presentation-spaces).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -18,7 +18,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
-| The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| The one-task workspaces, their setting, and their cleanup | [Legacy presentation spaces](#legacy-presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
@@ -163,81 +163,29 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
-## Presentation spaces
+## Stable home spaces and ordinary worker tabs
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
-This section calls that one-task workspace the projection.
-Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
+Each FirstMate home and persistent SecondMate owns one durable `state/herdr-workspace` binding containing the canonical physical home, Herdr session/socket identity, exact workspace id, owner kind, generation, and optional launcher anchor ids.
 
-### Setting values
+A first spawn claims the exact launcher workspace when the process has a verified Herdr parent; initial persistent-home provisioning may instead adopt one unambiguous cosmetic home-label match or create one stable home workspace.
 
-The local gitignored `config/herdr-presentation-spaces` file controls the projection.
+Every later spawn validates the binding against the live session and exact workspace id and refuses stale, missing, contradictory, or ambiguous ownership rather than guessing.
 
-| File state | Result |
-| --- | --- |
-| Absent | Leaves the choice to the version floor below (the unconfigured default). |
-| `off` | Opts the home out. |
-| `on` | Forces the projection on, as a deliberate opt-in. |
-| Empty | A deliberate opt-in, the same as `on`. |
-| Any other value | Warns and follows the unconfigured default rather than failing a spawn over a purely visual setting. |
+Ordinary workers are created as tabs directly in that exact workspace. New spawns never create disposable worker workspaces and never call `workspace.move`; existing agents and existing presentation journals are not migrated.
 
+Herdr 0.9.0/protocol 22 does not provide verified workspace-scoped Agents filtering or a native FirstMate-home ownership relationship. Agents-view grouping must therefore remain cosmetic; FirstMate uses the durable binding and exact endpoint metadata instead.
+
+## Legacy presentation spaces
+
+Legacy presentation journals and cleanup remain readable for existing tasks, but new spawns no longer create disposable one-task workspaces.
+A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
+An absent file leaves the choice to the version floor below.
+An empty file and the value `on` are both a deliberate opt-in.
 Values are compared with whitespace stripped and case ignored.
-
+An unrecognized value warns and follows the unconfigured default rather than failing a spawn over a purely visual setting.
 The empty file is the historical presence-based opt-in form.
-So every home that had already enabled the projection stays enabled with no migration step.
+Every home that had already enabled the projection stays enabled with no migration step.
 No previously enabled home can be turned off by the default or by the floor.
-
-A home that never created the file gains the projection at its next Herdr spawn on a supported release.
-That flip is deliberate.
-It reaches only the Herdr backend, because no other runtime backend has a projection path.
-
-### Why the default needs Herdr 0.8.0
-
-Projecting each task into its own workspace makes every task cleanup a workspace-emptying removal.
-That is the only removal shape Herdr's pre-0.8.0 focus defect touches.
-The focus-safe removal plan below can only avoid the defect while the closing pane's shell can be proved lone, childless, and idle.
-
-A persistent child of that shell - a `gitstatusd`, a `zsh-async` worker, or `direnv` - fails that proof permanently and forces the plain explicit close.
-On those releases, that close moves the active workspace for roughly a seventh of a second before the restore backstop pulls it back, once per task cleanup.
-
-An unconfigured home is therefore projected only on a release at or above the 0.8.0 floor.
-On those releases every workspace-removal primitive preserves focus, and that proof stops being load-bearing.
-
-Below the floor, an unconfigured home uses the ordinary flat per-home layout instead.
-It warns once per home per detected release, naming the running release and the upgrade that restores the projection.
-That one-warning-per-release record is a `state/.herdr-presentation-floor-<release>` marker.
-Deleting it only makes the same warning appear again.
-An upgrade or downgrade re-announces itself because the release is part of the key.
-
-### How the floor is checked
-
-The floor reads two sources:
-
-- The installed client's protocol and version.
-- The selected named session's server signals, while that server is running.
-
-Both applicable releases must pass.
-When status positively reports no running server, the floor uses only the client, because that client will start it.
-
-The unconfigured default is rechecked after the server is started or adopted, and before any presentation journal or workspace is created.
-An unreadable server state or release is treated as unsupported rather than guessed at.
-
-An explicit `on` is honored below the floor, so a home that deliberately opted in is never silently downgraded.
-That home accepts the documented focus move, and the exact prior-tab restore stays its backstop.
-
-The floor has a single owner, the spawn-time gate.
-So cleanup for a projection that already exists always runs and never strands a workspace, whatever release the home is on now.
-
-Upgrading Herdr to 0.8.0 or newer is the fix.
-Writing `off` is the immediate mitigation for a home that cannot upgrade yet.
-
-### Secondmate homes
-
-The setting is inherited into secondmate homes through the normal configuration-convergence owner.
-The default needs no special convergence.
-The primary's absent file and the secondmate's absent file both mean the same unconfigured default.
-So leaving the file absent converges a secondmate to that same default rather than turning it off.
-Only an explicit primary `off` propagates the opt-out.
 
 A secondmate agent itself always stays in its ordinary parent workspace; only children launched by that home are eligible.
 An unconverged opt-out keeps the default projection in that home until convergence.
