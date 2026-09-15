@@ -4389,6 +4389,16 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# A claude worker must leave a project's committed .claude/settings.local.json
+# byte-identical (see the hook writer above). Record its blob before launch so
+# the success path can warn if anything rewrote it; this never refuses the
+# spawn and never touches the file.
+CLAUDE_TRACKED_SETTINGS=.claude/settings.local.json
+CLAUDE_TRACKED_SETTINGS_BLOB=
+if [ "$HARNESS" = claude ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } &&
+  git -C "$WT" ls-files --error-unmatch -- "$CLAUDE_TRACKED_SETTINGS" >/dev/null 2>&1; then
+  CLAUDE_TRACKED_SETTINGS_BLOB=$(git -C "$WT" hash-object -- "$CLAUDE_TRACKED_SETTINGS" 2>/dev/null) || CLAUDE_TRACKED_SETTINGS_BLOB=
+fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
@@ -4532,6 +4542,14 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+if [ -n "$CLAUDE_TRACKED_SETTINGS_BLOB" ]; then
+  if [ ! -f "$WT/$CLAUDE_TRACKED_SETTINGS" ]; then
+    echo "warning: task $ID's tracked $WT/$CLAUDE_TRACKED_SETTINGS disappeared after the claude launch; restore it before teardown" >&2
+  elif [ "$(git -C "$WT" hash-object -- "$CLAUDE_TRACKED_SETTINGS" 2>/dev/null)" != "$CLAUDE_TRACKED_SETTINGS_BLOB" ]; then
+    echo "warning: task $ID's tracked $WT/$CLAUDE_TRACKED_SETTINGS changed after the claude launch; inspect and restore it before teardown" >&2
+  fi
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

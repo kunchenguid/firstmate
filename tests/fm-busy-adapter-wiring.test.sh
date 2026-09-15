@@ -294,17 +294,39 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
-# A project may commit .claude/settings.local.json (a permissions allow-list,
-# env, plugins). Spawning a claude worker into it must leave that file
-# byte-identical and the worktree clean, while the launch still reaches the
-# hooks through --settings.
-test_claude_spawn_leaves_a_tracked_project_settings_file_untouched() {
-  local case_dir home proj wt fakebin id=busy-cl-tracked out tracked launch_log
-  case_dir="$TMP_ROOT/claude-tracked-settings"
+# make_tracked_claude_settings_case <name> <id> <claude-at-launch: keep|rewrite|delete>
+# A project committing .claude/settings.local.json (a permissions allow-list),
+# a linked worktree of it, and a fakebin whose tmux RUNS the claude launch
+# command in the worktree so a fake claude acts on the tracked file at launch.
+make_tracked_claude_settings_case() {
+  local name=$1 id=$2 at_launch=$3 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mv "$fakebin/tmux" "$fakebin/tmux-spawn"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = send-keys ]; then
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = -l ]; then
+      case "$a" in
+        *" claude "*) (cd "$FM_FAKE_PANE_PATH" && sh -c "$a") >/dev/null 2>&1 ;;
+      esac
+    fi
+    prev=$a
+  done
+fi
+exec "$(dirname "$0")/tmux-spawn" "$@"
+SH
+  case "$at_launch" in
+    keep) printf '#!/usr/bin/env bash\nexit 0\n' ;;
+    rewrite) printf '#!/usr/bin/env bash\nprintf "{}\\n" > .claude/settings.local.json\n' ;;
+    delete) printf '#!/usr/bin/env bash\nrm -f .claude/settings.local.json\n' ;;
+  esac > "$fakebin/claude"
+  chmod +x "$fakebin/tmux" "$fakebin/claude"
   fm_test_spawn_home "$home" claude
   fm_git_init_commit "$proj"
   mkdir -p "$proj/.claude"
@@ -313,21 +335,58 @@ test_claude_spawn_leaves_a_tracked_project_settings_file_untouched() {
   git -C "$proj" add -f .claude/settings.local.json
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm settings
   fm_git_add_origin "$proj" "$proj.origin.git"
-  git -C "$proj" worktree add --quiet -b wt-claude-tracked "$wt"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
   fm_test_spawn_brief "$home" "$id"
-  tracked="$case_dir/settings.committed"
-  cp "$wt/.claude/settings.local.json" "$tracked"
-  launch_log="$case_dir/launch.log"
+  cp "$wt/.claude/settings.local.json" "$case_dir/settings.committed"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
 
-  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" run_spawn "$home" "$wt" "$fakebin" "$id" "$proj")
+# Spawning a claude worker into a project that commits its settings.local.json
+# must leave that file byte-identical and the worktree clean, while the launch
+# still reaches the hooks through --settings.
+test_claude_spawn_leaves_a_tracked_project_settings_file_untouched() {
+  local rec id=busy-cl-tracked out launch_log
+  rec=$(make_tracked_claude_settings_case claude-tracked-settings "$id" keep)
+  read_case_record "$rec"
+  launch_log="$CASE_DIR/launch.log"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
-  cmp -s "$tracked" "$wt/.claude/settings.local.json" \
-    || fail "claude spawn rewrote the project's committed .claude/settings.local.json: $(git -C "$wt" diff --stat)"
-  out=$(git -C "$wt" status --porcelain)
+  cmp -s "$CASE_DIR/settings.committed" "$WT_DIR/.claude/settings.local.json" \
+    || fail "claude spawn rewrote the project's committed .claude/settings.local.json: $(git -C "$WT_DIR" diff --stat)"
+  assert_not_contains "$out" "settings.local.json" \
+    "an unchanged tracked settings file must not draw a post-launch warning"
+  out=$(git -C "$WT_DIR" status --porcelain)
   [ -z "$out" ] || fail "claude spawn left the worktree dirty: $out"
-  assert_grep "--settings '$(cd "$home/state" && pwd -P)/$id.claude-settings.json'" "$launch_log" \
+  assert_grep "--settings '$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json'" "$launch_log" \
     "claude launch does not load the per-task hook settings"
   pass "claude spawn leaves a project's committed .claude/settings.local.json untouched and the worktree clean"
+}
+
+# Whatever rewrites or removes the committed settings.local.json during a claude
+# launch, the spawn still succeeds but names the file and the task in a warning,
+# and leaves the file exactly as the launch left it.
+test_claude_spawn_warns_when_launch_changes_tracked_settings() {
+  local at_launch rec id out
+  for at_launch in rewrite delete; do
+    id=busy-cl-$at_launch
+    rec=$(make_tracked_claude_settings_case "claude-tracked-$at_launch" "$id" "$at_launch")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "claude spawn must still succeed when the launch changes tracked settings ($at_launch): $out"
+    assert_contains "$out" "spawned $id " "claude spawn should report success ($at_launch)"
+    out=$(printf '%s\n' "$out" | grep '^warning: ' | grep -F "$id" | grep -F "$WT_DIR/.claude/settings.local.json")
+    [ -n "$out" ] || fail "claude spawn did not warn naming the changed tracked settings file and task ($at_launch)"
+    if [ "$at_launch" = rewrite ]; then
+      [ "$(cat "$WT_DIR/.claude/settings.local.json")" = "{}" ] \
+        || fail "the post-launch check must not restore or rewrite the tracked settings file"
+    else
+      assert_absent "$WT_DIR/.claude/settings.local.json" \
+        "the post-launch check must not recreate a removed tracked settings file"
+    fi
+  done
+  pass "claude spawn warns, without refusing or repairing, when the launch changes a tracked settings.local.json"
 }
 
 test_raw_claude_launch_has_no_semantic_wiring() {
@@ -489,6 +548,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_claude_spawn_leaves_a_tracked_project_settings_file_untouched
+test_claude_spawn_warns_when_launch_changes_tracked_settings
 test_raw_claude_launch_has_no_semantic_wiring
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
