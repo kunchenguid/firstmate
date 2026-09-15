@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace a running or missing agent with a new one in the preserved worktree (endpoint recovery follows the transaction below), on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -68,8 +68,12 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+4. **Stop the old agent** through the `exit` verb, with its postcondition, unless the backend positively classifies the endpoint as `missing`.
+   In that case relaunch treats it as already stopped; standalone `exit` still refuses a missing endpoint.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which preserves the recorded worktree, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   An existing agent-free endpoint is reused; a positively `missing` endpoint is recreated on the recorded tmux or Herdr backend.
+   Herdr recreation publishes the replacement workspace, tab, and pane identities in the task record.
+   Control revalidates and reloads that record before checking replacement liveness.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -120,5 +124,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, missing-endpoint recreation with tmux and Herdr provider doubles, and a deterministic replacement acting on delivered preserved instructions.
+  These doubles do not establish authenticated agent resumption or live Herdr missing-endpoint recovery.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

@@ -57,7 +57,20 @@ make_tmux_stub() {  # <dir>
 set -u
 D=$FM_FAKE_DIR
 case "${1:-}" in
+  new-window)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) printf '%s\n' "$2" >> "$D/windows"; shift 2 ;;
+        -c) printf '%s' "$2" > "$D/cwd"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'zsh' > "$D/command"
+    printf '@42\n'
+    exit 0 ;;
   send-keys)
+    [ -s "$D/windows" ] || exit 1
     shift
     literal=0
     while [ $# -gt 0 ]; do
@@ -76,6 +89,9 @@ case "${1:-}" in
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'*)
+          if [ -x "$D/../fakebin/claude" ]; then
+            (cd "$(cat "$D/cwd")" && bash -c "$payload") || exit 1
+          fi
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -96,6 +112,7 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    [ -s "$D/windows" ] || exit 1
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
@@ -1558,6 +1575,148 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_missing_agent_relaunches_same_task_and_worktree() {
+  local dir out rc=0
+  dir=$(new_case missing-agent rl42)
+  add_ship_task "$dir" rl42 claude
+  : > "$dir/fake/windows"
+  printf 'interrupted changes\n' > "$dir/wt/preserved.txt"
+  mkdir -p "$dir/home/state/rl42.inbox"
+  printf 'pending steer\n' > "$dir/home/state/rl42.inbox/1"
+  out=$(run_control "$dir" rl42 relaunch --note "recover the interrupted work") || rc=$?
+  expect_code 0 "$rc" "a missing agent should be treated as already stopped"$'\n'"$out"
+  assert_grep 'fm-rl42' "$dir/fake/windows" "replacement endpoint must exist"
+  assert_grep 'interrupted changes' "$dir/wt/preserved.txt" "local changes must survive"
+  assert_grep 'pending steer' "$dir/home/state/rl42.inbox/1" "pending steering must survive"
+  assert_contains "$out" "relaunched rl42" "missing-agent relaunch should report success"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "replacement should run in the recorded endpoint"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "replacement should retain the recorded worktree"
+  assert_grep "recover the interrupted work" "$dir/home/data/rl42/brief.md" "the replacement should receive the progress note"
+  pass "fm-control relaunch: a missing agent is treated as already stopped and replaced in place"
+}
+
+# Consume the actual argv delivered by the launch command. This deterministic
+# worker executes only the fixture's explicit arithmetic instruction; it proves
+# transport and usable preserved context, not authentication or LLM reasoning.
+make_replacement_worker() {
+  cat > "$1/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for payload in "$@"; do :; done
+# The test passes the public protocol CLI alongside the fake provider state.
+op=$(cat "$FM_FAKE_DIR/opinput")
+[ "$(printf '%s' "$payload" | "$op" kind)" = launch-brief ]
+printf '%s' "$payload" | "$op" body > "$FM_FAKE_DIR/received-brief"
+value=$(sed -n 's/^Resume fixture: add \([0-9][0-9]*\) to preserved.txt$/\1/p' "$FM_FAKE_DIR/received-brief")
+[ -n "$value" ]
+printf '%s\n' "$(( $(cat preserved.txt) + value ))" > resumed.txt
+SH
+  chmod +x "$1/fakebin/claude"
+  printf '%s\n' "$ROOT/bin/fm-operational-input.sh" > "$1/fake/opinput"
+}
+
+test_missing_replacement_acts_on_delivered_instructions() {
+  local dir out rc=0
+  dir=$(new_case resume-instructions rl43)
+  add_ship_task "$dir" rl43 claude
+  make_replacement_worker "$dir"
+  printf '\nResume fixture: add 7 to preserved.txt\n' >> "$dir/home/data/rl43/brief.md"
+  printf '35\n' > "$dir/wt/preserved.txt"
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" rl43 relaunch --note "Continue the saved arithmetic instruction") || rc=$?
+  expect_code 0 "$rc" "replacement should execute its delivered launch command"$'\n'"$out"
+  [ "$(cat "$dir/wt/resumed.txt")" = 42 ] || fail "replacement did not act on preserved instructions and work"
+  [ "$(cat "$dir/wt/preserved.txt")" = 35 ] || fail "replacement lost interrupted work"
+  assert_grep 'Continue the saved arithmetic instruction' "$dir/fake/received-brief" \
+    "the emitted launch interface must deliver the new progress note too"
+  pass "fm-control relaunch: deterministic replacement acts on preserved instructions delivered through launch argv"
+}
+
+# Stateful Herdr CLI double: unknown calls fail closed, and sends to the old
+# pane fail. The real backend adapter must create and publish the replacement.
+make_relaunch_herdr_stub() {
+  cat > "$1/fakebin/herdr" <<'PYTHON'
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ['FM_FAKE_DIR'])
+state = root / 'herdr.json'
+s = json.loads(state.read_text())
+a = sys.argv[1:]
+if '--session' in a:
+    i = a.index('--session')
+    assert a[i + 1] == 'fm-lab-relaunch'
+    del a[i:i + 2]
+cmd = a[:2]
+r = {}
+if cmd == ['status', '--json']:
+    r = {'client': {'version': '0.7.1', 'protocol': 14}, 'server': {'running': True}}
+elif cmd == ['workspace', 'list']:
+    r = {'result': {'workspaces': [{'workspace_id': 'w1', 'label': 'fixture'}]}}
+elif cmd == ['tab', 'list']:
+    r = {'result': {'tabs': s['tabs']}}
+elif cmd == ['tab', 'create']:
+    assert a[a.index('--workspace') + 1] == 'w1'
+    assert not s['tabs']
+    s['tabs'] = [{'tab_id': 'w1:t9', 'pane_id': 'w1:p9', 'workspace_id': 'w1',
+                  'label': a[a.index('--label') + 1]}]
+    s['cwd'] = a[a.index('--cwd') + 1]
+    r = {'result': {'tab': {'tab_id': 'w1:t9'}, 'root_pane': {'pane_id': 'w1:p9'}}}
+elif cmd == ['pane', 'get']:
+    if a[2] != 'w1:p9' or not s['tabs']:
+        r = {'error': {'code': 'pane_not_found'}}
+    else:
+        r = {'result': {'pane': {'pane_id': 'w1:p9', 'foreground_cwd': s['cwd']}}}
+elif cmd == ['agent', 'get']:
+    r = ({'result': {'agent': {'agent_status': 'working'}}} if s['alive']
+         else {'error': {'code': 'agent_not_found'}})
+elif cmd == ['pane', 'process-info']:
+    r = {'result': {'type': 'pane_process_info', 'process_info': {
+        'pane_id': 'w1:p9', 'shell_pid': 12345,
+        'foreground_processes': [{'pid': 12346, 'name': 'claude', 'argv': ['claude']}]}}}
+elif cmd in [['pane', 'run'], ['pane', 'send-text'], ['pane', 'send-keys']]:
+    assert s['tabs'] and a[2] == 'w1:p9'
+    if cmd == ['pane', 'send-text']:
+        s['pending'] = a[3]
+    if cmd == ['pane', 'send-keys'] and a[3] == 'enter' and 'encode launch-brief' in s.get('pending', ''):
+        s['alive'] = True
+else:
+    print('unexpected Herdr call: ' + repr(a), file=sys.stderr)
+    sys.exit(1)
+state.write_text(json.dumps(s))
+print(json.dumps(r))
+PYTHON
+  chmod +x "$1/fakebin/herdr"
+  printf '{"tabs":[],"alive":false}\n' > "$1/fake/herdr.json"
+}
+
+test_missing_herdr_endpoint_publishes_replacement_identity() {
+  local dir out rc=0
+  dir=$(new_case herdr-missing rl44)
+  add_ship_task "$dir" rl44 claude
+  make_relaunch_herdr_stub "$dir"
+  sed 's/^window=.*/window=fm-lab-relaunch:w1:p2/' "$dir/home/state/rl44.meta" > "$dir/meta"
+  mv "$dir/meta" "$dir/home/state/rl44.meta"
+  printf '%s\n' 'backend=herdr' 'herdr_session=fm-lab-relaunch' \
+    'herdr_workspace_id=w1' 'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' >> "$dir/home/state/rl44.meta"
+  mkdir -p "$dir/home/config"
+  printf 'off\n' > "$dir/home/config/herdr-presentation-spaces"
+  out=$(run_control "$dir" rl44 relaunch --note "Recover the missing Herdr pane") || rc=$?
+  expect_code 0 "$rc" "missing Herdr pane should be recreated"$'\n'"$out"
+  [ "$(meta_field "$dir" rl44 window)" = fm-lab-relaunch:w1:p9 ] || fail "window did not adopt replacement identity"
+  [ "$(meta_field "$dir" rl44 herdr_pane_id)" = w1:p9 ] || fail "pane identity was not published"
+  [ "$(meta_field "$dir" rl44 herdr_tab_id)" = w1:t9 ] || fail "tab identity was not published"
+  [ "$(meta_field "$dir" rl44 endpoint_task_id)" = rl44 ] || fail "replacement lost task identity"
+  [ "$(meta_field "$dir" rl44 worktree)" = "$dir/wt" ] || fail "replacement lost recorded worktree"
+  jq -e --arg wt "$dir/wt" '.alive and .cwd == $wt and (.tabs | length) == 1 and .tabs[0].label == "fm-rl44"' \
+    "$dir/fake/herdr.json" >/dev/null || fail "record does not match the live replacement endpoint"
+  [ "$(journal_field "$dir" rl44 phase)" = complete ] || fail "replacement liveness was not verified"
+  pass "fm-control relaunch: missing Herdr pane is recreated with matching task and endpoint metadata"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1597,6 +1756,7 @@ test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
+test_missing_agent_relaunches_same_task_and_worktree
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
@@ -1611,3 +1771,6 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+
+test_missing_replacement_acts_on_delivered_instructions
+test_missing_herdr_endpoint_publishes_replacement_identity
