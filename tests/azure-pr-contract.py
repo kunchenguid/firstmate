@@ -23,6 +23,8 @@ MIN_APPROVER_POLICY = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
 MERGE_STRATEGY_POLICY = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab"
 FILE_SIZE_POLICY = "2e26e725-8201-4edd-8bf5-978563c34a80"
 CASE_ENFORCEMENT_POLICY = "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+MAX_PATH_LENGTH_POLICY = "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+RESERVED_NAMES_POLICY = "db2b9b4c-180d-4529-9701-01541d19f36b"
 
 FAKE = r'''#!/usr/bin/env python3
 import json,os,sys
@@ -209,7 +211,13 @@ class AzureContract(unittest.TestCase):
         case_enforcement = dict(id=4, revision=1, isEnabled=True, isBlocking=True,
                                 type=dict(id=CASE_ENFORCEMENT_POLICY),
                                 settings=dict(enforceConsistentCase=True))
-        self.rows("policyConfigurations", self.configs + [file_size, case_enforcement])
+        max_path_length = dict(id=5, revision=1, isEnabled=True, isBlocking=True,
+                               type=dict(id=MAX_PATH_LENGTH_POLICY),
+                               settings=dict(maxPathLength=1))
+        reserved_names = dict(id=6, revision=1, isEnabled=True, isBlocking=True,
+                              type=dict(id=RESERVED_NAMES_POLICY),
+                              settings=dict(reservedNames=['aux']))
+        self.rows("policyConfigurations", self.configs + [file_size, case_enforcement, max_path_length, reserved_names])
         self.rows("evaluations", self.policies)
         p = self.run_helper("verify")
         self.assertEqual(p.returncode, 0, p.stderr)
