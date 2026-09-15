@@ -168,6 +168,26 @@ for provider in -- codex-; do
 done
 ok "arm rejects noncanonical provider identities"
 
+rm -f "$COUNT"
+generic_home="$LAB/generic-home"
+mkdir -p "$generic_home"
+PATH="$FAKEBIN:$PATH" QUOTA_AXI_COUNT="$COUNT" FM_HOME="$generic_home" \
+  "$BIN/fm-procevent-quota.sh" arm --interval 0.01 --provider codex >/dev/null \
+  || fail "generic provider watch did not arm"
+PATH="$FAKEBIN:$PATH" QUOTA_AXI_COUNT="$COUNT" FM_HOME="$generic_home" \
+  "$BIN/fm-procevent.sh" start quota-codex >/dev/null \
+  || fail "generic provider watch runner failed"
+generic_result=
+for candidate in "$generic_home/state/procevent-inbox/quota-codex".*.result; do
+  [ -e "$candidate" ] || continue
+  generic_result=$candidate
+  break
+done
+[ -n "$generic_result" ] || fail "generic provider watch produced no result"
+[ "$("$BIN/fm-procevent-quota.sh" classify "$generic_result")" = exhausted ] \
+  || fail "generic provider watch did not execute its registered poll"
+ok "generic provider arm registers an executable poll"
+
 out=$(FM_HOME="$LAB/retire-home" FM_STATE_OVERRIDE="$LAB/retire-state" \
   "$BIN/fm-procevent-quota.sh" retire --provider codex)
 [ "$out" = "retired: quota-codex" ] || fail "provider retire targeted the wrong source: $out"

@@ -237,8 +237,9 @@ cmd_arm() {
   [ "$timeout" -ge 5 ] || timeout=5
   [ -z "$scope" ] || optional+=(--scope "$scope")
   [ "$inclusive" -eq 0 ] || optional+=(--inclusive)
+  [ -z "$SOURCE_ID_OVERRIDE" ] || optional+=(--source-id "$SOURCE_ID_OVERRIDE")
   "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
-    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" "${optional[@]}" --source-id "$CANONICAL_SOURCE_ID" --timeout "$timeout" || exit 1
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" "${optional[@]}" --timeout "$timeout" || exit 1
   printf 'armed: %s\n' "$CANONICAL_SOURCE_ID"
   printf 'provider: %s\n' "${PROVIDER:-(aggregate)}"
   printf 'threshold: %s%%\n' "$threshold"
