@@ -117,16 +117,29 @@ fm_windows_own_pid() {
   return 1
 }
 
+# Run one already-built PowerShell -Command script and print its stdout.
+# Bounded with `timeout` (present wherever this fleet already relies on it,
+# e.g. fm-backlog-transition-lib.sh) so a hung or AV/EDR-intercepted WMI call
+# cannot wedge lock acquisition or a turn-end guard indefinitely; runs
+# unbounded only if `timeout` itself is unavailable, no worse than before.
+fm_windows_powershell_run() {  # <script>
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 powershell.exe -NoProfile -NonInteractive -Command "$1" 2>/dev/null
+  else
+    powershell.exe -NoProfile -NonInteractive -Command "$1" 2>/dev/null
+  fi
+}
+
 # Print "<pid>\t<name>\t<commandline>" for real Windows pids from $1 up through
 # its parents (16 hops), one per line, innermost first - the same shape
 # fm_harness_ancestry_pids walks below, sourced from Win32_Process instead of
 # `ps` so it sees the real ancestry regardless of the POSIX/Windows boundary.
 # One powershell.exe per call, the whole chain in one round trip.
 fm_windows_ancestry_rows() {  # <starting real windows pid>
-  local start=$1
+  local start=$1 script
   case "$start" in ''|*[!0-9]*) return 1 ;; esac
   command -v powershell.exe >/dev/null 2>&1 || return 1
-  powershell.exe -NoProfile -NonInteractive -Command '
+  script='
     $ErrorActionPreference = "SilentlyContinue"
     # $fmPid, never $pid: PowerShell reserves $PID (case-insensitive) as a
     # read-only automatic variable naming THIS powershell.exe process, so
@@ -140,22 +153,31 @@ fm_windows_ancestry_rows() {  # <starting real windows pid>
       if (-not $p.ParentProcessId -or $p.ParentProcessId -eq $fmPid) { break }
       $fmPid = $p.ParentProcessId
     }
-  ' 2>/dev/null
+  '
+  fm_windows_powershell_run "$script"
 }
 
-# Windows counterpart of the ancestry walk below: same contiguous-run and
-# Claude-extends contract, fed by fm_windows_ancestry_rows instead of `ps`.
-# Win32_Process names carry a trailing .exe that the shared classifier's exact
-# harness-name patterns (^pi$, ^omp$, ...) do not expect, so it is stripped
-# before matching.
-fm_harness_ancestry_pids_windows() {
-  local start rows pid comm args extending=0 printed=0
-  start=$(fm_windows_own_pid) || return 1
-  rows=$(fm_windows_ancestry_rows "$start") || return 1
-  [ -n "$rows" ] || return 1
+# Classify pre-fetched Windows ancestry rows (fm_windows_ancestry_rows's shape)
+# with the exact same contiguous-run and Claude-extends contract as the POSIX
+# walk below - kept as one function, called from both fm_harness_ancestry_pids
+# and fm_harness_ancestry_pids_windows, precisely so that contract is stated
+# once. A future change to the gap/Claude-extends rule belongs in BOTH this
+# function and the POSIX loop below; grep this file for "Claude-extends"
+# before changing either.
+#
+# A row's pid is validated as digits-only before use: an embedded raw newline
+# in some launcher's CommandLine could otherwise misalign the next row's
+# tab-split fields, and a corrupted "pid" written into the lock file would
+# brick reacquisition since every liveness check also requires pure digits.
+# Win32_Process Name is lowercased after its .exe suffix is stripped, since
+# unlike POSIX `ps -o comm=` (always lowercase in practice) its casing is
+# whatever Windows reports and the shared classifier's patterns are not
+# case-insensitive.
+fm_harness_ancestry_classify_rows() {  # <rows>
+  local rows=$1 pid comm args extending=0 printed=0
   while IFS=$'\t' read -r pid comm args; do
-    [ -n "$pid" ] || continue
-    comm=${comm%.[Ee][Xx][Ee]}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    comm=$(printf '%s' "${comm%.[Ee][Xx][Ee]}" | tr '[:upper:]' '[:lower:]')
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -168,6 +190,19 @@ fm_harness_ancestry_pids_windows() {
 $rows
 EOF
   [ "$printed" -eq 1 ]
+}
+
+# Windows counterpart of the ancestry walk below, fed by fm_windows_ancestry_rows
+# instead of `ps`. Returns failure both when the native path could not run at
+# all and when it ran but found no harness - callers that need to tell those
+# apart (fm_harness_ancestry_pids' fallback gate) inline the fetch themselves
+# instead of calling this wrapper; see its own comment for why.
+fm_harness_ancestry_pids_windows() {
+  local start rows
+  start=$(fm_windows_own_pid) || return 1
+  rows=$(fm_windows_ancestry_rows "$start") || return 1
+  [ -n "$rows" ] || return 1
+  fm_harness_ancestry_classify_rows "$rows"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -189,15 +224,30 @@ EOF
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 #
+# fm_harness_ancestry_classify_rows above applies this exact same contract to
+# pre-fetched Windows rows instead of iterative `ps` calls, because the two
+# walks fetch one hop at a time vs. all hops at once and cannot share a single
+# loop; a change to the gap or Claude-extends rule belongs in BOTH places.
+#
 # On Windows (MSYS/Git Bash/Cygwin) this defers to the Win32_Process-based walk
 # above, which alone can see across the POSIX/Windows process boundary; it
-# falls back to the `ps`-based walk below only if that native path itself could
-# not run (own pid unreadable, or no powershell.exe on PATH), never merely
-# because it found no harness match.
+# falls back to the `ps`-based walk below only if the native path itself could
+# not answer at all - own pid unreadable, no powershell.exe on PATH, or WMI/CIM
+# unreachable (blocked, disabled, AV/EDR-intercepted) so it could not even
+# resolve THIS shell's own pid - never merely because it climbed the real
+# ancestry and found no harness match, which the ps-based walk could not
+# improve on anyway (it cannot see across this same boundary either). Getting
+# at least the self row back is what proves Win32_Process is reachable, so the
+# fetch is inlined here rather than going through fm_harness_ancestry_pids_windows,
+# whose own all-or-nothing success/failure cannot distinguish the two cases.
 fm_harness_ancestry_pids() {
   if fm_windows_env; then
-    fm_harness_ancestry_pids_windows && return 0
-    fm_windows_own_pid >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1 && return 1
+    local win_start win_rows
+    win_start=$(fm_windows_own_pid)
+    if [ -n "$win_start" ]; then
+      win_rows=$(fm_windows_ancestry_rows "$win_start")
+      [ -n "$win_rows" ] && { fm_harness_ancestry_classify_rows "$win_rows"; return $?; }
+    fi
   fi
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -242,27 +292,35 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 #
-# On Windows a lock pid is a real Windows pid (see fm_harness_ancestry_pids
-# above), which `kill -0`/`ps -p` cannot resolve - MSYS/Cygwin only recognizes
-# pids in its own POSIX-emulation numbering, never arbitrary Windows pids - so
-# this asks Win32_Process directly instead.
+# On Windows the recorded lock pid is usually a real Windows pid (see
+# fm_harness_ancestry_pids above), which `kill -0`/`ps -p` cannot resolve -
+# MSYS/Cygwin only recognizes pids in its own POSIX-emulation numbering, never
+# arbitrary Windows pids - so this asks Win32_Process first. But that same
+# ancestry walk falls back to the ps-based walk (an MSYS-numbered pid) when the
+# native path itself could not answer, so a pid this function is asked about
+# could be from either numbering space, and it cannot tell which just by
+# looking at the integer. A Windows-side "no such process" is therefore NOT
+# treated as dead outright: it falls through to the POSIX check too, in case
+# the pid is really an MSYS one. Only a Windows-side match that is definitely
+# not harness-shaped is authoritative dead, since that positively identifies a
+# real, different process at that pid.
 fm_harness_pid_alive() {
   local pid=$1 comm args row
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  if fm_windows_env; then
-    command -v powershell.exe >/dev/null 2>&1 || return 1
-    row=$(powershell.exe -NoProfile -NonInteractive -Command '
+  if fm_windows_env && command -v powershell.exe >/dev/null 2>&1; then
+    row=$(fm_windows_powershell_run '
       $ErrorActionPreference = "SilentlyContinue"
       $p = Get-CimInstance Win32_Process -Filter ("ProcessId=" + '"$pid"')
       if ($p) { Write-Output ("$($p.Name)`t$($p.CommandLine)") }
-    ' 2>/dev/null) || return 1
-    [ -n "$row" ] || return 1
-    IFS=$'\t' read -r comm args <<EOF
+    ')
+    if [ -n "$row" ]; then
+      IFS=$'\t' read -r comm args <<EOF
 $row
 EOF
-    comm=${comm%.[Ee][Xx][Ee]}
-    fm_harness_process_matches "$comm" "$args"
-    return $?
+      comm=$(printf '%s' "${comm%.[Ee][Xx][Ee]}" | tr '[:upper:]' '[:lower:]')
+      fm_harness_process_matches "$comm" "$args" && return 0
+      return 1
+    fi
   fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1

@@ -463,7 +463,8 @@ set -u
 argv="$*"
 case "$argv" in
   *ParentProcessId*)
-    IFS=';' read -r -a rows <<< "${FM_TEST_WIN_ROWS:-}"
+    [ -n "${FM_TEST_WIN_ROWS:-}" ] || exit 0
+    IFS=';' read -r -a rows <<< "$FM_TEST_WIN_ROWS"
     for row in "${rows[@]}"; do
       IFS='|' read -r rpid rname rcmd <<< "$row"
       printf '%s\t%s\t%s\n' "$rpid" "$rname" "$rcmd"
@@ -568,6 +569,81 @@ SH
   pass "session-lock windows: the ps-based walk still runs as a fallback when powershell.exe is unavailable"
 }
 
+test_windows_ancestry_falls_back_when_wmi_answers_nothing() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-wmi-empty"
+  fakebin=$(fm_windows_fakebin "$dir")
+  fm_windows_fake_powershell "$fakebin"
+  mkdir -p "$dir/state"
+
+  # powershell.exe is present and own_pid resolves, but the CIM query itself
+  # answers with nothing at all - not even a row for our own process - as it
+  # would with WMI blocked, disabled, or intercepted. That must read as "the
+  # native path could not answer", not "no harness present", and fall back to
+  # the ps-based walk instead of hard-failing.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$field" = "winpid=" ] && { printf '%s\n' "${FM_TEST_OWN_WINPID:-5000}"; exit 0; }
+case "$pid:$field" in
+  888:comm=) printf '%s\n' claude ;;
+  888:args=) printf '%s\n' claude ;;
+  888:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 888 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(FM_TEST_WIN_ROWS='' lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "ancestry did not fall back to the ps-walk when WMI answered with nothing"
+  [ "$got" = 888 ] || fail "fallback ancestry resolved '$got', expected the ps-walk's harness pid 888"
+  pass "session-lock windows: ancestry falls back to the ps-walk when WMI/CIM cannot even resolve its own pid"
+}
+
+test_windows_pid_alive_falls_back_for_an_msys_space_pid() {
+  local dir fakebin
+  dir="$TMP_ROOT/windows-alive-fallback"
+  fakebin=$(fm_windows_fakebin "$dir")
+  fm_windows_fake_powershell "$fakebin"
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  777:comm=) printf '%s\n' claude ;;
+  777:args=) printf '%s\n' claude ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # A lock pid can come from the ps-based fallback walk (an MSYS-numbered
+  # pid), not just the native Windows walk (a real Windows pid) - see the gap
+  # this closes at fm_harness_ancestry_pids' fallback above. Win32_Process has
+  # no process at all for 777 (FM_TEST_WIN_ALIVE unset), which must fall
+  # through to the POSIX check rather than being read as conclusively dead.
+  FM_TEST_WIN_ALIVE='' lib_eval "$fakebin" 'fm_harness_pid_alive 777' \
+    || fail "an MSYS-space lock pid with no matching Windows process was read as dead instead of falling back to ps/kill"
+  pass "session-lock windows: liveness falls back to ps/kill when Win32_Process has no such pid at all"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -577,6 +653,8 @@ test_windows_ancestry_finds_claude_past_exe_suffixes
 test_windows_ancestry_stops_at_a_gap
 test_windows_pid_alive_uses_win32_process
 test_windows_ancestry_falls_back_without_powershell
+test_windows_ancestry_falls_back_when_wmi_answers_nothing
+test_windows_pid_alive_falls_back_for_an_msys_space_pid
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
