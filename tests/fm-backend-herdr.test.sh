@@ -436,21 +436,32 @@ test_recovery_grade_read_widens_only_at_its_own_boundary() {
 # the shell pid it names is a real process this test owns, so the descendant
 # walk runs against the real operating-system process table.
 
-stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|-> [process-info-exit] [registered-pane-id] [response-type]
-  local dir="$TMP_ROOT/stale-reg-$1" resp log fb n
+# The agent argument is either a bare agent_status (a registered `pi` record)
+# or a JSON object standing in for the whole `.result.agent` record; the
+# registered pane id is merged into it. A process-info body of `none` scripts
+# a pass in which the classifier must refuse BEFORE reading the process view,
+# so only two responses are laid down per pass and the probe appends the
+# fake's process-info call count for the caller to pin at zero.
+stale_registration_case() {  # <dir-suffix> <agent_status|agent-json> <process-info-body|-|none> [process-info-exit] [registered-pane-id] [response-type]
+  local dir="$TMP_ROOT/stale-reg-$1" agent=$2 resp log fb n calls=3
   mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  case "$agent" in
+    \{*) ;;
+    *) agent=$(printf '{"agent":"pi","agent_status":"%s"}' "$agent") ;;
+  esac
+  agent=$(printf '%s' "$agent" | jq -c --arg pane "${5:-w1:p2}" '. + {pane_id: $pane}')
+  [ "$3" != none ] || calls=2
   # The probe below classifies the same pane three times (pane state, the
   # recovery-grade read, the husk check), and the canned fake consumes
-  # responses in call order, so the same three-call script is laid down for
+  # responses in call order, so the same per-pass script is laid down for
   # each pass:
-  for n in 0 3 6; do
+  for n in 0 "$calls" $((calls * 2)); do
     # +1: pane get -> the pane structurally exists
     printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/$((n + 1)).out"
-    # +2: agent get -> a registered agent with the given status
-    printf '{"result":{"type":"%s","agent":{"agent":"pi","agent_status":"%s","pane_id":"%s"}}}\n' \
-      "${6:-agent_info}" "$2" "${5:-w1:p2}" > "$resp/$((n + 2)).out"
+    # +2: agent get -> the registered record
+    printf '{"result":{"type":"%s","agent":%s}}\n' "${6:-agent_info}" "$agent" > "$resp/$((n + 2)).out"
     # +3: pane process-info -> the pane's actual process view
-    [ "$3" = - ] || printf '%s\n' "$3" > "$resp/$((n + 3)).out"
+    case "$3" in -|none) ;; *) printf '%s\n' "$3" > "$resp/$((n + 3)).out" ;; esac
     [ -z "${4:-}" ] || printf '%s\n' "$4" > "$resp/$((n + 3)).exit"
   done
   fb=$(make_herdr_fakebin "$dir")
@@ -458,6 +469,7 @@ stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|->
     bash -c '. "$0/bin/backends/herdr.sh"
       printf "%s %s " "$(fm_backend_herdr_pane_agent_state fmtest w1:p2)" "$(fm_backend_herdr_agent_state fmtest:w1:p2)"
       fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT"
+  [ "$3" != none ] || printf ' process-info-calls=%s' "$(grep -c process-info "$log")"
 }
 
 shell_only_process_info() {  # <shell-pid>
@@ -500,12 +512,19 @@ test_unknown_registration_requires_exact_shell_only_process_proof() {
   out=$(stale_registration_case unknown-shell unknown "$shell_info")
   [ "$out" = "stale-agent dead refused" ] \
     || { kill "$shell_pid" 2>/dev/null; fail "an exact-pane unknown record over a shell-only pane must recover without licensing a husk close, got '$out'"; }
-  out=$(stale_registration_case unknown-wrong-pane unknown "$shell_info" '' w9:p9)
-  [ "$out" = "unknown unreadable refused" ] \
-    || { kill "$shell_pid" 2>/dev/null; fail "a contradictory unknown registration must refuse recovery, got '$out'"; }
-  out=$(stale_registration_case unknown-wrong-type unknown "$shell_info" '' w1:p2 pane_process_info)
-  [ "$out" = "unknown unreadable refused" ] \
-    || { kill "$shell_pid" 2>/dev/null; fail "an unknown registration with a contradictory response type must refuse recovery, got '$out'"; }
+  # The record Herdr 0.8.2 leaves after an orderly Codex exit once shell output
+  # follows it: the agent label is gone, only agent_session still names Codex.
+  out=$(stale_registration_case unknown-unlabeled \
+    '{"agent_status":"unknown","display_agent":"labtask","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"01a09ee8-e50a-7b13-9c4b-2272b385ad3b"}}' \
+    "$shell_info")
+  [ "$out" = "stale-agent dead refused" ] \
+    || { kill "$shell_pid" 2>/dev/null; fail "an unlabeled unknown record over a shell-only pane must recover without licensing a husk close, got '$out'"; }
+  out=$(stale_registration_case unknown-wrong-pane unknown none '' w9:p9)
+  [ "$out" = "unknown unreadable refused process-info-calls=0" ] \
+    || { kill "$shell_pid" 2>/dev/null; fail "a contradictory unknown registration must refuse recovery before reading the process view, got '$out'"; }
+  out=$(stale_registration_case unknown-wrong-type unknown none '' w1:p2 pane_process_info)
+  [ "$out" = "unknown unreadable refused process-info-calls=0" ] \
+    || { kill "$shell_pid" 2>/dev/null; fail "an unknown registration with a contradictory response type must refuse recovery before reading the process view, got '$out'"; }
   out=$(stale_registration_case unknown-process-error unknown 'Error: socket unavailable' 1)
   [ "$out" = "unknown unreadable refused" ] \
     || { kill "$shell_pid" 2>/dev/null; fail "an unknown registration with an unreadable process view must refuse recovery, got '$out'"; }

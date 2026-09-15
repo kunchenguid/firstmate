@@ -2248,7 +2248,11 @@ EOF
 #                 registration alone is no longer trusted, and its absence is
 #                 not claimed either. An unknown registration is recoverable
 #                 only when its echoed pane id agrees and the process view
-#                 positively proves a shell-only pane. The caller must refuse
+#                 positively proves a shell-only pane; its `agent` label may
+#                 be absent, because Herdr drops the label once shell output
+#                 follows an exited agent while the record itself lingers
+#                 (measured on 0.8.2 - docs/verification/runtime-backends.md
+#                 "Stale agent registration"). The caller must refuse
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
@@ -2272,9 +2276,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     working|idle|done|blocked) ;;
     unknown)
       printf '%s' "$out" | jq -e --arg pane "$pane_id" '
-        .result.type == "agent_info"
-        and .result.agent.pane_id == $pane
-        and (.result.agent.agent | type == "string" and length > 0)
+        .result.type == "agent_info" and .result.agent.pane_id == $pane
       ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
       [ "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" = shell ] \
         && printf 'stale-agent' || printf 'unknown'
