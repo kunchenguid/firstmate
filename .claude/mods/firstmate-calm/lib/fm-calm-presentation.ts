@@ -90,11 +90,15 @@ export type CalmSessionRow = {
 };
 
 /**
- * The working notes a restored transcript holds. The stored transcript keeps each
- * content block as its own row, so assistant text is a working note when its own row
- * called tools, or when a tool-calling assistant row follows it before the next user row.
+ * The structurally identified working notes and final replies in a restored transcript.
+ * The stored transcript keeps each content block as its own row, so assistant text is a
+ * working note when its own row called tools, or when a tool-calling assistant row
+ * follows it before the next user row.
  */
-export function restoredWorkingNotes(rows: readonly CalmSessionRow[]): string[] {
+export function restoredAssistantText(rows: readonly CalmSessionRow[]): {
+  workingNotes: string[];
+  finalReplies: string[];
+} {
   const notes = new Set<string>();
   const finalReplies = new Set<string>();
   for (let index = 0; index < rows.length; index += 1) {
@@ -113,7 +117,7 @@ export function restoredWorkingNotes(rows: readonly CalmSessionRow[]): string[] 
     else finalReplies.add(key);
   }
   for (const key of finalReplies) notes.delete(key);
-  return [...notes];
+  return { workingNotes: [...notes], finalReplies: [...finalReplies] };
 }
 
 /** Whether a user row's text is a canonically classified Firstmate operational input. */

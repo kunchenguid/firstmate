@@ -21,6 +21,7 @@ set -u
 
 MOD="$ROOT/.claude/mods/firstmate-calm"
 PI_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
+PI_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 TMP_ROOT=$(fm_test_tmproot fm-calm-claude-mod)
 
@@ -39,8 +40,10 @@ test_plugin_shape() {
   autoload="$ROOT/.claude/skills/firstmate-calm"
   [ -f "$autoload/.claude-plugin/plugin.json" ] || fail "the project's .claude/skills path does not reach the mod's manifest"
   [ -f "$autoload/hooks/hooks.json" ] || fail "the project's .claude/skills path does not reach the mod's hooks module declaration"
-  cmp -s "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$MOD/lib/fm-calm-working-ship-sprite.ts" \
-    || fail "the Pi extension's sprite core is not the mod's sprite core"
+  [ -L "$PI_SPRITE" ] || fail "the Pi sprite path is not a symlink to the shared core"
+  [ "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_SPRITE")" = \
+    "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$MOD/lib/fm-calm-working-ship-sprite.ts")" ] \
+    || fail "the Pi sprite path does not resolve to the mod's shared core"
   [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
   cat >"$TMP_ROOT/shape.mjs" <<JS
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -240,7 +243,7 @@ check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [] }) =
 check(policy.stepTextIsWorkingNote({ stopReason: "end_turn", toolUses: [{}] }) === false, "end_turn");
 check(policy.stepTextIsWorkingNote({ stopReason: null, toolUses: [] }) === false, "no response");
 check(policy.workingNoteKey("  note \\n") === "note" && policy.workingNoteKey("   ") === "", "note key");
-const notes = policy.restoredWorkingNotes([
+const restored = policy.restoredAssistantText([
   { role: "user", text: "go", toolUses: [] },
   { role: "assistant", text: " own call ", toolUses: [{}] },
   { role: "assistant", text: "before a tool row", toolUses: [] },
@@ -252,7 +255,8 @@ const notes = policy.restoredWorkingNotes([
   { role: "user", text: "last", toolUses: [] },
   { role: "assistant", text: "plain reply", toolUses: [] },
 ]);
-check(JSON.stringify(notes) === JSON.stringify(["own call", "before a tool row"]), \`restored notes \${JSON.stringify(notes)}\`);
+check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row"]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
+check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
 check(policy.userTextIsOperational("\\u2063FIRSTMATE_OP: v1 watcher: x") && !policy.userTextIsOperational("hello"), "operational recognition");
 console.log("policy-ok");
 JS
@@ -263,15 +267,26 @@ JS
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy
 # shapes, and near misses. Each case is one file so multi-line bodies stay exact.
+canonical_generic_kinds() {
+  bash -c '. "$1"; printf "%s\n" "$FM_OPERATIONAL_KINDS"' firstmate "$OPERATIONAL_INPUT"
+}
+
 write_parity_corpus() {
-  local dir=$1 kind index=0 body
+  local dir=$1 kind index=0 body generic_kinds
   mkdir -p "$dir"
-  for kind in session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome from-firstmate; do
+  generic_kinds=$(canonical_generic_kinds) || fail "could not read generic kinds from the operational-input owner"
+  [ -n "$generic_kinds" ] || fail "the operational-input owner exposes no generic kinds"
+  for kind in $generic_kinds; do
     for body in 'plain body' $'multi\nline\n\nbody' $'trailing newline\n' $'two trailing newlines\n\n' 'colon: inside: body' 'ünïcödé body ✓' ' '; do
       index=$((index + 1))
       printf '%s' "$body" | "$OPERATIONAL_INPUT" encode "$kind" >"$dir/case-$index.txt" \
         || fail "the owner could not encode kind $kind for the parity corpus"
     done
+  done
+  for body in 'plain body' $'multi\nline\n\nbody' $'trailing newline\n' $'two trailing newlines\n\n' 'colon: inside: body' 'ünïcödé body ✓' ' '; do
+    index=$((index + 1))
+    printf '%s' "$body" | "$OPERATIONAL_INPUT" encode from-firstmate >"$dir/case-$index.txt" \
+      || fail "the owner could not encode from-firstmate for the parity corpus"
   done
   for body in \
     'Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.' \
@@ -310,7 +325,7 @@ write_parity_corpus() {
 }
 
 test_classifier_parity_with_shell_owner() {
-  local corpus count out shell_verdict port_verdict mismatches=0 compared=0 index file
+  local corpus count out shell_verdict port_verdict mismatches=0 compared=0 index file generic_kinds kind
   corpus="$TMP_ROOT/corpus"
   count=$(write_parity_corpus "$corpus")
   cat >"$TMP_ROOT/classify.mjs" <<JS
@@ -348,7 +363,9 @@ JS
   [ "$compared" -eq "$count" ] || fail "compared $compared of $count parity cases"
   [ "$mismatches" -eq 0 ] || fail "the TypeScript classifier diverged from bin/fm-operational-input.sh on $mismatches of $count cases"
   # The corpus must exercise every current kind and the legacy shapes, or parity is vacuous.
-  for kind in session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome from-firstmate legacy-operational; do
+  generic_kinds=$(canonical_generic_kinds) || fail "could not reread generic kinds from the operational-input owner"
+  [ -n "$generic_kinds" ] || fail "the operational-input owner exposes no generic kinds"
+  for kind in $generic_kinds from-firstmate legacy-operational; do
     grep -q "	$kind\$" "$corpus/port-verdicts.tsv" || fail "the parity corpus never produced the $kind verdict"
   done
   grep -q '	none$' "$corpus/port-verdicts.tsv" || fail "the parity corpus never produced a non-operational verdict"

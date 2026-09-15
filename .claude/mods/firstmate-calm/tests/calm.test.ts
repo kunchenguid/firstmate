@@ -255,6 +255,29 @@ describe("mid-turn working notes", () => {
     expect(isStock(await $.ui.render(assistantMessage("Done.", "final-reply")))).toBe(true);
   });
 
+  test("keeps an earlier final reply visible when a later working note reuses its text", async ($, on) => {
+    world(on, { preference: "on\n" });
+    const set = stepper(on);
+    set({
+      chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
+      result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
+    });
+    await runStep($);
+    expect(isStock(await $.ui.render(assistantMessage("Done.", "final-reply")))).toBe(true);
+
+    set({
+      chunks: [
+        { kind: "text", index: 0, text: "Done." },
+        { kind: "tool", index: 1, id: "t1", name: "Bash" },
+        { kind: "stop", stopReason: "tool_use", usage: null },
+      ],
+      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+    });
+    await runStep($);
+    expect(isStock(await $.ui.render(assistantMessage("Done.", "earlier-final")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Done.", "later-note")))).toBe(true);
+  });
+
   test("treats a response cut off while calling tools as a working note, but not a plain cut-off", async ($, on) => {
     world(on, { preference: "on\n" });
     const set = stepper(on);

@@ -39,7 +39,7 @@ import {
 import {
   calmPreferencePath,
   parseCalmPreference,
-  restoredWorkingNotes,
+  restoredAssistantText,
   serializeCalmPreference,
   stepTextIsWorkingNote,
   userTextIsOperational,
@@ -56,6 +56,7 @@ let preferencePath: string | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
+const finalReplies = new Set<string>();
 const sprite = createCalmWorkingShipSprite();
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
@@ -80,7 +81,9 @@ async function load($: EngineInterface): Promise<void> {
   );
   calm = parseCalmPreference(await readPreference($, preferencePath));
   try {
-    for (const note of restoredWorkingNotes(await $.session.messages())) workingNotes.add(note);
+    const restored = restoredAssistantText(await $.session.messages());
+    for (const note of restored.workingNotes) workingNotes.add(note);
+    for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
     // A transcript that cannot be read leaves restored narration visible; nothing else changes.
   }
@@ -169,14 +172,19 @@ export const register: Register = (on) => {
       if (stepTextIsWorkingNote(result)) {
         for (const text of [...blocks.values(), result.answer]) {
           const key = workingNoteKey(text);
-          if (key === "" || workingNotes.has(key)) continue;
+          if (key === "" || finalReplies.has(key) || workingNotes.has(key)) continue;
           workingNotes.add(key);
           changed = true;
         }
       } else {
         for (const text of [...blocks.values(), result.answer]) {
           const key = workingNoteKey(text);
-          if (key !== "" && workingNotes.delete(key)) changed = true;
+          if (key === "") continue;
+          if (!finalReplies.has(key)) {
+            finalReplies.add(key);
+            changed = true;
+          }
+          if (workingNotes.delete(key)) changed = true;
         }
       }
       if (changed && calm) $.ui.invalidate("ui.render");
@@ -220,6 +228,7 @@ export const register: Register = (on) => {
 
   on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
     await ensureLoaded($);
-    return calm && workingNotes.has(workingNoteKey(e.props.text)) ? hiddenRow($, e) : next(e);
+    const key = workingNoteKey(e.props.text);
+    return calm && workingNotes.has(key) && !finalReplies.has(key) ? hiddenRow($, e) : next(e);
   });
 };
