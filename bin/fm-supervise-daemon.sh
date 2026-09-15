@@ -931,7 +931,7 @@ wedge_alarm_notify() {  # <summary> <marker>
   # the fixed wedge event name; the helper applies the AFK posture and dedupe
   # checks and performs the bounded API call away from the daemon loop.
   if [ -x "$telegram" ]; then
-    FM_STATE_OVERRIDE="$state" "$telegram" send wedge >/dev/null 2>&1 &
+    FM_STATE_OVERRIDE="$state" "$telegram" notify-wedge >/dev/null 2>&1 &
   fi
   while IFS= read -r ch; do
     [ -n "$ch" ] || continue

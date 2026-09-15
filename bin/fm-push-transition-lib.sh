@@ -91,7 +91,9 @@ watch_telegram_notify() {
   local reason=$1 telegram="$FM_ROOT/bin/fm-telegram.sh"
   [ -x "$telegram" ] || return 0
   {
-    printf '%s\n' "$reason" | FM_STATE_OVERRIDE="$STATE" "$telegram" notify-wake
+    printf '%s\n%s\n%s\n' "$reason" "${FM_SIGNAL_TELEGRAM_KIND:-}" \
+      "${FM_SIGNAL_TELEGRAM_IDENTITY:-$reason}" \
+      | FM_STATE_OVERRIDE="$STATE" "$telegram" notify-wake
   } >/dev/null 2>&1 &
 }
 

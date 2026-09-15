@@ -1562,9 +1562,11 @@ run_check_capture() {
 # (docs/pi-supervision-branch.md). Stale and heartbeat rows retain their existing
 # eligibility rules.
 signal_files_actionable() {  # <status-file> ...
-  local f task record rest endpoint ident needs_decision rc found=1
+  local f task record rest endpoint ident events needs_decision rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_NEEDS_DECISION_FILES=''
+  FM_SIGNAL_TELEGRAM_KIND=''
+  FM_SIGNAL_TELEGRAM_IDENTITY=''
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
@@ -1583,9 +1585,19 @@ signal_files_actionable() {  # <status-file> ...
       continue
     fi
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    events=${rest#*$'\t'}
     FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+    FM_SIGNAL_TELEGRAM_IDENTITY="${FM_SIGNAL_TELEGRAM_IDENTITY}${f}:${endpoint}:${ident};"
+    if [ "$rc" -eq 0 ]; then
+      if printf '%s\n' "$events" | grep -Eq '(^| ; )(failed|blocked|needs-decision|reconciliation-required):'; then
+        FM_SIGNAL_TELEGRAM_KIND=error
+      elif [ -z "$FM_SIGNAL_TELEGRAM_KIND" ]; then
+        FM_SIGNAL_TELEGRAM_KIND=boundary
+      fi
+    fi
     if [ "$needs_decision" -eq 1 ]; then
       FM_SIGNAL_NEEDS_DECISION_FILES="${FM_SIGNAL_NEEDS_DECISION_FILES} ${f}"
+      FM_SIGNAL_TELEGRAM_KIND=error
     fi
     if [ "$rc" -eq 0 ] || [ "$needs_decision" -eq 1 ]; then
       found=0
@@ -1723,15 +1735,6 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
-}
-
-telegram_progress_tick_detached() {
-  local telegram="$SCRIPT_DIR/fm-telegram.sh" record
-  record=$(fm_afk_contract_path "$STATE")
-  [ -f "$record" ] || return 0
-  [ "$(fm_afk_contract_read_field "$record" reach_channels)" = telegram ] || return 0
-  [ -x "$telegram" ] || return 0
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$telegram" notify-progress >/dev/null 2>&1 &
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -1949,10 +1952,6 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
-  # The notification helper owns the cadence and aggregate redaction; this
-  # one-shot tick makes the 10-15 minute update independent of actionable wakes.
-  telegram_progress_tick_detached
-
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi

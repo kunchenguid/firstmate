@@ -2,9 +2,9 @@
 # Quota-exhaustion process-event adapter.
 #
 # Usage:
-#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--scope <scope>] [--inclusive]
+#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>]
 #   fm-procevent-quota.sh arm-afk [--interval <secs>]
-#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--scope <scope>] [--inclusive] [--timeout <secs>]
+#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--timeout <secs>]
 #   fm-procevent-quota.sh classify <result-file>
 #   fm-procevent-quota.sh terminal <result-file>
 #   fm-procevent-quota.sh source-id
@@ -12,9 +12,7 @@
 #
 # arm        Register a recurring quota-axi --json poll that wakes firstmate
 #            when the tracked provider's effectivePercentRemaining drops below
-#            <threshold> (default 10%) or, with --inclusive, at or below it.
-#            --scope limits the condition to availability records bounded by
-#            that named window. A runway.status of exhausted_now also fires.
+#            <threshold> (default 10%). A runway.status of exhausted_now also fires.
 #            The condition is deterministic and the watch is registered through
 #            `bin/fm-procevent.sh register`.
 # arm-afk    Register the Codex weekly protection watch at or below 70%.
@@ -95,26 +93,11 @@ positive_number() {
 
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
 
-valid_scope() {
-  local scope=${1-}
-  [[ "$scope" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]]
-}
-
 valid_percent() {
   local n=${1-}
   local LC_ALL=C
   [[ "$n" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
   jq -en --arg n "$n" '($n | tonumber) <= 100' >/dev/null 2>&1
-}
-
-validate_source_override_contract() {
-  [ -z "$SOURCE_ID_OVERRIDE" ] && return 0
-  [ "$SOURCE_ID_OVERRIDE" = afk-codex-weekly ] \
-    && [ "$PROVIDER" = codex ] \
-    && [ "$scope" = weekly ] \
-    && [ "$threshold" = 70 ] \
-    && [ "$inclusive" -eq 1 ] \
-    || die "afk-codex-weekly is reserved for the inclusive 70% Codex weekly watch"
 }
 
 # quota_json [timeout]
@@ -215,36 +198,25 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD scope='' inclusive=0
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout
   SOURCE_ID_OVERRIDE=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --interval)  positive_number "${2-}" || die "--interval needs a positive number"; interval=$2; shift 2 ;;
       --threshold) valid_percent "${2-}" || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
       --provider)  [ -n "${2-}" ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
-      --scope)     valid_scope "${2-}" || die "--scope needs a path-safe value"; scope=$2; shift 2 ;;
-      --inclusive) inclusive=1; shift ;;
-      --source-id) [ "${2-}" = afk-codex-weekly ] || die "--source-id is reserved for the AFK Codex weekly watch"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
       *) usage ;;
     esac
   done
-  validate_source_override_contract
   resolve_provider "$PROVIDER"
   fm_quota_axi_compatible 5 >/dev/null 2>&1 || die "quota-axi is missing or below the compatibility floor"
-  local timeout
-  local -a optional=()
   timeout=$(perl -e 'print int($ARGV[0] * 0.8 + 0.5)' "$interval") || timeout=30
   [ "$timeout" -ge 5 ] || timeout=5
-  [ -z "$scope" ] || optional+=(--scope "$scope")
-  [ "$inclusive" -eq 0 ] || optional+=(--inclusive)
-  [ -z "$SOURCE_ID_OVERRIDE" ] || optional+=(--source-id "$SOURCE_ID_OVERRIDE")
   "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
-    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" "${optional[@]}" --timeout "$timeout" || exit 1
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" --timeout "$timeout" || exit 1
   printf 'armed: %s\n' "$CANONICAL_SOURCE_ID"
   printf 'provider: %s\n' "${PROVIDER:-(aggregate)}"
   printf 'threshold: %s%%\n' "$threshold"
-  [ -z "$scope" ] || printf 'scope: %s\n' "$scope"
-  [ "$inclusive" -eq 0 ] || printf 'boundary: inclusive\n'
   printf 'interval: %ss\n' "$interval"
 }
 
@@ -255,32 +227,22 @@ cmd_arm_afk() {
     positive_number "$2" || die "--interval needs a positive number"
     interval=$2
   }
-  cmd_arm --interval "$interval" --threshold 70 --provider codex --scope weekly --inclusive --source-id afk-codex-weekly
+  fm_quota_axi_compatible 5 >/dev/null 2>&1 || die "quota-axi is missing or below the compatibility floor"
+  "$SCRIPT_DIR/fm-procevent.sh" register quota afk-codex-weekly \
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll-afk --interval "$interval" || exit 1
+  printf 'armed: afk-codex-weekly\n'
+  printf 'provider: codex\n'
+  printf 'threshold: 70%%\n'
+  printf 'scope: weekly\n'
+  printf 'boundary: inclusive\n'
+  printf 'interval: %ss\n' "$interval"
 }
 
 # For use inside the runner: parse the spec argv and run one condition evaluation.
 # This is intentionally not the public `arm` path; the runner calls this command
 # directly, so the argv must match the registration.
-cmd_poll() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout='' scope='' inclusive=0
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --interval)  [ "$#" -ge 2 ] || die "--interval needs a positive number"; interval=$2; shift 2 ;;
-      --threshold) [ "$#" -ge 2 ] || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
-      --provider)  [ "$#" -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
-      --scope)     [ "$#" -ge 2 ] || die "--scope needs a value"; valid_scope "$2" || die "--scope needs a path-safe value"; scope=$2; shift 2 ;;
-      --inclusive) inclusive=1; shift ;;
-      --source-id) [ "$#" -ge 2 ] || die "--source-id needs a value"; [ "$2" = afk-codex-weekly ] || die "--source-id is reserved for the AFK Codex weekly watch"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
-      --timeout)   [ "$#" -ge 2 ] || die "--timeout needs a positive integer"; timeout=$2; shift 2 ;;
-      *) usage ;;
-    esac
-  done
-  positive_number "$interval" || die "--interval needs a positive number"
-  valid_percent "$threshold" || die "--threshold needs a percent 0-100"
-  [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
-  validate_source_override_contract
-  resolve_provider "$PROVIDER"
-  [ -z "$SOURCE_ID_OVERRIDE" ] || [ "$CANONICAL_SOURCE_ID" = "$SOURCE_ID_OVERRIDE" ] || die "poll source id does not match its provider"
+run_poll() {
+  local interval=$1 threshold=$2 timeout=$3 scope=$4 inclusive=$5
   local json detail status polls=0
   while :; do
     polls=$((polls + 1))
@@ -304,6 +266,40 @@ cmd_poll() {
     printf 'condition_polls: %s\n' "$polls"
     exit 0
   done
+}
+
+cmd_poll() {
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout=''
+  PROVIDER=
+  SOURCE_ID_OVERRIDE=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --interval)  [ "$#" -ge 2 ] || die "--interval needs a positive number"; interval=$2; shift 2 ;;
+      --threshold) [ "$#" -ge 2 ] || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
+      --provider)  [ "$#" -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
+      --timeout)   [ "$#" -ge 2 ] || die "--timeout needs a positive integer"; timeout=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  positive_number "$interval" || die "--interval needs a positive number"
+  valid_percent "$threshold" || die "--threshold needs a percent 0-100"
+  [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
+  resolve_provider "$PROVIDER"
+  run_poll "$interval" "$threshold" "$timeout" '' 0
+}
+
+cmd_poll_afk() {
+  local interval=$DEFAULT_INTERVAL
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --interval) [ "$#" -ge 2 ] || die "--interval needs a positive number"; interval=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  positive_number "$interval" || die "--interval needs a positive number"
+  PROVIDER=codex
+  CANONICAL_SOURCE_ID=afk-codex-weekly
+  run_poll "$interval" 70 5 weekly 1
 }
 
 cmd_classify() {
@@ -347,6 +343,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   arm-afk)   shift; cmd_arm_afk "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  poll-afk)  shift; cmd_poll_afk "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   source-id) shift; cmd_source_id "${1-}" ;;

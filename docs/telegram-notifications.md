@@ -37,14 +37,13 @@ The sender accepts only these fixed event classes:
 - `stalled` - a worker or supervision path waiting too long.
 - `wedge` - away escalation delivery could not be submitted.
 - `quota` - Codex weekly quota is at or below 70% remaining.
-- `progress` - every 10 minutes by default, an aggregate count of active, waiting, ready, and review-needed work.
 
 Watcher reasons are classified internally and are never placed in the Telegram message.
-Routine heartbeats and ordinary progress are suppressed as individual events, while the separate bounded progress cadence reports current aggregate work counts.
-It includes no task names, mandate words, or status-log text.
+Routine heartbeats, ordinary progress, and status signals without a classified boundary or error are suppressed.
 API calls use bounded timeouts, do not expose the token in process arguments, and are best-effort with one in-call retry.
 Failures are not persisted in a durable Telegram retry queue.
-Successful event classes are deduplicated per away session in a private, bounded journal.
+Successful events are deduplicated by event identity per away session in a private, bounded journal, so a later distinct completion or error is still delivered.
+The completion path is owned by Firstmate's classified watcher event; there is no public command that lets a worker send a completion notification directly.
 
 ## Weekly Codex protection
 
@@ -59,5 +58,5 @@ The source is retired when the away posture returns.
 
 Tests use `FM_TELEGRAM_TRANSPORT` to replace HTTP.
 The fake transport receives only the method and private request/response file paths, and writes a structured response without receiving the bot token.
-Tests cover setup verification, strict permissions, no command polling, fixed message text, AFK gating, bounded deduplication, one in-call failed-send retry, generic quota-source rejection, the 10-minute progress cadence and redaction, and the weekly-vs-five-hour quota boundary.
+Tests cover setup verification, strict permissions, no command polling, fixed message text, AFK gating, event-identity deduplication, one in-call failed-send retry, generic quota-source rejection, and the weekly-vs-five-hour quota boundary.
 Use `bin/fm-lint.sh` for shell and documentation validation before delivery.

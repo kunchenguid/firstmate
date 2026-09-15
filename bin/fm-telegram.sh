@@ -4,10 +4,9 @@
 # Usage:
 #   fm-telegram.sh setup
 #   fm-telegram.sh ready
-#   fm-telegram.sh send <boundary|error|stalled|wedge|quota>
-#   fm-telegram.sh notify-wake       # reads one watcher reason from stdin
+#   fm-telegram.sh notify-wake       # reads one watcher event from stdin
 #   fm-telegram.sh notify-result <quota-result-file>
-#   fm-telegram.sh notify-progress
+#   fm-telegram.sh notify-wedge
 #
 # setup reads the bot token from config/telegram-bot-token and the chat binding
 # from config/telegram-chat-id. Both files must be regular, owner-only 0600
@@ -18,20 +17,18 @@
 #
 # send accepts only fixed event names and never accepts caller-supplied text.
 # It sends only while a confirmed away posture records reach_channels: telegram.
-# notify-wake maps an actionable watcher reason to one fixed event name and
+# notify-wake maps an actionable watcher event to one fixed event name and
 # ignores routine reasons. notify-result handles only a quota adapter result and
 # sends the fixed Codex weekly-quota notification for low or exhausted outcomes.
-# notify-progress emits a bounded aggregate count of current work (no task names,
-# mandate words, or status text) at the configured 10-15 minute cadence.
 #
 # The Telegram bot token is placed only in curl's private configuration stdin,
 # never in process arguments, output, logs, tracked files, or notification text.
 # HTTP calls are short and bounded. A failed call gets one in-call retry and
 # remains best-effort without a durable retry queue. Successful event keys are
-# recorded privately per away session so repeated watcher wakes do not duplicate notifications.
+# recorded privately per away session and event identity so replaying the same
+# watcher event does not duplicate notifications.
 # FM_TELEGRAM_TRANSPORT is a test-only transport seam: its command receives the
 # method, request-file path, and response-file path, never the bot token.
-# FM_TELEGRAM_TEST_NOW is a test-only numeric clock override for progress cadence.
 set -u
 export LC_ALL=C
 
@@ -43,7 +40,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 TOKEN_FILE="$CONFIG/telegram-bot-token"
 CHAT_FILE="$CONFIG/telegram-chat-id"
 NOTIFIED_FILE="$STATE/.telegram-notifications"
-PROGRESS_NOTIFIED_FILE="$STATE/.telegram-progress-notifications"
 NOTIFY_LOCK="$STATE/.telegram-notifications.lock"
 POSTURE_LOCK="$STATE/.cursor-park-owner.lock"
 TELEGRAM_NOTIFIED_KEEP=64
@@ -296,13 +292,18 @@ telegram_event_text() {
   esac
 }
 
-telegram_event_key() { printf 'fm-telegram-v1:%s:%s' "$TELEGRAM_SESSION" "$1"; }
+telegram_identity_digest() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  fi
+}
 
-telegram_now() {
-  case "${FM_TELEGRAM_TEST_NOW:-}" in
-    ''|*[!0-9]*) date +%s ;;
-    *) printf '%s\n' "$FM_TELEGRAM_TEST_NOW" ;;
-  esac
+telegram_event_key() {
+  local digest
+  digest=$(telegram_identity_digest "$2") || return 1
+  printf 'fm-telegram-v1:%s:%s:%s' "$TELEGRAM_SESSION" "$1" "$digest"
 }
 
 telegram_notified() {
@@ -323,8 +324,7 @@ telegram_record_success() {
     return 1
   fi
   printf '%s\n' "$key" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
-  # A session contributes at most five keys; retaining only a small tail keeps
-  # this private dedupe journal bounded across repeated away sessions.
+  # Retaining only a small tail keeps this private dedupe journal bounded.
   tail -n "$TELEGRAM_NOTIFIED_KEEP" "$tmp" > "${tmp}.tail" || { rm -f -- "$tmp" "${tmp}.tail"; return 1; }
   mv -f -- "${tmp}.tail" "$tmp" || { rm -f -- "$tmp" "${tmp}.tail"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -338,8 +338,7 @@ telegram_send_text() {
   local key=$1 text=$2 journal=${3:-$NOTIFIED_FILE} request response lock_result attempt
   mkdir -p "$STATE" || return 1
   if ! fm_lock_acquire_wait_bounded "$NOTIFY_LOCK" 2; then
-    # Distinguish contention from a successful no-op so progress does not move
-    # its cadence marker when another notification owns the short lock.
+    # Distinguish contention from a successful no-op for best-effort callers.
     return 75
   fi
   lock_result=0
@@ -396,69 +395,14 @@ telegram_posture_lock_release() {
 # Send one fixed event. Disabled/unconfigured homes are a successful no-op for
 # watcher callers; malformed configured files are reported to direct callers.
 telegram_send_kind() {
-  local kind=$1 text='' rc=0
+  local kind=$1 identity=${2:-$1} text='' rc=0
   telegram_posture_lock_acquire || return 1
   if telegram_away_session_load; then
     telegram_state_prepare || rc=1
     if [ "$rc" -eq 0 ]; then telegram_config_ready || rc=1; fi
     if [ "$rc" -eq 0 ]; then text=$(telegram_event_text "$kind") || rc=2; fi
     if [ "$rc" -eq 0 ]; then
-      telegram_send_text "$(telegram_event_key "$kind")" "$text" || rc=$?
-    fi
-  fi
-  telegram_posture_lock_release || rc=1
-  return "$rc"
-}
-
-telegram_progress_counts() {
-  local meta id current state total=0 active=0 waiting=0 ready=0 other=0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    id=$(basename "$meta"); id=${id%.meta}
-    total=$((total + 1))
-    current=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-crew-state.sh" "$id" 2>/dev/null || true)
-    state=${current%% ·*}
-    state=${state#state: }
-    case "$state" in
-      working) active=$((active + 1)) ;;
-      parked|blocked|paused) waiting=$((waiting + 1)) ;;
-      done) ready=$((ready + 1)) ;;
-      *) other=$((other + 1)) ;;
-    esac
-  done
-  printf '%s\t%s\t%s\t%s\t%s\n' "$total" "$active" "$waiting" "$ready" "$other"
-}
-
-telegram_send_progress() {
-  local interval=${FM_TELEGRAM_PROGRESS_INTERVAL:-600} now last=0 counts total active waiting ready other text slot marker_tmp rc=0
-  telegram_posture_lock_acquire || return 1
-  if telegram_away_session_load; then
-    telegram_state_prepare || rc=1
-    if [ "$rc" -eq 0 ]; then telegram_config_ready || rc=1; fi
-    if [ "$rc" -eq 0 ]; then
-      case "$interval" in ''|*[!0-9]*) interval=600 ;; esac
-      [ "$interval" -ge 600 ] 2>/dev/null || interval=600
-      [ "$interval" -le 900 ] 2>/dev/null || interval=900
-      now=$(telegram_now)
-      if [ -e "$STATE/.telegram-progress" ] || [ -L "$STATE/.telegram-progress" ]; then
-        private_file_valid "$STATE/.telegram-progress" || rc=1
-        if [ "$rc" -eq 0 ]; then last=$(cat "$STATE/.telegram-progress" 2>/dev/null || true); fi
-      fi
-      case "$last" in ''|*[!0-9]*) last=0 ;; esac
-      if [ "$rc" -eq 0 ] && [ $((now - last)) -ge "$interval" ]; then
-        IFS=$'\t' read -r total active waiting ready other <<< "$(telegram_progress_counts)"
-        text="Firstmate away progress update: supervision is active; current work: ${active:-0} active, ${waiting:-0} waiting, ${ready:-0} ready, ${other:-0} needing review (${total:-0} total). Decisions and authority still wait for your return."
-        slot=$((now / interval))
-        if telegram_send_text "$(telegram_event_key "progress:$interval:$slot")" "$text" "$PROGRESS_NOTIFIED_FILE"; then
-          marker_tmp=$(mktemp "$STATE/.telegram-progress.XXXXXX") || rc=1
-          if [ "$rc" -eq 0 ]; then chmod 600 "$marker_tmp" || rc=1; fi
-          if [ "$rc" -eq 0 ]; then printf '%s\n' "$now" > "$marker_tmp" || rc=1; fi
-          if [ "$rc" -eq 0 ]; then mv -f -- "$marker_tmp" "$STATE/.telegram-progress" || rc=1; fi
-          [ "$rc" -eq 0 ] || rm -f -- "${marker_tmp:-}"
-        else
-          rc=$?
-        fi
-      fi
+      telegram_send_text "$(telegram_event_key "$kind" "$identity")" "$text" || rc=$?
     fi
   fi
   telegram_posture_lock_release || rc=1
@@ -477,24 +421,26 @@ telegram_kind_for_wake() {
       esac
       ;;
     check:*) printf 'error\n' ;;
-    signal:*|needs-decision:*)
-      case "$reason" in
-        *blocked:*|*failed:*|*error*|*needs-decision*) printf 'error\n' ;;
-        *done:*|*PR\ ready*|*checks\ green*|*ready\ in\ branch*|*merged*) printf 'boundary\n' ;;
-        *) printf 'boundary\n' ;;
-      esac
-      ;;
+    signal:*) return 1 ;;
+    needs-decision:*) printf 'error\n' ;;
     *) printf 'error\n' ;;
   esac
 }
 
 telegram_notify_wake() {
-  local reason kind
+  local reason hinted_kind identity kind
   IFS= read -r reason || true
+  IFS= read -r hinted_kind || true
+  IFS= read -r identity || true
   [ -n "${reason:-}" ] || return 0
-  kind=$(telegram_kind_for_wake "$reason" 2>/dev/null) || return 0
-  [ -n "$kind" ] || return 0
-  telegram_send_kind "$kind"
+  case "$reason" in
+    signal:*)
+      case "$hinted_kind" in boundary|error) kind=$hinted_kind ;; *) return 0 ;; esac
+      ;;
+    *) kind=$(telegram_kind_for_wake "$reason" 2>/dev/null) || return 0 ;;
+  esac
+  [ -n "${identity:-}" ] || identity=$reason
+  telegram_send_kind "$kind" "$identity"
 }
 
 telegram_notify_result() {
@@ -513,10 +459,9 @@ telegram_notify_result() {
 case "${1:-}" in
   setup) [ "$#" -eq 1 ] || usage; telegram_setup ;;
   ready) [ "$#" -eq 1 ] || usage; telegram_config_ready ;;
-  send) [ "$#" -eq 2 ] || usage; telegram_send_kind "$2" ;;
   notify-wake) [ "$#" -eq 1 ] || usage; telegram_notify_wake ;;
   notify-result) [ "$#" -eq 2 ] || usage; telegram_notify_result "$2" ;;
-  notify-progress) [ "$#" -eq 1 ] || usage; telegram_send_progress ;;
+  notify-wedge) [ "$#" -eq 1 ] || usage; telegram_send_kind wedge ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

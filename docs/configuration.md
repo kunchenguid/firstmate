@@ -199,8 +199,7 @@ Run [`bin/fm-telegram.sh setup`](telegram-notifications.md) after placing the al
 The integration never reads updates, handles commands, or grants authority, and it sends only fixed event summaries while `reach_channels: telegram` is active.
 The away entry remains hold-for-return, keeps an unspecified return time unspecified, and retains the four-worker default cap.
 The Codex quota process-event uses a weekly `boundedBy` scope and an inclusive 70% threshold; a five-hour window cannot trigger that protection notification.
-While away, the watcher also offers a default 10-minute aggregate progress update, clamped to the requested 10-15 minute range, without task names or status text.
-See [`telegram-notifications.md`](telegram-notifications.md) for the setup, event coverage, progress cadence, retry/deduplication, and fake-transport test contract.
+See [`telegram-notifications.md`](telegram-notifications.md) for the setup, event coverage, retry/deduplication, and fake-transport test contract.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
@@ -1112,7 +1111,6 @@ FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascrip
 FM_TELEGRAM_TIMEOUT=5              # seconds for one bounded private Telegram API call, clamped by bin/fm-telegram.sh
 FM_TELEGRAM_CONNECT_TIMEOUT=2      # seconds for connecting to Telegram, bounded by the total timeout
 FM_TELEGRAM_QUOTA_INTERVAL=300     # seconds between Codex weekly-quota checks while Telegram AFK reach is active
-FM_TELEGRAM_PROGRESS_INTERVAL=600  # seconds between aggregate Telegram progress updates, clamped to 600-900 by bin/fm-telegram.sh
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once

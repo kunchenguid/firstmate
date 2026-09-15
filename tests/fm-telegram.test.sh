@@ -113,27 +113,34 @@ reach=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$hom
 ok "confirmed AFK posture records Telegram reach without changing authority"
 
 send_env=(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_TELEGRAM_TRANSPORT="$FAKE" FM_TELEGRAM_TEST_LOG="$LOG" FM_TELEGRAM_FAIL_MARK="$FAIL_ONCE")
+if env "${send_env[@]}" "$BIN/fm-telegram.sh" send boundary >/dev/null 2>&1; then
+  fail "public sender accepted a direct completion notification"
+fi
+notify_signal() {
+  printf '%s\n%s\n%s\n' "signal:$1" "$2" "$3" | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake
+}
 mv "$home/state/.afk-contract" "$home/state/.afk-contract.saved"
-env "${send_env[@]}" "$BIN/fm-telegram.sh" send boundary || fail "non-AFK no-op failed"
+notify_signal 'task.status' boundary event-1 || fail "non-AFK no-op failed"
 [ "$(grep -c '^sendMessage$' "$LOG")" -eq 0 ] || fail "non-AFK send was delivered"
 mv "$home/state/.afk-contract.saved" "$home/state/.afk-contract"
-env "${send_env[@]}" "$BIN/fm-telegram.sh" send boundary || fail "boundary notification failed"
-env "${send_env[@]}" "$BIN/fm-telegram.sh" send boundary || fail "duplicate boundary handling failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 1 ] || fail "duplicate boundary was delivered"
-ok "AFK gating and per-session deduplication suppress duplicate notifications"
+notify_signal 'task.status' boundary event-1 || fail "boundary notification failed"
+notify_signal 'task.status' boundary event-1 || fail "duplicate boundary handling failed"
+notify_signal 'task.status' boundary event-2 || fail "later completion boundary failed"
+[ "$(grep -c '^sendMessage$' "$LOG")" -eq 2 ] || fail "event identity did not distinguish boundary notifications"
+ok "AFK gating deduplicates replays without suppressing later boundaries"
 
 rm -f "$home/state/.telegram-notifications"
 touch "$home/state/.afk"
 printf 'quiet\n' > "$home/state/.afk"
-env "${send_env[@]}" "$BIN/fm-telegram.sh" send boundary || fail "quiet no-op failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 1 ] || fail "quiet mode sent an away notification"
+notify_signal 'task.status' boundary quiet-event || fail "quiet no-op failed"
+[ "$(grep -c '^sendMessage$' "$LOG")" -eq 2 ] || fail "quiet mode sent an away notification"
 rm -f "$home/state/.afk"
 ok "quiet mode does not use the away Telegram channel"
 
 rm -f "$home/state/.telegram-notifications" "$FAIL_ONCE"
-env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error || fail "failed notification did not recover with an in-call retry"
-env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error || fail "duplicate notification handling failed after in-call retry"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 3 ] || fail "failed notification was not retried exactly once in-call"
+printf '%s\n\n%s\n' 'check: failing check' check-event | env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "failed notification did not recover with an in-call retry"
+printf '%s\n\n%s\n' 'check: failing check' check-event | env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "duplicate notification handling failed after in-call retry"
+[ "$(grep -c '^sendMessage$' "$LOG")" -eq 4 ] || fail "failed notification was not retried exactly once in-call"
 [ "$(grep -Fc 'error that needs attention' "$LOG")" -eq 2 ] || fail "fixed error text was not sent on both in-call attempts"
 ok "failed delivery retries once in-call without duplicate success"
 
@@ -152,23 +159,16 @@ generic_after=$(grep -c '^sendMessage$' "$LOG")
 ok "generic quota sources do not produce weekly AFK alerts"
 
 reserved_home="$LAB/reserved-quota-home"
-for malformed in \
-  '--threshold 70 --provider codex --scope five_hour --inclusive' \
-  '--threshold 70 --provider claude --scope weekly --inclusive' \
-  '--threshold 69 --provider codex --scope weekly --inclusive' \
-  '--threshold 70 --provider codex --scope weekly'
-do
-  # Word splitting here is deliberate: each fixture is an argv fragment made
-  # exclusively from fixed test literals.
-  # shellcheck disable=SC2086
+for unsupported in --scope --inclusive --source-id; do
   if PATH="$FAKEBIN:$PATH" FM_HOME="$reserved_home" FM_STATE_OVERRIDE="$reserved_home/state" \
-    "$BIN/fm-procevent-quota.sh" arm $malformed --source-id afk-codex-weekly >/dev/null 2>&1; then
-    fail "reserved AFK source accepted a non-weekly-Codex contract: $malformed"
+    "$BIN/fm-procevent-quota.sh" arm "$unsupported" weekly >/dev/null 2>&1; then
+    fail "generic quota arm accepted AFK-only option: $unsupported"
   fi
 done
-[ ! -e "$reserved_home/state/procevent/afk-codex-weekly.source" ] \
-  || fail "a malformed reserved AFK source was registered"
-ok "reserved AFK quota source accepts only the inclusive 70% Codex weekly contract"
+PATH="$FAKEBIN:$PATH" FM_HOME="$reserved_home" FM_STATE_OVERRIDE="$reserved_home/state" \
+  "$BIN/fm-procevent-quota.sh" arm-afk --interval 0.01 >/dev/null \
+  || fail "fixed AFK quota source did not arm"
+ok "weekly AFK quota is available only through its fixed arm path"
 
 cat > "$home/state/quota.result" <<'EOF'
 quota: afk-codex-weekly
@@ -179,49 +179,42 @@ env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-result "$home/state/quota.resu
 grep -Fq 'weekly quota is at or below 70% remaining' "$LOG" || fail "quota notification text missing"
 ok "quota result emits the fixed weekly protection notification"
 
-# Progress updates use only aggregate current-state counts, never task names or
-# status text, and the 600-second minimum keeps the cadence inside 10-15 minutes.
-printf 'private task title that must not leave the home\n' > "$home/state/active.meta"
-FM_TELEGRAM_TEST_NOW=600 env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-progress || fail "first progress update failed"
-progress_count=$(grep -c '^sendMessage$' "$LOG")
-[ "$progress_count" -eq 5 ] || fail "first progress update was not delivered"
-FM_TELEGRAM_TEST_NOW=601 env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-progress || fail "progress cadence no-op failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 5 ] || fail "progress update ignored its cadence"
-FM_TELEGRAM_TEST_NOW=1200 env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-progress || fail "second progress update failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 6 ] || fail "progress update did not recur after ten minutes"
-! grep -Fq 'private task title that must not leave the home' "$LOG" || fail "progress notification leaked status text"
-! grep -Fq 'active.meta' "$LOG" || fail "progress notification leaked task identity"
-FM_TELEGRAM_PROGRESS_INTERVAL=1 FM_TELEGRAM_TEST_NOW=1201 env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-progress || fail "short progress interval no-op failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 6 ] || fail "progress cadence accepted a value below ten minutes"
+watch_signal_metadata() {
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    signal_files_actionable "$2" || true
+    printf "%s\t%s\n" "$FM_SIGNAL_TELEGRAM_KIND" "$FM_SIGNAL_TELEGRAM_IDENTITY"
+  ' _ "$BIN/fm-watch.sh" "$1"
+}
+failed_status="$home/state/failed-signal.status"
+done_status="$home/state/done-signal.status"
+printf 'failed: worker command exited nonzero\n' > "$failed_status"
+printf 'done: final work complete\n' > "$done_status"
+IFS=$'\t' read -r failed_kind failed_identity <<< "$(watch_signal_metadata "$failed_status")"
+IFS=$'\t' read -r done_kind done_identity <<< "$(watch_signal_metadata "$done_status")"
+[ "$failed_kind" = error ] || fail "watcher did not classify failed status as an error notification"
+[ "$done_kind" = boundary ] || fail "watcher did not classify done status as a boundary notification"
 rm -f "$home/state/.telegram-notifications"
-FM_TELEGRAM_PROGRESS_INTERVAL=900 FM_TELEGRAM_TEST_NOW=2100 env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-progress || fail "fifteen-minute progress interval failed"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 7 ] || fail "progress cadence rejected the fifteen-minute upper bound"
-ok "progress updates recur every ten minutes with redacted aggregate work counts and a 10-15 minute bound"
-
-rm -f "$home/state/.telegram-notifications"
-printf '%s\n' 'signal: private-status-secret' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "signal notification mapping failed"
-printf '%s\n' 'stale: private-status-secret' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "stale notification mapping failed"
-printf '%s\n' 'check: private-status-secret' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "check notification mapping failed"
+printf '%s\n' 'signal: private-status-secret' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "routine signal suppression failed"
+notify_signal 'failed.status' "$failed_kind" "$failed_identity" || fail "failed signal notification mapping failed"
+notify_signal 'done.status' "$done_kind" "$done_identity" || fail "done signal notification mapping failed"
+printf '%s\n\n%s\n' 'stale: private-status-secret' stale-event | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "stale notification mapping failed"
+printf '%s\n\n%s\n' 'check: private-status-secret' check-event-2 | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "check notification mapping failed"
 printf '%s\n' heartbeat | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "heartbeat suppression failed"
-grep -Fq 'captain-facing boundary' "$LOG" || fail "signal did not map to boundary text"
+[ "$(grep -Fc 'captain-facing boundary' "$LOG")" -ge 1 ] || fail "classified completion did not map to boundary text"
+[ "$(grep -Fc 'error that needs attention' "$LOG")" -ge 2 ] || fail "classified failures did not map to error text"
 grep -Fq 'may be stalled' "$LOG" || fail "stale did not map to stalled text"
-grep -Fq 'error that needs attention' "$LOG" || fail "check did not map to error text"
 ! grep -Fq 'private-status-secret' "$LOG" || fail "watcher reason leaked into notification text"
-ok "actionable wake classes map to fixed text while heartbeat and reason details stay private"
+ok "classified watcher events map to fixed text while routine signals stay silent"
 
 out=$(QUOTA_TEST_MODE=weekly PATH="$FAKEBIN:$PATH" FM_HOME="$LAB/quota-home" FM_STATE_OVERRIDE="$LAB/quota-state" \
-  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 70 --provider codex --scope weekly --inclusive --timeout 1) \
+  "$BIN/fm-procevent-quota.sh" poll-afk --interval 0.01) \
   || fail "weekly inclusive quota poll failed"
 printf '%s\n' "$out" | grep -qx 'status: low' || fail "weekly 70% inclusive boundary did not fire"
 ok "weekly Codex quota fires at the inclusive 70% boundary"
 
-if out=$(timeout 1.0 env QUOTA_TEST_MODE=weekly PATH="$FAKEBIN:$PATH" FM_HOME="$LAB/quota-home-2" FM_STATE_OVERRIDE="$LAB/quota-state-2" \
-  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 70 --provider codex --scope weekly --timeout 1 2>/dev/null); then
-  fail "exclusive weekly threshold fired at exactly 70%"
-fi
-[ -z "$out" ] || fail "exclusive boundary produced an unexpected result: $out"
 if out=$(timeout 1.0 env PATH="$FAKEBIN:$PATH" FM_HOME="$LAB/quota-home-3" FM_STATE_OVERRIDE="$LAB/quota-state-3" \
-  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 70 --provider codex --scope weekly --inclusive --timeout 1 2>/dev/null); then
+  "$BIN/fm-procevent-quota.sh" poll-afk --interval 0.01 2>/dev/null); then
   fail "five-hour-only quota unexpectedly satisfied weekly scope"
 fi
 [ -z "$out" ] || fail "five-hour-only quota produced an unexpected result: $out"
