@@ -474,7 +474,9 @@ test_installer_rejects_unsupported_platform() {
 test_fm_lint_default_path_catches_broken_ci_yml() {
   local tmp fakebin log diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-wf-default)
-  mkdir -p "$tmp/bin" "$tmp/.github/workflows"
+  mkdir -p "$tmp/bin/backends" "$tmp/.github/workflows"
+  # Backend purity scans both canonical directories even with no changed roots.
+  printf '#!/usr/bin/env bash\ntrue\n' > "$tmp/bin/backends/stub.sh"
   cp "$LINT" "$tmp/bin/fm-lint.sh"
   cp "$LINT_WF" "$tmp/bin/fm-lint-workflows.sh"
   cp "$GUARD" "$tmp/bin/fm-prepush-voice-guard.sh"
@@ -524,6 +526,8 @@ SH
     "fm-lint.sh default path did not name the broken workflow"
   assert_not_contains "$out" "No such file or directory" \
     "a missing fixture script masqueraded as the workflow failure"$'\n'"$out"
+  assert_not_contains "$out" "awk:" \
+    "a backend-purity scanner error masqueraded as the workflow failure"$'\n'"$out"
   assert_not_contains "$out" "The scan did not complete" \
     "a voice-guard scanner error masqueraded as the workflow failure"$'\n'"$out"
   pass "fm-lint.sh default path catches a self-broken ci.yml"
