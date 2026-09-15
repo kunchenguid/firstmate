@@ -3,8 +3,8 @@
 # Usage: fm-whatsapp-auth.sh <absolute-home> owned|probe
 # owned: require descent from the home's live lock-owning harness, print PID.
 # probe: print checkpoint or unavailable; no watcher/terminal claim is made.
-# This stage has no verified unattended wake adapter. A live main can consume
-# its inbox at a checkpoint; neither a live PID nor a note starts a missing main.
+# This probe checks session identity only, not the watcher's native inbox delivery.
+# Neither a live PID nor a note proves unattended response or starts a missing main.
 # Session identity remains owned by fm-session-lock-lib.sh, shared by all backends.
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

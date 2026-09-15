@@ -52,8 +52,9 @@ A ponte lê o arquivo por chamada, sem exportar a chave a subprocessos, prompts 
 Para rotação, regenere a chave no aplicativo e repita esse comando; a chave anterior é invalidada segundo o manual.
 Se houver um halt de autenticação, siga a sequência de [Recuperação](#recuperação), preservando o banco.
 
-Antes de habilitar tráfego real, obtenha a autorização para o destino e conteúdo exatos do teste.
-Então defina localmente `mode:"live"`, `enabled:true` e `outbound_authorized:true` em um novo estado de ativação.
+Antes de habilitar tráfego real, confira a autorização existente para o destino e conteúdo exatos do teste; obtenha-a se ainda faltar.
+Na primeira instalação real, defina localmente `mode:"live"`, `enabled:true` e `outbound_authorized:true` em um estado separado do simulador.
+Ao atualizar uma instalação real existente, mantenha seu estado e vínculo de identidade conforme [Recuperação](#recuperação).
 Habilitar `enabled` permite polling; `outbound_authorized` é uma autorização local separada para respostas ao criador.
 O token nunca muda o destinatário permitido e a ponte não amplia as permissões do Firstmate.
 
@@ -107,9 +108,9 @@ Para transcrição, escolha exatamente uma das opções:
 
 Instalar dependências ou indicar um comando não autoriza enviar dados privados a um novo provedor.
 `media-doctor` confere dependências e presença da configuração de STT, sem ler token nem acessar rede; `ready:true` não comprova decodificação, qualidade da transcrição, capacidade visual do principal ou entrega WhatsApp.
-Teste cada tipo com fixtures controladas e depois obtenha prova real da conta autorizada, preservando o único consumidor e a correlação dos pedidos.
+Siga o [plano de aceitação na conta instalada](verification/whatsapp.md#plano-de-aceitação-na-conta-instalada) para ordenar validação local, publicação, instalação controlada e prova real antes da ativação permanente.
 
-Ativação reversível, após essa validação e com autorização para o serviço existente:
+Para habilitar mídia na instalação controlada prevista nesse plano, com autorização para o serviço existente:
 
 1. Em `config/whatsapp.json`, defina `media` como `true`.
 2. Configure `media_python` e uma das opções locais de STT acima.
@@ -218,6 +219,6 @@ O pedido precisa ter sido reivindicado com seu `note_id` exato, e o principal pr
 As referências de tarefa apontam para o home/id/revisão canônicos, inclusive quando o trabalho pertence a um secondmate.
 Uma resposta genérica ou uma reação não aprova decisões, e o transporte nunca executa a ação aprovada.
 Enquanto houver uma decisão pendente ainda vigente, confirmações genéricas como “sim” e “ok” recebem um pedido de código.
-Sem decisão pendente vigente, essas confirmações seguem como texto conversacional ao principal no próximo checkpoint, mesmo que existam decisões expiradas ainda registradas como pendentes.
+Sem decisão pendente vigente, essas confirmações seguem como texto conversacional pelo fluxo de [entrega ao principal](#limite-de-disponibilidade), mesmo que existam decisões expiradas ainda registradas como pendentes.
 Eventos `completed`, `failed` e `reply` invalidam decisões pendentes ou respondidas daquele pedido na mesma transação do encerramento; recibos de decisões já consumidas permanecem idempotentes.
 Uma resposta explícita com código expirado continua recusada, sem aprovar a ação nem encaminhar essa resposta ao principal.
