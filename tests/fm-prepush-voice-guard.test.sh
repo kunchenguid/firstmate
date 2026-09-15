@@ -766,8 +766,7 @@ SH
   [ "$telemetry_rc" = "$rc" ] \
     || fail "telemetry result_exit $telemetry_rc did not match lint exit $rc"
 
-  # Explicit paths are a ShellCheck-only override and must not scan commits,
-  # so a targeted lint of one script still works on a branch that is refusing.
+  # Targeted file lint must remain usable while a branch's messages are refused.
   rc=0
   out=$(cd "$tmp" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     "$tmp/bin/fm-lint.sh" bin/fm-lint.sh 2>&1) || rc=$?
