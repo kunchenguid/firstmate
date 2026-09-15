@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "presenter"
+version = "0.1.0"
+description = "Template-driven PowerPoint and Word authoring with technical content blocks."
+readme = "presenter/README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "python-pptx",
+  "python-docx",
+  "matplotlib",
+  "sympy",
+  "pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["presenter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/presenter"]
+pythonpath = ["."]
+addopts = "--import-mode=importlib -p no:cacheprovider"
