@@ -878,7 +878,7 @@ SH
   [ -z "$out" ] || fail "acknowledged terminal outcome replayed after restart"
   printf 'run:\n  id: replacement\n  branch: fm/recovery\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
   run_real_reconcile >/dev/null
-  FM_DAEMON_DOWN=1 out=$(FM_DAEMON_DOWN=1 run_real_reconcile)
+  out=$(FM_DAEMON_DOWN=1 run_real_reconcile)
   [ -n "$out" ] || fail "daemon failure behind a persisted running row stayed silent"
   unset FM_DAEMON_DOWN
   # A completely lost response after a known active run must not be mistaken
@@ -948,7 +948,7 @@ SH
   out=$(run_real_reconcile "$MATE")
   [ -n "$out" ] || fail "unknown secondmate endpoint blocked authoritative gate reconciliation"
 
-  write_child "$MATE" duplicate 'working: validation active'
+  write_child "$MATE" duplicate 'done: completed delivery'
   printf 'backend=zellij\n' >> "$MATE/state/duplicate.meta"
   age "$MATE/state/duplicate.meta"
   mkdir -p "$MATE/projects/duplicate"
@@ -956,10 +956,8 @@ SH
   git -C "$MATE/projects/duplicate" checkout -q -b fm/duplicate
   git -C "$MATE/projects/duplicate" commit -q --allow-empty -m initial
   head=$(git -C "$MATE/projects/duplicate" rev-parse HEAD)
-  printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
-  run_real_reconcile "$MATE" >/dev/null
-  printf 'done: completed delivery\n' >> "$MATE/state/duplicate.status"
-  age "$MATE/state/duplicate.meta" "$MATE/state/duplicate.status" "$MATE/state/duplicate.turn-ended"
+  # Reboot recovery sees the terminal ledger and completed run together, with
+  # no prior periodic observation to lend the receipt a run id.
   printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
   run_real_reconcile "$MATE" >/dev/null
   [ "$(grep -c 'child duplicate done:' "$MAIN/state/mate.status")" = 1 ] \

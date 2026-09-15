@@ -15,12 +15,14 @@
 # bin/fm-parent-channel-lib.sh as
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh and without waiting for
-# the inactive cadence. A line still being appended (no trailing newline yet)
-# is left for the next poll. This is what keeps a mate's PR-ready, finding,
-# and failure outcomes from depending on the mate model appending them
-# (docs/secondmate-parent-channel.md). A main home has no parent channel and
-# skips this path: its watcher already signals every child status line.
+# report pointer, without waiting for the inactive cadence.
+# A newly delivered terminal line performs one bounded current-state read only
+# when needed to bind the exact terminal run id; failed attribution never delays
+# or suppresses the ledger delivery.
+# This keeps a mate's PR-ready, finding, and failure outcomes independent of the
+# mate model appending them (docs/secondmate-parent-channel.md).
+# A main home has no parent channel and skips this path because its watcher
+# already signals every child status line.
 # `report <task-id>` runs that same delivery for one child on behalf of a
 # caller that already holds the child's meta lock, which bin/fm-teardown.sh
 # does before it removes the child's record; it exits 0 when the line is
@@ -71,8 +73,8 @@
 # When a terminal ledger append races just after the inactive path's final read,
 # ledger_claim binds that one ledger fingerprint to the already-delivered
 # inactive receipt so the two publishers cannot report one completion twice.
-# A ledger receipt records the exact run id only when a prior authoritative
-# observation already bound that delivery to a run.
+# A ledger receipt records the exact run id only when its bounded
+# publication-time read binds the same terminal outcome.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -431,10 +433,11 @@ report_child_ledger_locked() { # <id> <meta>
   elif [ "$?" -eq 2 ]; then
     return 1
   fi
-  run_id=$(observation_run_id "$id" "$incarnation" 2>/dev/null || true)
   recorded_run_id=$(record_value "$RECORD_PENDING" run_id)
-  [ -n "$recorded_run_id" ] || [ -z "$run_id" ] \
-    || record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
+  if [ -z "$recorded_run_id" ]; then
+    run_id=$(delivered_run_id "$id" "$state" 2>/dev/null || true)
+    [ -z "$run_id" ] || record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
+  fi
   note=$(clean_field "$(status_line_note "$last")")
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
@@ -530,18 +533,38 @@ observe_run() { # <task> <incarnation> <state-line>
   OBSERVED_RUN_TOKEN=$token
 }
 
-observation_run_id() { # <task> <incarnation>
-  local task=$1 incarnation=$2 file line run_id
-  file="$OUTCOME_DIR/$task.run-observation"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(record_value "$file" incarnation)" = "$incarnation" ] || return 1
-  line=$(record_value "$file" observation)
+run_id_from_state_line() { # <state-line>
+  local line=$1 run_id
   case "$line" in *" · source: run-step"*) ;; *) return 1 ;; esac
   case "$line" in *" · run: "*) ;; *) return 1 ;; esac
   run_id=${line##*" · run: "}
   run_id=${run_id%%" · "*}
   valid_id "$run_id" || return 1
   printf '%s\n' "$run_id"
+}
+
+observation_run_id() { # <task> <incarnation>
+  local task=$1 incarnation=$2 file line
+  file="$OUTCOME_DIR/$task.run-observation"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(record_value "$file" incarnation)" = "$incarnation" ] || return 1
+  line=$(record_value "$file" observation)
+  run_id_from_state_line "$line"
+}
+
+# Bind a ledger delivery to a run only when the authoritative current-state
+# reader reports the same terminal outcome.
+# The one-second read happens once per new receipt and never blocks delivery
+# when the run is absent, active, ambiguous, or unreadable.
+delivered_run_id() { # <task> <done|failed>
+  local task=$1 state=$2 line
+  line=$(fm_run_timed 1 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  case "$state|$line" in
+    'done|state: done '*|'failed|state: failed '*) ;;
+    *) return 1 ;;
+  esac
+  run_id_from_state_line "$line"
 }
 
 claim_ledger_report_for_run() { # <task> <incarnation> <state> <run-id>
