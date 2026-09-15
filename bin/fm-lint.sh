@@ -19,6 +19,14 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# That same default path runs bin/fm-prepush-voice-guard.sh, which reads back
+# every commit message not yet on the default branch and refuses firstmate's
+# internal voice before the first push. It lives here because .no-mistakes.yaml pins
+# commands.lint to this script and the gate runs lint last before its first
+# push, so it reads the commits made during the preceding review, test, and
+# document steps. The later CI step can add commits after that push and is not
+# covered; docs/architecture.md "Internal-voice refusal before the first push"
+# owns that declared gap.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -33,9 +41,9 @@
 #     `gh`). That local pass drops --external-sources and excludes SC1091,
 #     SC2034, SC2153, and SC2329. A branch with zero matching changed files
 #     skips ShellCheck and prints a "no changed lint targets" note, then
-#     still runs the backend-purity check and validates workflows.
+#     still runs backend purity, workflow validation, and the voice guard.
 # Explicit paths always bypass this file-set selection and lint exactly the
-# given paths, matching the same config, without the workflow YAML check.
+# given paths, matching the same config, without workflow or commit scanning.
 # Explicit core bin/ and bin/backends/ scripts still receive the
 # backend-purity check. The backend-purity check rejects direct Beads CLI
 # invocations in the core bin/ and bin/backends/ scripts so every configured
@@ -48,6 +56,7 @@
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
+# Its result_exit records the final status after all dispatched checks complete.
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
@@ -157,6 +166,17 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# Default no-args lint also reads back every commit message that is not yet on
+# the default branch. This step is here rather than in a git hook because the
+# messages that leaked came from the gate's own fix agents, which commit inside
+# the gate's separate repository: lint is the last firstmate-owned code that
+# runs in that repository before the first push.
+# bin/fm-prepush-voice-guard.sh owns the rule set.
+fm_lint_run_voice_guard() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  "$SELF_DIR/fm-prepush-voice-guard.sh"
 }
 
 # Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
@@ -561,6 +581,9 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
+  voice_rc=0
+  fm_lint_run_voice_guard || voice_rc=$?
+  [ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
   exit "$overall_rc"
 fi
 
@@ -760,6 +783,24 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
+purity_rc=0
+fm_lint_run_backend_purity || purity_rc=$?
+if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
+  overall_rc=$purity_rc
+fi
+
+# Always run the voice refusal, even after a ShellCheck or workflow failure, so
+# one lint round reports every message that has to be reworded rather than
+# revealing them one failed run at a time.
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
+fi
+voice_rc=0
+fm_lint_run_voice_guard || voice_rc=$?
+[ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
+
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)
   TELEMETRY_SHELLCHECK_END=$(fm_lint_shellcheck_count)
@@ -870,18 +911,6 @@ EOF
     printf 'fm-lint.sh: could not write telemetry to %s.\n' "$TELEMETRY" >&2
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
-fi
-
-purity_rc=0
-fm_lint_run_backend_purity || purity_rc=$?
-if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
-  overall_rc=$purity_rc
-fi
-
-if [ "$overall_rc" -eq 0 ]; then
-  fm_lint_run_workflows || overall_rc=$?
-else
-  fm_lint_run_workflows || true
 fi
 
 exit "$overall_rc"

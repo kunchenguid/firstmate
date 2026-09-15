@@ -222,6 +222,13 @@ case "$*" in
     fi
     exit 0
     ;;
+  # fm-lint.sh's default path also runs bin/fm-prepush-voice-guard.sh, which asks git
+  # which commits are not yet on the default branch. Answer as a checkout with
+  # no commits off that branch, so these lint tests keep measuring file selection
+  # rather than commit messages. tests/fm-prepush-voice-guard.test.sh owns that behavior.
+  "rev-list HEAD --not "*)
+    exit 0
+    ;;
   *)
     exit 1
     ;;
