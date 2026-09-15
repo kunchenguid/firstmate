@@ -507,6 +507,34 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/whatsapp-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/examples/whatsapp.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "bin/requirements-whatsapp-media.txt",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/whatsapp.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/whatsapp-reference/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/whatsapp-reference/specification.pt-BR.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/whatsapp.md",
+      "audience": "maintainer-verification"
     }
   ]
 }
