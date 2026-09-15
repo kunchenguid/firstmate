@@ -25,6 +25,8 @@ FILE_SIZE_POLICY = "2e26e725-8201-4edd-8bf5-978563c34a80"
 CASE_ENFORCEMENT_POLICY = "7ed39669-655c-494e-b4a0-a08b4da0fcce"
 MAX_PATH_LENGTH_POLICY = "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
 RESERVED_NAMES_POLICY = "db2b9b4c-180d-4529-9701-01541d19f36b"
+AUTHOR_EMAIL_POLICY = "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+FILE_PATH_POLICY = "51c78909-e838-41a2-9496-c647091e3c61"
 
 FAKE = r'''#!/usr/bin/env python3
 import json,os,sys
@@ -217,7 +219,13 @@ class AzureContract(unittest.TestCase):
         reserved_names = dict(id=6, revision=1, isEnabled=True, isBlocking=True,
                               type=dict(id=RESERVED_NAMES_POLICY),
                               settings=dict(reservedNames=['aux']))
-        self.rows("policyConfigurations", self.configs + [file_size, case_enforcement, max_path_length, reserved_names])
+        author_email = dict(id=7, revision=1, isEnabled=True, isBlocking=True,
+                            type=dict(id=AUTHOR_EMAIL_POLICY),
+                            settings=dict(authorEmailPatterns=['*@example.com']))
+        file_path = dict(id=8, revision=1, isEnabled=True, isBlocking=True,
+                         type=dict(id=FILE_PATH_POLICY),
+                         settings=dict(filenamePatterns=['*.tmp']))
+        self.rows("policyConfigurations", self.configs + [file_size, case_enforcement, max_path_length, reserved_names, author_email, file_path])
         self.rows("evaluations", self.policies)
         p = self.run_helper("verify")
         self.assertEqual(p.returncode, 0, p.stderr)
