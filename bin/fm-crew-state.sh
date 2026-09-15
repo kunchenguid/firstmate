@@ -772,11 +772,13 @@ fi
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so only positive evidence that the target is gone may
-# read as death - a backend that failed to answer is unknown, never death, for
-# both classifier-backed backends (tmux and herdr) - and every death-class
-# verdict reports unknown rather than trusting a possibly-stale status log as
-# the current state.
+# is no run to consult, so only positive endpoint evidence may reconcile the
+# status log: a readable pane can still hold only its shell after the agent
+# exits, and trusting its last `working:` event would make stopped work look live.
+# Terminal or blocked events remain supervision-relevant evidence when the endpoint
+# itself is terminal; only stale progress is discarded. A backend that failed to
+# answer is unknown, never death, for both classifier-backed backends (tmux and
+# herdr).
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
@@ -826,6 +828,42 @@ if ! pane_readable "$BACKEND_TARGET"; then
       ;;
   esac
 fi
+
+# A successful pane read proves only that the endpoint can be addressed, not
+# that its agent is still present. Reconcile readable classifier-backed
+# endpoints before using semantic busy state or the append-only status log.
+# `alive` keeps the ordinary idle-secondmate path unchanged; `dead` and
+# `missing` are positive endpoint evidence. Unknown classifier answers preserve
+# the existing fail-safe fallback and never authorize a lifecycle action.
+case "$TASK_BACKEND" in
+  tmux|herdr)
+    AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) || AGENT_STATE=unreadable
+    case "$AGENT_STATE" in
+      dead)
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        case "$LOG_STATE" in
+          working)
+            emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+            ;;
+          parked|paused|blocked|done|failed)
+            emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}backend agent gone at $BACKEND_TARGET"
+            ;;
+          *)
+            emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+            ;;
+        esac
+        ;;
+      missing)
+        emit unknown none "backend target gone: $BACKEND_TARGET"
+        ;;
+      alive) ;;
+      *)
+        # Keep the pre-existing pane/busy/status fallback for an ambiguous or
+        # unreadable classifier result. It cannot prove that the agent stopped.
+        ;;
+    esac
+    ;;
+esac
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.

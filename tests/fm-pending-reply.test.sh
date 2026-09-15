@@ -1086,6 +1086,25 @@ test_tick_skips_terminal_and_reuses_target_observation() {
   pass "tick skips terminal records and reuses target observations"
 }
 
+test_tick_escalates_confirmed_stopped_secondmate() (
+  local home state corr sm_home
+  home=$(setup_parent stopped-secondmate)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" hibit)
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=10200
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "inspect the release")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+  fm_backend_agent_state() { printf dead; }
+  fm_pending_reply_tick "$state" || fail "stopped secondmate tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "confirmed stopped secondmate must escalate its active routed request"
+  grep -Fq "pending-reply-agent-stopped: task=hibit pending-reply-id=$corr" "$state/hibit.status" \
+    || fail "stopped secondmate escalation must be visible to the parent"
+  pass "tick escalates active routed work when the secondmate agent stopped"
+)
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -1599,6 +1618,7 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_escalates_confirmed_stopped_secondmate
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
