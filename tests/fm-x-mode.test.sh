@@ -10,8 +10,8 @@
 # band; this suite pins the client logic and the activation contract.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 # The client under test uses the real jq; make it resolvable regardless of where
@@ -785,36 +785,13 @@ test_bootstrap_reports_missing_x_dependency() {
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes chrome-devtools-axi curl
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
+  fm_test_fake_gh_axi "$fakebin"
   for tool in dirname grep tail; do
     tool_path=$(command -v "$tool") || fail "test host must provide $tool"
     ln -s "$tool_path" "$fakebin/$tool"
   done
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
+  fm_test_fake_gh "$fakebin"
+  fm_test_fake_treehouse "$fakebin" 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
   out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
