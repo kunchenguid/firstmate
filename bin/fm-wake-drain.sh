@@ -454,9 +454,15 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    # State the folded key on EVERY entry, "default" included. This section's
+    # own hint asks the operator to pass that key to fm-send, and the note is
+    # unedited worker prose that may itself carry a "[key=...]" token the key
+    # grammar reads as prose rather than a stated key. Suppressing the key for
+    # "default" left exactly one bracket token visible on such a line - the one
+    # that is NOT the key - so the listing read as naming a key it had not
+    # folded, and the advised command then refused. An entry must always carry
+    # the token that closes it.
+    line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
@@ -486,6 +492,7 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf 'OPEN DECISIONS: <key> is the [key=...] printed before the verb; a token inside a note is prose, not a key.\n' || return 1
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
