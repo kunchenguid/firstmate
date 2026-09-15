@@ -1135,3 +1135,69 @@ Only after those retries exhaust does it remove the lock, and only when it is pr
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+## Native candidate pools (config/dispatch-pools.json)
+
+Named pools are an explicit alternative to agent-resolved crew dispatch arrays.
+`fm-spawn.sh --pool <name>` selects a named pool; optional `defaults.crewmate` and `defaults.secondmate` select it automatically for their native intake paths.
+Without a selected pool, existing single-profile and crew-dispatch behavior is unchanged.
+A selected pool rejects concrete harness/model/effort overrides, including raw launch commands.
+The file is inherited by secondmate homes through the existing config inheritance owner.
+Remote secondmate pool launches are refused because local credentials cannot prove a remote carrier's identity or quota.
+
+The strict schema is `{"schemaVersion":1,"defaults":{"crewmate":"workers","secondmate":"workers"},"pools":{"workers":[candidate]}}`.
+Each candidate has exactly `id`, `harness`, `model`, `effort`, `provider`, `authCarrier`, `carrier`, and `weight`.
+String fields are nonempty safe identifiers, except `model`, which may also be `provider/id` shaped (router-style selectors; still no `..` or `//`); candidate IDs and concrete carrier/profile tuples must be unique within each pool.
+Weights are positive integers up to 10000; a pool has 1-64 candidates.
+Use weight 1 for equal shares.
+Unknown fields, empty arrays, duplicate candidates, invalid weights and unknown default pool names are refused.
+Validate without launching with `bin/fm-dispatch-pool.sh validate <config-file> <state-dir>`.
+Inspect viability without reserving with `bin/fm-dispatch-pool.sh probe <config-file> <state-dir> inspection <pool>`.
+
+The current qualified adapter tuple is `harness=codex`, `provider=openai`, `authCarrier=codex-chatgpt`, `carrier=codex-native`.
+It reads account identity, live model/effort capability, and quota from one bounded native Codex app-server session without submitting a prompt.
+Only explicitly qualified general Codex models use the `codex` quota bucket; unqualified models and native launch efforts are refused.
+The chosen executable, OpenAI provider and Codex auth home are pinned into the launch command.
+Fresh evidence is checked again after allocation and before launch delivery, with account changes refused.
+No credential or email is recorded in a route receipt.
+A `carrier=wrapper` candidate names a PATH executable in `harness` instead of a verified adapter.
+Admission resolves the executable and reads its `--list-models` discovery surface.
+A nonzero exit means a pinned wrapper, which requires `model=default` and passes nothing positional.
+A successful listing requires `model=default` for a single-row wrapper or a listed alias for a multi-row one, passed as the first positional argument.
+Delivery swaps the wrapper binary into its `claude-*` or `codex-*` family template behind a `--` separator, keeping that family's autonomy flags, effort mapping, hook wiring and brief position.
+`bin/fm-spawn.sh` owns the family rule and the exact launch shape.
+Other carrier tuples remain visible as rejected candidates with explicit reasons; no candidate is substituted.
+Claude-hosted Muse, Gemini and Luna do not fall back to Claude account quota, standalone Muse, or bare model flags.
+
+`bin/fm-dispatch-pool.sh` owns the serialized admission API, and `state/dispatch-pools.json` owns scores, receipt history and audit events in one atomic update.
+`bin/fm-dispatch-pools-install.sh` is the only supported write path for a home's `config/dispatch-pools.json`.
+It runs the pool's own admission gate before installing, probes every pool by default, and refuses a pool with zero viable candidates, so validate-clean outages (stale carriers, missing wrapper binaries) can never land silently.
+Pass `--no-probe` only when offline.
+Install while the fleet is idle: in-flight pooled tasks pin their route receipt to the config digest, so rank edits underneath them break `verify` with `route_config_changed`, and removing or renaming a candidate breaks relaunch with `pinned_candidate_not_viable`.
+The primary home is authoritative for ranks; any other home (treehouse sessions, secondmate seeds) is brought into agreement by installing the primary's file through this script, never by independent hand-edits.
+Candidate `id` values describe the model and effort (`gemini-high`), while `harness` names the PATH executable that launches it (`claude-gemini`); the `claude-`/`codex-` prefix selects the wrapped base CLI, not the model.
+Name new candidate ids harness-first (for example `claude-gpt-luna-high`) so the two axes cannot be confused again.
+Weights are round-robin shares among viable candidates, not a strict priority order: a weight-2 candidate reserves first and roughly twice as often as a weight-1 sibling, but weights change nothing when zero or one candidate is viable.
+A pool named in the optional top-level `"priority"` array instead reserves the first viable candidate in config order every time, ignoring weights: whenever the first entry is viable it wins, and the pool moves down only past non-viable or terminally exhausted entries.
+Use `"priority"` when the order itself is the policy; leave a pool unlisted when the intent is load-sharing.
+Probe refusals are the live failure catalog, and each names its owner: `wrapper_not_installed` and `wrapper_probe_failed` mean the binary is missing or unhealthy on this host's PATH; `wrapper_model_unlisted` and `wrapper_model_pinned_use_default` mean the `model` field disagrees with the wrapper's `--list-models` surface; `quota_exhausted`, `quota_unknown_or_stale`, and `stale_or_unknown_evidence` mean the Codex quota read is spent, malformed, or older than sixty seconds; `model_or_effort_unavailable` and `quota_scope_unqualified` mean the catalog no longer carries that model or effort; `opencode_go_quota_and_upstream_max_attestation_unqualified`, `lawful_managed_routing_projection_producer_unavailable`, `claude_live_model_effort_and_account_bound_quota_unqualified`, and `unsupported_carrier_tuple` mean the carrier tuple is retired and the candidate must be rewritten onto a qualified `codex-native` or `wrapper` tuple, never worked around at the caller.
+Only `codex-native` has live quota sensing; `wrapper` candidates admit on binary plus model alias with an empty quota window, so wrapper pools never shed load on exhaustion.
+Smooth weighted round-robin adds each viable candidate's weight, chooses the largest score with config order breaking exact score ties, then subtracts the viable total from that candidate.
+An excluded candidate's score resets to zero.
+Scores are isolated by pool name and exact candidate configuration digest.
+A reservation consumes one slot even if launch delivery fails; replay of the same task/generation retains the same candidate and requires fresh viability.
+Changed config or authentication identity during replay is a refusal.
+Task metadata carries `route_pool`, `route_candidate`, `route_generation`, and `route_receipt`; `finish` records delivery success, which is distinct from live harness success.
+Native teardown does not discard routing audit history.
+
+Ordinary `fm-control.sh <id> relaunch` preserves a pool task's candidate, including for secondmates.
+`--quota-exhausted <private-event.json>` currently refuses before any lifecycle mutation because the Codex TUI has no verified native terminal-error producer.
+The event must be a private regular file inside the same state directory with `schemaVersion=1`, exact `task`, `generation`, `candidate`, `receipt`, `provider`, `authIdentity`, `spawnGeneration`, `kind=quota_exhausted`, `terminal=true`, and an `observedAt` epoch-millisecond timestamp within five minutes.
+Its `nativeEvent` must be a terminal Codex `error` notification with `willRetry=false`, `codexErrorInfo=usageLimitExceeded`, and a thread ID matching native task metadata.
+Pool crewmates retain their native `agent-turn-complete` notification through `bin/fm-dispatch-pool-notify.sh`, which binds the exact task/spawn generation/thread in the route receipt and preserves the turn-ended marker without storing message bodies.
+Secondmates retain their existing configured notification unchanged.
+A completed-turn notification is not terminal-quota evidence, so controlled failover remains refused until an authoritative native terminal-error producer is integrated.
+Do not hand-fill a missing native thread binding to enable failover.
+Unknown interruption, generic errors, stale events, or missing bindings cannot authorize migration.
+The native relaunch transaction preserves the existing worktree, task ID, brief/progress note and prior route receipt.
+Portable admission regression lives in `tests/fm-dispatch-pool.test.sh`, with installer regression in `tests/fm-dispatch-pools-install.test.sh`; spawn and control integration regressions extend their existing profile/relaunch suites.

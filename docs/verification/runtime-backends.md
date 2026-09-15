@@ -1907,3 +1907,11 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Native candidate-pool probe
+
+On 2026-09-11, `bin/fm-test-run.sh tests/fm-dispatch-pool-live-e2e.test.sh` checked the installed Codex 0.153.4 app-server account, model/effort and rate-limit protocol without submitting a prompt or starting a task endpoint.
+The guard printed `native Astra low auth/catalog/quota viable` and exited 0 with no capability skip.
+`FM_DISPATCH_POOL_LIVE=1 bin/fm-test-run.sh tests/fm-dispatch-pool-live-e2e.test.sh` refreshes this check and refuses a missing Codex binary or unavailable protocol evidence.
+Claude native and the Claude-hosted Muse, Gemini and Luna carriers remain explicitly unsupported by this guard.
+This evidence does not prove live task delivery or terminal quota failover; the native thread-binding limit is owned by the candidate-pool section in [`configuration.md`](../configuration.md#native-candidate-pools-configdispatch-poolsjson).

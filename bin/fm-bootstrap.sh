@@ -1479,6 +1479,14 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  if [ -e "$CONFIG/dispatch-pools.json" ] || [ -L "$CONFIG/dispatch-pools.json" ]; then
+    command -v jq >/dev/null 2>&1 || echo "MISSING: jq (install: $(install_cmd jq))"
+    if ! pool_validation=$("$SCRIPT_DIR/fm-dispatch-pool.sh" validate "$CONFIG/dispatch-pools.json" "$STATE" 2>&1); then
+      echo "CREW_DISPATCH: invalid config/dispatch-pools.json - $pool_validation"
+    elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      echo 'BOOTSTRAP_INFO: native candidate pools active config/dispatch-pools.json'
+    fi
+  fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

@@ -107,16 +107,59 @@ fm_test_fake_tmux_spawn() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  # Liveness seam for the pool-launch gate: FM_FAKE_PANE_COMMAND answers the
+  # pane_current_command read so a test can emulate a live agent (a harness
+  # name) or an exited one (a shell). Unset keeps the legacy
+  # agent-unattributable answer.
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
+# The liveness gate reads backend state, so this stub models a minimal
+# window lifecycle: new-window records its -n name beside the launch log and
+# list-windows inventories those records, so a created endpoint reads present
+# only after it is created. FM_FAKE_DUPLICATE_WINDOW keeps its explicit
+# pre-seed for the duplicate test that owns it; FM_FAKE_DROP_WINDOWS=1 hides
+# the records to emulate an endpoint that vanished after creation.
+_fm_fake_tmux_windows_file() {
+  [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] || return 1
+  printf '%s/.fake-tmux-windows' "$(dirname "$FM_FAKE_LAUNCH_LOG")"
+}
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
+    if [ -z "${FM_FAKE_DROP_WINDOWS:-}" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && [ -f "$wf" ] && cat "$wf"
+    fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    wname=; prev=
+    for _a in "$@"; do
+      if [ "$prev" = "-n" ]; then wname=$_a; fi
+      prev=$_a
+    done
+    if [ -n "$wname" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && printf '%s\n' "$wname" >> "$wf"
+    fi
+    exit 0
+    ;;
+  kill-window)
+    wt=; prev=
+    for _a in "$@"; do
+      if [ "$prev" = "-t" ]; then wt=$_a; fi
+      prev=$_a
+    done
+    if [ -n "$wt" ]; then
+      wf=$(_fm_fake_tmux_windows_file 2>/dev/null) && [ -f "$wf" ] && {
+        wname=$(printf '%s' "$wt" | tr -d '=' | sed 's/^.*://')
+        grep -vxF -- "$wname" "$wf" > "$wf.tmp" && mv "$wf.tmp" "$wf"
+      }
+    fi
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -308,4 +351,28 @@ make_stubs() {
   fm_test_fake_tmux_send "$fakebin"
   fm_test_fake_sleep_noop "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+# Native pool protocol fixture; no vendor process or endpoint is launched.
+fm_test_pool_codex() {
+cat > "$1/codex" <<'JS'
+#!/usr/bin/env node
+const readline=require('readline');
+const limit={limitId:'codex',primary:{usedPercent:Number(process.env.POOL_USED||10),resetsAt:process.env.POOL_STALE?'bad':Math.floor(Date.now()/1000)+3600},secondary:null,individualLimit:null,spendControlReached:false,rateLimitReachedType:null};
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line);if(!r.id)return;let result;
+ if(r.method==='initialize')result={userAgent:'codex-fixture',codexHome:process.env.CODEX_HOME};
+ if(r.method==='account/read')result={account:process.env.POOL_NO_AUTH?null:{type:'chatgpt',email:'fixture@example.invalid'},requiresOpenaiAuth:true};
+ if(r.method==='account/rateLimits/read')result={accountId:'fixture-account',rateLimits:limit,rateLimitsByLimitId:{codex:limit}};
+ if(r.method==='model/list')result={data:['gpt-6-astra','gpt-5.6-sol'].map(model=>({id:model,model,hidden:false,supportedReasoningEfforts:[{reasoningEffort:'low'}]})),nextCursor:null};
+ console.log(JSON.stringify({id:r.id,result}));
+});
+JS
+chmod +x "$1/codex"
+}
+
+fm_test_pool_config() {
+cat > "$1" <<'JSON'
+{"schemaVersion":1,"defaults":{"crewmate":"test","secondmate":"test"},"pools":{"test":[{"id":"a","harness":"codex","model":"gpt-6-astra","effort":"low","provider":"openai","authCarrier":"codex-chatgpt","carrier":"codex-native","weight":2},{"id":"b","harness":"codex","model":"gpt-5.6-sol","effort":"low","provider":"openai","authCarrier":"codex-chatgpt","carrier":"codex-native","weight":1}]}}
+JSON
 }

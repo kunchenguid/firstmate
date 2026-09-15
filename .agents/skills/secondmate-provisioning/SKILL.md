@@ -181,6 +181,13 @@ Treat an inherited queue that carries plans with no matching delivery record as 
 
 ## Backlog handoff
 
+When a schema-version-2 fleet is active, provisioning registers the persistent SecondMate as the semantic owner after the home, parent binding, and parent route exist.
+Use `bin/fm-fleet.sh owner register` with the SecondMate's durable home and only the exclusive project and domain intake keys; do not copy the non-exclusive `projects:` clone list from `data/secondmates.md` without deciding which keys are exclusive.
+Then use `assign --secondmate <id>` so the fleet keeps a healthy sticky reasoning-manager assignment or chooses the least-loaded healthy reasoning manager deterministically.
+Physical manager selection never changes the SecondMate's scope, home, backlog, or completion evidence.
+Unknown ownership goes through the fleet's durable unassigned triage instead of creating a SecondMate during intake.
+Use the journaled `transfer` commands documented in [`docs/fleet.md`](../../../docs/fleet.md) when changing the parent FirstMate for an existing local SecondMate; direct edits to `.fm-secondmate-parent`, either parent's `data/secondmates.md`, or parent meta/status are unsupported.
+
 Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
 When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
