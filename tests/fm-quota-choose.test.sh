@@ -137,6 +137,14 @@ cat > "$FIXTURE" <<'JSON'
         "status": "unknown",
         "effectiveAvailability": []
       }
+    },
+    {
+      "provider": "agy",
+      "windows": [],
+      "quotaSemantics": {
+        "status": "unknown",
+        "effectiveAvailability": []
+      }
     }
   ]
 }
@@ -247,10 +255,13 @@ fi
 [ "$err" = "error: unknown harness: bogus" ] || fail "unknown harness returned: $err"
 ok "unknown harness fails closed"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default 2>&1); then
-  fail "trailing unsupported harness was hidden by an earlier selection"
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:gemini-3.8-flash-high 2>/dev/null); then
+  fail "agy unresolved quota unexpectedly selected with '$out'"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "trailing unsupported harness returned: $err"
+[ "$out" = "none" ] || fail "agy unresolved quota: expected 'none', got '$out'"
+
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:gemini-3.8-flash-high --candidate claude:default)
+[ "$out" = "claude default" ] || fail "agy unresolved quota should be skipped in favor of a known candidate, got '$out'"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"
@@ -551,11 +562,11 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
-  fail "unsupported harness unexpectedly dispatched"
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate rovo:default 2>&1); then
+  fail "unmapped harness unexpectedly dispatched"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
-ok "unsupported harness is rejected"
+[ "$err" = "error: unknown harness: rovo" ] || fail "unmapped harness returned: $err"
+ok "unmapped supported harness is rejected"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then

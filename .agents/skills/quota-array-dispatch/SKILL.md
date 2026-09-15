@@ -25,12 +25,13 @@ The canonical shell helper for a worker that has already performed its model-sel
 Pass it the intake's already-captured default TOON or permitted JSON fallback through stdin or `--snapshot`; it never takes another quota snapshot, so it selects from the same quota state as the intake.
 Pass each candidate as `harness:model`, with earlier candidates preferred.
 The helper maps each harness to its primary provider family and applies the provider-wide scopes plus the exact model or product scopes for the model.
+It recognizes agy as quota-axi's agy provider, but current quota-axi reports agy's Gemini, Claude, and GPT-family windows as unresolved attention rather than comparable effective availability, so the helper will not select agy until those rows become modeled.
 An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
 This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
 omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
 Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.
-Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
+Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family, or when deliberately surfacing agy's current unresolved quota as non-selectable evidence.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
 
@@ -75,6 +76,8 @@ A candidate authenticates through its own tuple's surface; another harness's CLI
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
 A provider can carry a healthy source beside a missing or expired one; the unused source's state is not the candidate's state.
 A Pi-hosted family may authenticate through the vendor's own store with no `pi:`-prefixed source at all, which is normal and never evidence against the candidate.
+For agy, establish the available model from `agy models` and account for quota-axi's agy provider row separately: the underlying model names currently include Gemini, Claude, and GPT-OSS families, but quota-axi exposes only `agy,all,unresolved_windows` attention for those windows, not comparable Gemini or Claude provider headroom.
+That keeps agy eligible with disclosed uncertainty but prevents ranking it by `spendPriority` against modeled providers.
 
 Uncertainty and ineligibility are different findings:
 

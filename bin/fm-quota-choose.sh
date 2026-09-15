@@ -44,6 +44,12 @@
 # its own Codex login, so an openai-codex candidate reads as unknown quota here
 # and is never selected on this host; its runway is disclosed uncertainty for
 # the agent-side gates, not measured headroom.
+# agy has a quota-axi provider row, but current quota-axi reports its Gemini,
+# Claude, and GPT-family windows as unresolved attention rather than comparable
+# spendPriority rows. The helper therefore recognizes agy as a known provider
+# and safely leaves agy candidates unselected until quota-axi supplies known
+# effective availability; agent-side dispatch must surface that uncertainty
+# instead of ranking agy against modeled providers.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -312,9 +318,10 @@ printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi prov
 # Map a firstmate harness name to its primary quota-axi provider family.
 # Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
 # the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
+# and has no family for any other prefix (see the header). agy maps to quota-axi's
+# agy provider row, which is currently unresolved rather than comparable known
+# availability. Authoritative multi-provider routing is owned by AGENTS.md
+# section 4 and the quota-array-dispatch skill, not this helper.
 provider_for_harness() {
   case "$1" in
     omp)
@@ -332,6 +339,7 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }
