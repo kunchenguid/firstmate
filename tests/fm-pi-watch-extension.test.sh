@@ -431,7 +431,8 @@ test_pi_branch_offer_owns_actionable_wake() {
   home="$TMP_ROOT/pi-branch-offer-home"
   log="$TMP_ROOT/pi-branch-offer.log"
   stop="$TMP_ROOT/pi-branch-offer.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/data/scout-complete"
+  printf '# Complete scout report\n' > "$home/data/scout-complete/report.md"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -444,7 +445,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: branch-offer synthetic wake\n'
+  printf '%s\n' "${FM_TEST_REASON:-signal: branch-offer synthetic wake}"
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
@@ -460,8 +461,10 @@ import { pathToFileURL } from "node:url";
 // branch listener the wake must be owned by the branch (no main follow-up);
 // with a bus but no acceptor the dispatcher must fall back to main. The
 // divergence between the two runs is asserted, so the case cannot go vacuous.
-async function runScenario(withAcceptor) {
+async function runScenario(withAcceptor, reason, queue) {
   writeFileSync(process.env.FM_ARM_LOG, "");
+  writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, queue);
+  process.env.FM_TEST_REASON = reason;
   const offers = [];
   let mainPrompt = "";
   let tool = null;
@@ -477,8 +480,8 @@ async function runScenario(withAcceptor) {
   };
   if (withAcceptor) {
     bus.on("fm-branch-supervision:dispatch", (offer) => {
-      offers.push({ message: offer.message, projects: offer.projects });
-      offer.accept();
+      offers.push({ message: offer.message, projects: offer.projects, eligible: offer.eligible });
+      if (offer.eligible) offer.accept();
     });
   }
   const pi = {
@@ -492,11 +495,12 @@ async function runScenario(withAcceptor) {
       mainPrompt = message;
     },
   };
-  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?scenario=${withAcceptor}`);
+  const scenario = encodeURIComponent(`${withAcceptor}-${reason}`);
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?scenario=${scenario}`);
   mod.default(pi);
   await tool.execute("tool-call-branch-offer", {}, undefined, undefined, {});
   for (let i = 0; i < 250; i += 1) {
-    const settled = withAcceptor ? offers.length > 0 : mainPrompt !== "";
+    const settled = offers.some((offer) => offer.eligible) || mainPrompt !== "";
     if (settled) break;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -504,11 +508,15 @@ async function runScenario(withAcceptor) {
   return { offers, mainPrompt, rows };
 }
 
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
-const accepted = await runScenario(true);
-if (accepted.offers.length !== 1) throw new Error(`expected one branch offer, got ${accepted.offers.length}`);
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\nkind=ship\n");
+const routineReason = "signal: branch-offer synthetic wake";
+const routineQueue = "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n";
+const accepted = await runScenario(true, routineReason, routineQueue);
+if (accepted.offers.length !== 1 || accepted.offers[0].eligible !== true) {
+  throw new Error(`expected one eligible branch offer, got ${JSON.stringify(accepted.offers)}`);
+}
 if (!accepted.offers[0].message.includes("signal: branch-offer synthetic wake")) {
   throw new Error(`offer missed the wake reason: ${accepted.offers[0].message}`);
 }
@@ -519,13 +527,37 @@ if (accepted.mainPrompt !== "") throw new Error(`accepted offer still reached ma
 if (!accepted.rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
   throw new Error(`handling delivery was not confirmed before the branch handoff: ${accepted.rows.join(" | ")}`);
 }
-const declined = await runScenario(false);
+const declined = await runScenario(false, routineReason, routineQueue);
 if (declined.offers.length !== 0) throw new Error("no-acceptor scenario recorded an offer");
 if (!declined.mainPrompt.includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error(`unaccepted offer did not fall back to main: ${declined.mainPrompt}`);
 }
 if (!declined.mainPrompt.includes("signal: branch-offer synthetic wake")) {
   throw new Error(`fallback wake lost the reason line: ${declined.mainPrompt}`);
+}
+
+// Reproduce the missed-cleanup shape: a complete scout report and live task
+// metadata exist, but no backlog row does. Even with an accepting branch, the
+// terminal scout signal must reach main so reporting, the captain-call gate,
+// and guarded cleanup cannot split across actors.
+writeFileSync(`${state}/scout-complete.meta`, "project=/projects/approved\nwindow=fm-scout-complete\nkind=scout\n");
+writeFileSync(`${state}/scout-complete.status`, "done: full report ready\n");
+const scoutReason = "signal: scout-complete.status";
+const scoutQueue = "1\t1\tsignal\tscout-complete.status\tsignal: scout-complete.status\n";
+const scout = await runScenario(true, scoutReason, scoutQueue);
+if (scout.offers.length !== 1 || scout.offers[0].eligible !== false) {
+  throw new Error(`a completed scout was offered to the branch: ${JSON.stringify(scout.offers)}`);
+}
+if (!scout.mainPrompt.includes("FIRSTMATE WATCHER WAKE") || !scout.mainPrompt.includes(scoutReason)) {
+  throw new Error(`a completed scout did not reach main: ${scout.mainPrompt}`);
+}
+writeFileSync(`${state}/scout-working.meta`, "project=/projects/approved\nwindow=fm-scout-working\nkind=scout\n");
+writeFileSync(`${state}/scout-working.status`, "working: audit still running\n");
+const workingReason = "signal: scout-working.status";
+const workingQueue = "1\t1\tsignal\tscout-working.status\tsignal: scout-working.status\n";
+const workingScout = await runScenario(true, workingReason, workingQueue);
+if (workingScout.offers.length !== 1 || workingScout.offers[0].eligible !== true || workingScout.mainPrompt !== "") {
+  throw new Error(`an active scout did not remain branch-ownable: ${JSON.stringify(workingScout)}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);

@@ -55,14 +55,12 @@ export interface UnreadWakeScope {
    */
   corrupted: boolean;
   /**
-   * The exact "key" field of every decision-owned signal or stale row this
-   * scan excluded. Signal rows are marked by bin/fm-watch.sh; stale rows are
-   * decision-owned when their task has an open needs-decision or its current
-   * declaration is captain-held. fm-primary-pi-watch.ts cross-references these
-   * keys against the current trigger so its entire coalesced batch is forced
-   * to main.
+   * Exact signal/stale keys that must stay on main for any reason, including
+   * decision-owned rows and completed scout lifecycle events. The watcher
+   * cross-references these keys by task so one main-owned row keeps its whole
+   * triggering batch on main without vetoing unrelated branch work.
    */
-  needsDecisionKeys: string[];
+  mainOwnedKeys: string[];
   taskByWakeKey: Record<string, string>;
 }
 
@@ -73,7 +71,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   eligibleSeqs: [],
   eligibleTasks: [],
   corrupted: false,
-  needsDecisionKeys: [],
+  mainOwnedKeys: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -83,7 +81,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   eligibleSeqs: [],
   eligibleTasks: [],
   corrupted: true,
-  needsDecisionKeys: [],
+  mainOwnedKeys: [],
   taskByWakeKey: {},
 };
 
@@ -100,11 +98,14 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
 // starves by being left behind.
 //
-// A signal row whose payload is "needs-decision:"-prefixed, or a stale row
-// for a task with an open needs-decision or a current captain-held declaration,
-// gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
-// and forced to main on its own triggering close (fm-primary-pi-watch.ts's
-// offerWakeToBranch). Heartbeat handling remains independent.
+// A signal row whose payload is "needs-decision:"-prefixed, a stale row for a
+// task with an open needs-decision or a current captain-held declaration, or
+// any signal/stale row for a completed scout gets the identical treatment: excluded from
+// eligibleSeqs, never a scan veto, and forced to main on its own triggering
+// close (fm-primary-pi-watch.ts's offerWakeToBranch). Main owns the scout's
+// report relay, captain-call completion gate, and guarded cleanup as one
+// lifecycle; a branch outcome must not make main treat that work as settled.
+// Heartbeat handling remains independent.
 //
 // That applies to a heartbeat review too, and it is the whole point: a
 // heartbeat used to be deferred to main merely because some unrelated check
@@ -200,6 +201,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
+  const taskKinds = new Map<string, string>();
   // The task id behind each key a signal or stale row may carry: the task id
   // itself, or the endpoint its metadata records.
   const taskByKey = new Map<string, string>();
@@ -210,8 +212,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      const kind = fields.find((line) => line.startsWith("kind="))?.slice(5) ?? "";
       if (project) {
         metadata.set(task, project);
+        if (kind) taskKinds.set(task, kind);
         taskByKey.set(task, task);
         taskByKey.set(`${task}.status`, task);
         taskByKey.set(`${task}.turn-ended`, task);
@@ -227,7 +231,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
-  const needsDecisionKeys: string[] = [];
+  const mainOwnedKeys: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -235,6 +239,23 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     .split(/\s+/)
     .filter(Boolean);
   const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
+  const completedScouts = new Map<string, boolean>();
+  const isCompletedScout = (task: string): boolean | null => {
+    if (taskKinds.get(task) !== "scout") return false;
+    if (completedScouts.has(task)) return completedScouts.get(task)!;
+    const statusPath = `${state}/${task}.status`;
+    try {
+      const version = statusFileVersion(statusPath);
+      if (!version) return false;
+      const lines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
+      if (statusFileVersion(statusPath) !== version) return null;
+      const completed = statusLineVerb(lines.at(-1) ?? "") === "done";
+      completedScouts.set(task, completed);
+      return completed;
+    } catch {
+      return null;
+    }
+  };
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -260,14 +281,26 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         // status append surfaced through the actionable signal path is
         // excluded from what the branch may claim without vetoing the scan
         // (docs/pi-supervision-branch.md "Autonomy").
-        needsDecisionKeys.push(key);
+        mainOwnedKeys.push(key);
         continue;
       }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
+      const completedScout = isCompletedScout(task);
+      if (completedScout === null) return UNSAFE_SCOPE;
+      if (project && completedScout) {
+        mainOwnedKeys.push(key);
+        continue;
+      }
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+      const completedScout = isCompletedScout(task);
+      if (completedScout === null) return UNSAFE_SCOPE;
+      if (project && completedScout) {
+        mainOwnedKeys.push(key);
+        continue;
+      }
       if (task) {
         const statusPath = `${state}/${task}.status`;
         if (!staleDecisionOwnership.has(statusPath)) {
@@ -303,7 +336,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
           staleDecisionOwnership.set(statusPath, decisionOwned);
         }
         if (staleDecisionOwnership.get(statusPath)) {
-          needsDecisionKeys.push(key);
+          mainOwnedKeys.push(key);
           continue;
         }
       }
@@ -332,7 +365,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     eligibleSeqs,
     eligibleTasks: [...eligibleTasks],
     corrupted: false,
-    needsDecisionKeys,
+    mainOwnedKeys,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }

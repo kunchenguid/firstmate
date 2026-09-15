@@ -3804,12 +3804,17 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   local repo home out status
   repo="$TMP_ROOT/dispatch-classify-root"
   home="$TMP_ROOT/dispatch-classify-home"
-  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/data/scout-complete" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
-  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-window\nkind=ship\n' "$home" > "$home/state/task-a.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-scout-complete\nkind=scout\n' "$home" > "$home/state/scout-complete.meta"
+  printf 'done: full report ready\n' > "$home/state/scout-complete.status"
+  printf '# Complete scout report\n' > "$home/data/scout-complete/report.md"
+  printf 'project=%s/projects/approved\nwindow=fm-scout-working\nkind=scout\n' "$home" > "$home/state/scout-working.meta"
+  printf 'working: audit still running\n' > "$home/state/scout-working.status"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
@@ -3847,9 +3852,72 @@ for (const row of mainOnlyRows) {
   if (scope.corrupted) throw new Error(`an ordinary main-only row must not read as corrupted: ${row}`);
 }
 
+// A completed scout with a full report and live metadata stays main-owned even
+// when no backlog file lists it. Both its immediate signal and later stale
+// alias keep the report, captain-call gate, and guarded cleanup in one main
+// lifecycle, while unrelated work and a heartbeat remain branch-ownable.
+if (fs.existsSync(`${process.env.FM_HOME}/data/backlog.md`)) {
+  throw new Error("scout routing fixture unexpectedly has a backlog list");
+}
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tsignal\tscout-complete.status\tsignal: scout-complete.status",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const scoutSignalMixed = scopeForUnreadWake(state, false);
+if (!scoutSignalMixed.eligible || scoutSignalMixed.eligibleSeqs.join(",") !== "2" || scoutSignalMixed.corrupted) {
+  throw new Error(`a completed scout signal changed unrelated branch eligibility: ${JSON.stringify(scoutSignalMixed)}`);
+}
+if (scoutSignalMixed.mainOwnedKeys.join(",") !== "scout-complete.status") {
+  throw new Error(`a completed scout signal was not independently main-owned: ${JSON.stringify(scoutSignalMixed)}`);
+}
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-scout-complete\tstale: fm-scout-complete",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const scoutStaleMixed = scopeForUnreadWake(state, false);
+if (!scoutStaleMixed.eligible || scoutStaleMixed.eligibleSeqs.join(",") !== "2" ||
+  scoutStaleMixed.mainOwnedKeys.join(",") !== "fm-scout-complete") {
+  throw new Error(`a completed scout stale alias was not independently main-owned: ${JSON.stringify(scoutStaleMixed)}`);
+}
+if (scoutStaleMixed.taskByWakeKey["fm-scout-complete"] !== "scout-complete") {
+  throw new Error(`a completed scout stale alias lost task identity: ${JSON.stringify(scoutStaleMixed)}`);
+}
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\theartbeat\theartbeat\theartbeat",
+    "1\t2\tsignal\tscout-complete.status\tsignal: scout-complete.status",
+    "1\t3\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const scoutHeartbeatMixed = scopeForUnreadWake(state, true);
+if (!scoutHeartbeatMixed.eligible || scoutHeartbeatMixed.eligibleSeqs.join(",") !== "1,3" ||
+  scoutHeartbeatMixed.mainOwnedKeys.join(",") !== "scout-complete.status") {
+  throw new Error(`a main-owned scout vetoed or rode the heartbeat: ${JSON.stringify(scoutHeartbeatMixed)}`);
+}
+
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tsignal\tscout-working.status\tsignal: scout-working.status",
+    "1\t2\tstale\tfm-scout-working\tstale: fm-scout-working",
+  ].join("\n"),
+);
+const workingScout = scopeForUnreadWake(state, false);
+if (!workingScout.eligible || workingScout.eligibleSeqs.join(",") !== "1,2" ||
+  workingScout.eligibleTasks.join(",") !== "scout-working" || workingScout.mainOwnedKeys.length !== 0) {
+  throw new Error(`an active scout was not branch-ownable: ${JSON.stringify(workingScout)}`);
+}
+
 // A needs-decision signal row is a main-only class too, marked by payload
 // rather than kind (docs/pi-supervision-branch.md "Autonomy"): it is excluded
-// from eligibleSeqs and named in needsDecisionKeys. A later stale row under the
+// from eligibleSeqs and named in mainOwnedKeys. A later stale row under the
 // task's window alias remains individually claimable, while task-identity
 // precedence keeps its complete wake on main until the decision row is read.
 writeFileSync(
@@ -3866,8 +3934,8 @@ if (!needsDecisionMixed.eligible) {
 if (needsDecisionMixed.eligibleSeqs.join(",") !== "2") {
   throw new Error(`a needs-decision row must be excluded from eligibleSeqs: ${JSON.stringify(needsDecisionMixed)}`);
 }
-if (needsDecisionMixed.needsDecisionKeys.join(",") !== "task-a.status") {
-  throw new Error(`needsDecisionKeys must name the excluded row: ${JSON.stringify(needsDecisionMixed)}`);
+if (needsDecisionMixed.mainOwnedKeys.join(",") !== "task-a.status") {
+  throw new Error(`the main-owned index must name the excluded decision row: ${JSON.stringify(needsDecisionMixed)}`);
 }
 if (needsDecisionMixed.taskByWakeKey["task-a.status"] !== "task-a" ||
   needsDecisionMixed.taskByWakeKey["fm-window"] !== "task-a") {
@@ -3899,7 +3967,7 @@ const captainHeldMixed = scopeForUnreadWake(state, false);
 if (!captainHeldMixed.eligible || captainHeldMixed.eligibleSeqs.join(",") !== "2") {
   throw new Error(`a captain-held stale row was offered to the branch: ${JSON.stringify(captainHeldMixed)}`);
 }
-if (captainHeldMixed.needsDecisionKeys.join(",") !== "fm-window") {
+if (captainHeldMixed.mainOwnedKeys.join(",") !== "fm-window") {
   throw new Error(`the captain-held stale key was not marked main-owned: ${JSON.stringify(captainHeldMixed)}`);
 }
 
@@ -3919,17 +3987,17 @@ if (countedStatusReads !== 1) {
   throw new Error(`one status was read ${countedStatusReads} times for repeated stale rows`);
 }
 if (!repeatedCaptainHeld.eligible || repeatedCaptainHeld.eligibleSeqs.join(",") !== "3" ||
-  repeatedCaptainHeld.needsDecisionKeys.join(",") !== "fm-window,fm-window") {
+  repeatedCaptainHeld.mainOwnedKeys.join(",") !== "fm-window,fm-window") {
   throw new Error(`repeated stale reminders changed classification: ${JSON.stringify(repeatedCaptainHeld)}`);
 }
 const repeatedCaptainHeldNextScan = scopeForUnreadWake(state, false);
-if (countedStatusReads !== 1 || repeatedCaptainHeldNextScan.needsDecisionKeys.join(",") !== "fm-window,fm-window") {
+if (countedStatusReads !== 1 || repeatedCaptainHeldNextScan.mainOwnedKeys.join(",") !== "fm-window,fm-window") {
   throw new Error(`an unchanged status was not reused across scans: reads=${countedStatusReads} scope=${JSON.stringify(repeatedCaptainHeldNextScan)}`);
 }
 writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting the captain\nworking: resumed after answer\n");
 const changedCaptainHeld = scopeForUnreadWake(state, false);
 if (countedStatusReads !== 2 || changedCaptainHeld.eligibleSeqs.join(",") !== "1,2,3" ||
-  changedCaptainHeld.needsDecisionKeys.length !== 0) {
+  changedCaptainHeld.mainOwnedKeys.length !== 0) {
   throw new Error(`a changed status did not invalidate its cached decision: reads=${countedStatusReads} scope=${JSON.stringify(changedCaptainHeld)}`);
 }
 countedStatusPath = "";
@@ -3951,7 +4019,7 @@ const openDecisionMixed = scopeForUnreadWake(state, false);
 if (!openDecisionMixed.eligible || openDecisionMixed.eligibleSeqs.join(",") !== "2") {
   throw new Error(`an open-decision stale row was offered to the branch: ${JSON.stringify(openDecisionMixed)}`);
 }
-if (openDecisionMixed.needsDecisionKeys.join(",") !== "fm-window") {
+if (openDecisionMixed.mainOwnedKeys.join(",") !== "fm-window") {
   throw new Error(`the open-decision stale key was not marked main-owned: ${JSON.stringify(openDecisionMixed)}`);
 }
 
@@ -3962,7 +4030,7 @@ writeFileSync(
 );
 const customResolved = scopeForUnreadWake(state, false);
 if (!customResolved.eligible || customResolved.eligibleSeqs.slice().sort().join(",") !== "1,2" ||
-  customResolved.needsDecisionKeys.length !== 0) {
+  customResolved.mainOwnedKeys.length !== 0) {
   throw new Error(`a custom resolution verb left the stale decision open: ${JSON.stringify(customResolved)}`);
 }
 
@@ -3970,7 +4038,7 @@ process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB = "awaiting-captain";
 writeFileSync(`${state}/task-a.status`, "awaiting-captain [key=cleanup]: awaiting the captain\n");
 const customHeld = scopeForUnreadWake(state, false);
 if (!customHeld.eligible || customHeld.eligibleSeqs.join(",") !== "2" ||
-  customHeld.needsDecisionKeys.join(",") !== "fm-window") {
+  customHeld.mainOwnedKeys.join(",") !== "fm-window") {
   throw new Error(`a custom captain-held verb was offered to the branch: ${JSON.stringify(customHeld)}`);
 }
 delete process.env.FM_CLASSIFY_RESOLVE_VERB;
@@ -3983,7 +4051,7 @@ writeFileSync(
 );
 const customReservedPrefixes = scopeForUnreadWake(state, false);
 if (!customReservedPrefixes.eligible || customReservedPrefixes.eligibleSeqs.join(",") !== "2" ||
-  customReservedPrefixes.needsDecisionKeys.join(",") !== "fm-window") {
+  customReservedPrefixes.mainOwnedKeys.join(",") !== "fm-window") {
   throw new Error(`configured reserved prefixes lost an open stale decision: ${JSON.stringify(customReservedPrefixes)}`);
 }
 delete process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES;
@@ -3992,7 +4060,7 @@ writeFileSync(`${state}/symlink-target.status`, "needs-decision: external choice
 unlinkSync(`${state}/task-a.status`);
 symlinkSync(`${state}/symlink-target.status`, `${state}/task-a.status`);
 const symlinkedStatus = scopeForUnreadWake(state, false);
-if (!symlinkedStatus.corrupted || symlinkedStatus.eligible || symlinkedStatus.needsDecisionKeys.length !== 0) {
+if (!symlinkedStatus.corrupted || symlinkedStatus.eligible || symlinkedStatus.mainOwnedKeys.length !== 0) {
   throw new Error(`a symlinked status file influenced stale routing: ${JSON.stringify(symlinkedStatus)}`);
 }
 unlinkSync(`${state}/task-a.status`);
@@ -4110,7 +4178,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "main-only classification and eligible-row snapshot contract must hold: $out"
-  pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
+  pass "scopeForUnreadWake keeps decisions and scout lifecycles main-owned without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
 # The model picker's bounded scrolling and its search ranking are Pi's own
