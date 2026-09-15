@@ -186,6 +186,14 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     ;;
   *" ida --region sg session get "*)
     case "$mode" in
+      get-launch-126) printf 'PRIVATE_LOCAL_STDERR token=synthetic-secret\n' >&2; exit 126 ;;
+      get-launch-127) printf 'PRIVATE_LOCAL_STDERR token=synthetic-secret\n' >&2; exit 127 ;;
+      get-empty) printf 'PRIVATE_LOCAL_STDERR token=synthetic-secret\n' >&2; exit 0 ;;
+      get-malformed) printf 'PRIVATE_LOCAL_STDOUT not-json\n'; exit 0 ;;
+      get-multiple) printf '{}\n{}\n'; exit 0 ;;
+      get-exit-error) success '{}'; exit 1 ;;
+      get-structure) success '{"session":{"id":70001},"messages":{}}'; exit 0 ;;
+      get-session-mismatch) success '{"session":{"id":70002},"messages":[]}'; exit 0 ;;
       get-provider-error) error INTERNAL_ERROR 'temporary provider read failure'; exit 1 ;;
       get-unavailable) error HTTP_503 'service unavailable'; exit 1 ;;
       get-auth) error AUTH_REQUIRED 'authentication required'; exit 1 ;;
@@ -826,6 +834,116 @@ test_timeout_reconciliation_and_no_duplicate() {
   pass "ambiguous timeout reconciles the durable marker and adoption never creates a duplicate session"
 }
 
+test_local_readback_failure_and_recovery() {
+  local mode class home fakebin id source mode_file sha marker provider state first status before tries expected_phase recovery_seq
+  for mode in launch-126 launch-127 empty malformed multiple exit-error structure session-mismatch; do
+    case "$mode" in
+      launch-126) class=cli-not-executable ;;
+      launch-127) class=cli-not-found ;;
+      empty) class=response-empty ;;
+      malformed|multiple) class=response-invalid-json ;;
+      exit-error) class=cli-exit-error ;;
+      structure) class=response-invalid-structure ;;
+      session-mismatch) class=session-identity-mismatch ;;
+    esac
+    id="ida-local-$mode"; source="ida-$id"
+    home=$(new_home "$id"); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+    mode_file="$home/mode"; printf 'get-%s\n' "$mode" >"$mode_file"
+    sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+    marker="firstmate:$id:${sha:0:16}"
+    printf '%s\t%s\tcompleted\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+    provider=$(jq -cn --arg marker "$marker" '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",agent_id:"9001",agent_name:"iDA Test",model:null,provider_status:"running"}')
+    expected_phase="result-unavailable"
+    if [ "$mode" = empty ]; then
+      # A failed first read after create must retain the create response's exact identity.
+      provider=$(printf '%s' "$provider" | jq '.session_id=null | .task_id=null')
+      : >"$home/sessions.tsv"
+      expected_phase="submission-unknown"
+    fi
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-remote-agent-lib.sh"
+      STATE="$2/state"; DATA="$2/data"
+      fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 1
+      fm_remote_meta_write "$3" ida research || exit 1
+      fm_remote_state_transition "$3" running "" "" provider-running not-armed unavailable "" "" "{}"
+    ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "local readback fixture failed"
+    if [ "$mode" = empty ]; then
+      FM_HOME="$home" bash -c '. "$1/bin/fm-remote-agent-lib.sh"; STATE="$2/state"; DATA="$2/data";
+        fm_remote_state_transition "$3" submission-not-started "" "" dispatch-durable not-armed unavailable "" "" "{}"
+      ' _ "$ROOT" "$home" "$id" || fail "pre-submission fixture checkpoint failed"
+    fi
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null || fail "local source arm failed"
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >"$home/capture.out" 2>"$home/capture.err" \
+      || fail "local failure capture failed: $mode"
+    state=$(state_file "$home" "$id"); first="$home/state/procevent-inbox/$source.1.result"; status="$home/state/$id.status"
+    jq -e --arg class "$class" --arg phase "$expected_phase" '.phase == $phase and .outcome == "unavailable"
+      and .waiter == "interrupted" and .error_class == $class and .report_path == null
+      and .provider_state.local_readback_blocked == true
+      and .provider_state.session_id == "70001" and .provider_state.task_id == "80001"' "$state" >/dev/null \
+      || fail "local failure changed remote outcome/identity or lost its class: $mode"
+    jq -e --arg class "$class" '.terminal == false and .ambiguous == false and .error_class == $class' "$first" >/dev/null \
+      || fail "local failure observation falsely terminalized provider: $mode"
+    assert_present "$home/state/procevent-inbox/$source.1.handled" "local failure was not acknowledged"
+    assert_absent "$home/state/procevent/$source.source" "local failure silently rearmed"
+    assert_absent "$home/state/procevent/$source.runner" "local failure retained a runner"
+    assert_grep 'blocked [key=ida-readback-local]' "$status" "local failure did not emit its blocker"
+    assert_grep 'use adopt' "$status" "local failure did not explain recovery"
+    if grep -E '^failed:|^done:' "$status" >/dev/null; then fail "local failure claimed remote completion"; fi
+    assert_grep "procevent ida $source 1" "$home/state/.wake-queue" "local failure notification was not durable"
+    before=$(cat "$status")
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" handle "$id" 1 "$first" >/dev/null || fail "local failure replay failed"
+    [ "$(cat "$status")" = "$before" ] || fail "local failure replay duplicated its blocker"
+    run_ida_source "$home" "$fakebin" "$mode_file" "$STATE_CMD" "$id" >"$home/current-state"
+    assert_grep 'state: blocked' "$home/current-state" "local readback current-state hid actionable failure"
+    if grep -R -E 'PRIVATE_LOCAL_STDERR|PRIVATE_LOCAL_STDOUT|synthetic-secret' "$home/state" >/dev/null; then
+      fail "raw local failure leaked into durable state"
+    fi
+
+    recovery_seq=2
+    if [ "$mode" = launch-126 ]; then
+      # An intervening remote outage must not close the local recovery obligation.
+      printf 'get-unavailable\n' >"$mode_file"
+      run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null || fail "transient retry arm failed"
+      run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null || fail "transient retry capture failed"
+      jq -e '.provider_state.local_readback_blocked == true and .error_class == "unavailable"' "$state" >/dev/null \
+        || fail "remote outage lost the local recovery obligation"
+      assert_no_grep 'resolved [key=ida-readback-local]' "$status" "remote outage falsely resolved local readback"
+      printf 'recorded-task-missing\n' >"$mode_file"
+      run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null || fail "missing-task capture failed"
+      jq -e '.provider_state.local_readback_blocked == true' "$state" >/dev/null || fail "missing bound task lost recovery obligation"
+      assert_no_grep 'resolved [key=ida-readback-local]' "$status" "sibling-only response resolved bound-task readback"
+      recovery_seq=4
+    fi
+    # Recovery includes another task in the session and must retain the exact binding.
+    printf 'recorded-task-conflict\n' >"$mode_file"
+    run_ida_source "$home" "$fakebin" "$mode_file" "$IDA" adopt "$id" >"$home/adopt.out" || fail "same-task recovery failed"
+    wait_phase "$home" "$id" terminal-success
+    tries=300
+    while [ ! -f "$home/state/procevent-inbox/$source.$recovery_seq.handled" ] && [ "$tries" -gt 0 ]; do sleep 0.03; tries=$((tries - 1)); done
+    [ "$tries" -gt 0 ] || fail "recovery capture was not acknowledged"
+    jq -e '.provider_state.task_id == "80001" and .provider_state.session_id == "70001"
+      and .provider_state.local_readback_blocked == false and .result_availability == "available"' "$state" >/dev/null \
+      || fail "recovery lost exact task or retained the local blocker"
+    assert_grep 'resolved [key=ida-readback-local]' "$status" "healthy read did not resolve the blocker"
+    [ "$(grep -c '^done:' "$status")" -eq 1 ] || fail "recovery did not emit one completion"
+    assert_grep 'FM_IDA_READINESS_V1' "$home/data/$id/report.md" "recovery lost the task answer"
+    assert_no_grep 'OTHER_TASK_ANSWER' "$home/data/$id/report.md" "recovery used the sibling answer"
+    assert_absent "$home/state/procevent/$source.source" "recovery did not retire the source"
+    before=$(cat "$home/data/$id/report.md")
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" handle "$id" "$recovery_seq" "$home/state/procevent-inbox/$source.$recovery_seq.result" >/dev/null \
+      || fail "recovery replay failed"
+    [ "$(cat "$home/data/$id/report.md")" = "$before" ] && [ "$(grep -c '^done:' "$status")" -eq 1 ] \
+      || fail "recovery replay changed its report or repeated completion"
+    if [ "$mode" = empty ]; then
+      [ "$(grep -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log")" -eq 1 ] || fail "recovery repeated create"
+    else
+      assert_no_grep 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" "local recovery repeated create"
+    fi
+    assert_no_grep 'chat completion close' "$home/bytedcli.log" "local recovery cancelled provider"
+  done
+  pass "local read failures capture actionable blockers, retire only waiting, and recover the exact task once"
+}
+
 test_transient_readback_coalescing_and_backoff() {
   local home fakebin id=ida-transient source mode_file result_one runner sleep_log sleep_release
   local results wakes artifacts revision replay tries sha marker provider staged
@@ -1181,6 +1299,7 @@ test_task_bound_terminal_and_monotonic_generations
 test_terminal_outcomes_with_visible_answer
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
+test_local_readback_failure_and_recovery
 test_transient_readback_coalescing_and_backoff
 test_artifact_store_idempotency
 test_abandon_after_authoritative_zero_match
