@@ -41,6 +41,20 @@
 # no queue rule, one that could not be read, rules that disagree, and a method
 # this script does not recognise are four distinct outcomes and are reported
 # apart, because each one leaves the operator somewhere different.
+#
+# Two further refusals protect work that a merge would otherwise break silently,
+# and both read the repository's open pull requests for one branch
+# (bin/fm-pr-lib.sh's fm_pr_github_open_requests). When an open pull request's
+# base is the head branch this run is merging, the squash or rebase this run
+# would perform rewrites the commits that stacked pull request is built on and
+# turns it into a conflict, so the merge is refused and both the stacked pull
+# requests and the --merge method that preserves them are named; a caller that
+# already named a merge commit needs no such read. When another open pull
+# request shares this one's head branch, which pull request the task owns cannot
+# be told apart, so the merge is refused and every open pull request on that
+# branch is named. Both guards are GitHub reads: a GitLab merge request's
+# method is the project's own setting, which this script never chooses and
+# therefore never has to override, so the GitLab merge path is unchanged here.
 # A caller-requested --auto that leaves the pull request neither merged nor
 # queued is refused the same way and says auto-merge was armed with nothing
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
@@ -570,8 +584,9 @@ github_verify_mergeable() {
   local json fields line red name covered
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local head_branch='' head_repo=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,headRepository,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -583,6 +598,8 @@ github_verify_mergeable() {
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
+        "branch=" + ((.headRefName // "") | tostring),
+        "head_repo=" + ((.headRepository.nameWithOwner // "") | tostring),
         "base=" + ((.baseRefName // "") | tostring)
       else
         error("pull request payload is not an object")
@@ -598,14 +615,14 @@ github_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       merge_state=*) merge_state=${line#merge_state=} ;;
       head=*) live_head=${line#head=} ;;
+      branch=*) head_branch=${line#branch=} ;;
+      head_repo=*) head_repo=${line#head_repo=} ;;
       base=*) base=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
-  done <<FIELDS
-$fields
-FIELDS
-  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$base" ]; then
+  done < <(printf '%s\n' "$fields")
+  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ] || [ -z "$base" ] || [ -z "$head_branch" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
@@ -663,7 +680,72 @@ EOF
   printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
+  FM_PR_GITHUB_HEAD_BRANCH=$head_branch
+  FM_PR_GITHUB_HEAD_REPO=$head_repo
   FM_PR_GITHUB_BASE=$base
+}
+
+# --- stacked-branch and duplicate-head-branch guards -------------------------
+# The refusal pairs described in this script's header. Both read the
+# repository's open pull requests for one branch, and a read this run cannot
+# perform is a refusal rather than an assumption that nothing was found, because
+# the merge it guards is irreversible.
+FM_PR_GITHUB_HEAD_BRANCH=
+FM_PR_GITHUB_HEAD_REPO=
+
+github_report_open_pull_requests() {  # <reason> <own-number> <number-url-lines>
+  local reason=$1 own=$2 lines=$3 number url
+  printf 'error: %s\n' "$reason" >&2
+  while IFS=' ' read -r number url; do
+    [ -n "$number" ] || continue
+    if [ -n "$own" ] && [ "$number" = "$own" ]; then
+      printf 'error:   %s (the pull request this run was asked to merge)\n' "$url" >&2
+    else
+      printf 'error:   %s\n' "$url" >&2
+    fi
+  done <<EOF
+$lines
+EOF
+}
+
+github_refuse_stacked_children() {
+  local children method=${FM_PR_GITHUB_CALLER_METHOD:-squash}
+  # Nothing is stranded by a merge commit, so the caller who already named one is
+  # not made to pay for this read.
+  if github_caller_method_is merge; then
+    return 0
+  fi
+  if ! children=$(fm_pr_github_open_requests "$PR_OWNER/$PR_REPO" base "$FM_PR_GITHUB_HEAD_BRANCH"); then
+    printf 'error: could not read the open pull requests stacked on head branch %s of %s; refusing to merge %s without knowing whether a %s merge would strand one\n' \
+      "$FM_PR_GITHUB_HEAD_BRANCH" "$PR_OWNER/$PR_REPO" "$URL" "$method" >&2
+    return 1
+  fi
+  [ -n "$children" ] || return 0
+  github_report_open_pull_requests \
+    "refusing to merge $URL: a $method merge rewrites the commits that these open pull requests are stacked on with head branch $FM_PR_GITHUB_HEAD_BRANCH" \
+    '' "$children"
+  printf 'error: retry with: %s %s %s --merge, which lands a merge commit and keeps the stacked pull requests mergeable; or merge them first\n' \
+    "$0" "$ID" "$URL" >&2
+  return 1
+}
+
+github_refuse_duplicate_head() {
+  local all others
+  if ! all=$(fm_pr_github_open_requests "$PR_OWNER/$PR_REPO" head \
+      "$FM_PR_GITHUB_HEAD_BRANCH" "$FM_PR_GITHUB_HEAD_REPO"); then
+    printf 'error: could not read the open pull requests for head branch %s of %s; refusing to merge %s without knowing whether another open pull request shares that head branch\n' \
+      "$FM_PR_GITHUB_HEAD_BRANCH" "$PR_OWNER/$PR_REPO" "$URL" >&2
+    return 1
+  fi
+  # This pull request is itself in that list, an open pull request on its own
+  # head branch, so only the other requests in it are the ambiguity.
+  others=$(printf '%s\n' "$all" | awk -v own="$PR_NUMBER" '$1 != own && NF == 2')
+  [ -n "$others" ] || return 0
+  github_report_open_pull_requests \
+    "refusing to merge $URL: these open pull requests all use head branch $FM_PR_GITHUB_HEAD_BRANCH, so which one belongs to this task is ambiguous" \
+    "$PR_NUMBER" "$all"
+  printf 'error: close every duplicate pull request for that head branch, then retry\n' >&2
+  return 1
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1144,6 +1226,8 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
+    github_refuse_duplicate_head || exit 1
+    github_refuse_stacked_children || exit 1
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1

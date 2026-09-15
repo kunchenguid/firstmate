@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# The same GitHub live read of the pull request supplies its head branch, which
+# is used to report every other open pull request on that branch: a repeated
+# validation run can open a second pull request for a branch that already has
+# one, and no other step in this path enumerates open pull requests for a branch.
+# That report is an actionable line and never a refusal here, because a
+# registration that failed would leave the task with no recorded pr= at all;
+# bin/fm-pr-merge.sh is the path that refuses to merge while the ambiguity stands.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -73,10 +80,58 @@ fi
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
+HEAD_BRANCH=
+HEAD_REPO=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
+  # The head commit, its branch, and that branch's own repository are read in
+  # one live view. A payload carrying more than one line is not a view this
+  # trusts at all, so nothing is read from it: a malformed answer must never
+  # have its first line taken as the head commit.
+  if REMOTE=$(cd "$WT" && gh pr view "$URL" \
+      --json headRefOid,headRefName,headRepository \
+      -q '.headRefOid + "\t" + .headRefName + "\t" + (.headRepository.nameWithOwner // "")' 2>/dev/null); then
+    case "$REMOTE" in
+      *$'\n'*) ;;
+      *)
+        IFS=$'\t' read -r REMOTE_HEAD HEAD_BRANCH HEAD_REPO <<<"$REMOTE"
+        if fm_pr_head_valid "$REMOTE_HEAD"; then
+          PR_HEAD=$REMOTE_HEAD
+        else
+          HEAD_BRANCH=
+          HEAD_REPO=
+        fi
+        ;;
+    esac
+  fi
+fi
+
+# Report, never block on, a second open pull request that shares this pull
+# request's head branch. Nothing else in this path looks for one, which is how a
+# duplicate opened by a repeated validation run sat unnoticed until the captain
+# asked about it. Every open pull request found on the branch is named so the
+# operator can pick, and the poll is still armed: the merge path is what refuses
+# while the ambiguity stands (bin/fm-pr-merge.sh), so a registration that failed
+# here would only leave the task with no recorded pr= or poll at all.
+if [ "$PROVIDER" = github ] && [ -n "$HEAD_BRANCH" ]; then
+  OPEN_ON_HEAD=
+  if ! OPEN_ON_HEAD=$(fm_pr_github_open_requests "$PROJECT_PATH" head "$HEAD_BRANCH" "$HEAD_REPO"); then
+    printf 'actionable: could not check whether another open pull request shares head branch %s of %s\n' \
+      "$HEAD_BRANCH" "$PROJECT_PATH" >&2
+  elif [ -n "$OPEN_ON_HEAD" ] \
+    && [ -n "$(printf '%s\n' "$OPEN_ON_HEAD" | awk -v own="$NUMBER" '$1 != own && NF == 2 { print }')" ]; then
+    printf 'actionable: %s shares head branch %s of %s with other open pull requests:\n' \
+      "$URL" "$HEAD_BRANCH" "$PROJECT_PATH" >&2
+    while IFS=' ' read -r OPEN_NUMBER OPEN_URL; do
+      [ -n "$OPEN_NUMBER" ] || continue
+      if [ "$OPEN_NUMBER" = "$NUMBER" ]; then
+        printf 'actionable:   %s (the pull request registered here)\n' "$OPEN_URL" >&2
+      else
+        printf 'actionable:   %s\n' "$OPEN_URL" >&2
+      fi
+    done <<EOF
+$OPEN_ON_HEAD
+EOF
+    printf 'actionable: close every duplicate for that head branch; a merge is refused while a sibling open pull request shares it\n' >&2
   fi
 fi
 

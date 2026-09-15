@@ -147,10 +147,76 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        view_json=""
+        view_prog=""
+        view_prev=""
+        for view_arg in "$@"; do
+          if [ "$view_prev" = json ]; then
+            view_json=$view_arg
+            view_prev=""
+            continue
+          fi
+          if [ "$view_prev" = jq ]; then
+            view_prog=$view_arg
+            view_prev=""
+            continue
+          fi
+          case "$view_arg" in
+            --json) view_prev=json ;;
+            -q|--jq) view_prev=jq ;;
+            --json=*) view_json=${view_arg#--json=} ;;
+            -q=*|--jq=*) view_prog=${view_arg#*=} ;;
+          esac
+        done
+        view_payload=$(printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"headRefName\":\"${FM_TEST_GH_HEAD_BRANCH:-fm/task-a}\",\"headRepository\":{\"nameWithOwner\":\"${FM_TEST_GH_HEAD_REPO:-o/r}\"},\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}")
+        if [ -n "$view_json" ]; then
+          view_payload=$(printf '%s' "$view_payload" | jq --arg f "$view_json" 'with_entries(select(.key as $k | ($f | split(",")) | index($k)))') || exit 1
+        fi
+        if [ -n "$view_prog" ]; then
+          printf '%s' "$view_payload" | jq -r "$view_prog"
+          exit $?
+        fi
+        printf '%s\n' "$view_payload"
         exit 0
         ;;
     esac
+    ;;
+  "pr list")
+    [ ! -f "${FM_TEST_GH_LIST_FAIL:-}" ] || exit 1
+    list_rows=""
+    case " $* " in
+      *" --head "*) list_rows=${FM_TEST_GH_LIST_BY_HEAD:-/dev/null} ;;
+      *" --base "*) list_rows=${FM_TEST_GH_LIST_BY_BASE:-/dev/null} ;;
+      *) exit 2 ;;
+    esac
+    list_fields=""
+    list_prog=""
+    list_prev=""
+    for list_arg in "$@"; do
+      if [ "$list_prev" = --json ]; then
+        list_fields=$list_arg
+        list_prev=""
+        continue
+      fi
+      if [ "$list_prev" = --jq ]; then
+        list_prog=$list_arg
+        list_prev=""
+        continue
+      fi
+      case "$list_arg" in
+        --json) list_prev=--json ;;
+        --jq) list_prev=--jq ;;
+        --json=*) list_fields=${list_arg#--json=} ;;
+        --jq=*) list_prog=${list_arg#--jq=} ;;
+      esac
+    done
+    [ -n "$list_prog" ] || exit 2
+    list_payload=$(jq -R -s 'split("\n") | map(select(length > 0)) | map(split(" ")) | map({number: (.[0] | tonumber), url: .[1], headRefName: .[2], baseRefName: .[3], headRepository: {nameWithOwner: (.[4] // "")}})' "$list_rows") || exit 1
+    if [ -n "$list_fields" ]; then
+      list_payload=$(printf '%s' "$list_payload" | jq --arg f "$list_fields" 'map(with_entries(select(.key as $k | ($f | split(",")) | index($k))))') || exit 1
+    fi
+    printf '%s' "$list_payload" | jq -r "$list_prog"
+    exit $?
     ;;
   "pr merge")
     [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
@@ -158,7 +224,41 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  # The live head read also reports the head branch and that branch's own
+  # repository, so a case drives the duplicate-head-branch report by naming
+  # them; the default keeps every other case on a plain head commit.
+  *headRefOid*)
+    view_json=""
+    view_prog=""
+    view_prev=""
+    for view_arg in "$@"; do
+      if [ "$view_prev" = json ]; then
+        view_json=$view_arg
+        view_prev=""
+        continue
+      fi
+      if [ "$view_prev" = jq ]; then
+        view_prog=$view_arg
+        view_prev=""
+        continue
+      fi
+      case "$view_arg" in
+        --json) view_prev=json ;;
+        -q|--jq) view_prev=jq ;;
+        --json=*) view_json=${view_arg#--json=} ;;
+        -q=*|--jq=*) view_prog=${view_arg#*=} ;;
+      esac
+    done
+    view_payload=$(jq -n --arg oid "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" --arg branch "${FM_TEST_GH_HEAD_BRANCH:-fm/task-a}" --arg repo "${FM_TEST_GH_HEAD_REPO:-o/r}" '{headRefOid: $oid, headRefName: $branch, headRepository: {nameWithOwner: $repo}}') || exit 1
+    if [ -n "$view_json" ]; then
+      view_payload=$(printf '%s' "$view_payload" | jq --arg f "$view_json" 'with_entries(select(.key as $k | ($f | split(",")) | index($k)))') || exit 1
+    fi
+    if [ -n "$view_prog" ]; then
+      printf '%s' "$view_payload" | jq -r "$view_prog"
+      exit $?
+    fi
+    printf '%s\n' "$view_payload"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
@@ -188,6 +288,11 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # Open pull requests the guards read answer from these files, one
+  # "<number> <url> <head> <base> <head-repo>" row per line, which the mock
+  # translates into the JSON the script's --jq projection runs over.
+  : > "$dir/open-by-head"
+  : > "$dir/open-by-base"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -223,6 +328,8 @@ run_check_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_LIST_BY_HEAD="$dir/open-by-head" FM_TEST_GH_LIST_BY_BASE="$dir/open-by-base" \
+    FM_TEST_GH_LIST_FAIL="$dir/open-by-head-fail" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
@@ -233,6 +340,8 @@ run_merge_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_LIST_BY_HEAD="$dir/open-by-head" FM_TEST_GH_LIST_BY_BASE="$dir/open-by-base" \
+    FM_TEST_GH_LIST_FAIL="$dir/open-by-head-fail" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
@@ -2417,7 +2526,135 @@ SH
   pass "poll retirement preserves a replacement authority record"
 }
 
+# The read behind both guards has to keep three verdicts apart: no open pull
+# request on the branch, a row the forge's own branch filter returned but whose
+# branch field disagrees, and a payload the read could not trust at all. A merge
+# may treat the first two as "nothing found", and only the third refuses it, so
+# a failed read must never present itself as an empty result.
+test_open_request_read_separates_empty_from_failed() {
+  local dir out
+  dir=$(make_case open-request-read)
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_GH_LIST_RC:-0}" = 0 ] || exit "${FM_TEST_GH_LIST_RC}"
+printf '%s' "${FM_TEST_GH_LIST_ROWS:-}"
+SH
+  chmod +x "$dir/fakebin/gh"
+  helper() {  # <head|base> <rows> [<gh-exit>]
+    FM_TEST_GH_LIST_ROWS=$2 FM_TEST_GH_LIST_RC=${3:-0} \
+      PATH="$dir/fakebin:$BASE_PATH" \
+      fm_pr_github_open_requests example/repo "$1" fm/task-a example/repo
+  }
+
+  out=$(helper head '') \
+    || fail "open-request-read: an empty read was reported as a failure"
+  [ -z "$out" ] || fail "open-request-read: an empty read reported a match"
+
+  out=$(helper head $'41\thttps://github.com/example/repo/pull/41\tfm/task-a\tmain\texample/repo') \
+    || fail "open-request-read: a matching head read failed"
+  [ "$out" = '41 https://github.com/example/repo/pull/41' ] \
+    || fail "open-request-read: a matching head read was not reported exactly: '$out'"
+
+  out=$(helper head $'41\thttps://github.com/example/repo/pull/41\tfm/other\tmain\texample/repo') \
+    || fail "open-request-read: a superset head read failed"
+  [ -z "$out" ] || fail "open-request-read: a head-filtered row naming another branch was accepted"
+
+  out=$(helper head $'41\thttps://github.com/example/repo/pull/41\tfm/task-a\tmain\tother-user/repo') \
+    || fail "open-request-read: a cross-fork head read failed"
+  [ -z "$out" ] || fail "open-request-read: a same-named branch in another fork was accepted"
+
+  out=$(helper base $'57\thttps://github.com/example/repo/pull/57\tfm/child\tfm/task-a\texample/repo') \
+    || fail "open-request-read: a matching base read failed"
+  [ "$out" = '57 https://github.com/example/repo/pull/57' ] \
+    || fail "open-request-read: a matching base read was not reported exactly: '$out'"
+
+  out=$(helper base $'57\thttps://github.com/example/repo/pull/57\tfm/child\tmain\texample/repo') \
+    || fail "open-request-read: a superset base read failed"
+  [ -z "$out" ] || fail "open-request-read: a base-filtered row naming another base was accepted"
+
+  helper head $'41\thttps://github.com/example/repo/pull/41\tfm/task-a\tmain\texample/repo\nabc\thttps://github.com/example/repo/pull/abc\tfm/task-a\tmain\texample/repo' \
+    && fail "open-request-read: an unreadable row was reported as a successful read"
+  helper head $'41\thttps://github.com/example/repo/pull/41\tfm/task-a' \
+    && fail "open-request-read: a truncated row was reported as a successful read"
+  helper head '41 https://github.com/example/repo/pull/41 fm/task-a main example/repo' 1 \
+    && fail "open-request-read: a failed forge read was reported as a successful one"
+  pass "the open-request read keeps an empty result, an unrelated branch, and a failed read apart"
+}
+
+# The duplicate-head-branch gap at registration time. A repeated validation run
+# can open a second pull request for a branch that already has one, and nothing
+# in this path enumerated open pull requests for a branch, so the duplicate sat
+# unnoticed until the captain asked what it was. Registration now reports every
+# open pull request on the recorded head branch, and still records pr= and arms
+# the poll: the merge path is what refuses while the ambiguity stands
+# (bin/fm-pr-merge.sh), so a registration that failed here would only leave the
+# task with no recorded pull request at all.
+test_duplicate_head_branch_is_reported_at_registration() {
+  local dir head
+  dir=$(make_case duplicate-head-at-registration)
+  write_task_meta "$dir"
+  head=0123456789abcdef0123456789abcdef01234567
+  printf '%s\n' \
+    '41 https://github.com/example/repo/pull/41 fm/task-a main example/repo' \
+    '56 https://github.com/example/repo/pull/56 fm/task-a main example/repo' \
+    > "$dir/open-by-head"
+
+  FM_TEST_GH_HEAD=$head FM_TEST_GH_HEAD_BRANCH=fm/task-a FM_TEST_GH_HEAD_REPO=example/repo \
+    run_check_entry "$dir" task-a https://github.com/example/repo/pull/56 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "duplicate-head-at-registration: the ambiguous registration failed: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://github.com/example/repo/pull/56' "$dir/home/state/task-a.meta" \
+    || fail "duplicate-head-at-registration: the registration did not record its own pull request"
+  grep -qxF "pr_head=$head" "$dir/home/state/task-a.meta" \
+    || fail "duplicate-head-at-registration: the registration lost its head commit"
+  assert_present "$dir/home/state/task-a.check.sh" \
+    "duplicate-head-at-registration: the registration did not arm the poll"
+  assert_grep 'pr list --repo example/repo --state open --limit 100 --head fm/task-a' "$dir/gh.log" \
+    "duplicate-head-at-registration: the registration read no open pull requests for the recorded head branch"
+  assert_grep 'actionable: https://github.com/example/repo/pull/56 shares head branch fm/task-a of example/repo with other open pull requests:' "$dir/stderr" \
+    "duplicate-head-at-registration: the report did not name the branch and the registered pull request"
+  assert_grep 'actionable:   https://github.com/example/repo/pull/41' "$dir/stderr" \
+    "duplicate-head-at-registration: the report did not name the sibling open pull request"
+  assert_grep 'actionable:   https://github.com/example/repo/pull/56 (the pull request registered here)' "$dir/stderr" \
+    "duplicate-head-at-registration: the report did not mark the pull request it registered"
+  assert_grep 'close every duplicate for that head branch' "$dir/stderr" \
+    "duplicate-head-at-registration: the report did not say how to clear the ambiguity"
+
+  # A read that cannot be performed is reported rather than passed over in
+  # silence, and an unambiguous registration reports nothing at all.
+  dir=$(make_case duplicate-head-read-fails)
+  write_task_meta "$dir"
+  : > "$dir/open-by-head-fail"
+  FM_TEST_GH_HEAD=$head FM_TEST_GH_HEAD_BRANCH=fm/task-a FM_TEST_GH_HEAD_REPO=example/repo \
+    run_check_entry "$dir" task-a https://github.com/example/repo/pull/56 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "duplicate-head-read-fails: an unreadable duplicate check failed the registration"
+  assert_grep 'actionable: could not check whether another open pull request shares head branch fm/task-a of example/repo' "$dir/stderr" \
+    "duplicate-head-read-fails: the failed read was not reported"
+  assert_present "$dir/home/state/task-a.check.sh" \
+    "duplicate-head-read-fails: the failed read left the poll unarmed"
+
+  # An unambiguous registration reports nothing at all. The forge's list read
+  # returns the pull request being registered itself, so this case carries its
+  # own row: the registered pull request is never a duplicate of itself.
+  dir=$(make_case duplicate-head-absent)
+  write_task_meta "$dir"
+  printf '%s\n' \
+    '56 https://github.com/example/repo/pull/56 fm/task-a main example/repo' \
+    > "$dir/open-by-head"
+  FM_TEST_GH_HEAD=$head FM_TEST_GH_HEAD_BRANCH=fm/task-a FM_TEST_GH_HEAD_REPO=example/repo \
+    run_check_entry "$dir" task-a https://github.com/example/repo/pull/56 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "duplicate-head-absent: the unambiguous registration failed"
+  assert_no_grep 'actionable' "$dir/stderr" \
+    "duplicate-head-absent: an unambiguous registration reported an ambiguity"
+  pass "fm-pr-check reports every open pull request on the recorded head branch, and arms the poll either way"
+}
+
 test_parser_matrix
+test_open_request_read_separates_empty_from_failed
+test_duplicate_head_branch_is_reported_at_registration
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

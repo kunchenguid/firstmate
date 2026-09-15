@@ -207,6 +207,68 @@ fm_pr_url_parse() {
   FM_PR_NUMBER=${BASH_REMATCH[3]}
 }
 
+# --- open-request reads for the stacked-branch and duplicate-head guards ------
+# bin/fm-pr-merge.sh refuses a merge whose head branch another open pull
+# request uses, and refuses a squash or rebase merge while open pull requests
+# are stacked on that same branch, because rewriting the commits they are built
+# on turns every one of them into a conflict. bin/fm-pr-check.sh reports the
+# duplicate case at registration time. All three need one repository's open
+# pull requests filtered by a branch field, and every caller has to tell "no
+# match" apart from "could not read": this helper writes one "<number> <url>"
+# line per match to stdout, writes nothing when nothing matches, and returns
+# non-zero only when the forge could not be read.
+#
+# Git refuses space, tab, and control characters in a branch name, and @tsv
+# escaping keeps any such value from splitting a row, so no branch name can
+# split the fields this parses, and each field is compared whole rather than
+# matched as a substring of the line.
+#
+# GitHub's --head filter matches a branch name across forks, and an unrelated
+# fork can carry a branch whose name collides with this repository's, so a
+# head-branch match also requires the head repository to agree whenever both
+# sides report one. bin/fm-pr-check.sh and bin/fm-pr-merge.sh both run their own
+# live read of the pull request, so the head repository they pass is that
+# pull request's own, never a value taken from metadata.
+#
+# These reads are implemented for GitHub only. Its merge path is the one that
+# imposes a default method, and GitLab's own list output and branch filters would
+# need pinning the same way before they could refuse a merge.
+fm_pr_github_open_requests() {  # <owner/repo> <head|base> <branch> [<head-repo>]
+  local repo=${1-} field=${2-} branch=${3-} head_repo=${4-}
+  local flag raw number url head_ref base_ref entry_repo
+  local LC_ALL=C
+  [ -n "$repo" ] && [ -n "$branch" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  case "$field" in
+    head) flag=--head ;;
+    base) flag=--base ;;
+    *) return 1 ;;
+  esac
+  if ! raw=$(gh pr list --repo "$repo" --state open --limit 100 "$flag" "$branch" \
+      --json number,url,headRefName,baseRefName,headRepository \
+      --jq '.[] | [(.number|tostring), .url, .headRefName, .baseRefName, (.headRepository.nameWithOwner // "")] | @tsv'); then
+    return 1
+  fi
+  while IFS=$'\t' read -r number url head_ref base_ref entry_repo; do
+    [ -n "$number" ] || continue
+    # A payload this cannot read is a failed read and never an empty result: a
+    # caller must not merge on a guess that there is no duplicate or no child.
+    case "$number" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -n "$url" ] && [ -n "$head_ref" ] && [ -n "$base_ref" ] || return 1
+    if [ "$field" = head ]; then
+      [ "$head_ref" = "$branch" ] || continue
+      if [ -n "$head_repo" ] && [ -n "$entry_repo" ] && [ "$entry_repo" != "$head_repo" ]; then
+        continue
+      fi
+    else
+      [ "$base_ref" = "$branch" ] || continue
+    fi
+    printf '%s %s\n' "$number" "$url"
+  done < <(printf '%s\n' "$raw")
+}
+
 fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C

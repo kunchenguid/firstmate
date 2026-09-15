@@ -268,6 +268,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 ## Why a recorded head is not the authority
 
 `bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
+The same GitHub-only live read also supplies the head branch and that branch's own repository, which the registration path uses to report every other open pull request on the branch; the GitLab path reads no head branch at all.
 It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
 
 The merge path does not record one either, and deliberately does not depend on one.
