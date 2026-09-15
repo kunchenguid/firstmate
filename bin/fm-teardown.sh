@@ -1687,7 +1687,7 @@ validate_worktree_teardown_safety() {
   if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
     case "$origin_url" in
-      https://dev.azure.com/*|https://*@dev.azure.com/*|https://*.visualstudio.com/*|git@ssh.dev.azure.com:*|ssh://git@ssh.dev.azure.com/*|*@vs-ssh.visualstudio.com:v3/*|ssh://*@vs-ssh.visualstudio.com/v3/*)
+      https://dev.azure.com/*|https://*@dev.azure.com/*|https://*.visualstudio.com/*|git@ssh.dev.azure.com:*|ssh://git@ssh.dev.azure.com/*|ssh://git@ssh.dev.azure.com:*|*@vs-ssh.visualstudio.com:*|ssh://*@vs-ssh.visualstudio.com/*|ssh://*@vs-ssh.visualstudio.com:*)
         echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
         return 1
         ;;

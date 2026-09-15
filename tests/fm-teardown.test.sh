@@ -824,7 +824,7 @@ test_no_mistakes_truly_unpushed_refuses() {
 
 test_azure_requires_completed_pr_and_local_containment() {
   local case_dir state head rc expected api_state
-  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-legacy; do
+  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-legacy unregistered-legacy-ssh; do
     case_dir=$(make_case "azure-$state")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello
@@ -858,6 +858,9 @@ SH
         ;;
       unregistered-legacy)
         git -C "$case_dir/wt" remote set-url origin 'example@vs-ssh.visualstudio.com:v3/example/Project/repo'
+        ;;
+      unregistered-legacy-ssh)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://example@vs-ssh.visualstudio.com:22/Project/_ssh/repo'
         ;;
     esac
     expected=1

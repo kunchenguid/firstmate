@@ -113,6 +113,12 @@ class AzureContract(unittest.TestCase):
         return subprocess.run([str(ROOT / "bin" / script), *args], env=self.env,
                               text=True, capture_output=True, timeout=30)
 
+    def calls(self):
+        calls = self.dir / "calls"
+        if not calls.exists():
+            return []
+        return [json.loads(line) for line in calls.read_text().splitlines() if line]
+
     def test_identity_routes(self):
         for url in (URL, "https://example.visualstudio.com/DefaultCollection/Project/_git/repo/pullrequest/7",
                     "https://example.visualstudio.com/Project/_git/repo/pullrequest/7",
@@ -134,6 +140,23 @@ class AzureContract(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertNotEqual(self.run_helper("parse", url).returncode, 0)
         self.assertFalse((self.dir / "calls").exists())
+
+    def test_legacy_collection_transport_uses_root_organization_url(self):
+        url = "https://example.visualstudio.com/DefaultCollection/Project/_git/repo/pullrequest/7"
+        p = self.run_helper("head", url)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        organizations = [call[call.index("--organization") + 1] for call in self.calls()]
+        self.assertEqual(organizations, ["https://example.visualstudio.com", "https://example.visualstudio.com"])
+
+    def test_head_uses_current_iteration_source(self):
+        current = "e" * 40
+        self.rows("pullRequestIterations", [dict(id=3, sourceRefCommit=dict(commitId=current), targetRefCommit=dict(commitId="f" * 40))])
+        p = self.run_helper("head")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, current + "\n")
+        p = self.script("fm-pr-check.sh", "task", URL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("pr_head=" + current, (self.dir / "state/task.meta").read_text())
 
     def test_revision_bound_completion(self):
         p = self.run_helper("complete")

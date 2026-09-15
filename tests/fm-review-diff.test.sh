@@ -193,7 +193,24 @@ test_azure_review_uses_live_source_revision() {
   mkdir -p "$case_dir/fakebin"
   cat > "$case_dir/fakebin/az" <<SH
 #!/usr/bin/env bash
-printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"lastMergeSourceCommit":{"commitId":"$PR_SHA"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+resource=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --resource) resource=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$resource" in
+  pullRequests)
+    printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"lastMergeSourceCommit":{"commitId":"$stale"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+    ;;
+  pullRequestIterations)
+    printf '%s\n' '{"continuation_token":null,"count":1,"value":[{"id":2,"sourceRefCommit":{"commitId":"$PR_SHA"},"targetRefCommit":{"commitId":"ffffffffffffffffffffffffffffffffffffffff"}}]}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/az"
   out=$(PATH="$case_dir/fakebin:$PATH" run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")

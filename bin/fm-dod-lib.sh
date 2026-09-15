@@ -219,8 +219,8 @@ fm_task_branch() {  # <task-id> [prefix]
   printf '%s\n' "$branch"
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch]
-  local mode=$1 id=$2 branch=${3:-fm/$2}
+fm_dod_block() {  # <mode> <task-id>
+  local mode=$1 id=$2 branch="fm/$2"
   case "$mode" in
     direct-PR)
       cat <<EOF
