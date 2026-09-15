@@ -1655,6 +1655,11 @@ teardown_treehouse_return() {
   return 1
 }
 
+report_dirty_tracked_claude_settings() {  # <porcelain-status>
+  printf '%s\n' "$1" | grep -qE '^[^?!][^?!] \.claude/settings\.local\.json$' || return 0
+  echo "the project's git-tracked .claude/settings.local.json changed after the Claude launch; restore it in $WT with: git checkout -- .claude/settings.local.json" >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1696,7 +1701,10 @@ validate_worktree_teardown_safety() {
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      if [ -n "$dirty" ]; then
+        echo "uncommitted changes present" >&2
+        report_dirty_tracked_claude_settings "$dirty_raw"
+      fi
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -1704,6 +1712,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
+    report_dirty_tracked_claude_settings "$dirty_raw"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then

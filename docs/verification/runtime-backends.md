@@ -487,7 +487,6 @@ The scratch repo was deleted and its store entries were removed and verified abs
 
 `tests/fm-busy-adapter-wiring.test.sh` pins the spawn side against a fake claude: the committed file stays byte-identical, the worktree stays clean, and the launch names the per-task settings file.
 The live arms above are what establish that Claude loads that file's hooks alongside the project's own settings.
-Because this is a point-in-time observation, every claude ship or scout spawn also records the git blob of a tracked `.claude/settings.local.json` before launch and, once the launch commits, prints a warning naming that file and the task if it changed or disappeared; the spawn still succeeds and the file is left as found.
 
 ## Composer classification matrix
 

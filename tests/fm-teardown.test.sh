@@ -835,6 +835,52 @@ test_teardown_removes_an_untracked_legacy_claude_hook_file() {
   pass "teardown still removes an untracked legacy claude hook file"
 }
 
+# A committed .claude/settings.local.json that changed in the task copy still
+# blocks teardown like any uncommitted change, and the refusal names the file
+# with its restore command; an unrelated dirty file draws no such line.
+test_teardown_refusal_names_a_changed_tracked_claude_settings_file() {
+  local case_dir rc wt_head dirty_path
+  for dirty_path in .claude/settings.local.json feature.txt; do
+    case_dir=$(make_case "dirty-claude-settings-${dirty_path##*.}")
+    write_meta "$case_dir" no-mistakes ship
+    mkdir -p "$case_dir/wt/.claude"
+    printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"]}}' > "$case_dir/wt/.claude/settings.local.json"
+    printf '%s\n' landed > "$case_dir/wt/feature.txt"
+    git -C "$case_dir/wt" add -f .claude/settings.local.json feature.txt
+    git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "landed work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    printf '%s\n' '{}' > "$case_dir/wt/$dirty_path"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "dirty $dirty_path: teardown should refuse: $(cat "$case_dir/stderr")"
+    assert_grep "has uncommitted changes" "$case_dir/stderr" \
+      "dirty $dirty_path: teardown did not report the uncommitted changes"
+    assert_grep "then --force" "$case_dir/stderr" \
+      "dirty $dirty_path: teardown dropped the --force guidance"
+    [ "$(cat "$case_dir/wt/$dirty_path")" = "{}" ] \
+      || fail "dirty $dirty_path: teardown changed the dirty file"
+    [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$wt_head" ] \
+      || fail "dirty $dirty_path: teardown moved the worktree HEAD"
+    [ -f "$case_dir/state/task-x1.meta" ] || fail "dirty $dirty_path: teardown completed despite dirty work"
+    if [ "$dirty_path" = .claude/settings.local.json ]; then
+      assert_grep ".claude/settings.local.json changed after the Claude launch" "$case_dir/stderr" \
+        "dirty tracked claude settings: refusal did not name the changed file"
+      assert_grep "git checkout -- .claude/settings.local.json" "$case_dir/stderr" \
+        "dirty tracked claude settings: refusal did not give the restore command"
+    else
+      assert_no_grep "settings.local.json" "$case_dir/stderr" \
+        "dirty unrelated file: refusal must not mention the claude settings file"
+    fi
+  done
+  pass "teardown refusal names a changed tracked .claude/settings.local.json with its restore command, and only then"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3725,6 +3771,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_keeps_a_tracked_claude_settings_file
 test_teardown_removes_an_untracked_legacy_claude_hook_file
+test_teardown_refusal_names_a_changed_tracked_claude_settings_file
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
