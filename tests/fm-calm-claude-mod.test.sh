@@ -176,14 +176,14 @@ const palettes = raster.CALM_SHIP_RASTER_PALETTES;
 check(palettes.dark.water === 0x93a5ff && palettes.dark.boat === 0xd77757, "dark palette is not Claude Code's dark spinner blue and Claude orange");
 check(palettes.light.water === 0x5769f7 && palettes.light.boat === 0xd77757, "light palette is not Claude Code's light spinner blue and Claude orange");
 check(palettes.dark.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR && palettes.light.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
-for (const [theme, family] of [["dark", "dark"], ["dark-ansi", "dark"], ["dark-daltonized", "dark"], ["light", "light"], ["light-ansi", "light"], ["light-daltonized", "light"], ["auto", "dark"], ["custom:rose", "dark"], [undefined, "dark"], [42, "dark"], ["", "dark"]]) {
+for (const [theme, family] of [["dark", "dark"], ["dark-ansi", "dark"], ["dark-daltonized", "dark"], ["light", "light"], ["light-ansi", "light"], ["light-daltonized", "light"], ["auto", "light"], ["custom:rose", "light"], [undefined, "light"], [42, "light"], ["", "light"]]) {
   check(raster.calmShipPaletteFamily(theme) === family, \`theme \${JSON.stringify(theme)} chose \${raster.calmShipPaletteFamily(theme)}, not \${family}\`);
 }
 for (const [family, colors] of Object.entries(palettes)) for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
   const sprite = core.createCalmWorkingShipSprite();
   for (let step = 0; step < 6; step += 1) {
     const frame = sprite.frame(width);
-    const packed = family === "dark" ? raster.packCalmShipRasterCells(frame, width) : raster.packCalmShipRasterCells(frame, width, colors);
+    const packed = raster.packCalmShipRasterCells(frame, width, colors);
     check(packed.rows === frame.length, \`rows \${packed.rows} for a \${frame.length}-row frame\`);
     const grid = decode(packed.cells, width, packed.rows);
     for (let row = 0; row < frame.length; row += 1) {
@@ -205,6 +205,11 @@ for (const [family, colors] of Object.entries(palettes)) for (const width of [1,
     sprite.tick();
   }
 }
+// The packer's pre-load default is the both-readable light fallback.
+{
+  const packed = raster.packCalmShipRasterCells([[{ text: "▁", color: "water" }]], 1);
+  check(decode(packed.cells, 1, 1)[0][0].fg === palettes.light.water, "the default packing palette is not the light fallback");
+}
 // A run wider than the grid is clipped, never wrapped into the next row.
 {
   const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "water" }], [{ text: "◿│◣", color: "boat" }]], 4);
@@ -221,7 +226,7 @@ console.log("raster-ok");
 JS
   out=$(run_node "$TMP_ROOT/raster.mjs" 2>&1) || fail "raster packing: $out"
   assert_contains "$out" "raster-ok" "the raster packing check did not complete"
-  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, chosen by the theme setting's family with a dark fallback, with plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
+  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, using light as the both-readable fallback, with plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
 }
 
 test_presentation_policy() {

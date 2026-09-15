@@ -65,7 +65,7 @@ let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
 const sprite = createCalmWorkingShipSprite();
-let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.dark;
+let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -137,7 +137,7 @@ async function resetSession($: EngineInterface): Promise<void> {
   finalReplies.clear();
   sites.clear();
   sprite.reset();
-  palette = CALM_SHIP_RASTER_PALETTES.dark;
+  palette = CALM_SHIP_RASTER_PALETTES.light;
   await ensureLoaded($);
 }
 

@@ -143,8 +143,8 @@ describe("the working ship", () => {
     ["light", LIGHT_WATER, "light"],
     ["light-daltonized", LIGHT_WATER, "light"],
     ["light-ansi", LIGHT_WATER, "light"],
-    ["auto", DARK_WATER, "dark"],
-    ["custom:rose-pine", DARK_WATER, "dark"],
+    ["auto", LIGHT_WATER, "light"],
+    ["custom:rose-pine", LIGHT_WATER, "light"],
   ] as const) {
     test(`paints the ${family} family for the theme value ${JSON.stringify(theme)}`, async ($, on) => {
       world(on, { preference: "on\n", theme });

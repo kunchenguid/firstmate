@@ -11,8 +11,9 @@
 // docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
 // own: the water takes the theme's spinner blue and the whole boat takes the Claude
 // orange of the stock spinner, one set per theme family. The family follows the
-// `theme` setting's prefix (`dark*` or `light*`); `auto` and custom themes fall back to
-// the dark set. The Pi extension keeps its standard ANSI colors and is unaffected.
+// `theme` setting's prefix (`dark*` or `light*`); `auto`, custom, missing, and
+// unreadable values use the light set as the both-readable fallback. The Pi extension
+// keeps its standard ANSI colors and is unaffected.
 import type {
   CalmWorkingShipColor,
   CalmWorkingShipFrame,
@@ -50,12 +51,12 @@ export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, C
 };
 
 /**
- * The palette family for a `theme` setting value: `light`, `light-daltonized`, and
- * `light-ansi` select the light set; every dark theme, `auto`, a custom theme, and a
- * missing or non-string value select the dark set.
+ * The palette family for a `theme` setting value: values starting with `dark` select
+ * the dark set, values starting with `light` select the light set, and every other,
+ * missing, or non-string value selects the both-readable light fallback.
  */
 export function calmShipPaletteFamily(theme: unknown): CalmShipPaletteFamily {
-  return typeof theme === "string" && theme.startsWith("light") ? "light" : "dark";
+  return typeof theme === "string" && theme.startsWith("dark") ? "dark" : "light";
 }
 
 /** How many Raster columns a Spinner site of `viewportColumns` gets: the row minus its margin, within the Raster's limits. */
@@ -109,7 +110,7 @@ export type CalmShipRasterCells = {
 export function packCalmShipRasterCells(
   frame: CalmWorkingShipFrame,
   columns: number,
-  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.dark,
+  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light,
 ): CalmShipRasterCells {
   const rows = Math.max(1, frame.length);
   const words = new Uint32Array(columns * rows * 3);
