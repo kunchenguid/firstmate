@@ -4259,6 +4259,13 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Herdr/tmux worker panes likewise inherit the long-lived backend daemon's
+# environment, not the spawning captain's. Forward an explicitly selected
+# Grok home in the launch command so a Firstmate-isolated Grok worker cannot
+# fall back to the operator's ordinary ~/.grok config, MCPs, hooks, or sessions.
+if [ "$HARNESS" = grok ] && [ -n "${GROK_HOME:-}" ]; then
+  LAUNCH="GROK_HOME=$(shell_quote "$GROK_HOME") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
