@@ -2352,7 +2352,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
       continue
     fi
-    offset=$(fm_wake_status_cursor_offset "$path") || return 1
+    offset=$(fm_wake_status_cursor_offset "$path") || continue
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
