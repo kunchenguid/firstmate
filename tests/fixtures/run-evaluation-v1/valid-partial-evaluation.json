@@ -1,0 +1,183 @@
+{
+  "schemaVersion": "governance.run-evaluation.v1",
+  "kind": "run_evaluation",
+  "evaluationId": "evaluation.synthetic.001",
+  "evaluatedAt": "2026-09-14T12:00:00Z",
+  "scoringProfile": {
+    "id": "golden-tasks.synthetic",
+    "version": 1,
+    "digest": "sha256:a982818f4f82e805bc85dfab28b3baa31704bc17297870018f19c526c7e80c7f",
+    "benchmarkId": "golden-tasks.synthetic",
+    "benchmarkRevision": 1,
+    "caseSetDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "metricId": "outcome-quality",
+    "metricVersion": "1",
+    "normalizationPolicyDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "evaluatorName": "governance-fixture-evaluator",
+    "evaluatorVersion": "1",
+    "evaluatorDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "derivedFrom": {
+    "agentRunRecord": {
+      "recordId": "record.synthetic.001.r2",
+      "runId": "run.synthetic.001",
+      "revision": 2,
+      "schemaVersion": 3,
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dataClass": "synthetic"
+    },
+    "taskEnvelope": {
+      "taskId": "task.synthetic.001",
+      "schemaVersion": 2,
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dataClass": "synthetic"
+    }
+  },
+  "contextAxes": {
+    "taskClass": "code_review",
+    "dataClassification": {
+      "schemeId": "agent-run-data-class",
+      "schemeVersion": 1,
+      "value": "synthetic"
+    },
+    "executionEnvironment": {
+      "schemeId": "governance.execution-environment",
+      "schemeVersion": 1,
+      "value": "isolated-local"
+    },
+    "inputTrust": {
+      "schemeId": "governance.input-trust",
+      "schemeVersion": 1,
+      "value": "synthetic-trusted"
+    },
+    "externalEffect": {
+      "schemeId": "governance.external-effect",
+      "schemeVersion": 1,
+      "value": "none"
+    },
+    "approvalAuthority": {
+      "schemeId": "governance.approval-authority",
+      "schemeVersion": 1,
+      "value": "human"
+    }
+  },
+  "subject": {
+    "model": {
+      "provider": "openai",
+      "modelId": "synthetic/model-a",
+      "effort": "high",
+      "identitySource": "provider_confirmed"
+    },
+    "executionHarness": {
+      "name": "codex-cli",
+      "version": "1",
+      "mode": "noninteractive",
+      "surface": "cli"
+    },
+    "route": {
+      "routeRef": "route.synthetic.readonly",
+      "routingPolicyVersion": 1,
+      "permissionProfileRef": "profile.synthetic.readonly",
+      "dispatcherAdapter": "fixture-adapter",
+      "dispatcherAdapterVersion": "1"
+    }
+  },
+  "identityKeys": {
+    "modelKey": "sha256:d4862b3ecdb99c7484d5a999e2e7c3567ea7c2cf508eea03a0afc80ea3c6d87d",
+    "executionHarnessKey": "sha256:df662200f87bf18b4732853eedcbf1178b881a830fbc31495deb978c61aa8933",
+    "routeFrameKey": "sha256:af9ab3852ac14867d659fcb780c1b6296956d33b025843d277fb57a59f146191",
+    "fullRouteKey": "sha256:3f87c7039943ff7cee6fb5b015938fb6b0af9ef983131a8394accf7ed561192f",
+    "taskContextKey": "sha256:bfa5b413e28d74577587687ee176ee0081a4ceba256de3101f792d78f1d4764a"
+  },
+  "dimensions": {
+    "quality": {
+      "measurementQuality": "exact",
+      "raw": {"value": 0.85, "unit": "fraction"},
+      "normalized": 0.85,
+      "uncertainty": {"value": 0.0, "quality": "exact"},
+      "basisRefs": ["evaluation.primary-measurement"],
+      "evidenceRefs": [{"ref": "metrics/quality.json", "kind": "metric", "dataClass": "synthetic", "visibility": "surface_labelled"}],
+      "reasonCodes": []
+    },
+    "reliability": {
+      "measurementQuality": "exact",
+      "raw": {"value": 1, "unit": "boolean"},
+      "normalized": 1.0,
+      "uncertainty": {"value": 0.0, "quality": "exact"},
+      "basisRefs": ["agent-run.result.status"],
+      "evidenceRefs": [{"ref": "metrics/result.json", "kind": "metric", "dataClass": "synthetic", "visibility": "surface_labelled"}],
+      "reasonCodes": []
+    },
+    "cost": {
+      "measurementQuality": "estimated",
+      "raw": {"value": 0.12, "unit": "usd"},
+      "normalized": 0.9,
+      "uncertainty": {"value": 0.2, "quality": "estimated"},
+      "basisRefs": ["agent-run.cost.amount-usd"],
+      "evidenceRefs": [{"ref": "metrics/cost.json", "kind": "metric", "dataClass": "synthetic", "visibility": "surface_labelled"}],
+      "reasonCodes": ["price_table_estimate"]
+    },
+    "duration": {
+      "measurementQuality": "exact",
+      "raw": {"value": 42.1, "unit": "seconds"},
+      "normalized": 0.8,
+      "uncertainty": {"value": 0.0, "quality": "exact"},
+      "basisRefs": ["agent-run.timing.duration-ms"],
+      "evidenceRefs": [{"ref": "metrics/duration.json", "kind": "metric", "dataClass": "synthetic", "visibility": "surface_labelled"}],
+      "reasonCodes": []
+    },
+    "reviewEffort": {
+      "measurementQuality": "unavailable",
+      "raw": {"value": null, "unit": "minutes"},
+      "normalized": null,
+      "uncertainty": {"value": null, "quality": "unavailable"},
+      "basisRefs": ["agent-run.review"],
+      "evidenceRefs": [],
+      "reasonCodes": ["review_effort_not_measured"]
+    },
+    "policyViolations": {
+      "measurementQuality": "exact",
+      "raw": {"value": 0, "unit": "count"},
+      "normalized": 1.0,
+      "uncertainty": {"value": 0.0, "quality": "exact"},
+      "basisRefs": ["evaluation.policy-findings"],
+      "evidenceRefs": [{"ref": "metrics/policy-findings.json", "kind": "metric", "dataClass": "synthetic", "visibility": "surface_labelled"}],
+      "reasonCodes": []
+    }
+  },
+  "comparisons": {
+    "model": {
+      "eligibility": "eligible",
+      "candidateKey": "sha256:d4862b3ecdb99c7484d5a999e2e7c3567ea7c2cf508eea03a0afc80ea3c6d87d",
+      "cohortKey": "sha256:f76afb88e810105ff6dc5de4a47221b7f6614eb0d5c985a8b01c5605d2e8f90e",
+      "reasonCodes": []
+    },
+    "executionHarness": {
+      "eligibility": "eligible",
+      "candidateKey": "sha256:df662200f87bf18b4732853eedcbf1178b881a830fbc31495deb978c61aa8933",
+      "cohortKey": "sha256:7c64823c70a292e1ce18c6a34950bbcf9a595aeb8dd9b1a25ec48ebba84d153a",
+      "reasonCodes": []
+    },
+    "fullRoute": {
+      "eligibility": "eligible",
+      "candidateKey": "sha256:3f87c7039943ff7cee6fb5b015938fb6b0af9ef983131a8394accf7ed561192f",
+      "cohortKey": "sha256:f05ee6c94f550ef56411dda5c6525b0d2a33e86a9915005f8deb4dcfed65a191",
+      "reasonCodes": []
+    }
+  },
+  "state": {
+    "status": "partial",
+    "reasonCodes": ["review_effort_not_measured"]
+  },
+  "dataClass": "synthetic",
+  "freshness": {
+    "mode": "revision_bound",
+    "sourceRevision": 2,
+    "timeToLiveSeconds": null
+  },
+  "retention": {
+    "mode": "append_only",
+    "policyRef": "governance.run-evaluation-retention.v1"
+  },
+  "routingApplied": false
+}
