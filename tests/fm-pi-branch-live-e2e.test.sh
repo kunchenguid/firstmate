@@ -991,3 +991,185 @@ if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
   fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
+
+# Real main AND branch sessions, including provider serialization and real
+# acknowledgement tools. Only the provider's synthetic responses are scripted:
+# first ignore two requests, then perform an idempotent private marker action.
+# A newer outcome must reach that action without any intervening user prompt.
+# Optional FM_PI_BRANCH_PROCESSING_EVIDENCE names a JSON output file for the
+# synthetic provider transcript and persisted outcome/action checkpoints.
+processinghome="$TMP_ROOT/processing-home"
+processingdir="$TMP_ROOT/processing-agent"
+mkdir -p "$processinghome/state" "$processinghome/config" "$processingdir"
+cp "$streamdir/models.json" "$processingdir/models.json"
+BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+  FM_HOME="$processinghome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$processingdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/processing-output" 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const pkg = process.env.PI_PACKAGE_DIR;
+const { createAgentSession, createEventBus, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const { Type } = await import(pathToFileURL(`${pkg}/node_modules/typebox/build/index.mjs`).href);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+mkdirSync(`${home}/projects/probe`, { recursive: true });
+writeFileSync(`${home}/state/probe.meta`, `project=${home}/projects/probe\nwindow=probe-window\n`);
+writeFileSync(`${home}/state/probe.status`, "working: synthetic test\n");
+const events = [];
+const requests = [];
+const checkpoints = [];
+const checkpoint = (stage) => checkpoints.push({
+  stage,
+  processedThrough: Number(readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim()),
+  action: existsSync(`${home}/action`) ? readFileSync(`${home}/action`, "utf8") : null,
+  markerCalls,
+  ordinaryPrompts: events.filter((event) => event.type === "prompt").map((event) => event.text),
+});
+const bus = createEventBus();
+let branchCalls = 0;
+let mainCalls = 0;
+let markerCalls = 0;
+const textOf = (content) => typeof content === "string" ? content : (content ?? []).map((part) => part.text ?? "").join("\n");
+const chunk = (delta, finish) => `data: ${JSON.stringify({
+  id: "processing-probe", object: "chat.completion.chunk", created: 1, model: "fm-live-stream-model",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+})}\n\n`;
+const tool = (name, args) => ({ tool_calls: [{ index: 0, id: `call_${name}_${mainCalls}_${branchCalls}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] });
+globalThis.fetch = async (input, init) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected request: ${url}`);
+  const body = JSON.parse(init?.body ?? await input.text());
+  const isBranch = body.tools?.some((item) => item.function?.name === "fm_branch_report");
+  requests.push({ isBranch, messages: body.messages });
+  let delta;
+  if (isBranch) {
+    branchCalls += 1;
+    delta = branchCalls % 2
+      ? tool("fm_branch_report", { task: "probe", verdict: "captain", summary: branchCalls === 1 ? "older action" : branchCalls === 3 ? "new marker action" : "passive recovery canary" })
+      : { content: "reported" };
+  } else {
+    mainCalls += 1;
+    // Ordinary input baseline, then two ignored processing turns, then action
+    // and acknowledgement in separate turns (never acknowledgement first).
+    if (mainCalls === 1) delta = { content: "ordinary input received" };
+    else if (mainCalls === 2) delta = {};
+    else if (mainCalls === 3) delta = { content: "unrelated earlier answer" };
+    else if (mainCalls === 4) delta = tool("private_marker", {});
+    else if (mainCalls === 5) delta = tool("fm_branch_processed", { through: 2 });
+    else if (mainCalls === 7) delta = {};
+    else if (mainCalls === 8) delta = { content: "unrelated answer" };
+    else if (mainCalls === 9) delta = tool("fm_branch_processed", { through: 3 });
+    else delta = { content: "handled" };
+  }
+  return new Response(chunk({ role: "assistant", ...delta }, null) + chunk({}, delta.tool_calls ? "tool_calls" : "stop") + "data: [DONE]\n\n", {
+    status: 200, headers: { "content-type": "text/event-stream" },
+  });
+};
+const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+const loader = new DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings, eventBus: bus,
+  noExtensions: true, additionalExtensionPaths: [process.env.BRANCH_PLUGIN],
+  noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  systemPromptOverride: () => "Synthetic supervision test. Perform only private_marker then acknowledge listed outcomes.",
+  extensionFactories: [(pi) => {
+    pi.registerTool({ name: "private_marker", label: "Private marker", description: "Perform the harmless test action", parameters: Type.Object({}),
+      execute: async () => {
+        markerCalls += 1;
+        if (!existsSync(`${home}/action`)) writeFileSync(`${home}/action`, "handled\n");
+        return { content: [{ type: "text", text: "marker recorded" }] };
+      },
+    });
+    pi.on("before_agent_start", (event) => { events.push({ type: "prompt", text: event.prompt }); });
+    pi.on("agent_settled", () => { events.push({ type: "settled" }); });
+    pi.on("message_end", (event) => {
+      if (event.message.role === "assistant") events.push({ type: "assistant", content: event.message.content, stop: event.message.stopReason });
+    });
+  }],
+});
+await loader.reload();
+if (loader.getExtensions().errors.length) throw new Error(JSON.stringify(loader.getExtensions().errors));
+const runtime = await ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json`, modelsStorePath: `${agentDir}/models-store.json` });
+const { session } = await createAgentSession({
+  cwd: home, agentDir, resourceLoader: loader, modelRuntime: runtime,
+  model: runtime.getModel("fm-live-stream", "fm-live-stream-model"),
+  settingsManager: settings, sessionManager: SessionManager.create(home, `${home}/sessions`), noTools: "builtin",
+});
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 400; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timeout ${label}; mainCalls=${mainCalls}, branchCalls=${branchCalls}, events=${JSON.stringify(events)}`);
+};
+const report = async (seq) => {
+  writeFileSync(`${home}/state/.wake-queue`, `1\t${seq}\tsignal\tprobe.status\tsignal: harmless test\n`);
+  const offer = { message: "signal: probe.status", eligible: true, projects: [`${home}/projects/probe`], heartbeat: false,
+    accepted: false, settlement: Promise.resolve(), accept(settlement) { this.accepted = true; this.settlement = settlement; } };
+  bus.emit("fm-branch-supervision:dispatch", offer);
+  if (!offer.accepted) throw new Error("real branch refused synthetic offer");
+  await offer.settlement;
+};
+await session.prompt("ordinary-input-canary");
+await report(1);
+await waitFor(() => mainCalls === 3 && session.isIdle, "two ignored processing turns");
+// Allow agent_settled's awaited reconciliation to finish, not just agent_end.
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== "0") throw new Error("ignored replies acknowledged an outcome");
+if (existsSync(`${home}/action`)) throw new Error("an ignored reply performed the action");
+const firstMain = requests.filter((item) => !item.isBranch);
+if (!firstMain[0].messages.some((m) => m.role === "user" && textOf(m.content).includes("ordinary-input-canary"))) throw new Error("ordinary path not provider-visible");
+for (const request of firstMain.slice(1)) {
+  if (!request.messages.some((m) => m.role === "user" && textOf(m.content).includes("[seq 1] probe: older action"))) throw new Error("custom request persisted but was absent at provider boundary");
+}
+checkpoint("older outcome ignored twice; no action or acknowledgement");
+await report(2);
+await waitFor(() => existsSync(`${home}/action`), "new outcome action WITHOUT captain input");
+await waitFor(() => readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() === "2", "explicit post-action acknowledgement");
+await waitFor(() => !session.isStreaming, "acknowledged run ended");
+if (markerCalls !== 1) throw new Error(`duplicate action: ${markerCalls}`);
+if (events.filter((event) => event.type === "prompt").length !== 1) throw new Error("the test smuggled in a captain prompt");
+const actionRequest = requests.filter((item) => !item.isBranch)[3];
+if (!actionRequest.messages.some((m) => textOf(m.content).includes("[seq 1]") && textOf(m.content).includes("[seq 2]"))) throw new Error("new request dropped old unprocessed action");
+const visible = session.sessionManager.getEntries().filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (visible.length !== 2) throw new Error("visible outcome loss or duplication");
+checkpoint("new outcome handled once with older outcome retained; no new captain prompt");
+// Prove the bounded passive recovery path uses the real before_agent_start
+// injection and reaches provider input too, without an auto-loop.
+await report(3);
+await waitFor(() => mainCalls === 8 && session.isIdle, "passive budget exhausted");
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (mainCalls !== 8) throw new Error("exhausted passive request auto-looped");
+checkpoint("passive recovery budget exhausted without an automatic loop");
+await session.prompt("ordinary passive recovery input");
+const passiveRequest = requests.filter((item) => !item.isBranch)[8];
+if (!passiveRequest.messages.some((m) => textOf(m.content).includes("[seq 3] probe: passive recovery canary"))) throw new Error("passive request absent at provider boundary");
+if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== "3") throw new Error("passive recovery did not acknowledge explicitly");
+if (markerCalls !== 1) throw new Error("passive recovery duplicated the prior action");
+checkpoint("ordinary prompt delivered passive recovery and explicit acknowledgement");
+if (process.env.FM_PI_BRANCH_PROCESSING_EVIDENCE) {
+  writeFileSync(process.env.FM_PI_BRANCH_PROCESSING_EVIDENCE, JSON.stringify({
+    sdkVersion: JSON.parse(readFileSync(`${pkg}/package.json`, "utf8")).version,
+    transport: "In-process synthetic OpenAI-compatible responses; no network or real model evaluation",
+    checkpoints,
+    providerRequests: requests.map(({ isBranch, messages }) => ({
+      actor: isBranch ? "branch" : "main",
+      messages: messages.filter((message) => message.role !== "system"),
+    })),
+    events,
+    persistedOutcomes: readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    visibleOutcomes: session.sessionManager.getEntries().filter((entry) => entry.customType === "fm-branch-visible-outcome"),
+  }, null, 2) + "\n");
+}
+session.dispose();
+console.log("PROCESSING_OK provider-visible=ordinary,custom,passive keyed-retries=2 new-action=1 processed=3");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/processing-output")
+if [ "$status" -ne 0 ] || [ "$out" != "PROCESSING_OK provider-visible=ordinary,custom,passive keyed-retries=2 new-action=1 processed=3" ]; then
+  fail "real-SDK processing handoff guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION exposes keyed requests to the provider, bounds ignored replies, and acts on a newer outcome without captain input"

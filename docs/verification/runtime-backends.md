@@ -1864,6 +1864,32 @@ The focused regression recreates the two 2026-08-31 incident shapes against the 
 In both, the processed marker holds, the same sequence is presented again at the run boundary and after a session replacement, the triggered-turn budget gives way to a next-prompt copy without duplicates, and only `fm_branch_processed` with the presented sequence closes the outcome; a routine outcome never enters the path, and delivered history from before the marker existed is migrated once rather than re-presented.
 On this machine the globally installed npm package is 0.81.1, whose stock `ToolExecutionComponent` rendering differs from the 0.84 line and fails the suite's first rendering-consumer case before any delivery case runs, which is why `FM_PI_PACKAGE_DIR` points at the 0.84.4 install above.
 
+### 2026-09-07 exhausted processing request recovery
+
+Verified on Linux x86_64, Node v25.3.0, installed `@earendil-works/pi-coding-agent` 0.84.2, using isolated temporary homes and credential-free synthetic provider responses.
+The real main and branch sessions serialize requests through the installed SDK to an intercepted OpenAI-compatible transport; no request leaves the machine.
+The probe demonstrates provider visibility rather than inferring it from persisted custom messages, and scripts empty and unrelated responses rather than claiming a remote model reliably produces or avoids them.
+The current pacing contract is owned by [Pi supervision branch](../pi-supervision-branch.md#two-stage-noise-filter).
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh tests/fm-branch-supervision.test.sh tests/fm-pi-watch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+# With TypeScript 5.9.3 on PATH (a temporary local installation suffices):
+bin/fm-test-run.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - new captain outcomes restart the budget without dropping older unhandled actions
+ok - real Pi SDK 0.84.2 exposes keyed requests to the provider, bounds ignored replies, and acts on a newer outcome without captain input
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.2
+skip: installed Pi 0.84.2 predates the stock renderer contract 0.84.4 this case compares against
+```
+
+The renderer skip is unrelated to request delivery; all applicable portable delivery cases and the real-SDK processing probe passed.
+The probe checks the marker is performed once, the processed marker stays unchanged through the ignored replies, a later request includes both outstanding sequences, and passive recovery on an ordinary prompt also reaches provider input and explicitly acknowledges.
+This evidence covers the importable Pi SDK, not the separately bundled signed runtime or remote-provider model behavior.
+No other primary harness loads this Pi-only extension, and the shared store, actor leases, wake claims, runtime-backend adapters, and watcher lifecycle remain unchanged.
+
 ### 2026-09-02 historical post-construction provider-error fallback
 
 The focused extension suite, strict typecheck, and real-SDK guard were run against the npm `@earendil-works/pi-coding-agent` 0.84.4 package on macOS 26.5.0 arm64, Node v24.13.1, before fallback ownership moved from the branch extension to the watcher.
