@@ -40,23 +40,40 @@ Worth reading before starting, because it establishes that the doctrine is settl
 
 The risk layer already refuses to trust the classifier's `none`. This plan extends that distrust to the gate layer, where it is currently absent.
 
-## Volume consequence — measured, not estimated
+## Volume consequence — corrected against the ledger 2026-09-15
 
-Swept every Dependabot pull request (last 30 per repo, open and closed) across all 29 enrolled repositories and selected those whose changed files are lockfiles only. **39 such pull requests.** Max delta found inside each:
+**An earlier draft of this section overstated the effect.** It counted 39 lockfile-only Dependabot *pull requests* across the fleet and implied 14 of them would start merging. That is the wrong population: most never reach `candidate` at all, for a reason this plan does not touch.
 
-| max delta in the lockfile | count | share | verdict after this plan |
+From `zapp-evaluations` (1,683 rows), lockfile-only is **106 rows across 11 distinct PRs**. Of those:
+
+| | rows | PRs | note |
 |---|---|---|---|
-| contains a **minor** | **24** | 62% | `semverDistance` grades `medium`; `maxRiskGrade: low` → **blocked at risk** |
-| **patch-only** | **14** | 36% | grades `low`, reaches 6 signals → **approves and merges** |
-| contains a **major** | 1 | 3% | **fails gate 8** |
+| reached `candidate` (risk graded) | 14 | **6** | **all six on `bankrate/conductor`** |
+| `not-candidate`, failed `ciBaselineMet` | **87** | | gate 11 — this plan does not touch it |
+| `not-candidate`, failed `resiliencyTierPermits` | 4 | | |
+| `not-candidate`, failed `coverageFloor` | 1 | | |
 
-So candidate volume for the class drops by roughly two thirds. **Do not read that as a loss.** Today all 39 park: `signalsGraded: 2` means `shouldApprove` returns `false` while `shouldEnable` can return `true`, which is PLAT-1320's enable-and-park. The real change is:
+**Every lockfile-only candidate in the ledger is on `conductor`, and that is not a coincidence.** `conductor` is the only enrolled repo with **no `HCL`**, so gate 11 never demands `Terraform plan (speculative)` from it. Every other repo's lockfile PRs die at gate 11 before classification quality matters.
 
-> **from 39 candidates of which 0 can complete, to 14 candidates of which 14 can complete.**
+So state the effect of this work precisely:
 
-State that framing in the PR description. "Lockfile candidates fell 64%" read on its own will look like a regression to anyone watching the weekly report.
+* **It improves the grade on PRs that already reach `candidate`** — today all six grade `low` on two signals that say nothing about dependencies.
+* **It does not expand lockfile candidacy fleet-wide.** That is gated on gate 11, i.e. PLAT-1313. Do not claim otherwise in the PR description.
+* Among the PRs that *do* reach candidate, patch-only ones become approvable and ones carrying a minor get correctly blocked at the **risk grade** (`semverDistance` → `medium` vs `maxRiskGrade: low`) rather than at the signal count.
 
----
+That last point matters for what to watch: after this lands, **the binding constraint on a lockfile-only PR is the grade, not `minSignalsGraded`.** The count comfortably clears 4; the `medium` from a single minor bump is what blocks.
+
+For context on how common minors are, the PR-level sweep still holds as a rough shape: of 39 lockfile-only Dependabot PRs fleet-wide, 24 contain at least one minor, 14 are patch-only, 1 contains a major. Treat those as proportions, not as a count of PRs that will merge.
+
+### The ledger confirms the predicted signal gaps exactly
+
+All 14 graded rows are identical — 7 of 9 signals `unknown`, and the only two that grade are the two that are not about dependencies:
+
+`coverageDelta` `low` · `newFindings` `low` · `semverDistance` **unknown** · `publishAge` **unknown** · `targetVersionHealth` **unknown** · `closesFinding` **unknown** · `depType` **unknown** · `internalConfidence` **unknown** · `deploymentHealth` **unknown**
+
+`depType` is unknown on **100%** of rows, which confirms the transitive-manifest problem is total rather than partial and makes Step 6 worth doing rather than optional.
+
+The two that stay `unknown` after this plan are threshold-gated elsewhere, not bump-gated: `internalConfidence` on `minFleetForConfidence: 50` (fleet is 29 — PLAT-1319) and `deploymentHealth` on `minDeployments: 10` (PLAT-1318). **Neither blocks this work.** 7 of 9 against a floor of 4 is not a shortfall; there is no 9-of-9 requirement anywhere in the policy.
 
 ## Runs concurrently with PLAT-1312 — two things to know
 
