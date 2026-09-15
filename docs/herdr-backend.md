@@ -310,7 +310,8 @@ The watcher maps the pane back to the task and skips secondmate endpoints, decla
 
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
-There is still one watcher process; the event reader is a bounded child of that watcher.
+There is still one watcher process; the watcher runs the wait as a bounded background child and the event reader is that child's own bounded subprocess.
+That shape is what lets a wake tap end the wait early (the tap contract is owned by [`architecture.md`](architecture.md)): the adapter stops its reader and removes its scratch fifo when the wait is terminated, so a tapped wait leaves nothing behind.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 

@@ -1907,6 +1907,83 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+
+# --- tap: an append rings only the advertised, identity-matched watcher ------
+# fm_wake_append ends with fm_wake_tap_watcher: SIGUSR1 to the pid this home's
+# watcher lock records, so the cycle that surfaces the row runs now. A process
+# that does not trap USR1 dies on it, which is exactly why the three refusals
+# below are proved with a bare `sleep` that would not survive a stray signal:
+# no tap advertisement, a lock identity the live pid no longer matches, and a
+# lock from another home each leave the recorded process untouched.
+lock_dir_for() {  # <state> <pid> <identity> <fm-home> [advertise]
+  local state=$1 pid=$2 identity=$3 home=$4 lockdir
+  lockdir="$state/.watch.lock"
+  rm -rf "$lockdir"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$pid" > "$lockdir/pid"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  printf '%s\n' "$home" > "$lockdir/fm-home"
+  [ "${5:-}" != advertise ] || printf 'usr1\n' > "$lockdir/tap"
+}
+
+appender_view() {  # <state> <shell-expression> - what the appender itself resolves
+  FM_STATE_OVERRIDE="$1" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    eval "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+test_tap_reaches_only_the_advertised_identity_matched_watcher() {
+  local dir state home marker sleeper identity listener i
+  dir=$(make_case tap)
+  state="$dir/state"
+  # shellcheck disable=SC2016 # Expanded by the appender's own shell on purpose.
+  home=$(appender_view "$state" 'printf "%s\n" "$FM_HOME"')
+  [ -n "$home" ] || fail "could not resolve the appender's home"
+
+  # 1. No tap advertisement: the recorded process is never signalled.
+  sleep 37 &
+  sleeper=$!
+  identity=$(appender_view "$state" "fm_pid_identity $sleeper")
+  [ -n "$identity" ] || fail "could not compute a live identity for the sleeper"
+  lock_dir_for "$state" "$sleeper" "$identity" "$home"
+  append_wake "$state" check tap-1 "check: tap probe one" || fail "append without a tap advertisement failed"
+  sleep 0.3
+  is_live_non_zombie "$sleeper" || fail "a watcher that does not advertise the tap was signalled"
+
+  # 2. Advertised, but the lock identity no longer matches the live pid.
+  lock_dir_for "$state" "$sleeper" "stale-identity cmdline-hex=00" "$home" advertise
+  append_wake "$state" check tap-2 "check: tap probe two" || fail "append against a stale identity failed"
+  sleep 0.3
+  is_live_non_zombie "$sleeper" || fail "a pid whose recorded identity no longer matches was signalled"
+
+  # 3. Advertised and matching, but the lock belongs to another home.
+  lock_dir_for "$state" "$sleeper" "$identity" "$home/elsewhere" advertise
+  append_wake "$state" check tap-3 "check: tap probe three" || fail "append against another home's lock failed"
+  sleep 0.3
+  is_live_non_zombie "$sleeper" || fail "another home's watcher was signalled"
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+
+  # 4. Advertised, matching, same home: the tap lands.
+  marker="$dir/tapped"
+  bash -c 'trap "printf tapped > \"$1\"; exit 0" USR1; while :; do sleep 0.1; done' _ "$marker" &
+  listener=$!
+  identity=$(appender_view "$state" "fm_pid_identity $listener")
+  lock_dir_for "$state" "$listener" "$identity" "$home" advertise
+  append_wake "$state" check tap-4 "check: tap probe four" || fail "append against a live advertised watcher failed"
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$marker" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$marker" 2>/dev/null || true)" = tapped ] || { kill "$listener" 2>/dev/null || true; fail "the advertised, identity-matched watcher was not tapped"; }
+  wait "$listener" 2>/dev/null || true
+  [ "$(grep -c . "$state/.wake-queue")" -eq 4 ] || fail "every append must stay durable regardless of the tap outcome"
+  pass "a wake append taps only the advertised, identity-matched watcher of this home, and every append stays durable"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
@@ -1948,3 +2025,4 @@ test_stale_ack_that_consumes_nothing_names_the_current_wake
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
+test_tap_reaches_only_the_advertised_identity_matched_watcher

@@ -498,7 +498,7 @@ SH
 }
 
 test_poll_rolls_back_wake_without_durable_record() {
-  local fakebin homedir_bin roll_home
+  local fakebin homedir_bin roll_home listener identity marker i
   fakebin=$(fm_fakebin "$TMP_ROOT")
   roll_home="$TMP_ROOT/rollback-home"
   mkdir -p "$roll_home"
@@ -523,6 +523,21 @@ SH
   chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
   [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
 
+  # An advertised, identity-matched watcher of THIS home, so the tap decision is
+  # observable: a rolled-back row leaves no durable wake, so the watcher must be
+  # left to its poll; the retry's durable row must ring it.
+  marker="$roll_home/tapped"
+  bash -c 'trap "printf tapped > \"$1\"; exit 0" USR1; while :; do sleep 0.1; done' _ "$marker" &
+  listener=$!
+  identity=$(FM_HOME="$roll_home" FM_STATE_OVERRIDE="$roll_home/state" bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$listener")
+  [ -n "$identity" ] || { kill "$listener" 2>/dev/null || true; fail "could not compute the listener's identity"; }
+  mkdir -p "$roll_home/state/.watch.lock"
+  printf '%s\n' "$listener" > "$roll_home/state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$roll_home/state/.watch.lock/pid-identity"
+  printf '%s\n' "$roll_home" > "$roll_home/state/.watch.lock/fm-home"
+  printf 'usr1\n' > "$roll_home/state/.watch.lock/tap"
+
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
@@ -532,6 +547,8 @@ SH
   local wakeq
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "rolled-back wake must not stay queued without a durable record"
+  sleep 0.3
+  [ ! -s "$marker" ] || { kill "$listener" 2>/dev/null || true; fail "a rolled-back wake must not tap the watcher: there is no durable row for it to surface"; }
 
   # Restore write access: the next poll must surface the mail fresh, exactly
   # once, as if the interrupted attempt never happened.
@@ -544,7 +561,14 @@ SH
   assert_contains "$out" "woke for 66" "retry poll surfaces the mail exactly once"
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "retry poll appends exactly one wake for uid 66"
-  pass "fm-mail: a wake with no durable record is rolled back, not left ackable"
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$marker" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$marker" ] || { kill "$listener" 2>/dev/null || true; fail "the retry poll's durable wake must tap the watcher instead of leaving the mail to the poll cadence"; }
+  wait "$listener" 2>/dev/null || true
+  pass "fm-mail: a wake with no durable record is rolled back, not left ackable, and only the durable one taps the watcher"
 }
 
 test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake() {

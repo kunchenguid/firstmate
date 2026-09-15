@@ -33,6 +33,10 @@ the owner of that format and is the only file both machines run.
 The relay reads records and queues work. It never changes a project, and the
 queueing half is `bin/fm-inbox.sh note`, the same surface the captain's own
 out-of-band capture already uses, rather than a second queue.
+A queued request rings this home's watcher as it lands, so the first mate takes
+it up on the next supervision cycle instead of at the end of the poll it was
+sleeping through, and holding the conversation costs the first mate no standing
+attention of its own; [`architecture.md`](architecture.md) owns that tap.
 
 ## What it costs in time
 
