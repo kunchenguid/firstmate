@@ -85,6 +85,11 @@
 #      re-block (budget_account_current_epoch owns that rule), so an inert
 #      hook that leaves the ledger frozen cannot hold the guard in an
 #      unbounded re-block loop below that override.
+#
+# Read-only sessions: a session whose fleet lock another live session holds may
+# not repair supervision, so every mode lets its stop through instead of
+# blocking (fm_session_lock_held_by_other_harness in bin/fm-session-lock-lib.sh
+# owns that proof). The lock owner itself is guarded exactly as described above.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -167,6 +172,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -214,6 +221,30 @@ AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   && fm_afk_daemon_owns_supervision "$STATE"; then
   allow_supervised_stop
+fi
+
+# --- a read-only session: another live session owns this home's fleet lock ---
+# A session that did not get the lock may not arm, drain, or repair supervision,
+# and its own Stop auto-arm stays inert by identity, so a block here can never
+# bring supervision back - it only traps that session in an endless re-block.
+# Recovery belongs to the lock holder, whose Stop boundary this guard still
+# blocks. Claude mode tells the user once per session and holder; every other
+# mode allows silently. Only positive proof stands down: a missing, malformed,
+# or dead lock and an unresolvable ancestry fall through to the ordinary block.
+READONLY_NOTICE="$STATE/.turnend-readonly-advised"
+if LOCK_HOLDER=$(fm_session_lock_held_by_other_harness "$STATE"); then
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    NOTICE_KEY="session=$SESSION_ID holder=$LOCK_HOLDER"
+    if ! grep -Fxq "$NOTICE_KEY" "$READONLY_NOTICE" 2>/dev/null; then
+      NOTICE_TMP="$READONLY_NOTICE.tmp.$$"
+      if { tail -n 49 "$READONLY_NOTICE" 2>/dev/null; printf '%s\n' "$NOTICE_KEY"; } > "$NOTICE_TMP" 2>/dev/null; then
+        mv -f "$NOTICE_TMP" "$READONLY_NOTICE" 2>/dev/null || true
+      fi
+      rm -f "$NOTICE_TMP" 2>/dev/null || true
+      printf '{"systemMessage":"Firstmate monitoring is off, and this session cannot restart it: another open session (pid %s) owns this fleet. Message or close that session to restart monitoring. This session will not be blocked."}\n' "$LOCK_HOLDER"
+    fi
+  fi
+  exit 0
 fi
 
 block_stop() {

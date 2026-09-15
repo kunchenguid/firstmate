@@ -192,6 +192,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1228,17 +1230,6 @@ run_integrated_autoarm() {
       ' 2>&1
 }
 
-# The same real hook, fired from a harness-named process that does NOT write
-# state/.lock: whoever already holds that lock decides whether this firing is
-# the owning session's or a competing one.
-run_integrated_autoarm_unowned() {
-  local dir=$1 home
-  home=$(cd "$dir" && pwd)
-  # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
-  printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
-    | FM_HOME="$home" "$dir/fake-claude" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1
-}
-
 write_integrated_failed_arm() {
   local dir=$1
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
@@ -1633,13 +1624,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
-# The auto-arm's ledger epoch advances only when the hook reaches its
-# generation claim. A live harness-named process outside the hook's ancestry
-# holding state/.lock keeps the hook inert by its identity contract, so the
-# ledger stays at the exhausted-failure epoch the hook wrote before it went
-# quiet. The block budget used to advance only on an epoch change, so this
-# shape re-blocked without limit and the attended fail-open never fired: the
-# budget must count consecutive re-blocks against an unchanged epoch instead.
+# A live harness-named process that is not the caller's session, holding
+# state/.lock: the shape of a second session that did not get the fleet lock.
 hold_session_lock_from_foreign_harness() {  # sets FOREIGN_LOCK_HOLDER
   local dir=$1
   # `bash -c` execs a single command in place, which would rename the process
@@ -1651,8 +1637,14 @@ hold_session_lock_from_foreign_harness() {  # sets FOREIGN_LOCK_HOLDER
   printf '%s\n' "$FOREIGN_LOCK_HOLDER" > "$dir/state/.lock"
 }
 
+# The auto-arm's ledger epoch advances only when the hook reaches its
+# generation claim. A Stop hook that never fires again after its exhausted
+# failure leaves the ledger frozen at that failure epoch. The block budget used
+# to advance only on an epoch change, so this shape re-blocked without limit and
+# the attended fail-open never fired: the budget must count consecutive
+# re-blocks against an unchanged epoch instead.
 test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
-  local dir out status guard_out guard_status holder i pid identity count epoch_line
+  local dir out status guard_out guard_status i pid identity count epoch_line
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
@@ -1664,12 +1656,7 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   expect_code 0 "$guard_status" "the first failed epoch must own its Stop handoff"
   epoch_line=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")
 
-  hold_session_lock_from_foreign_harness "$dir"
-  holder=$FOREIGN_LOCK_HOLDER
   for i in 1 2 3 4; do
-    out=$(run_integrated_autoarm_unowned "$dir"); status=$?
-    expect_code 0 "$status" "an auto-arm outside the lock owner's ancestry must stay inert at stop $i"
-    [ -z "$out" ] || fail "inert auto-arm produced output at stop $i: $out"
     [ "$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")" = "$epoch_line" ] \
       || fail "the ledger epoch advanced at stop $i, so this case no longer drives a frozen epoch"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
@@ -1696,8 +1683,6 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   identity=$(watcher_identity "$dir" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
     fail "could not identify the frozen-epoch recovery watcher"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
@@ -1705,8 +1690,6 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   guard_out=$(run_hook_claude "$dir" true); guard_status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$guard_status" "a healthy watcher must still allow the stop after a frozen-epoch alarm"
   [ -z "$guard_out" ] || fail "healthy allow after the frozen-epoch alarm produced output: $guard_out"
@@ -1717,7 +1700,85 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   expect_code 2 "$guard_status" "a later unhealthy stop must re-block from a fresh budget"
   count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
   [ "$count" = 1 ] || fail "the post-recovery episode must restart its budget at 1, got $count"
-  pass "fm-turnend-guard --claude: an inert auto-arm's frozen epoch reaches one bounded fail-open and resets on recovery"
+  pass "fm-turnend-guard --claude: a silent auto-arm's frozen epoch reaches one bounded fail-open and resets on recovery"
+}
+
+# Runs the guard as a child of a harness-named process, so its own harness
+# ancestry is that fixture process no matter what launched the test. The
+# trailing exit keeps bash from exec-ing the guard in place of the harness.
+run_guard_under_fake_harness() {  # <dir> <payload> [guard-args...]
+  local dir=$1 payload=$2 home
+  shift 2
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # $0 and $@ expand inside the fake harness child.
+  printf '%s\n' "$payload" | FM_HOME="$home" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    "$dir/fake-claude" -c '"$0" "$@"; exit $?' "$dir/bin/fm-turnend-guard.sh" "$@" 2>&1
+}
+
+# The same, with the fixture harness writing its own pid into state/.lock first:
+# the guard then runs inside the session that owns the fleet lock.
+run_guard_as_lock_owner() {  # <dir> <payload> [guard-args...]
+  local dir=$1 payload=$2 home
+  shift 2
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # $$, $0, $@, and FM_HOME expand inside the fake harness child.
+  printf '%s\n' "$payload" | FM_HOME="$home" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    "$dir/fake-claude" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; "$0" "$@"; exit $?' \
+    "$dir/bin/fm-turnend-guard.sh" "$@" 2>&1
+}
+
+# A session that did not get the fleet lock may not arm, drain, or repair
+# supervision, so blocking its Stop can never bring supervision back: it only
+# traps that session in an endless re-block. While another live session holds
+# the lock, the guard stands down - Claude mode names the holder once per
+# session and holder, other modes allow silently, and neither spends the block
+# budget - while the lock owner itself and a dead holder still block.
+test_hook_stands_down_while_another_live_session_holds_the_fleet_lock() {
+  local dir holder out status
+  local payload='{"stop_hook_active":false,"session_id":"sess-read-only"}'
+  local other_payload='{"stop_hook_active":false,"session_id":"sess-read-only-other"}'
+  dir=$(make_primary_dir "$TMP_ROOT/hook-read-only-session")
+  : > "$dir/state/task1.meta"
+  ln -s /bin/bash "$dir/fake-claude"
+  hold_session_lock_from_foreign_harness "$dir"
+  holder=$FOREIGN_LOCK_HOLDER
+
+  out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
+  expect_code 0 "$status" "a read-only Claude session must be allowed to end its turn"
+  assert_contains "$out" '"systemMessage"' "the read-only stand-down must tell the user why supervision is not repaired here"
+  assert_contains "$out" "pid $holder" "the read-only notice must name the session that holds the fleet lock"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "a read-only session must not get the repair banner it cannot act on"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a read-only stand-down must not spend the lock owner's block budget"
+
+  out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
+  expect_code 0 "$status" "a repeated read-only Claude stop must still be allowed"
+  [ -z "$out" ] || fail "the read-only notice must appear once per session and holder, got: $out"
+
+  out=$(run_guard_under_fake_harness "$dir" "$other_payload" --claude); status=$?
+  expect_code 0 "$status" "a second read-only Claude session must be allowed to end its turn"
+  assert_contains "$out" "pid $holder" "a second read-only session must get its own notice naming the lock holder"
+  out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
+  expect_code 0 "$status" "the first read-only session must still be allowed after the second one stops"
+  [ -z "$out" ] || fail "another read-only session's stop re-showed the first session's notice: $out"
+  out=$(run_guard_under_fake_harness "$dir" "$other_payload" --claude); status=$?
+  expect_code 0 "$status" "the second read-only session must still be allowed on a repeated stop"
+  [ -z "$out" ] || fail "alternating read-only sessions re-showed the second session's notice: $out"
+
+  out=$(run_guard_under_fake_harness "$dir" "$payload"); status=$?
+  expect_code 0 "$status" "a read-only session in the default blocking mode must also be allowed"
+  [ -z "$out" ] || fail "the default-mode read-only stand-down must stay silent, got: $out"
+
+  out=$(run_guard_as_lock_owner "$dir" "$payload" --claude); status=$?
+  expect_code 2 "$status" "the session that owns the fleet lock must still be blocked while supervision is down"
+  assert_contains "$out" "TURN WOULD END BLIND" "the lock owner's block lost its repair banner"
+
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(run_guard_under_fake_harness "$dir" "$payload" --claude); status=$?
+  expect_code 2 "$status" "a dead lock holder proves no other session is responsible, so the stop must block"
+  assert_contains "$out" "TURN WOULD END BLIND" "the dead-holder block lost its repair banner"
+  pass "fm-turnend-guard: stands down once, visibly, for a read-only session while another live session holds the fleet lock"
 }
 
 # The same frozen ledger without a verified failure episode: the budget must
@@ -2267,6 +2328,7 @@ test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
 test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
+test_hook_stands_down_while_another_live_session_holds_the_fleet_lock
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
