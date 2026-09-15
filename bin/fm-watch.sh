@@ -713,7 +713,7 @@ signal_turnend_panes_churned() {  # <file> ...
 # otherwise hide behind unchanged coverage while churn defeats the stale backbone.
 signal_turnend_outcome_covered() {  # <file> ...
   local f base task meta kind w key now_s absorb_secs marker since age
-  local rec_task task_index i j count
+  local rec_task task_index i j count declaration
   local max_absorb_secs=9223372036854775807
   local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=() snapshot_windows=() snapshot_keys=()
   local -a signal_indexes=() covered_keys=() missing_keys=() created_keys=()
@@ -762,8 +762,8 @@ signal_turnend_outcome_covered() {  # <file> ...
     done
     [ "$count" -eq 1 ] || return 1
     [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
-    branch_outcome_index_covers_status "$task" || return 1
-    ! outcome_covered_window_saw_busy "$key" || return 1
+    declaration=$(outcome_covered_declaration "$task") || return 1
+    ! outcome_covered_window_saw_busy "$key" "$declaration" || return 1
     signal_indexes+=("$task_index")
     covered_keys+=("$key")
   done
@@ -1513,18 +1513,25 @@ captain_call_stale_bound() {  # <window-key> <task>
 # after the pane was seen busy under this declaration, returns 1 so the caller
 # alarms once and refreshes the throttle through stale_wait_record.
 outcome_covered_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 sig throttle
-  STALE_WAIT_DECLARATION=
-  branch_outcome_index_covers_status "$task" || return 1
-  [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] || return 1
-  sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
-  STALE_WAIT_DECLARATION="outcome-covered:${BRANCH_OUTCOME_INDEX_SEQ}:${sig}"
+  local key=$1 task=$2 throttle
+  STALE_WAIT_DECLARATION=$(outcome_covered_declaration "$task") || return 1
   throttle="$STATE/.paused-resurfaced-$key"
   case "$(cat "$throttle" 2>/dev/null || true)" in
     "$STALE_WAIT_DECLARATION") stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" ;;
     "busy:$STALE_WAIT_DECLARATION") return 1 ;;
     *) printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle" ;;
   esac
+}
+
+# The coverage identity a covered absorb is bound to: the covering outcome's
+# sequence plus the whole status-log signature. Fails when the task is not
+# covered, so every caller falls through to surfacing.
+outcome_covered_declaration() {  # <task>
+  local task=$1 sig
+  branch_outcome_index_covers_status "$task" || return 1
+  [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] || return 1
+  sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
+  printf 'outcome-covered:%s:%s' "$BRANCH_OUTCOME_INDEX_SEQ" "$sig"
 }
 
 outcome_covered_throttle_armed() {  # <window-key>
@@ -1536,22 +1543,29 @@ outcome_covered_throttle_armed() {  # <window-key>
   return 1
 }
 
-outcome_covered_window_saw_busy() {  # <window-key>
-  local throttle="$STATE/.paused-resurfaced-$1"
-  [ -f "$throttle" ] || return 1
-  case "$(cat "$throttle" 2>/dev/null || true)" in
-    busy:outcome-covered:*) return 0 ;;
-  esac
-  return 1
+# 0 when this window was seen busy under the CURRENT coverage identity: the
+# worker ran after the outcome that covers its status log, so whatever it does
+# next is news the outcome cannot vouch for. A newer outcome, or any new status
+# byte, changes the identity and retires the observation with it.
+outcome_covered_window_saw_busy() {  # <window-key> <declaration>
+  [ "$(cat "$STATE/.paused-resurfaced-$1" 2>/dev/null || true)" = "busy:$2" ]
 }
 
-note_outcome_covered_busy() {  # <window-key>
-  local throttle="$STATE/.paused-resurfaced-$1" recorded
-  [ -f "$throttle" ] || return 0
+# Record that a covered pane is working again. Runs on every busy poll, not only
+# after a covered stale sight armed the throttle, because the branch may steer a
+# finished worker and report the steer as the covering outcome: nothing else then
+# marks the turn that steer starts. A declaration this window does not own - a
+# declared wait, a captain call - is never overwritten.
+note_outcome_covered_busy() {  # <window-key> <task>
+  local key=$1 task=$2 throttle recorded declaration
+  throttle="$STATE/.paused-resurfaced-$key"
   recorded=$(cat "$throttle" 2>/dev/null || true)
   case "$recorded" in
-    outcome-covered:*) printf 'busy:%s' "$recorded" > "$throttle" ;;
+    ''|outcome-covered:*|busy:outcome-covered:*) ;;
+    *) return 0 ;;
   esac
+  declaration=$(outcome_covered_declaration "$task") || return 0
+  [ "$recorded" = "busy:$declaration" ] || printf 'busy:%s' "$declaration" > "$throttle"
 }
 
 surface_terminal_stale() {  # <window> <window-key> <hash>
@@ -2569,7 +2583,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    [ "$busy_now" -ne 0 ] || note_outcome_covered_busy "$key"
+    [ "$busy_now" -ne 0 ] || note_outcome_covered_busy "$key" "$task"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

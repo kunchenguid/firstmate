@@ -5549,6 +5549,49 @@ test_terminal_stale_outcome_covered_busy_then_stop_surfaces() {
   pass "the first stop after the pane was busy again surfaces despite outcome coverage"
 }
 
+test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
+  local dir state fakebin out drain_out capture_file window key throttle pid
+  dir=$(make_case turn-ended-outcome-ack-before-report); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-ackfirst"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.paused-resurfaced-$key"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/ackfirst.meta"
+  printf 'done: PR https://example.test/pr/31 checks green\n' > "$state/ackfirst.status"
+  printf '%s' "$(seen_sig "$state/ackfirst.status")" > "$state/.seen-ackfirst_status"
+  # The branch steers the finished worker, the worker acknowledges the steer,
+  # and only then does the branch report: the covering outcome is newer than
+  # every inbox byte, so the status log alone still reads as fully covered.
+  record_acked_steer "$state" ackfirst
+  backdate_path "$state/ackfirst.inbox"
+  backdate_path "$state/ackfirst.inbox/handled"
+  write_covered_outcome_index "$state" ackfirst 21
+  # The worker is now working on the steer. No stale sight has armed a throttle.
+  [ ! -e "$throttle" ] || fail "the fixture armed a throttle before the busy interval"
+  printf 'rebasing the branch\nCtrl+c:cancel' > "$capture_file"
+  covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
+    || fail "the watcher exited while the steered worker was busy: $(cat "$out")"
+  case "$(cat "$throttle" 2>/dev/null)" in
+    busy:outcome-covered:21:*) ;;
+    *) fail "a busy steered worker was not recorded against its covering outcome: $(cat "$throttle" 2>/dev/null)" ;;
+  esac
+  # It stops with a question in the pane and no new status line.
+  printf 'Should I force-push the rebase?' > "$capture_file"
+  : > "$state/ackfirst.turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a silent stop after a steer the outcome covered stayed hidden"; }
+  grep -F "signal: $state/ackfirst.turn-ended" "$out" >/dev/null \
+    || fail "the post-steer silent stop did not print: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the post-steer silent stop failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/ackfirst.turn-ended" >/dev/null \
+    || fail "the post-steer silent stop was not queued"
+  pass "a worker steered before its covering outcome still surfaces the stop that follows"
+}
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -5617,6 +5660,7 @@ test_turn_ended_outcome_covered_post_steer_stop_surfaces
 test_terminal_stale_outcome_covered_post_steer_death_surfaces
 test_terminal_stale_outcome_covered_static_pane_resurfaces_on_cadence
 test_terminal_stale_outcome_covered_busy_then_stop_surfaces
+test_turn_ended_outcome_covered_steer_acked_before_report_surfaces
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
