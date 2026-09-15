@@ -192,12 +192,23 @@ printf 'failed: worker command exited nonzero\n' > "$failed_status"
 printf 'done: final work complete\n' > "$done_status"
 IFS=$'\t' read -r failed_kind failed_identity <<< "$(watch_signal_metadata "$failed_status")"
 IFS=$'\t' read -r done_kind done_identity <<< "$(watch_signal_metadata "$done_status")"
+IFS=$'\t' read -r unreadable_kind unreadable_identity <<< "$(
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    status_span_first_actionable_record() { return 2; }
+    signal_files_actionable "$2" || true
+    printf "%s\t%s\n" "$FM_SIGNAL_TELEGRAM_KIND" "$FM_SIGNAL_TELEGRAM_IDENTITY"
+  ' _ "$BIN/fm-watch.sh" "$failed_status"
+)"
 [ "$failed_kind" = error ] || fail "watcher did not classify failed status as an error notification"
 [ "$done_kind" = boundary ] || fail "watcher did not classify done status as a boundary notification"
+[ "$unreadable_kind" = error ] || fail "watcher suppressed an unclassifiable status signal"
+[ -n "$unreadable_identity" ] || fail "unclassifiable status signal omitted its event identity"
 rm -f "$home/state/.telegram-notifications"
 printf '%s\n' 'signal: private-status-secret' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "routine signal suppression failed"
 notify_signal 'failed.status' "$failed_kind" "$failed_identity" || fail "failed signal notification mapping failed"
 notify_signal 'done.status' "$done_kind" "$done_identity" || fail "done signal notification mapping failed"
+notify_signal 'unreadable.status' "$unreadable_kind" "$unreadable_identity" || fail "unclassifiable signal notification mapping failed"
 printf '%s\n\n%s\n' 'stale: private-status-secret' stale-event | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "stale notification mapping failed"
 printf '%s\n\n%s\n' 'check: private-status-secret' check-event-2 | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "check notification mapping failed"
 printf '%s\n' heartbeat | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "heartbeat suppression failed"

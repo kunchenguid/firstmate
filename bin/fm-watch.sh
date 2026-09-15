@@ -1562,7 +1562,7 @@ run_check_capture() {
 # (docs/pi-supervision-branch.md). Stale and heartbeat rows retain their existing
 # eligibility rules.
 signal_files_actionable() {  # <status-file> ...
-  local f task record rest endpoint ident events needs_decision rc found=1
+  local f task record rest endpoint ident events signal_sig needs_decision rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_NEEDS_DECISION_FILES=''
   FM_SIGNAL_TELEGRAM_KIND=''
@@ -1581,6 +1581,9 @@ signal_files_actionable() {  # <status-file> ...
       # record NO classified endpoint for it below, so its content is classified
       # again once it is readable. The wake signature still advances, which is
       # what bounds this to one report per distinct file state.
+      signal_sig=$(fm_wake_signal_sig "$f" 2>/dev/null || printf 'unreadable')
+      FM_SIGNAL_TELEGRAM_KIND=error
+      FM_SIGNAL_TELEGRAM_IDENTITY="${FM_SIGNAL_TELEGRAM_IDENTITY}${f}:classification-error:${signal_sig};"
       found=0
       continue
     fi
