@@ -480,7 +480,9 @@ fm_touch_epoch() {
 # FM_TEST_CYG_STIME overrides the STIME column in the Cygwin-side rows, which is
 # how a caller reproduces a process started more than 24 hours ago: the real ps
 # prints "Sep  6" there, two whitespace fields instead of one, moving every later
-# field to the right.
+# field to the right. FM_TEST_PS_W_FAIL makes the `ps -W` Windows-table read
+# fail outright, and FM_TEST_PS_W_EMPTY makes it succeed with no output at all;
+# both reproduce an unreadable table.
 fm_cygwin_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -505,6 +507,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "$mode" = W ]; then
+  [ -n "${FM_TEST_PS_W_FAIL:-}" ] && { echo 'ps: unable to read the process table' >&2; exit 1; }
+  [ -n "${FM_TEST_PS_W_EMPTY:-}" ] && exit 0
   printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
   [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
   exit 0

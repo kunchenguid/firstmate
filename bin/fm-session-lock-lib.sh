@@ -213,18 +213,31 @@ fm_win_normalize_command() {  # <windows path>
   printf '%s' "${path%.exe}"
 }
 
-# Print the normalized executable path of live Windows process $1, or return 1.
+# Print the normalized executable path of live Windows process $1.
 # Presence in `ps -W` is also this bridge's liveness test, because kill -0 cannot
 # answer that question across the namespace boundary.
+#
+# The exit status keeps the two empty results apart because they mean opposite
+# things to a caller deciding liveness: 0 with the command on stdout; 1 when a
+# READABLE process table carries no row for the pid, which proves it absent; and
+# 2 when the table itself could not be read, which proves nothing. Collapsing
+# one failed `ps -W` into 1 reports a live tagged holder as dead, and the
+# callers that reclaim a lock on a dead verdict then hand a running session's
+# home to a second one.
 fm_win_command() {  # <winpid>
-  local winpid=$1 out
+  local winpid=$1 out table
   case "$winpid" in
     ''|*[!0-9]*) return 1 ;;
+  esac
+  table=$(ps -W 2>/dev/null) || return 2
+  case "$table" in
+    *WINPID*) ;;
+    *) return 2 ;;
   esac
   # Select the row first (WINPID precedes STIME, so its field number cannot
   # move), then let the shared reader take COMMAND from whatever field STIME
   # actually ended at.
-  out=$(ps -W 2>/dev/null | awk -v w="$winpid" '
+  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '
     NR == 1 { header = $0; next }
     $4 == w { print header; print; exit }
   ' | fm_ps_command)
@@ -346,11 +359,19 @@ EOF
 # kill -0 cannot see across that boundary and would report a live harness as
 # dead - which would hand a running session's home to a second one.
 fm_harness_pid_alive() {
-  local pid=$1 comm args winpid
+  local pid=$1 comm args winpid status
   if winpid=$(fm_win_untag_pid "$pid"); then
-    comm=$(fm_win_command "$winpid") || return 1
-    fm_harness_process_matches "$comm" "$comm"
-    return
+    if comm=$(fm_win_command "$winpid"); then
+      fm_harness_process_matches "$comm" "$comm"
+      return
+    else
+      status=$?
+    fi
+    # 2 is an unreadable Windows table: fail closed and report the holder live,
+    # because a caller reclaims the session lock on a dead verdict. Only a
+    # readable table that lacks the pid (1) proves the holder dead.
+    [ "$status" -ne 2 ] || return 0
+    return 1
   fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(fm_ps_comm "$pid") || return 1

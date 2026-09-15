@@ -427,6 +427,36 @@ test_cygwin_date_form_stime_does_not_truncate_the_command() {
   pass "session-lock: a two-field date STIME does not truncate the command a ps row reports"
 }
 
+test_unreadable_windows_table_does_not_report_a_tagged_holder_dead() {
+  local dir fakebin
+  dir="$TMP_ROOT/cygwin-unreadable"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # Callers (the Stop auto-arm and fm-lock.sh's live-owner refusal) reclaim the
+  # session lock as soon as a tagged holder reads dead. One failed `ps -W` read
+  # must therefore report the holder live, not hand a running session's home to
+  # a second one.
+  FM_TEST_PS_W_FAIL=1 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a failed ps -W read made a tagged holder read as dead"
+  FM_TEST_PS_W_FAIL=1 CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid' \
+    && fail "a failed ps -W read published a tagged session identity"
+
+  # A read that succeeds but returns no output is equally unreadable: it proves
+  # nothing about the holder, so it must fail closed the same way.
+  FM_TEST_PS_W_EMPTY=1 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a successful-but-empty ps -W read made a tagged holder read as dead"
+  FM_TEST_PS_W_EMPTY=1 CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid' \
+    && fail "a successful-but-empty ps -W read published a tagged session identity"
+
+  # The genuinely-absent case still works: a readable table with no row for the
+  # pid proves the holder dead and reclaim may proceed.
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:9999'; then
+    fail "a pid absent from a readable table was reported as a live holder"
+  fi
+  pass "session-lock: an unreadable Windows process table never reports a tagged holder dead"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -576,6 +606,7 @@ test_windows_pid_is_never_resolved_as_a_cygwin_pid
 test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
 test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_cygwin_date_form_stime_does_not_truncate_the_command
+test_unreadable_windows_table_does_not_report_a_tagged_holder_dead
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
