@@ -33,6 +33,13 @@ When that retained arm later closes, its actual close is classified as a new sup
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
+Pi main holds at most one unconsumed host follow-up at a time.
+A later actionable close, a typed restoration failure included, rides that host instead of queueing another follow-up: it counts as delivered with the host, and when Pi finalizes the host's user message (`message_end`) the extension rewrites that one message in place to list the original reason plus every rider, which is where a rider is consumed.
+A rider whose host was consumed but never rewritten therefore still rides the replacement handoff, exactly as an unconsumed host does.
+A host Pi settles without consuming and with nothing left queued (`agent_settled`, the queue cleared by an abort) is dropped by Pi; the extension carries its reasons into the next host rather than re-sending on its own, so an abort never starts a turn by itself and no reason vanishes.
+Carried reasons and unconsumed hostless failure wakes survive in-process session replacement in memory only; they are not persisted across process exit.
+The durable queue still holds the actionable rows; coalescing only stops one drain's worth of closes from arriving as several follow-up turns.
+
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 The recovery-episode contract below owns once-per-generation announcement.
@@ -113,6 +120,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+It also releases several actionable closes behind one queued host to prove they ride it as one follow-up, that the host's `message_end` rewrite lists every rider, that an unrelated user message never consumes them, and that a host Pi dropped carries its reasons into the next host.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, same-instance shutdown-plus-start, automatic re-arm before any model turn, a fresh extension-module rebind carrying all in-flight actionable closes exactly once, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
