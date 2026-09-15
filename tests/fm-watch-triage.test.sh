@@ -770,6 +770,33 @@ churn_config() {  # <dir> [off]
   printf '%s\n' "$cfg"
 }
 
+
+# Write a valid branch-outcome index covering the current status file bytes.
+# Uses the shared classifier helpers so identity matches production reads.
+write_covered_outcome_index() {  # <state> <task> <seq>
+  local state=$1 task=$2 seq=$3 f size ident
+  f="$state/$task.status"
+  if [ -f "$f" ]; then
+    size=$(LC_ALL=C stat -c '%s' "$f" 2>/dev/null || LC_ALL=C /usr/bin/stat -f '%z' "$f")
+    ident=$(_fm_open_decisions_file_ident "$f") || fail "could not identity $f"
+  else
+    size=0
+    ident=-
+  fi
+  printf 'fm-branch-outcome-index-v1\t%s\t%s\t%s\n' "$seq" "$size" "$ident" \
+    > "$state/.$task.branch-outcome-index"
+}
+
+
+prime_status_seen() {  # <status-file>
+  local f=$1 base
+  base=$(basename "$f")
+  base=${base//./_}
+  printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
+}
+
+
+
 # Wait until the watcher records an absorbed wake matching <needle> in its triage
 # log. 1 if the watcher exits first (i.e. it surfaced the wake instead), which is
 # exactly the unfixed behavior this case exists to catch. Polls the log rather
@@ -5062,6 +5089,320 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 
+
+test_turn_ended_outcome_covered_absorbed() {
+  local dir state fakebin out window key pid
+  dir=$(make_case turn-ended-outcome-covered); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-covered"
+  printf 'done: PR https://example.test/pr/9 checks green\n' > "$state/covered.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/covered.meta"
+  write_covered_outcome_index "$state" covered 7
+  prime_status_seen "$state/covered.status"
+  : > "$state/covered.turn-ended"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal (outcome-covered)" \
+    || { reap "$pid"; fail "covered bare turn-end was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "covered bare turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "covered bare turn-end enqueued a durable wake"
+  [ -s "$state/.turnend-covered-since-$key" ] \
+    || { reap "$pid"; fail "covered absorb did not open a bounded window"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end whose status is already outcome-covered is absorbed"
+}
+
+test_turn_ended_outcome_covered_new_status_surfaces() {
+  local dir state fakebin out drain_out window pid
+  dir=$(make_case turn-ended-outcome-new-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-coverednew"
+  : > "$state/coverednew.turn-ended"
+  printf 'done: implementation complete\n' > "$state/coverednew.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/coverednew.meta"
+  write_covered_outcome_index "$state" coverednew 3
+  # A later status append moves the log past the covered endpoint.
+  printf 'needs-decision: pick a scope\n' >> "$state/coverednew.status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end after new status bytes"
+  grep -E "signal: .*coverednew" "$out" >/dev/null \
+    || fail "watcher did not print the post-coverage signal: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the post-coverage turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "coverednew" >/dev/null \
+    || fail "post-coverage signal was not queued: $(cat "$drain_out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a status append after outcome coverage surfaces the next bare turn-end"
+}
+
+test_turn_ended_outcome_covered_absent_index_surfaces() {
+  local dir state fakebin out drain_out window pid
+  dir=$(make_case turn-ended-outcome-absent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-noindex"
+  printf 'done: ready\n' > "$state/noindex.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/noindex.meta"
+  prime_status_seen "$state/noindex.status"
+  : > "$state/noindex.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end with no outcome index"
+  grep -F "signal: $state/noindex.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not surface the no-index turn-end: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "an absent outcome index leaves bare turn-end surfacing unchanged"
+}
+
+test_turn_ended_outcome_covered_ident_mismatch_surfaces() {
+  local dir state fakebin out window pid size
+  dir=$(make_case turn-ended-outcome-ident); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-badident"
+  printf 'done: ready\n' > "$state/badident.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/badident.meta"
+  size=$(LC_ALL=C stat -c '%s' "$state/badident.status")
+  printf 'fm-branch-outcome-index-v1\t4\t%s\tweak:0:0\n' "$size" > "$state/.badident.branch-outcome-index"
+  prime_status_seen "$state/badident.status"
+  : > "$state/badident.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end with a mismatched outcome identity"
+  grep -F "signal: $state/badident.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not surface the identity-mismatched turn-end: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "an identity-mismatched outcome index leaves bare turn-end surfacing"
+}
+
+test_turn_ended_outcome_covered_bound_expires() {
+  local dir state fakebin out drain_out window key pid
+  dir=$(make_case turn-ended-outcome-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-bound"
+  printf 'done: ready\n' > "$state/bound.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/bound.meta"
+  write_covered_outcome_index "$state" bound 2
+  prime_status_seen "$state/bound.status"
+  : > "$state/bound.turn-ended"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  echo $(( $(date +%s) - 50 )) > "$state/.turnend-covered-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TURNEND_OUTCOME_ABSORB_SECS=30 FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface after the outcome-covered bound expired"
+  grep -F "signal: $state/bound.turn-ended" "$out" >/dev/null \
+    || fail "expired outcome-covered bound did not print the turn-end"
+  [ ! -e "$state/.turnend-covered-since-$key" ] \
+    || fail "expired outcome-covered bound left the window marker in place"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the bound-expired turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/bound.turn-ended" >/dev/null \
+    || fail "bound-expired turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "an expired outcome-covered bound surfaces one wake and clears the window"
+}
+
+test_turn_ended_outcome_covered_status_batch_never_uses_proof() {
+  local dir state fakebin out drain_out window pid
+  dir=$(make_case turn-ended-outcome-status-batch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-statusbatch"
+  printf 'working: still going\n' > "$state/statusbatch.status"
+  : > "$state/statusbatch.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/statusbatch.meta"
+  write_covered_outcome_index "$state" statusbatch 1
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a mixed status+turn-end batch via outcome coverage"
+  grep -F "$state/statusbatch" "$out" >/dev/null \
+    || fail "mixed status+turn-end batch did not surface"
+  unset FM_FAKE_CREW_STATE
+  pass "a batch containing any .status file never uses the outcome-covered proof"
+}
+
+test_turn_ended_outcome_covered_e2e_zero_turn_and_first_sights() {
+  local dir state fakebin out drain_out window key pid verb
+  dir=$(make_case turn-ended-outcome-e2e); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-e2e"
+  printf 'done: PR https://example.test/pr/11 checks green\n' > "$state/e2e.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/e2e.meta"
+  write_covered_outcome_index "$state" e2e 9
+  prime_status_seen "$state/e2e.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # N covered turn-ends with unchanged status: queue stays empty.
+  for _ in 1 2 3; do
+    : > "$state/e2e.turn-ended"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_absorbed "$state" "$pid" "absorbed benign signal (outcome-covered)" \
+      || { reap "$pid"; fail "e2e covered turn-end was not absorbed: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "e2e covered sequence enqueued a wake"; }
+    reap "$pid"
+    rm -f "$state/e2e.turn-ended" "$state/.seen-e2e_turn-ended"
+  done
+  # First sight of each captain-relevant verb still surfaces exactly once.
+  for verb in "needs-decision: choose" "blocked: waiting on credential" "failed: tests red" "done: follow-up ready"; do
+    # Stale coverage of an empty log, then a fresh captain-relevant status append:
+    # the first sight must surface even though an outcome index exists.
+    : > "$state/e2e.status"
+    write_covered_outcome_index "$state" e2e 9
+    printf '%s\n' "$verb" > "$state/e2e.status"
+    : > "$state/e2e.turn-ended"
+    : > "$out"
+    rm -f "$state/.wake-queue" "$state/.seen-e2e_turn-ended" "$state/.seen-e2e_status" \
+      "$state/.turnend-covered-since-$key" "$state/.hb-surfaced-e2e"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "e2e first sight of '$verb' did not surface: $(cat "$out")"
+    grep -E "signal:" "$out" >/dev/null \
+      || fail "e2e first sight of '$verb' printed no signal reason: $(cat "$out")"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+      || fail "drain after e2e first sight of '$verb' failed"
+    grep "$(printf '\tsignal\t')" "$drain_out" >/dev/null \
+      || fail "e2e first sight of '$verb' produced no signal row: $(cat "$drain_out")"
+    ack_stopped_cycle "$state" || fail "could not ack e2e first sight of '$verb'"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "covered turn-end sequence stays zero-turn while first sights still queue once each"
+}
+
+test_terminal_stale_outcome_covered_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale-outcome-covered); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done-covered"
+  printf 'finished, awaiting teardown' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/donecov.meta"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/donecov.status"
+  write_covered_outcome_index "$state" donecov 12
+  sig=$(seen_sig "$state/donecov.status"); printf '%s' "$sig" > "$state/.seen-donecov_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting teardown")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed stale (outcome-covered):" \
+    || { reap "$pid"; fail "covered terminal stale was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "covered terminal stale printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "covered terminal stale enqueued a wake"
+  [ -s "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "covered terminal stale did not write the declaration throttle"; }
+  case "$(cat "$state/.paused-resurfaced-$key")" in
+    outcome-covered:12:*) ;;
+    *) reap "$pid"; fail "covered terminal stale wrote the wrong declaration: $(cat "$state/.paused-resurfaced-$key")" ;;
+  esac
+  reap "$pid"
+  pass "a covered terminal-status pane re-hash is absorbed under the outcome-covered throttle"
+}
+
+test_terminal_stale_outcome_covered_new_status_surfaces() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale-outcome-new); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done-new"
+  printf 'finished, awaiting teardown' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/donenew.meta"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/donenew.status"
+  write_covered_outcome_index "$state" donenew 5
+  printf 'needs-decision: merge now?\n' >> "$state/donenew.status"
+  sig=$(seen_sig "$state/donenew.status"); printf '%s' "$sig" > "$state/.seen-donenew_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting teardown")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a terminal stale after new status"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "new-status terminal stale did not print"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after new-status terminal stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "new-status terminal stale was not queued"
+  pass "a new status event after outcome coverage surfaces terminal stale immediately"
+}
+
+test_terminal_stale_outcome_covered_resurfaces_on_cadence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid decl
+  dir=$(make_case terminal-stale-outcome-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done-resurface"
+  printf 'finished, awaiting teardown' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/doneres.meta"
+  printf 'done: PR https://example.test/pr/3\n' > "$state/doneres.status"
+  write_covered_outcome_index "$state" doneres 8
+  sig=$(seen_sig "$state/doneres.status"); printf '%s' "$sig" > "$state/.seen-doneres_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting teardown")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # First covered sight absorbs and arms the throttle.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed stale (outcome-covered):" \
+    || { reap "$pid"; fail "first covered terminal stale was not absorbed: $(cat "$out")"; }
+  decl=$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)
+  case "$decl" in
+    outcome-covered:8:*) ;;
+    *) reap "$pid"; fail "first covered sight wrote no outcome-covered declaration: $decl" ;;
+  esac
+  reap "$pid"
+  # Age the throttle past the cadence, then a new hash must re-surface once.
+  touch -d '2 hours ago' "$state/.paused-resurfaced-$key" 2>/dev/null \
+    || touch -t "$(date -u -d '2 hours ago' +%Y%m%d%H%M.%S 2>/dev/null || date -u -v-2H +%Y%m%d%H%M.%S)" \
+         "$state/.paused-resurfaced-$key"
+  printf 'finished, awaiting teardown (repaint)' > "$capture_file"
+  pane_hash=$(hash_text "finished, awaiting teardown (repaint)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a covered terminal stale past cadence"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "cadence re-surface did not print"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after cadence re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "cadence re-surface was not queued"
+  pass "a covered terminal stale re-surfaces once per PAUSE_RESURFACE_SECS"
+}
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -5088,6 +5429,8 @@ test_turn_ended_malformed_prior_hash_surfaced
 test_turn_ended_trailing_newline_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
+
+
 test_turn_ended_duplicate_endpoint_records_surfaced
 test_turn_ended_mixed_positive_evidence_batch_absorbed
 test_turn_ended_mixed_positive_evidence_batch_default_off
@@ -5114,6 +5457,16 @@ test_release_completion_survives_a_later_routine_append
 test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
+test_turn_ended_outcome_covered_absorbed
+test_turn_ended_outcome_covered_new_status_surfaces
+test_turn_ended_outcome_covered_absent_index_surfaces
+test_turn_ended_outcome_covered_ident_mismatch_surfaces
+test_turn_ended_outcome_covered_bound_expires
+test_turn_ended_outcome_covered_status_batch_never_uses_proof
+test_turn_ended_outcome_covered_e2e_zero_turn_and_first_sights
+test_terminal_stale_outcome_covered_absorbed
+test_terminal_stale_outcome_covered_new_status_surfaces
+test_terminal_stale_outcome_covered_resurfaces_on_cadence
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

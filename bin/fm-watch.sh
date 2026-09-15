@@ -232,6 +232,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+TURNEND_OUTCOME_ABSORB_SECS=${FM_TURNEND_OUTCOME_ABSORB_SECS:-900}  # longest a task's
+                                      # bare turn-ends may ride an already-handled
+                                      # outcome-index coverage proof before one wake
+                                      # surfaces and the window restarts
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -695,6 +699,113 @@ signal_turnend_panes_churned() {  # <file> ...
       return 1
     fi
   done
+  return 0
+}
+
+# Default-on proof for batches that contain ONLY bare .turn-ended markers: each
+# referenced task already has a valid branch-outcome index covering its whole
+# current status log under a matching identity. Reuses the same bounded per-task
+# index the drain trusts for its lost-wake backstop. Any .status file, absent or
+# invalid index, identity mismatch, new status bytes, unresolvable task, or an
+# exhausted per-window FM_TURNEND_OUTCOME_ABSORB_SECS bound returns 1 so the wake
+# surfaces exactly as before. The bound is mandatory for the same reason the
+# churn absorb's is: a worker that loops forever without appending status would
+# otherwise hide behind unchanged coverage while churn defeats the stale backbone.
+signal_turnend_outcome_covered() {  # <file> ...
+  local f base task meta kind w key now_s absorb_secs marker since age
+  local rec_task task_index i j count
+  local max_absorb_secs=9223372036854775807
+  local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=() snapshot_windows=() snapshot_keys=()
+  local -a signal_indexes=() covered_keys=() missing_keys=() created_keys=()
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     return 1 ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            return 1 ;;
+    esac
+    [ -n "$task" ] || return 1
+    task_index=-1
+    for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+      [ "${signal_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    if [ "$task_index" -lt 0 ]; then
+      signal_tasks+=("$task")
+    fi
+  done
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    rec_task=${meta##*/}
+    rec_task=${rec_task%.meta}
+    kind=$(fm_meta_get "$meta" kind)
+    w=$(fm_backend_target_of_meta "$meta")
+    key=
+    [ -n "$w" ] && key=$(window_key "$w")
+    snapshot_tasks+=("$rec_task")
+    snapshot_kinds+=("$kind")
+    snapshot_windows+=("$w")
+    snapshot_keys+=("$key")
+  done
+  for task in "${signal_tasks[@]}"; do
+    task_index=-1
+    for ((i = 0; i < ${#snapshot_tasks[@]}; i++)); do
+      [ "${snapshot_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    [ "$task_index" -ge 0 ] || return 1
+    w=${snapshot_windows[$task_index]}
+    key=${snapshot_keys[$task_index]}
+    [ -n "$w" ] && [ -n "$key" ] || return 1
+    count=0
+    for ((j = 0; j < ${#snapshot_keys[@]}; j++)); do
+      [ "${snapshot_keys[$j]}" = "$key" ] && count=$((count + 1))
+    done
+    [ "$count" -eq 1 ] || return 1
+    [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
+    branch_outcome_index_covers_status "$task" || return 1
+    signal_indexes+=("$task_index")
+    covered_keys+=("$key")
+  done
+  [ "${#covered_keys[@]}" -gt 0 ] || return 1
+  [[ $TURNEND_OUTCOME_ABSORB_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  if [ "${#TURNEND_OUTCOME_ABSORB_SECS}" -gt "${#max_absorb_secs}" ] \
+    || { [ "${#TURNEND_OUTCOME_ABSORB_SECS}" -eq "${#max_absorb_secs}" ] \
+      && [[ $TURNEND_OUTCOME_ABSORB_SECS -gt $max_absorb_secs ]]; }; then
+    return 1
+  fi
+  absorb_secs=$((10#$TURNEND_OUTCOME_ABSORB_SECS))
+  now_s=$(date +%s)
+  for key in "${covered_keys[@]}"; do
+    marker="$STATE/.turnend-covered-since-$key"
+    if [ ! -e "$marker" ]; then
+      [ ! -L "$marker" ] || return 1
+      missing_keys+=("$key")
+      continue
+    fi
+    since=$(cat "$marker" 2>/dev/null) || return 1
+    [[ $since =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    if [ "${#since}" -gt "${#now_s}" ] \
+      || { [ "${#since}" -eq "${#now_s}" ] && [[ $since > $now_s ]]; }; then
+      return 1
+    fi
+    age=$((10#$now_s - 10#$since))
+    if [ "$age" -ge "$absorb_secs" ]; then
+      rm -f "$marker"
+      return 1
+    fi
+  done
+  for key in "${missing_keys[@]}"; do
+    marker="$STATE/.turnend-covered-since-$key"
+    if (set -C; printf '%s' "$now_s" > "$marker") 2>/dev/null; then
+      created_keys+=("$key")
+      continue
+    fi
+    for created in "${created_keys[@]}"; do
+      rm -f "$STATE/.turnend-covered-since-$created"
+    done
+    return 1
+  done
+  FM_TURNEND_OUTCOME_COVERED=1
   return 0
 }
 
@@ -1389,6 +1500,30 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# Bound a terminal-status stale alarm whose latest status log is already covered
+# by a branch outcome. The finished result was already delivered; a new idle-pane
+# hash has nothing new to say until status bytes or a newer outcome change the
+# coverage identity. Declaration embeds the covered sequence and status signature
+# so any new event starts a fresh window whose first sight surfaces immediately.
+# First covered sight absorbs and arms the throttle; later sights inside
+# PAUSE_RESURFACE_SECS absorb; a sight after the cadence returns 1 so the caller
+# alarms once and refreshes the throttle through stale_wait_record.
+outcome_covered_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 sig throttle
+  STALE_WAIT_DECLARATION=
+  branch_outcome_index_covers_status "$task" || return 1
+  [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] || return 1
+  sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
+  STALE_WAIT_DECLARATION="outcome-covered:${BRANCH_OUTCOME_INDEX_SEQ}:${sig}"
+  throttle="$STATE/.paused-resurfaced-$key"
+  if [ "$(cat "$throttle" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && return 0
+    return 1
+  fi
+  printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle"
+  return 0
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2260,6 +2395,7 @@ EOF
     # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
+    FM_TURNEND_OUTCOME_COVERED=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
@@ -2275,7 +2411,9 @@ EOF
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { ! signal_crew_provably_working $files \
+        && ! signal_turnend_panes_churned $files \
+        && ! signal_turnend_outcome_covered $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -2333,7 +2471,11 @@ $pending
 EOF
         wake "$reason"
       fi
-      triage_log "absorbed benign $reason"
+      if [ "${FM_TURNEND_OUTCOME_COVERED:-0}" -eq 1 ]; then
+        triage_log "absorbed benign signal (outcome-covered)"
+      else
+        triage_log "absorbed benign $reason"
+      fi
     fi
   fi
 
@@ -2434,6 +2576,15 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif outcome_covered_stale_bound "$key" "$task"; then
+              # A branch outcome already covered this terminal status. Further
+              # NEW pane hashes of the same finished state are noise until the
+              # long cadence asks for a forgotten-teardown recheck, or a new
+              # status event / newer outcome changes the declaration.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (outcome-covered): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

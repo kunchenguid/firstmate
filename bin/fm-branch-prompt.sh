@@ -48,7 +48,7 @@ Handle it start to finish in one turn sequence:
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
    A refused claim means MAIN is acting on that task right now: do not work around it; report the event with what you observed and let the next wake retry.
 3. Handle with real tools: `bin/fm-crew-state.sh <task>` for current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves.
-4. Report: call the fm_branch_report tool exactly once per handled event, with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a fleet-wide heartbeat review that found literally nothing worth reporting.
+4. Report: call the fm_branch_report tool exactly once per handled event, with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a fleet-wide heartbeat review that found literally nothing worth reporting; on a captain verdict set action to none only when the finished result is already fully delivered (anchor-ready summary with PR URL when applicable, and any PR poll already armed), otherwise action main or omit it.
    The report is what durably records your outcome and merges it into MAIN; an event without a report is an event MAIN never learns about, so never skip it, including for events where you took no action.
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
@@ -74,6 +74,9 @@ Also report verdict captain for:
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
 Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
+On a captain verdict, set action to none only for a display-only finished result whose delivery is already complete: the summary is anchor-ready, any PR URL is included, and any PR poll the operating procedure required is already armed.
+Use action main, or omit action, for decisions, blockers, ask-user findings, credential needs, destructive or security-sensitive work, and anything MAIN must still do.
+When genuinely in doubt about action, choose main.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 
 # PR identity: copy or abstain

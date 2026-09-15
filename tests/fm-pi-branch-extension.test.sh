@@ -4932,7 +4932,87 @@ test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
+
+test_captain_outcome_action_none_skips_processing_turn() {
+  local repo home out status
+  repo="$TMP_ROOT/action-none-root"
+  home="$TMP_ROOT/action-none-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+const runOf = async (fn) => { await fire("agent_start", {}); await fn?.(); await fire("agent_end", {}); await fire("agent_settled", {}); };
+
+await fire("session_start", {}, defaultSessionCtx);
+
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const offer = dispatch("signal: display-only wake");
+if (!offer.accepted) throw new Error("branch refused the display-only wake");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "display-only branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+const noneResult = await report.execute("none-1", {
+  task: "branch-driver",
+  verdict: "captain",
+  summary: "PR https://example.com/pr/display is ready",
+  action: "none",
+}, undefined, undefined, {});
+if (noneResult.isError) throw new Error(`action none report failed: ${JSON.stringify(noneResult)}`);
+finishPrompt();
+await offer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+
+const seq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+const row = JSON.parse(outcomeScript(["list", "--recent", "1"]));
+if (row.action !== "none") throw new Error(`stored action was ${row.action}, not none`);
+if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
+  throw new Error("action none did not persist its anchor entry");
+}
+if (requests().length !== 0) throw new Error(`action none opened a processing request: ${JSON.stringify(requests())}`);
+if (unprocessedSeqs().length !== 0) throw new Error(`action none left unprocessed rows: ${unprocessedSeqs()}`);
+if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== String(seq)) {
+  throw new Error("action none did not advance the processed marker through the display-only path");
+}
+await runOf();
+if (requests().length !== 0) throw new Error("action none grew a processing request at the run boundary");
+
+// action main still opens the turn and keeps the re-presentation budget.
+const mainResult = await report.execute("main-1", {
+  task: "branch-driver",
+  verdict: "captain",
+  summary: "worker blocked on a missing credential",
+  action: "main",
+}, undefined, undefined, {});
+if (mainResult.isError) throw new Error(`action main report failed: ${JSON.stringify(mainResult)}`);
+const mainSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+if (requests().length !== 1) throw new Error(`action main opened ${requests().length} requests, not 1`);
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([mainSeq])) {
+  throw new Error(`action main did not leave its sequence unprocessed: ${unprocessedSeqs()}`);
+}
+await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: [] } }));
+if (requests().length !== 2) throw new Error("action main did not re-present after an empty answer");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([mainSeq])) {
+  throw new Error("an empty answer closed an action main sequence");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "action none must skip the processing turn while action main keeps it: $out"
+  pass "action none captain outcomes advance the processed marker with no main turn"
+}
+
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_captain_outcome_action_none_skips_processing_turn
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback

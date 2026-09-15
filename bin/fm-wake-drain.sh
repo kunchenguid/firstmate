@@ -249,57 +249,7 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
-BRANCH_OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
-BRANCH_OUTCOME_INDEX_MAX_BYTES=512
-BRANCH_OUTCOME_INDEX_STATE=ok
-BRANCH_OUTCOME_INDEX_ENDPOINT=
-BRANCH_OUTCOME_INDEX_IDENT=
 STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
-outcome_index_ready_ok() { # <ready-path>
-  local seq
-  [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ] || return 1
-  seq=$(LC_ALL=C command cat "$1" 2>/dev/null) || return 1
-  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-  return 0
-}
-
-load_branch_outcome_index() { # <task>
-  local task=$1 path data version seq endpoint ident extra size
-  BRANCH_OUTCOME_INDEX_STATE=ok
-  BRANCH_OUTCOME_INDEX_ENDPOINT=
-  BRANCH_OUTCOME_INDEX_IDENT=
-  case "$task" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  path="$STATE/.$task.branch-outcome-index"
-  [ -e "$path" ] || [ -L "$path" ] || return 0
-  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ -L "$path" ]; then
-    BRANCH_OUTCOME_INDEX_STATE=invalid
-    return 0
-  fi
-  size=$(_fm_status_file_size "$path") || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
-  if [ "$size" -gt "$BRANCH_OUTCOME_INDEX_MAX_BYTES" ]; then
-    BRANCH_OUTCOME_INDEX_STATE=invalid
-    return 0
-  fi
-  data=$(LC_ALL=C command cat "$path" 2>/dev/null) \
-    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
-  case "$data" in *$'\n'*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
-  IFS=$(printf '\t') read -r version seq endpoint ident extra <<EOF
-$data
-EOF
-  if [ "$version" != "$BRANCH_OUTCOME_INDEX_VERSION" ] || [ -n "$extra" ]; then
-    BRANCH_OUTCOME_INDEX_STATE=invalid
-    return 0
-  fi
-  case "$seq:$endpoint" in *[!0-9:]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
-  [ -n "$seq" ] && [ -n "$endpoint" ] && [ -n "$ident" ] \
-    && [ "${#seq}" -le 16 ] && [ "${#endpoint}" -le 16 ] \
-    && [ "$seq" -le 9007199254740991 ] && [ "$endpoint" -le 9007199254740991 ] \
-    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
-  BRANCH_OUTCOME_INDEX_ENDPOINT=$endpoint
-  BRANCH_OUTCOME_INDEX_IDENT=$ident
-}
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready

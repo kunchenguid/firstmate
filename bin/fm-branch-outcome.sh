@@ -6,8 +6,11 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible.
+#     "statusEndpoint":N,"statusIdent":"...","action":"main"|"none"}.
+#     `action` is captain-row processing intent: main opens a main processing
+#     turn, none is display-only (anchor entry only). Legacy rows without
+#     `silent`, status provenance, or `action` remain valid; missing `action`
+#     reads as main, the safe direction; missing `silent` is treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -23,21 +26,24 @@
 #     Pi's session, so reload recovery is idempotent across that crash window.
 #     A cursor beyond the validated store tail fails closed.
 #   - Processed marker: $STATE/.branch-outcomes-processed holds the highest
-#     seq whose captain rows main has ACKNOWLEDGED as processed, separately
+#     seq whose captain rows have been ACKNOWLEDGED as processed, separately
 #     from the read cursor: reading (the visible entry) is the branch's act,
-#     processing (main acting on the outcome and calling its acknowledgement
-#     tool) is main's. A captain row between the two markers is "unprocessed":
-#     delivered and shown, not yet acted on. Routine rows never wait on this
-#     marker. It only advances through an explicit sequence-bound
-#     acknowledgement naming a currently unprocessed captain row at or below
-#     the read cursor; a routine, unread, or already-processed target is
-#     refused. It never moves past the read cursor or backwards, so an
-#     unrelated or empty model answer cannot move it. An absent marker reads as
-#     0 (every delivered captain row is unprocessed, the safe direction);
-#     processed-init is the one-time migration that sets an absent marker to
-#     the read cursor so rows delivered before the marker existed are not
-#     re-presented. A present marker is validated before the migration returns,
-#     and a marker ahead of the read cursor fails closed.
+#     processing is either main's acknowledgement tool or the one
+#     extension-owned display-only path below. A captain row between the two
+#     markers is "unprocessed": delivered and shown, not yet closed. Routine
+#     rows never wait on this marker. The marker advances through an explicit
+#     sequence-bound acknowledgement naming a currently unprocessed captain
+#     row at or below the read cursor; a routine, unread, or already-processed
+#     target is refused. It never moves past the read cursor or backwards, so
+#     an unrelated or empty model answer cannot move it. The sole non-main
+#     path is `mark-processed --through N --display-only`, which additionally
+#     requires every captain row in (processed, N] to carry `action:none` and
+#     refuses any `action:main` (or omitted/legacy main) row in that span. An
+#     absent marker reads as 0 (every delivered captain row is unprocessed, the
+#     safe direction); processed-init is the one-time migration that sets an
+#     absent marker to the read cursor so rows delivered before the marker
+#     existed are not re-presented. A present marker is validated before the
+#     migration returns, and a marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
 #     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
@@ -59,8 +65,10 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
-#     Append one outcome record; prints the assigned seq.
+#       --summary <text> [--wake <text>] [--silent true|false] \
+#       [--action main|none]
+#     Append one outcome record; prints the assigned seq. `--action` defaults
+#     to main; none is valid only on captain rows (display-only delivery).
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -68,10 +76,11 @@
 #   fm-branch-outcome.sh unprocessed
 #     Print every captain record that is read but not yet processed (raw
 #     JSONL, ascending seq). Exit 0 with no output when none.
-#   fm-branch-outcome.sh mark-processed --through <seq>
-#     Advance the processed marker after main acknowledged the captain rows
-#     through <seq>; the target itself must be a currently unprocessed captain
-#     row at or below the read cursor.
+#   fm-branch-outcome.sh mark-processed --through <seq> [--display-only]
+#     Advance the processed marker after the captain rows through <seq> were
+#     acknowledged; the target itself must be a currently unprocessed captain
+#     row at or below the read cursor. `--display-only` is the extension-owned
+#     path for action:none rows and refuses any action:main row in the span.
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed
 #     marker at the current read cursor when it does not exist yet; validate a
@@ -107,7 +116,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--action main|none] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> [--display-only] | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -177,6 +186,12 @@ read_processed() {
 last_seq() {
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
   jq -Rse '
+    def status_ok:
+      ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
+      and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not));
+    def action_ok:
+      (.action == "main" or .action == "none")
+      and (.action != "none" or .verdict == "captain");
     def valid:
       type == "object"
       and (
@@ -185,8 +200,13 @@ last_seq() {
         or (
           keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
           and (.silent | type) == "boolean"
-          and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
-          and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+          and status_ok
+        )
+        or (
+          keys == ["action", "epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and (.silent | type) == "boolean"
+          and status_ok
+          and action_ok
         )
       )
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
@@ -427,6 +447,7 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
+    ACTION=main
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --task) TASK=${2:-}; shift 2 || usage ;;
@@ -434,6 +455,7 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --action) ACTION=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
@@ -442,8 +464,13 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
+    case "$ACTION" in main|none) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
       echo "error: silent outcomes must be routine fleet outcomes" >&2
+      exit 2
+    fi
+    if [ "$ACTION" = none ] && [ "$VERDICT" != captain ]; then
+      echo "error: action none is only valid on captain outcomes" >&2
       exit 2
     fi
     fm_lock_acquire_wait "$LOCK"
@@ -460,10 +487,10 @@ case "$CMD" in
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","action":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$ACTION" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
@@ -528,10 +555,16 @@ case "$CMD" in
     exit "$STATUS"
     ;;
   mark-processed)
-    [ "${1:-}" = --through ] || usage
-    THROUGH=${2:-}
+    DISPLAY_ONLY=0
+    THROUGH=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --through) THROUGH=${2:-}; shift 2 || usage ;;
+        --display-only) DISPLAY_ONLY=1; shift ;;
+        *) usage ;;
+      esac
+    done
     bounded_uint "$THROUGH" || usage
-    [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
     if ! CURSOR_SEQ=$(read_cursor) || ! PROCESSED_SEQ=$(read_processed); then
       fm_lock_release "$LOCK"
@@ -567,6 +600,25 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
       exit 1
+    fi
+    if [ "$DISPLAY_ONLY" -eq 1 ]; then
+      SPAN_OK=$(jq -rs --argjson processed "$PROCESSED_SEQ" --argjson through "$THROUGH" '
+        [ .[] | select(.seq > $processed and .seq <= $through and .verdict == "captain")
+          | ((.action // "main") == "none") ]
+        | if length == 0 then "missing"
+          elif all then "ok"
+          else "main"
+          end
+      ' "$STORE") || SPAN_OK=error
+      if [ "$SPAN_OK" != ok ]; then
+        fm_lock_release "$LOCK"
+        if [ "$SPAN_OK" = main ]; then
+          echo "error: refusing display-only processed advancement because an action:main captain outcome is in the span through $THROUGH" >&2
+        else
+          echo "error: refusing display-only processed advancement because seq $THROUGH is not a display-only captain span" >&2
+        fi
+        exit 1
+      fi
     fi
     write_processed "$THROUGH"
     fm_lock_release "$LOCK"
