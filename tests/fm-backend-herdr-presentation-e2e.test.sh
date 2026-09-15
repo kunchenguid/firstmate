@@ -675,49 +675,31 @@ pass "real Herdr lab: every projected create, task-tab create, seeded prune, and
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
 ACTIVE_SEEDED_START=$(log_line_count)
-ACTIVE_SEEDED_FOCUS_START=$(focus_audit_line_count)
-if spawn_task active-seeded "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/active-seeded.out" 2> "$TMP_ROOT/active-seeded.err"; then
-  fail "active seeded-tab projection should refuse the prune"
+cp "$MOVE_CALL_LOG" "$TMP_ROOT/move-log-before-active-seeded"
+if ! spawn_task active-seeded "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/active-seeded.out" 2> "$TMP_ROOT/active-seeded.err"; then
+  fail "detached persisted-focus seeded prune should succeed: $(cat "$TMP_ROOT/active-seeded.err")"
 fi
-grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1 \
-  || fail "active seeded-tab projection did not report its exact refusal"
-ACTIVE_SEEDED_WSID=$(cat "$ACTIVE_SEEDED_CONTROL/workspace")
-ACTIVE_SEEDED_TAB=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
+if grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1; then
+  fail "detached persisted-focus seeded prune still used the live-viewer refusal"
+fi
 ACTIVE_SEEDED_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")
 ACTIVE_SEEDED_TASK_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/task-pane")
-ACTIVE_SEEDED_FOCUS="$ACTIVE_SEEDED_WSID/$ACTIVE_SEEDED_TAB"
-assert_focus_is "$ACTIVE_SEEDED_FOCUS" "active seeded-tab prune refusal"
-assert_raw_presentation_mutations_preserved_since "$ACTIVE_SEEDED_FOCUS_START" "active seeded-tab prune refusal"
-lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
-  || fail "active seeded-tab refusal removed the exact seeded pane"
-if lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1; then
-  fail "active seeded-tab failure did not abort-clean the non-active task pane"
+if lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
+  fail "detached persisted-focus seeded prune left the seeded pane behind"
 fi
-sed -n "$((ACTIVE_SEEDED_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v focus="$ACTIVE_SEEDED_FOCUS" -v pane="$ACTIVE_SEEDED_PANE" '
-  $1 == "seeded-prune-refusal" && $2 == focus && $3 == focus && $4 == pane { found = 1 }
-  END { exit(found ? 0 : 1) }
-' || fail "guarded lab did not observe exact focus across the active seeded-tab refusal"
-if sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
-  fail "active seeded-tab refusal closed the exact active pane"
-fi
+lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1 \
+  || fail "detached persisted-focus seeded prune lost the task pane"
+sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
+  || fail "detached persisted-focus seeded prune did not close the seeded pane"
 lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after the active seeded-tab fixture"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture restoration"
 rm -rf "$ACTIVE_SEEDED_CONTROL"
-ACTIVE_SEEDED_CLEANUP_FOCUS_START=$(focus_audit_line_count)
-ACTIVE_SEEDED_LOCK=$(session_presentation_lock_path) \
-  || fail "could not resolve the session presentation lock for active-seeded cleanup"
-PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" bash -c '
-  . "$0/bin/fm-wake-lib.sh"
-  . "$0/bin/backends/herdr.sh"
-  lock=$1
-  fm_lock_acquire_wait "$lock"
-  fm_backend_herdr_projection_cleanup_exact "$2" "$3" "$4"
-  fm_lock_release "$lock"
-' "$ROOT" "$ACTIVE_SEEDED_LOCK" "$HERDR_LAB_SESSION" "$ACTIVE_SEEDED_TASK_PANE" "$ACTIVE_SEEDED_PANE"
+remember_meta_worktree "$HOME_DIR/state/active-seeded.meta" >/dev/null
+teardown_task active-seeded "$HOME_DIR" > "$TMP_ROOT/active-seeded-teardown.out" 2> "$TMP_ROOT/active-seeded-teardown.err" \
+  || fail "detached persisted-focus seeded prune leftover teardown failed: $(cat "$TMP_ROOT/active-seeded-teardown.err")"
+cp "$TMP_ROOT/move-log-before-active-seeded" "$MOVE_CALL_LOG"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture cleanup"
-assert_cleanup_focus_preserved "$ACTIVE_SEEDED_CLEANUP_FOCUS_START" "$ACTIVE_SEEDED_PANE" "$CAPTAIN_FOCUS"
-rm -f "$HOME_DIR/state/active-seeded.herdr-presentation"
-pass "real Herdr lab: active seeded-tab pruning refuses the exact pane and preserves exact focus"
+pass "real Herdr lab: persisted-focused seeded prune proceeds when no live client is attached"
 
 LOCK_CONTENTION_READY="$TMP_ROOT/lock-contention-ready"
 LOCK_CONTENTION_RELEASE="$TMP_ROOT/lock-contention-release"
@@ -767,7 +749,7 @@ fi
 assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback"
 assert_raw_presentation_mutations_preserved_since "$LOCK_CONTENTION_FOCUS_START" "bounded presentation lock flat fallback"
 teardown_task lock-contended "$HOME_DIR" > "$TMP_ROOT/lock-contended-teardown.out" 2> "$TMP_ROOT/lock-contended-teardown.err" \
-  || fail "flat lock-contention fixture teardown failed"
+  || fail "flat lock-contention fixture teardown failed: $(cat "$TMP_ROOT/lock-contended-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback teardown"
 pass "real Herdr lab: bounded lock contention warns and falls back flat without projection or focus drift"
 PROJECTION_ORDER_START=$(log_line_count)

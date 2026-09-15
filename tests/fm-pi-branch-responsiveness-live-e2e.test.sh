@@ -50,7 +50,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$PROJECT/.pi/extensions/fm-branch-supervision.ts"
-for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-operational-input; do
+for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-native-contract fm-operational-input; do
   cp "$ROOT/.pi/extensions/lib/$lib.ts" "$PROJECT/.pi/extensions/lib/$lib.ts"
 done
 
