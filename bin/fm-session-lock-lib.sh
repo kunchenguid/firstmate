@@ -6,6 +6,10 @@
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
+# fm_session_pid_valid() here is the single owner of which state/.lock values
+# are usable identities at all (a local pid or a Windows-tagged win:<pid>), so
+# the shell readers that gate startup, leases, trace binding, and the Claude
+# Stop auto-arm ask it instead of each keeping a private numeric test.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is

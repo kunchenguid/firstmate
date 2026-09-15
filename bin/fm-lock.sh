@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the harness (agent) identity found by the shared session-lock lib: the
+# shell's ancestry walk on POSIX, or a Windows-tagged win:<pid> resolved from the
+# harness's published pid on a Cygwin-family host, because the Cygwin process
+# boundary severs that ancestry. The identity lives as long as the firstmate
+# session, unlike the transient subshell PID of any one tool call, which is dead
+# moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
