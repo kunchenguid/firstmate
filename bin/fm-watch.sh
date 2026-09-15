@@ -1279,6 +1279,37 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# A stopped worker's unchanged pane can retain a timer from its last active
+# run. Resolve the wait before capture (which a missing endpoint cannot supply)
+# or hash-based wedge bookkeeping. Unread steers and positive busy signals
+# retain their own paths. Authoritative runs retain the inactive run monitor.
+ended_worker_wait_check() {  # <window> <task>
+  local win=$1 task=$2 key line reason
+  [ -n "$task" ] || return 1
+  [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = dead ] || return 1
+  fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
+  window_is_busy "$win" "" && return 1
+  task_captain_call_open "$task" || return 1
+  key=$(window_key "$win")
+  STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
+  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  case "$line" in
+    *"source: run-step"*|'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
+    'state: unknown '*|'state: stopped '*) ;;
+    *) return 1 ;;
+  esac
+  clear_stale_hash_tracking "$key"
+  afk_record_present && return 0
+  reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  stale_wait_record "$key"
+  wake "$reason"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -2249,6 +2280,9 @@ EOF
     # this guard: reaching it would require backlog reads for windows this gate
     # deliberately skips, putting that read on the ordinary poll hot path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+      continue
+    fi
+    if [ "$kind" != secondmate ] && ended_worker_wait_check "$w" "$task"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue

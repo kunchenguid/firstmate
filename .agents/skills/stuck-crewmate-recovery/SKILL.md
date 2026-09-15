@@ -30,6 +30,8 @@ Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secon
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
+The existing watcher scan in `bin/fm-inactive-reconcile.sh` observes these runs through decisions, terminal outcomes, or lost attribution without requiring a status-producing worker; reconcile its reported current state before any recovery action.
+When no run remains and the worker was deliberately ended for an open captain call, preserve the work and question instead of relaunching merely to silence a stale alarm; `bin/fm-watch.sh` owns that wait's bounded recheck.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.

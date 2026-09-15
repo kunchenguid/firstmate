@@ -2553,6 +2553,45 @@ test_open_captain_call_bounds_stale_churn() {
   pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
 }
 
+# A stopped worker can inherit a wedge timer from its preceding live run.
+# Holding the task does not change the pane bytes, so the same-hash branch must
+# reconcile the new wait rather than keep escalating the old working verdict.
+test_ended_worker_inherited_wedge_becomes_wait() {
+  local dir state out capture key
+  dir=$(make_hold_home ended-inherited-wedge 'working: preserved for the captain' hold) \
+    || fail "could not build stopped worker hold"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  key=$(hold_key)
+  printf 'preserved shell\n' > "$capture"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "stopped held worker did not report its wait"; }
+  grep -F 'possible wedge' "$out" >/dev/null && fail "stopped held worker inherited a false wedge: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null || fail "stopped worker was not classified as waiting: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge held worker wait"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped held worker repeated its alarm"
+  fi
+  reap "$HOLD_WATCH_PID"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.paused-resurfaced-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "unchanged stopped worker missed long decision recheck"; }
+  run_hold "$dir" open held-merge || fail "inspection closed the captain's decision"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the decision recheck"
+  bash -c '. "$1"; fm_task_inbox_write "$2" held-merge "resume after the pending decision"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" >/dev/null || fail "could not enqueue an unread instruction"
+  : > "$out"
+  FM_TASK_INBOX_GRACE_SECS=0 hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "ended-worker wait swallowed an unread instruction"; }
+  grep -F 'unread firstmate instruction' "$out" >/dev/null || fail "unread instruction did not override the held-worker cadence"
+  pass "a stopped held worker drops inherited wedges and rechecks unchanged panes on the decision cadence"
+}
+
 
 
 # The other half of the same bound, and the one that decides whether widening the
@@ -4865,6 +4904,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_open_captain_call_bounds_stale_churn
+test_ended_worker_inherited_wedge_becomes_wait
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
