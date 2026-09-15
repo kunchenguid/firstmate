@@ -58,6 +58,13 @@
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#                A bare composer's WRAP region (typed input continuing on the
+#                rows beneath the glyph row) is bounded by blank rows, by
+#                structural edges, and by the FURNITURE rows a harness draws
+#                directly below its composer - omp's status row, codex 0.154's
+#                status footer, and braille-only animation rows (declared once
+#                below, next to the idle placeholders) - none of which is ever
+#                typed input.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
@@ -86,6 +93,14 @@
 # content": it drops every de-emphasized run - dim/faint (SGR 2) AND a
 # dark/muted TRUECOLOR foreground - and keeps only normal-intensity,
 # normally-coloured text.
+# Ghost stripping is a STYLE test, so it cannot see furniture a harness draws
+# at normal intensity: codex-cli 0.154.0 animates a braille "starfield" around
+# its idle composer in greys on both sides of the ghost luminance ceiling, so
+# the brighter cells survive the strip and used to read as typed input. Those
+# cells are recognised by SHAPE instead (fm_composer_strip_braille and the
+# codex status footer, declared next to the idle placeholders below), and only
+# where a bare composer's furniture can sit: behind the glyph row's content
+# and on the rows that bound its wrap region.
 #
 # UNICODE WHITESPACE (issue #1988; open PRs #1995/#2047 target the same
 # defect and #1995's naming is adopted here so the implementations converge):
@@ -399,9 +414,14 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # hence the unanchored tail). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# 2026.08.11-e8db854). codex-cli 0.154.0 draws `Ask Codex to do anything` as an
+# SGR-2 dim placeholder after its bare `›` glyph (verified live through Herdr,
+# gpt-6-astra, fast mode); it is listed as the verified codex spelling, while
+# the ghost strip remains what proves that row empty: on a bare agent-glyph row
+# the same words surviving styling are real input, exactly as for every other
+# entry here. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Codex to do anything$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -426,6 +446,61 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # a middle dot. It is consulted only as the boundary BELOW a bare composer,
 # never on the composer row itself.
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# codex-cli 0.154.0 draws a one-row status footer directly BELOW its bare `›`
+# composer: the model cell, its reasoning-effort token, an optional `fast`
+# mode token, then middle-dot separated working-directory and session-title
+# cells, verified live through Herdr on codex-cli 0.154.0 (gpt-6-astra, fast
+# mode): `gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief`.
+# The model and path cells are bright truecolor, so ghost stripping keeps them,
+# and without this rule the bare composer's wrap region walks straight into
+# that row and an idle codex pane reads `pending`, the false verdict that
+# deferred every steering doorbell for the first codex 0.154 second mate.
+# A row is codex status furniture when it carries the effort token (codex's
+# own reasoning-effort vocabulary, one word after the model cell) followed by
+# a spaced middle dot and then a path cell opening with `~` or `/`, a
+# combination a wrapped typed row does not plausibly carry; a bare "contains a
+# middle dot" test would swallow a typed `fix · tests`. Exactly like the omp
+# rule, it is consulted only as the boundary BELOW a bare composer, never on
+# the composer row itself.
+FM_COMPOSER_CODEX_STATUS_RE_DEFAULT='^[[:space:]]*[^[:space:]]+[[:space:]]+(none|minimal|low|medium|high|xhigh)([[:space:]]+fast)?[[:space:]]+·[[:space:]]+(~|/)'
+
+# Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
+# 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
+# row, on the `›` row itself after the dim `Ask Codex to do anything`
+# placeholder, and on the row below it (verified live through Herdr on
+# codex-cli 0.154.0, gpt-6-astra, fast mode). The cells are truecolor greys
+# whose luminance straddles FM_COMPOSER_GHOST_LUMA_MAX, so the brighter ones
+# survive ghost stripping. The rule, applied by shape rather than style:
+#   - a row whose non-whitespace content is entirely braille cells is screen
+#     furniture; it never counts as wrapped typed content and it bounds a bare
+#     composer's wrap region exactly as the status rows above do;
+#   - braille cells behind the glyph row's content are stripped before that
+#     row's emptiness decision when NOTHING else follows the glyph;
+#   - a row that mixes braille with any other non-whitespace text stays typed
+#     content, because a human can type a braille character.
+# fm_composer_strip_braille is the ONE byte-exact remover: under LC_ALL=C awk
+# walks bytes and drops every UTF-8 sequence E2 A0..A3 80..BF. It is
+# deliberately not a grep bracket range over the block, for the reason
+# FM_OMP_SPINNER_FRAMES_RE records (GNU grep rejects a range between multibyte
+# endpoints). Reads stdin, prints the line with its braille cells removed.
+fm_composer_strip_braille() {
+  LC_ALL=C awk '
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\342" && i + 2 <= n) {
+          c2 = substr(line, i + 1, 1); c3 = substr(line, i + 2, 1)
+          if (c2 >= "\240" && c2 <= "\243" && c3 >= "\200" && c3 <= "\277") {
+            i += 3; continue
+          }
+        }
+        out = out c; i++
+      }
+      print out
+    }
+  '
+}
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
@@ -1001,6 +1076,8 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
+  _fm_composer_bare_row_strip_furniture_var content
+  _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
@@ -1017,6 +1094,42 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_codex_status: 0 when the trimmed row is codex's status
+# footer (FM_COMPOSER_CODEX_STATUS_RE_DEFAULT above) - the same furniture role
+# as the omp status row, consulted only as the boundary below a bare composer.
+_fm_composer_row_is_codex_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_CODEX_STATUS_RE:-$FM_COMPOSER_CODEX_STATUS_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
+# non-whitespace content is entirely braille cells (fm_composer_strip_braille
+# above) - an animation row that never counts as typed content and bounds a
+# bare composer's wrap region. A blank row is not furniture (the blank-row
+# rules own it), and a row mixing braille with anything else is not either.
+_fm_composer_row_is_braille_furniture() {  # <row>
+  local row=$1 rest
+  fm_composer_normalize_trim_var row
+  [ -n "$row" ] || return 1
+  rest=$(printf '%s\n' "$row" | fm_composer_strip_braille)
+  fm_composer_normalize_trim_var rest
+  [ -z "$rest" ]
+}
+
+# _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
+# the row to its glyph when everything behind the glyph is braille furniture,
+# in place through the named variable; a row whose tail carries anything else,
+# and a row with no agent glyph, are left untouched. This is the glyph-row half
+# of the braille rule: codex 0.154's starfield cells behind its (stripped)
+# placeholder must not stand in for typed input.
+_fm_composer_bare_row_strip_furniture_var() {  # <varname>
+  local __fmbf_name=$1 __fmbf_text=${!1} __fmbf_glyph='' __fmbf_body
+  fm_composer_leading_agent_glyph_var __fmbf_glyph "$__fmbf_text" || return 0
+  __fmbf_body=${__fmbf_text#*"$__fmbf_glyph"}
+  if _fm_composer_row_is_braille_furniture "$__fmbf_body"; then
+    printf -v "$__fmbf_name" '%s' "$__fmbf_glyph"
+  fi
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1031,6 +1144,8 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
     if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
+    if _fm_composer_row_is_codex_status "$trimmed"; then return 1; fi
+    if _fm_composer_row_is_braille_furniture "$trimmed"; then return 1; fi
     if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
   done
@@ -1049,8 +1164,11 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
   while [ "$row" -le "$cy" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
-    if [ "$row" -eq "$g" ] && fm_composer_leading_agent_glyph_var glyph "$content"; then
-      content=${content#*"$glyph"}
+    if [ "$row" -eq "$g" ]; then
+      _fm_composer_bare_row_strip_furniture_var content
+      if fm_composer_leading_agent_glyph_var glyph "$content"; then
+        content=${content#*"$glyph"}
+      fi
     fi
     fm_composer_normalize_trim_var content
     [ -z "$content" ] || text_seen=1
@@ -1168,6 +1286,8 @@ _fm_composer_select_cursorless() {
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
+      _fm_composer_row_is_codex_status "$trimmed" && break
+      _fm_composer_row_is_braille_furniture "$trimmed" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
