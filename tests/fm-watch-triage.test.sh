@@ -2006,8 +2006,8 @@ test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   # The session inventory names only the live window, which is what makes the
   # ghost's absence PROVEN rather than merely unreadable.
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS='fm-z-live' \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  FM_FAKE_TMUX_WINDOWS='fm-z-live' FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999 \
+    watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 150 || fail "watcher did not surface the live window's stale"
   grep -Fx "stale: $live" "$out" >/dev/null || fail "the live window's stale was not surfaced: $(cat "$out")"
