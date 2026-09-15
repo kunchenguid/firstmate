@@ -1064,6 +1064,58 @@ SH
   pass "a queue that cannot be counted keeps the queued-wake alarm up"
 }
 
+# A row that names an endpoint absent from the backend inventory and has no
+# current metadata owner is obsolete, not an unresolved current liveness issue.
+# Retire every duplicate in one locked pass and make a repeat drain silent.
+test_obsolete_stale_rows_are_retired_once() {
+  local dir state out err
+  dir=$(make_case obsolete-stale-row)
+  state="$dir/state"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane wV:p2 not found"}}'
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+  append_wake "$state" stale "default:wV:p2" "stale: default:wV:p2" || fail "first obsolete stale append failed"
+  append_wake "$state" stale "default:wV:p2" "stale: default:wV:p2" || fail "duplicate obsolete stale append failed"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "obsolete stale drain failed: $(cat "$err")"
+  grep -Fq 'retired 2 obsolete stale wake row(s)' "$err" \
+    || fail "obsolete stale rows were not retired as a batch: $(cat "$err")"
+  grep -Fq "default:wV:p2" "$err" || fail "retired stale evidence did not name the old endpoint"
+  [ ! -s "$state/.wake-queue" ] || fail "obsolete stale rows remained queued"
+
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "repeat obsolete stale drain failed: $(cat "$err")"
+  [ ! -s "$out" ] || fail "repeat obsolete stale drain presented a retired row: $(cat "$out")"
+  ! grep -Fq 'retired' "$err" || fail "repeat obsolete stale drain repeated the retirement"
+  pass "obsolete unowned stale endpoint rows are retired once and stay silent across a repeat drain"
+}
+
+# A current task owner is sufficient reason to preserve a stale row, even when
+# the endpoint looks like an old backend hint. Main must present and acknowledge
+# it normally so a genuine stale/liveness issue remains recoverable.
+test_current_stale_row_remains_presentable() {
+  local dir state out err
+  dir=$(make_case current-stale-row)
+  state="$dir/state"
+  printf 'window=live:fm-live\nkind=ship\n' > "$state/live.meta"
+  append_wake "$state" stale "live:fm-live" "stale: live:fm-live" || fail "current stale append failed"
+
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "current stale drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tstale\tlive:fm-live\t')" "$out" \
+    || fail "current stale row was suppressed instead of presented"
+  ! grep -Fq 'obsolete stale' "$err" || fail "current stale row was misclassified as obsolete"
+  ack_drain_err "$state" "$err" || fail "current stale row could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged current stale row remained queued"
+  pass "a current task's stale endpoint remains visible and acknowledgeable"
+}
+
 # A row that lost its structure can never be claimed, presented, or named by an
 # --ack-through cutoff, while it still counts as queued: without retirement it
 # wedges the queue permanently and keeps waking supervision.
@@ -2010,6 +2062,8 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_main_is_never_told_to_drain_rows_only_the_branch_owns
 test_uncountable_queue_still_raises_the_pending_alarm
+test_obsolete_stale_rows_are_retired_once
+test_current_stale_row_remains_presentable
 test_unconsumable_rows_are_retired_instead_of_wedging_the_queue
 test_branch_grant_refuses_rows_already_claimed_by_main
 test_actor_filter_precedes_same_key_deduplication

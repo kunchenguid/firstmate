@@ -32,6 +32,35 @@ _fm_wake_require_timeout() {
   . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
 }
 
+# Load the backend layer only for passive endpoint checks. Queue-only callers
+# should not inherit backend dependencies, while stale-row retirement needs the
+# recovery-grade missing verdict rather than a generic failed probe.
+_fm_wake_require_backend() {
+  command -v fm_backend_agent_state >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-backend.sh
+  . "$FM_WAKE_LIB_DIR/fm-backend.sh"
+}
+
+# 0 only when a stale row names an endpoint that is authoritatively absent and
+# no current task record owns that endpoint. A missing metadata match alone is
+# insufficient: a current but unregistered endpoint, or an unreadable backend,
+# must remain visible for recovery. The endpoint shapes used here deliberately
+# cover only backends with a recovery-grade missing verdict; unsupported or
+# ambiguous shapes stay queued.
+fm_wake_stale_row_is_obsolete() {  # <endpoint> <state-dir>
+  local endpoint=$1 state=$2 meta backend verdict
+  _fm_wake_require_backend || return 1
+  meta=$(fm_backend_meta_for_window "$endpoint" "$state" 2>/dev/null || true)
+  [ -z "$meta" ] || return 1
+  case "$endpoint" in
+    *:*:*) backend=herdr ;;
+    *:*) backend=tmux ;;
+    *) return 1 ;;
+  esac
+  verdict=$(fm_backend_agent_state "$backend" "$endpoint" 2>/dev/null || true)
+  [ "$verdict" = missing ]
+}
+
 # Pass a variable name to capture this frame's pid without forking it in $().
 # On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
 fm_current_pid() {  # [output-variable]
