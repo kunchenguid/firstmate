@@ -7,11 +7,15 @@
 # bin/fm-babysit.sh owns that contract; this suite pins it end to end:
 # foreground execution with stdout/stderr captured to a printed log path, exit
 # mirroring with a send attempt always preceding a 0 exit, the completion
-# statuses (completed, failed, signaled, timed-out), process-group cleanup on
-# timeout with no orphaned grandchildren, --fm-home precedence over FM_HOME
-# with a loud refusal when neither is set, the bounded tail in the message,
-# exactly one send retry with a pane-visible fallback line on double failure,
-# and one real delivery through the sibling fm-send.sh into a fixture home.
+# statuses (completed, failed, signaled, timed-out, interrupted), process-group
+# cleanup on timeout with no orphaned grandchildren, --fm-home precedence over
+# FM_HOME with a loud refusal when neither is set, the bounded tail in the
+# message, exactly one send retry with a pane-visible fallback line on double
+# failure, one real delivery through the sibling fm-send.sh into a fixture
+# home, the portable mktemp suffix on the default log path, KILL coverage for
+# TERM-resistant descendants on timeout, a single interrupt against a
+# TERM-ignoring child, and the monitor-mode group isolation used where setsid
+# is unavailable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -51,7 +55,8 @@ run_babysit() {
   local dir=$1
   shift
   env FM_BABYSIT_SEND="$dir/fake-send.sh" FM_HOME="$dir/home" \
-    "FM_BABYSIT_KILL_GRACE=${FM_BABYSIT_KILL_GRACE:-5}" "$BABYSIT" "$@" 2>&1
+    "FM_BABYSIT_KILL_GRACE=${FM_BABYSIT_KILL_GRACE:-5}" \
+    "FM_BABYSIT_NO_SETSID=${FM_BABYSIT_NO_SETSID:-}" "$BABYSIT" "$@" 2>&1
 }
 
 test_success_sends_one_message_with_log_and_tail() {
@@ -227,6 +232,91 @@ test_real_send_reaches_the_fixture_home_inbox() {
   pass "the default send path delivers one durable message through the real fm-send.sh"
 }
 
+test_default_log_uses_portable_mktemp_suffix() {
+  local dir out rc log
+  dir="$TMP/portable-log"
+  mkdir -p "$dir/home"
+  make_send_shim "$dir" >/dev/null
+  out=$(run_babysit "$dir" t1 -- sh -c 'echo portable-mktemp-probe'); rc=$?
+  expect_code 0 "$rc" "the default-log run must succeed"
+  log=$(printf '%s\n' "$out" | sed -n 's/.*log: //p' | head -n 1)
+  case "$log" in
+    *.log.??????) : ;;
+    *) fail "the default log path must keep the mktemp Xs last (portable form), got: $log" ;;
+  esac
+  assert_present "$log" "the portable-suffix log file must exist"
+  assert_grep "portable-mktemp-probe" "$log" "the log must capture the child output"
+  pass "the default log path uses the portable mktemp suffix form"
+}
+
+test_timeout_kills_term_resistant_grandchild() {
+  local dir out rc grandchild
+  dir="$TMP/timeout-resistant"
+  mkdir -p "$dir/home"
+  make_send_shim "$dir" >/dev/null
+  rm -f "$dir/grandchild.pid"
+  # shellcheck disable=SC2016 # $! and $1 expand in the child shell, not here.
+  out=$(FM_BABYSIT_KILL_GRACE=1 run_babysit "$dir" --timeout 2 t1 -- \
+    sh -c 'trap "" TERM; sleep 60 & echo $! > "$1"/grandchild.pid; echo started; wait' _ "$dir"); rc=$?
+  expect_code 124 "$rc" "a timed-out run must exit 124 even when descendants ignore TERM"
+  assert_contains "$(cat "$dir/sendlog")" "timed out after 2s" "the message must report the timeout status"
+  grandchild=$(cat "$dir/grandchild.pid")
+  if kill -0 "$grandchild" 2>/dev/null; then
+    fail "the KILL phase must reach a TERM-resistant grandchild (pid $grandchild alive)"
+  fi
+  pass "timeout KILLs the recorded group even when descendants ignore TERM"
+}
+
+test_single_interrupt_kills_term_ignoring_child() {
+  local dir child wrapper tries
+  dir="$TMP/single-interrupt"
+  mkdir -p "$dir/home"
+  make_send_shim "$dir" >/dev/null
+  rm -f "$dir/child.pid"
+  # shellcheck disable=SC2016 # $$ expands in the child shell, not here.
+  env FM_BABYSIT_SEND="$dir/fake-send.sh" FM_HOME="$dir/home" FM_BABYSIT_KILL_GRACE=1 \
+    "$BABYSIT" t1 -- sh -c 'echo $$ > "$1"/child.pid; trap "" TERM; exec sleep 60' _ "$dir" \
+    >"$dir/int.out" 2>&1 &
+  wrapper=$!
+  sleep 0.5
+  kill -TERM "$wrapper"
+  tries=0
+  while kill -0 "$wrapper" 2>/dev/null && [ "$tries" -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  if kill -0 "$wrapper" 2>/dev/null; then
+    fail "one interrupt must terminate the wrapper even when the child ignores TERM"
+  fi
+  wait "$wrapper"; rc=$?
+  expect_code 143 "$rc" "an interrupted wrapper must exit 143"
+  assert_equals 1 "$(send_calls "$dir")" "the interrupt must send exactly one message"
+  assert_contains "$(cat "$dir/sendlog")" "interrupted by SIGTERM" "the message must report the interruption"
+  child=$(cat "$dir/child.pid")
+  if kill -0 "$child" 2>/dev/null; then
+    fail "the interrupted run must leave no TERM-ignoring child behind (pid $child alive)"
+  fi
+  pass "one interrupt drives the full terminate primitive and still notifies"
+}
+
+test_setsid_fallback_still_isolates_group() {
+  local dir out rc grandchild
+  dir="$TMP/nosetsid"
+  mkdir -p "$dir/home"
+  make_send_shim "$dir" >/dev/null
+  rm -f "$dir/grandchild.pid"
+  # shellcheck disable=SC2016 # $! and $1 expand in the child shell, not here.
+  out=$(FM_BABYSIT_KILL_GRACE=1 FM_BABYSIT_NO_SETSID=1 run_babysit "$dir" --timeout 2 t1 -- \
+    sh -c 'sleep 60 & echo $! > "$1"/grandchild.pid; echo started; wait' _ "$dir"); rc=$?
+  expect_code 124 "$rc" "the monitor-mode fallback must still time out cleanly"
+  assert_contains "$(cat "$dir/sendlog")" "timed out after 2s" "the fallback run must still notify"
+  grandchild=$(cat "$dir/grandchild.pid")
+  if kill -0 "$grandchild" 2>/dev/null; then
+    fail "the monitor-mode fallback must leave no orphaned grandchild (pid $grandchild alive)"
+  fi
+  pass "the setsid fallback still isolates the child group and notifies"
+}
+
 test_backgrounded_wrapper_leaves_no_orphan_on_timeout() {
   local dir wrapper grandchild
   dir="$TMP/bg-timeout"
@@ -267,3 +357,7 @@ test_double_send_failure_prints_fallback_and_retries_once
 test_flaky_send_succeeds_on_retry
 test_real_send_reaches_the_fixture_home_inbox
 test_backgrounded_wrapper_leaves_no_orphan_on_timeout
+test_default_log_uses_portable_mktemp_suffix
+test_timeout_kills_term_resistant_grandchild
+test_single_interrupt_kills_term_ignoring_child
+test_setsid_fallback_still_isolates_group

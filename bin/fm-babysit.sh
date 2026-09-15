@@ -3,6 +3,7 @@
 # Usage: FM_HOME=<home> fm-babysit.sh [--fm-home <home>] [--timeout <seconds>] [--tail <lines>] [--log <path>] <task-id> -- <command> [<args>...]
 # The command runs in the foreground of the invoking pane, so the pane stays honestly busy while it runs.
 # Its stdout and stderr are captured to a log file: a fresh file under the TMPDIR scratch area by default, or a caller-chosen path under --log.
+# The default log template keeps the mktemp Xs at the end so it works with both GNU and BSD mktemp.
 # The log path is printed at start.
 # When the command finishes, is killed, or hits --timeout, exactly one durable steering message is appended through fm-send.sh to <task-id>.
 # That message reports the command, the completion status (completed, failed, signaled, timed-out, or interrupted), the exit code, the elapsed time, the log path, and the last --tail lines of the log (default 50, byte-capped).
@@ -10,9 +11,12 @@
 # The send is best-effort with one exact retry: when both attempts fail, one fallback line is printed to the pane and nothing else is written, so a lost notification stays observable instead of silently dropped.
 # The send home comes from --fm-home first and FM_HOME second; an absent or non-directory home is refused loudly before anything runs.
 # The send binary defaults to the fm-send.sh beside this script and must be executable; FM_BABYSIT_SEND overrides it (a test hook).
-# --timeout bounds the child: on expiry the child and its whole process group are sent SIGTERM, then SIGKILL after a short grace (FM_BABYSIT_KILL_GRACE seconds, default 5, also a test hook), the death is reported as timed-out, and the wrapper exits 124.
-# Process-group kills apply only when the child was launched in its own group via setsid; without setsid only the direct child is signaled, never the caller's group.
-# Otherwise the wrapper exits with the child's own exit code, so exit 0 always follows a completed send attempt, never a skipped one.
+# The child runs in its own process group, via setsid where available and via job-control monitor mode otherwise (FM_BABYSIT_NO_SETSID forces the fallback; a test hook).
+# Group signals therefore never touch the caller's group.
+# --timeout arms a timer that raises ALRM in this shell; ALRM and external TERM/INT all drive one bounded termination primitive: TERM the owned group, wait a bounded grace, KILL whatever owned members remain, then reap the leader and send the completion message.
+# The KILL phase targets the recorded group whenever it still has members, independent of whether the leader is still alive, so a TERM-resistant descendant can never be orphaned by a dead leader or a cancelled grace.
+# FM_BABYSIT_KILL_GRACE bounds the TERM-to-KILL grace in seconds (default 5, also a test hook).
+# On timeout the wrapper exits 124; otherwise it exits with the child's own exit code, so exit 0 always follows a completed send attempt, never a skipped one.
 # Only the log path, bounded /tmp scratch files, and the inbox record fm-send.sh owns are ever written; nothing is ever removed recursively.
 set -u
 
@@ -109,7 +113,7 @@ if [ -n "$LOG_GIVEN" ]; then
   LOG=$LOG_GIVEN
   : > "$LOG" || err 1 "cannot write log file: $LOG"
 else
-  LOG=$(mktemp "${TMPDIR:-/tmp}/fm-babysit-$TASK_ID.XXXXXX.log") || err 1 "cannot create scratch log file"
+  LOG=$(mktemp "${TMPDIR:-/tmp}/fm-babysit-$TASK_ID.log.XXXXXX") || err 1 "cannot create scratch log file"
 fi
 
 CMD_TEXT=""
@@ -121,90 +125,126 @@ printf "fm-babysit: running '%s' for task %s; log: %s\n" "$CMD_TEXT" "$TASK_ID" 
 
 START_EPOCH=$(date +%s)
 
-TIMEOUT_MARKER="${TMPDIR:-/tmp}/fm-babysit-timeout-$$-$RANDOM"
 CHILD=""
+PGID=""
 GROUPED=0
 WATCHDOG=""
 INTERRUPTED=""
+TIMEOUT_FIRED=0
+REAPED=0
+CODE=0
 TRAPPED=0
 
-# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
-babysit_kill_child() {
+# shellcheck disable=SC2329 # Invoked indirectly by the termination primitive and the signal traps below.
+babysit_owned_has_members() {
+  [ "$GROUPED" -eq 1 ] && [ -n "$PGID" ] && kill -0 "-$PGID" 2>/dev/null
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the termination primitive and the signal traps below.
+babysit_signal_owned() {
   local sig=$1
-  [ -n "$CHILD" ] || return 0
-  kill -0 "$CHILD" 2>/dev/null || return 0
-  if [ "$GROUPED" -eq 1 ]; then
-    kill "-$sig" "-$CHILD" 2>/dev/null || kill "-$sig" "$CHILD" 2>/dev/null || true
-  else
+  if [ "$GROUPED" -eq 1 ] && [ -n "$PGID" ]; then
+    kill "-$sig" "-$PGID" 2>/dev/null || {
+      kill -0 "$CHILD" 2>/dev/null && kill "-$sig" "$CHILD" 2>/dev/null || true
+    }
+  elif [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null; then
     kill "-$sig" "$CHILD" 2>/dev/null || true
   fi
 }
 
-# shellcheck disable=SC2329 # Invoked indirectly by the TERM/INT traps below.
-babysit_trap() {
-  TRAPPED=$((TRAPPED + 1))
-  if [ "$TRAPPED" -gt 1 ]; then
-    babysit_kill_child KILL
-  else
-    INTERRUPTED=$1
-    babysit_kill_child TERM
+# The single bounded termination primitive: TERM the owned target, wait out
+# the grace while owned members remain, then KILL whatever members remain.
+# Reaping stays with the main wait loop, so the completion message always
+# follows the final reap and no single signal can leave the wrapper waiting.
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+babysit_terminate() {
+  local waited=0 tenths
+  tenths=$((KILL_GRACE * 10))
+  babysit_signal_owned TERM
+  while babysit_owned_has_members && [ "$waited" -lt "$tenths" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if babysit_owned_has_members; then
+    babysit_signal_owned KILL
   fi
 }
 
-if command -v setsid >/dev/null 2>&1; then
+# shellcheck disable=SC2329 # Invoked indirectly by the main wait loop below.
+babysit_wait_leader() {
+  local rc
+  [ "$REAPED" -eq 1 ] && return 0
+  wait "$CHILD" 2>/dev/null
+  rc=$?
+  if [ "$REAPED" -eq 0 ]; then
+    CODE=$rc
+    REAPED=1
+  fi
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the ALRM trap below.
+babysit_on_alarm() {
+  [ "$REAPED" -eq 1 ] && return 0
+  TIMEOUT_FIRED=1
+  babysit_terminate
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the TERM/INT traps below.
+babysit_on_interrupt() {
+  [ "$REAPED" -eq 1 ] && return 0
+  TRAPPED=$((TRAPPED + 1))
+  if [ "$TRAPPED" -gt 1 ]; then
+    babysit_signal_owned KILL
+  else
+    INTERRUPTED=$1
+    babysit_terminate
+  fi
+}
+
+if [ -z "${FM_BABYSIT_NO_SETSID:-}" ] && command -v setsid >/dev/null 2>&1; then
   setsid "$@" >>"$LOG" 2>&1 &
   CHILD=$!
+  PGID=$CHILD
   GROUPED=1
 else
+  set -m
   "$@" >>"$LOG" 2>&1 &
   CHILD=$!
-  GROUPED=0
+  PGID=$CHILD
+  GROUPED=1
 fi
+
+trap 'babysit_on_alarm' ALRM
+trap 'babysit_on_interrupt TERM' TERM
+trap 'babysit_on_interrupt INT' INT
 
 if [ -n "$TIMEOUT" ]; then
   (
     sleep "$TIMEOUT"
-    if kill -0 "$CHILD" 2>/dev/null; then
-      : > "$TIMEOUT_MARKER" 2>/dev/null || true
-      if [ "$GROUPED" -eq 1 ]; then
-        kill -TERM "-$CHILD" 2>/dev/null || kill -TERM "$CHILD" 2>/dev/null || true
-      else
-        kill -TERM "$CHILD" 2>/dev/null || true
-      fi
-      sleep "$KILL_GRACE"
-      if kill -0 "$CHILD" 2>/dev/null; then
-        if [ "$GROUPED" -eq 1 ]; then
-          kill -KILL "-$CHILD" 2>/dev/null || kill -KILL "$CHILD" 2>/dev/null || true
-        else
-          kill -KILL "$CHILD" 2>/dev/null || true
-        fi
-      fi
-    fi
+    kill -ALRM "$$" 2>/dev/null || true
   ) &
   WATCHDOG=$!
 fi
 
-trap 'babysit_trap TERM' TERM
-trap 'babysit_trap INT' INT
-
-CODE=0
 while :; do
-  wait "$CHILD" 2>/dev/null
-  CODE=$?
+  babysit_wait_leader
   kill -0 "$CHILD" 2>/dev/null || break
 done
-
-trap - TERM INT
 
 if [ -n "$WATCHDOG" ]; then
   kill "$WATCHDOG" 2>/dev/null || true
   wait "$WATCHDOG" 2>/dev/null || true
 fi
-TIMED_OUT=0
-if [ -e "$TIMEOUT_MARKER" ] && [ "$CODE" -ne 0 ]; then
-  TIMED_OUT=1
+
+if { [ "$TIMEOUT_FIRED" -eq 1 ] || [ -n "$INTERRUPTED" ]; } && babysit_owned_has_members; then
+  babysit_signal_owned KILL
+  waited=0
+  tenths=$((KILL_GRACE * 10))
+  while babysit_owned_has_members && [ "$waited" -lt "$tenths" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
 fi
-rm -f -- "$TIMEOUT_MARKER" 2>/dev/null || true
 
 END_EPOCH=$(date +%s)
 ELAPSED=$((END_EPOCH - START_EPOCH))
@@ -212,7 +252,7 @@ ELAPSED=$((END_EPOCH - START_EPOCH))
 ELAPSED_TEXT=$(fm_format_elapsed "$ELAPSED")
 
 EXIT_CODE=0
-if [ "$TIMED_OUT" -eq 1 ]; then
+if [ "$TIMEOUT_FIRED" -eq 1 ] && [ "$CODE" -ne 0 ]; then
   STATUS="timed out after ${TIMEOUT}s; child killed"
   EXIT_CODE=124
 elif [ -n "$INTERRUPTED" ]; then
