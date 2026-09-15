@@ -1523,7 +1523,8 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid check_rc=0
+  FM_CHECK_TIMED_OUT=0
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -1543,9 +1544,12 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || check_rc=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
+  case "$check_rc" in
+    124) FM_CHECK_TIMED_OUT=1 ;;
+  esac
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
 }
@@ -2018,6 +2022,7 @@ while :; do
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
+          [ "$FM_CHECK_TIMED_OUT" -eq 0 ] || out="timed out after ${CHECK_TIMEOUT}s"
         else
           rejected_checks="$rejected_checks $c"
           continue
@@ -2041,10 +2046,12 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          [ "$FM_CHECK_TIMED_OUT" -eq 0 ] || out="timed out after ${CHECK_TIMEOUT}s"
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
+          [ "$FM_CHECK_TIMED_OUT" -eq 0 ] || out="timed out after ${CHECK_TIMEOUT}s"
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
