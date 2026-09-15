@@ -75,21 +75,23 @@
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
-# not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
-# That scan alone cannot prove THIS record is the current owner, because the task
-# that took the slot next may leave no record it can reach - its own worker may
-# have exited and its record been cleaned up, or it may live in a home this
-# machine does not register - which is how a released-then-reassigned slot was
-# returned out from under a live worker (observed 2026-09-07). So teardown also
-# reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
-# slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
+# not genuinely this task's destroys another worker's live work. Before any slot
+# cleanup, teardown first reads the slot's owner claim. If it names this task or
+# is absent, teardown verifies record exclusivity before the first slot cleanup:
+# no OTHER task record in this home or any locally registered Firstmate home may
+# name the same live path in its worktree= or home=. One live path with two task
+# records is the reuse collision itself, whichever record is stale.
+# The record-exclusivity scan alone cannot prove THIS record is the current owner,
+# because the task that took the slot next may leave no record it can reach - its
+# own worker may have exited and its record been cleaned up, or it may live in a
+# home this machine does not register - which is how a released-then-reassigned
+# slot was returned out from under a live worker (observed 2026-09-07). The slot's
+# owner claim is written by bin/fm-spawn.sh at the moment the slot is taken and
+# dropped here once it is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
+# names the claimant, skips the record-exclusivity scan, and then finishes only
+# this task's own cleanup - endpoint,
 # status, records, checks, backlog - while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
@@ -2180,11 +2182,12 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
+# The record-exclusivity scan proves that no OTHER task record names this slot
+# when the slot is still eligible for this task's cleanup. It cannot prove that
+# THIS record is not the stale one, because the task that took the slot next may
+# leave no record the scan can reach: its own worker may have exited and its
+# record been cleaned up, or it may belong to a home this machine does not
+# register. The claim closes that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
 # that allocates it - so a claim naming another task is proof the slot was
 # reassigned after this record was written.
