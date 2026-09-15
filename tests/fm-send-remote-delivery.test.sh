@@ -177,7 +177,7 @@ setup_remote_parent_home() {  # <name> <remote-home> -> echoes home dir
   home=$(setup_home "$1")
   mkdir -p "$home/data"
   fm_write_meta "$home/state/rsm.meta" \
-    "window=fm-remote:p1" \
+    "window=remote:rsm" \
     "endpoint_task_id=rsm" \
     "harness=claude" \
     "kind=secondmate" \
@@ -215,6 +215,13 @@ send_env() {  # <fakebin> <parent-home> <ssh-log> [extra env...] -- <cmd...>
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
     FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
     "$@"
+}
+
+replace_file() {
+  local file=$1 expression=$2 tmp
+  tmp=$(mktemp "${file}.XXXXXX")
+  sed "$expression" "$file" > "$tmp"
+  mv "$tmp" "$file"
 }
 
 test_remote_steer_lands_in_remote_inbox() {
@@ -502,6 +509,23 @@ test_remote_expected_host_revalidates_final_route() {
   count=$(remote_inbox_records "$rhome" | grep -c . || true)
   [ "$count" = 1 ] || fail "a mismatched expected remote host reached the remote inbox"
   pass "fm-send remote: expected host is enforced by final route validation"
+}
+
+test_remote_legacy_route_without_target() {
+  local dir fb ssh_log home rhome rc count
+  dir="$TMP_ROOT/remote-legacy-route"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-legacy-route)
+  home=$(setup_remote_parent_home remote-legacy-route "$rhome")
+  replace_file "$home/state/rsm.meta" '/^remote_target=/d'
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "legacy route steer" >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 0 "$rc" "an unguarded legacy remote route without remote_target must remain deliverable"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "the legacy remote route did not deliver exactly once"
+  pass "fm-send remote: unguarded legacy routes without remote_target remain ordinary"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
@@ -792,6 +816,7 @@ test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_expected_host_revalidates_final_route
+test_remote_legacy_route_without_target
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails

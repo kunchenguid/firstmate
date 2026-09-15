@@ -8,6 +8,28 @@ For a `kind=secondmate` target it always prepends the from-firstmate routing mar
 The **control plane** is [`bin/fm-control.sh`](../bin/fm-control.sh): allowlisted lifecycle verbs addressed to an exact task id.
 
 The split exists because the data plane's marking is exactly right for a message and exactly wrong for a lifecycle command.
+
+## Guard proof
+
+Both mutating entrypoints answer the exact non-mutating probe `--guard-capabilities --json`.
+The successful stdout is one JSON object with schema `fm-command-guard-proof.v1`, the command name, `verified: true`, and a deterministic guard list.
+`bin/fm-command-guard-lib.sh` owns that immutable capability table and the optional-environment comparison helpers used by the commands.
+
+`fm-control.sh` advertises `spawn-generation`.
+When `FM_CONTROL_EXPECTED_SPAWN_GEN` is non-empty, control rereads the current task generation under the task metadata lock and refuses before interrupt, exit, relaunch, or any lifecycle bytes when it is missing or different.
+Relaunch uses the old generation as its precondition and publishes a fresh generation through `bin/fm-spawn.sh` after replacement.
+Control remains generation-only in v1; its existing exact task-id, metadata, backend, endpoint, and lifecycle postcondition checks remain separate control-plane validation.
+
+`fm-send.sh` advertises `spawn-generation`, `endpoint`, and `remote-host` for every owned local task-selector path, including typed local sends.
+When `FM_SEND_EXPECTED_SPAWN_GEN` or `FM_SEND_EXPECTED_ENDPOINT` is non-empty, it rereads the canonical local task binding under the per-task metadata lock and refuses before pending-reply records, inbox enqueue, doorbells, or typed backend submission when the value is missing or different.
+Remote task selectors are outside the advertised v1 coverage for `spawn-generation` and `endpoint`; their remote transport and parent-generation publication are deferred to a focused follow-up, while the existing `FM_SEND_EXPECTED_REMOTE_HOST` check remains unchanged.
+For remote task selectors, when `FM_SEND_EXPECTED_REMOTE_HOST` is non-empty, it rereads the canonical remote host and refuses before remote transport when it is missing or different.
+Unset or empty values preserve ordinary behavior.
+An explicit backend target is an endpoint outside this home's task ledger, so it is excluded from the proof's authority claim and does not acquire task-selector guard semantics.
+
+The probe is recognized only for those exact two arguments.
+Other spellings remain ordinary command input, and a missing or unreadable home, state directory, or metadata set cannot produce a positive proof.
+The probe creates no state or delivery records.
 A routing-marked `/quit` arrives as ordinary chat - `[fm-from-firstmate] /quit` - which the agent reasons about instead of executing.
 The failure repeated across harnesses and homes, and the workaround (remember to use an unmarked send for agent-control commands, and improvise the right key or command per harness) lived only in agent prose, so it failed again every time a session did not happen to recall it.
 
@@ -122,6 +144,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 ## Verification
 
+- `tests/fm-command-guard-proof.test.sh` - the exact probe protocol, empty or unreadable home/state/metadata refusals, side-effect-free probing, local send generation and endpoint guards across inbox and typed paths, guard races, and control generation refusal before lifecycle bytes.
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
