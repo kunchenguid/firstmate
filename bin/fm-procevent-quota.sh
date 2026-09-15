@@ -107,6 +107,16 @@ valid_percent() {
   jq -en --arg n "$n" '($n | tonumber) <= 100' >/dev/null 2>&1
 }
 
+validate_source_override_contract() {
+  [ -z "$SOURCE_ID_OVERRIDE" ] && return 0
+  [ "$SOURCE_ID_OVERRIDE" = afk-codex-weekly ] \
+    && [ "$PROVIDER" = codex ] \
+    && [ "$scope" = weekly ] \
+    && [ "$threshold" = 70 ] \
+    && [ "$inclusive" -eq 1 ] \
+    || die "afk-codex-weekly is reserved for the inclusive 70% Codex weekly watch"
+}
+
 # quota_json [timeout]
 # Run `quota-axi --json` bounded by the given timeout. A missing or incompatible
 # quota-axi is an error condition, not a signal to fire.
@@ -218,6 +228,7 @@ cmd_arm() {
       *) usage ;;
     esac
   done
+  validate_source_override_contract
   resolve_provider "$PROVIDER"
   fm_quota_axi_compatible 5 >/dev/null 2>&1 || die "quota-axi is missing or below the compatibility floor"
   local timeout
@@ -258,7 +269,7 @@ cmd_poll() {
       --provider)  [ "$#" -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
       --scope)     [ "$#" -ge 2 ] || die "--scope needs a value"; valid_scope "$2" || die "--scope needs a path-safe value"; scope=$2; shift 2 ;;
       --inclusive) inclusive=1; shift ;;
-      --source-id) [ "$#" -ge 2 ] || die "--source-id needs a value"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
+      --source-id) [ "$#" -ge 2 ] || die "--source-id needs a value"; [ "$2" = afk-codex-weekly ] || die "--source-id is reserved for the AFK Codex weekly watch"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
       --timeout)   [ "$#" -ge 2 ] || die "--timeout needs a positive integer"; timeout=$2; shift 2 ;;
       *) usage ;;
     esac
@@ -266,6 +277,7 @@ cmd_poll() {
   positive_number "$interval" || die "--interval needs a positive number"
   valid_percent "$threshold" || die "--threshold needs a percent 0-100"
   [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
+  validate_source_override_contract
   resolve_provider "$PROVIDER"
   [ -z "$SOURCE_ID_OVERRIDE" ] || [ "$CANONICAL_SOURCE_ID" = "$SOURCE_ID_OVERRIDE" ] || die "poll source id does not match its provider"
   local json detail status polls=0

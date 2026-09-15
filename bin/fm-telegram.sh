@@ -396,7 +396,7 @@ telegram_posture_lock_release() {
 # Send one fixed event. Disabled/unconfigured homes are a successful no-op for
 # watcher callers; malformed configured files are reported to direct callers.
 telegram_send_kind() {
-  local kind=$1 text= rc=0
+  local kind=$1 text='' rc=0
   telegram_posture_lock_acquire || return 1
   if telegram_away_session_load; then
     telegram_state_prepare || rc=1

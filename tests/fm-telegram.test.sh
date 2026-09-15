@@ -151,6 +151,25 @@ generic_after=$(grep -c '^sendMessage$' "$LOG")
 [ "$generic_after" -eq "$generic_before" ] || fail "generic quota source produced a private AFK alert"
 ok "generic quota sources do not produce weekly AFK alerts"
 
+reserved_home="$LAB/reserved-quota-home"
+for malformed in \
+  '--threshold 70 --provider codex --scope five_hour --inclusive' \
+  '--threshold 70 --provider claude --scope weekly --inclusive' \
+  '--threshold 69 --provider codex --scope weekly --inclusive' \
+  '--threshold 70 --provider codex --scope weekly'
+do
+  # Word splitting here is deliberate: each fixture is an argv fragment made
+  # exclusively from fixed test literals.
+  # shellcheck disable=SC2086
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$reserved_home" FM_STATE_OVERRIDE="$reserved_home/state" \
+    "$BIN/fm-procevent-quota.sh" arm $malformed --source-id afk-codex-weekly >/dev/null 2>&1; then
+    fail "reserved AFK source accepted a non-weekly-Codex contract: $malformed"
+  fi
+done
+[ ! -e "$reserved_home/state/procevent/afk-codex-weekly.source" ] \
+  || fail "a malformed reserved AFK source was registered"
+ok "reserved AFK quota source accepts only the inclusive 70% Codex weekly contract"
+
 cat > "$home/state/quota.result" <<'EOF'
 quota: afk-codex-weekly
 status: low
