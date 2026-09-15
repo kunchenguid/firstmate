@@ -295,19 +295,34 @@ jq \
     } | task_projection($now));
   def secondmate_queued_projection($owner; $record):
     ($record + {id:scoped_id($owner; $record)} | queued_projection);
-  def secondmate_decision_projection($owner; $record; $queued):
+  def secondmate_decision_projection($owner; $record; $queued; $active; $now):
     (($queued // {}) + {
-      id:scoped_id($owner; $record),
-      title:($record.summary // $queued.title // $record.id),
-      repo:($queued.repo // null),
-      kind:($queued.kind // "captain"),
-      captain_actionable:true,
-      hold_bucket:($record.hold_bucket // $queued.hold_bucket // null),
-      hold_reason:($record.reason // $queued.hold_reason // $record.summary // null),
-      hold_until:($record.hold_until // $queued.hold_until // null),
-      hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
-      unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
-    } | queued_projection | .lane="waiting" | .state_source="structured-home-decision");
+        id:scoped_id($owner; $record),
+        title:($record.summary // $queued.title // $record.id),
+        repo:($queued.repo // $active.repo // null),
+        kind:($queued.kind // $active.kind // "captain"),
+        captain_actionable:true,
+        hold_bucket:($record.hold_bucket // $queued.hold_bucket // null),
+        hold_reason:($record.reason // $queued.hold_reason // $record.summary // null),
+        hold_until:($record.hold_until // $queued.hold_until // null),
+        hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
+        unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
+      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision") as $decision
+    | if $active == null then $decision
+      else (secondmate_active_projection($owner; $active; $now)) as $base
+      | $base + {
+          lane:"waiting",
+          attention:true,
+          attention_rank:0,
+          hold:$decision.hold,
+          blockers:$decision.blockers,
+          gate:$decision.gate,
+          artifacts:{
+            pr_url:($decision.artifacts.pr_url // $base.artifacts.pr_url),
+            report:(if $decision.artifacts.report.status == "available" then $decision.artifacts.report else $base.artifacts.report end)
+          }
+        }
+      end;
   def secondmate_completed_projection($owner; $record):
     ($record + {id:scoped_id($owner; $record),repo:($record.repo // null)} | completed_projection);
   . as $snapshot
@@ -336,7 +351,8 @@ jq \
        | select($mate.provenance.selected == "structured-home")
        | $mate.decisions_open[]? as $decision
        | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
-       | secondmate_decision_projection($mate; $decision; $queued_record)
+       | ([ $mate.active_children[]? | select(.id == $decision.id) ][0] // null) as $active_record
+       | secondmate_decision_projection($mate; $decision; $queued_record; $active_record; $now)
        | . + {_identity:("secondmate:" + .id),_priority:0} ]) as $secondmate_decisions
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
@@ -346,9 +362,12 @@ jq \
   | (($live_tasks + $queued + $completed + $secondmate_active + $secondmate_queued + $secondmate_decisions + $secondmate_completed)
       | sort_by([._identity,._priority,.id])
       | group_by(._identity)
-      | map(.[0] | del(._identity,._priority))) as $combined_tasks
+      | map(.[0])) as $combined_tasks
   | ($combined_tasks | length) as $combined_count
-  | ($combined_tasks[:500]) as $all_tasks
+  | ($combined_tasks
+      | sort_by([.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end),._identity])
+      | .[:500]
+      | map(del(._identity,._priority))) as $all_tasks
   | ([ $all_tasks[].project_id ] | unique | sort) as $project_ids
   | ([
       if $snapshot.main_inventory.valid != true then ($snapshot.main_inventory.reason // "invalid main inventory") | text(240) else empty end,

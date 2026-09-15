@@ -231,7 +231,7 @@ Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
 --json-read-only may consume an existing valid remote-summary cache but never
-creates or refreshes it.
+contacts a remote home, prepares a remote job, or creates or refreshes the cache.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -1405,6 +1405,7 @@ manifest=$2
 out_dir=$3
 filter=$4
 max_bytes=$5
+cache_writable=$6
 
 valid_summary() {  # <file> <home>
   local file=$1 home=$2 bytes
@@ -1434,11 +1435,13 @@ collect_one() {  # <manifest-row>
   slot=$(printf '%s' "$row" | jq -r '.slot') || return
   fetch="$out_dir/$slot.fetch"
   status="$out_dir/$slot.status"
-  if bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
-      "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
-      && valid_summary "$fetch" "$home"; then
-    printf 'fresh\n' > "$status"
-    return
+  if [ "$cache_writable" -eq 1 ]; then
+    if bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
+        "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
+        && valid_summary "$fetch" "$home"; then
+      printf 'fresh\n' > "$status"
+      return
+    fi
   fi
   if [ -n "$cache" ] && valid_summary "$cache" "$home"; then
     printf 'cached\n' > "$status"
@@ -1457,7 +1460,7 @@ BASH
   SNAPSHOT_COLLECTION_TIMED_OUT=0
   if fm_run_timed "$FM_SNAPSHOT_BUDGET" bash "$collector" \
       "$SCRIPT_DIR" "$manifest" "$SNAPSHOT_COLLECT_DIR" "$SNAPSHOT_SUMMARY_FILTER" \
-      "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"; then
+      "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" "$SNAPSHOT_CACHE_WRITABLE"; then
     :
   else
     rc=$?
