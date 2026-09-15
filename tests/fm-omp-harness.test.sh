@@ -61,37 +61,79 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   printf '%s' "$dir"
 }
 
+# Run <command> in <shell> detached from this suite's process tree: the launcher
+# exits immediately, the shell waits until it is reparented to init, and only
+# then runs the command, so the up-to-eight-hop ancestry walk inside
+# bin/fm-harness.sh terminates at init instead of escaping into a real omp
+# session that may be hosting this suite. This is the same orphaning the
+# session-lock e2e fixtures use. Extra arguments are env assignments for the
+# command's environment.
+run_detached() {  # <shell> <command> [env assignment...]
+  local sh=$1 command=$2 outfile i=0
+  shift 2
+  outfile=$(mktemp "$TMP_ROOT/detached.XXXXXX")
+  # shellcheck disable=SC2016 # the body deliberately expands inside the named shell
+  ( env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$@" \
+      FM_DETACHED_COMMAND="$command" "$sh" -c '
+        i=0
+        while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d " ")" != 1 ]; do
+          i=$((i + 1))
+          sleep 0.05
+        done
+        "$FM_DETACHED_COMMAND"
+        :
+      ' > "$outfile" 2>/dev/null & )
+  while [ "$i" -lt 200 ] && [ ! -s "$outfile" ]; do
+    i=$((i + 1))
+    sleep 0.05
+  done
+  cat "$outfile"
+}
+
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
   local bin out
   bin=$(make_named_shells "$TMP_ROOT/named")
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-    "$bin/omp" -c '"$1"; :' _ "$HARNESS")
+  out=$(run_detached "$bin/omp" "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
-    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+    out=$(run_detached "$bin/$decoy" "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    "$bin/omp" -c '"$1"; :' _ "$HARNESS")
+  out=$(run_detached "$bin/omp" "$HARNESS" CLAUDECODE=1 FM_OMP_HARNESS=omp)
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+  out=$(run_detached bash "$HARNESS" CLAUDECODE=1 FM_OMP_HARNESS=omp)
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+}
+
+test_detection_accepts_the_uppercase_title() {
+  local bin out
+  # omp 18.1.18 rewrites its own process title, and macOS reports that argv[0]
+  # spelling `OMP` through `ps -o comm=`. A case-insensitive filesystem cannot
+  # hold both spellings in one directory, so this one gets its own bin.
+  bin="$TMP_ROOT/named-upper"
+  mkdir -p "$bin"
+  ln -sf /bin/bash "$bin/OMP"
+  out=$(run_detached "$bin/OMP" "$HARNESS")
+  [ "$out" = omp ] || fail "an OMP-titled omp 18.1.18 process must still detect as omp, got '$out'"
+  # The marker precedence arm walks the same names, so it must see the ancestor too.
+  out=$(run_detached "$bin/OMP" "$HARNESS" CLAUDECODE=1 FM_OMP_HARNESS=omp)
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS must outrank CLAUDECODE under an OMP-titled omp ancestor, got '$out'"
+  pass "fm-harness: an OMP-titled omp 18.1.18 session detects as omp, including marker precedence"
 }
 
 test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches omp '' || fail "session-lock identity must accept the exact omp name"
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
+  # omp 18.1.18 rewrites its process title; macOS reports `OMP` in `ps -o comm=`
+  # while the kernel name stays `omp`, so the lock walk and the pane classifier
+  # must both keep recognizing the session.
+  fm_harness_process_matches OMP '' || fail "session-lock identity must accept omp 18.1.18's OMP process title"
+  fm_harness_process_matches /opt/homebrew/bin/OMP 'OMP --cwd /x' || fail "session-lock identity must accept an OMP path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
   # shellcheck source=bin/fm-backend.sh
@@ -99,6 +141,8 @@ test_lock_identity_and_liveness_classification() {
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
   [ "$(fm_agent_process_classify_name omp)" = agent ] || fail "tmux liveness must classify omp as an agent"
   [ "$(fm_agent_process_classify_name /opt/omp/bin/omp)" = agent ] || fail "tmux liveness must classify an omp path as an agent"
+  [ "$(fm_agent_process_classify_name OMP)" = agent ] || fail "tmux liveness must classify omp 18.1.18's OMP title as an agent"
+  [ "$(fm_agent_process_classify_name '' OMP)" = agent ] || fail "tmux liveness must classify an OMP argv0 as an agent"
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
@@ -575,6 +619,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_accepts_the_uppercase_title
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
