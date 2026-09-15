@@ -1,0 +1,24 @@
+# Firstmate fleet liveness guardian - systemd USER service template.
+#
+# Install: see docs/liveness-guardian.md "Install". Copy this file and the timer
+# into ~/.config/systemd/user/, edit FM_GUARDIAN_MAIN_HOME below if this box's
+# main firstmate home is not ~/firstmate, then enable the .timer (never this
+# .service directly - the timer drives it).
+#
+# This is a short read-mostly oneshot. When it finds a genuinely lapsed home it
+# re-arms a real watcher through its OWN transient `systemd-run --user` unit,
+# which the user manager owns independently, so that watcher survives this
+# oneshot exiting. This service never touches the shared no-mistakes daemon.
+[Unit]
+Description=Firstmate fleet liveness guardian (session-independent supervision backstop)
+Documentation=file:%h/firstmate/docs/liveness-guardian.md
+
+[Service]
+Type=oneshot
+# Edit this to the main firstmate home on this box if it is not ~/firstmate.
+Environment=FM_GUARDIAN_MAIN_HOME=%h/firstmate
+# Absolute path to the guardian; adjust if the repo lives elsewhere.
+ExecStart=%h/firstmate/bin/fm-liveness-guardian.sh
+TimeoutStartSec=120
+# A failing pass must be loud in the journal, not silently swallowed.
+SuccessExitStatus=0
