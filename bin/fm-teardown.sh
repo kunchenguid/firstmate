@@ -1261,6 +1261,30 @@ azure_work_is_landed() {
     || unpushed_patches_are_in_pr_head "$head" all || content_in_default
 }
 
+azure_remote_origin_requires_pr() {
+  local origin_url=${1-}
+  [ -n "$origin_url" ] || return 1
+  python3 - "$origin_url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+lower = url.lower()
+if not lower.startswith("ssh:") and ("vs-ssh.visualstudio.com" in lower or "ssh.dev.azure.com" in lower):
+    lower = "ssh://" + lower
+parts = urlsplit(lower)
+host = (parts.hostname or "").lower()
+path = parts.path or ""
+if parts.scheme in ("http", "https") and host in ("dev.azure.com",) and "/_git/" in path:
+    sys.exit(0)
+if parts.scheme in ("http", "https") and host.endswith(".visualstudio.com") and "/_git/" in path:
+    sys.exit(0)
+if parts.scheme == "ssh" and host in ("ssh.dev.azure.com", "vs-ssh.visualstudio.com"):
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -1686,12 +1710,10 @@ validate_worktree_teardown_safety() {
   # remote-reachability shortcut. SSH clone URLs identify Azure here as well.
   if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
-    case "$origin_url" in
-      https://dev.azure.com/*|https://*@dev.azure.com/*|https://*.visualstudio.com/*|git@ssh.dev.azure.com:*|ssh://git@ssh.dev.azure.com/*|ssh://git@ssh.dev.azure.com:*|*@vs-ssh.visualstudio.com:*|ssh://*@vs-ssh.visualstudio.com/*|ssh://*@vs-ssh.visualstudio.com:*)
-        echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
-        return 1
-        ;;
-    esac
+    if azure_remote_origin_requires_pr "$origin_url"; then
+      echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
+      return 1
+    fi
   fi
   case "$PR_URL" in
     https://dev.azure.com/*|https://*.visualstudio.com/*)
