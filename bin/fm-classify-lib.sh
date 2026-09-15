@@ -208,18 +208,28 @@ status_is_paused_or_captain_held() {  # <status-line>
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
-# clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
-# no local-zone guess is ever recorded). Prints that time as epoch seconds so a
+# clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` or the fleet-written
+# `[expires=<YYYY-MM-DDTHH:MM[:SS]Z>]` status shape consumed by watcher and
+# daemon pause rechecks (UTC only, so no local-zone guess is ever recorded).
+# Prints that time as epoch seconds so a
 # supervisor rechecks the wait when the worker said it would clear instead of on
 # the flat cadence; returns 1 when the line is not a pause or declares no time,
 # or the time is malformed, so a bad token falls back to the cadence rather than
 # silencing the wait.
 status_paused_until() {  # <status-line> -> epoch on stdout
-  local line=$1 token
+  local line=$1 token rest
   status_is_paused "$line" || return 1
-  token=$(printf '%s' "$line" \
-    | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
-    | head -1)
+  case "$line" in
+    *'[expires='*)
+      rest=${line#*'[expires='}
+      token=${rest%%]*}
+      ;;
+    *)
+      token=$(printf '%s' "$line" \
+        | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
+        | head -1)
+      ;;
+  esac
   [ -n "$token" ] || return 1
   fm_utc_iso_to_epoch "$token"
 }

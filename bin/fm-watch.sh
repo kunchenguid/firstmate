@@ -11,8 +11,8 @@
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
-# That cadence is hours long and condition-aware: a paused: line naming
-# `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
+# That cadence is hours long and condition-aware: a paused: deadline parsed by
+# status_paused_until in fm-classify-lib.sh triggers a recheck, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
 # while the away-posture record (state/.afk-contract) exists an
 # item held for the captain is never rechecked at all, in either posture.
@@ -283,10 +283,8 @@ case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (afk_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-# A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
-# status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
-# rechecked before that time, and it is rechecked once as soon as that time
-# passes even when the flat cadence has not elapsed, then held to the cadence.
+# Declared-wait timestamp syntax is owned by status_paused_until in
+# fm-classify-lib.sh; the header above owns the deadline/cadence bound.
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
