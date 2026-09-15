@@ -58,7 +58,6 @@ class Identity:
             self.org = "https://" + self.host
             if len(parts) == 6:
                 component(parts[0])
-                self.org += "/" + parts[0]
         self.project = component(parts[-5])
         self.repo = component(parts[-3])
         self.number = parts[-1]
@@ -144,6 +143,15 @@ class Azure:
         sha(pr.get("lastMergeCommit", {}).get("commitId"))
         return sha(pr["lastMergeSourceCommit"]["commitId"])
 
+    def latest_iteration(self):
+        iterations = self.listing("pullRequestIterations")
+        require(iterations and all(type(x.get("id")) is int for x in iterations), "unreadable Azure iterations")
+        return max(iterations, key=lambda x: x["id"])
+
+    def source_head(self):
+        self.pr()
+        return sha(self.latest_iteration().get("sourceRefCommit", {}).get("commitId"))
+
     def verify(self):
         pr = self.pr()
         require(pr.get("status") == "active" and pr.get("isDraft") is False and
@@ -151,10 +159,8 @@ class Azure:
                 not pr.get("autoCompleteSetBy"), "Azure PR is not active, non-draft and immediately mergeable")
         head = sha(pr["lastMergeSourceCommit"]["commitId"])
         target = sha(pr.get("lastMergeTargetCommit", {}).get("commitId"))
-        iterations = self.listing("pullRequestIterations")
-        require(iterations and all(type(x.get("id")) is int for x in iterations), "unreadable Azure iterations")
-        iteration = max(iterations, key=lambda x: x["id"])
-        require(iteration.get("sourceRefCommit", {}).get("commitId") == head,
+        iteration = self.latest_iteration()
+        require(sha(iteration.get("sourceRefCommit", {}).get("commitId")) == head,
                 "Azure iteration does not match the candidate source revision")
         reviewers = pr.get("reviewers")
         require(isinstance(reviewers, list), "unreadable Azure reviewers")
@@ -299,7 +305,7 @@ def main():
             return
         azure = Azure(identity)
         if args.action == "head":
-            print(azure.pr()["lastMergeSourceCommit"]["commitId"])
+            print(azure.source_head())
         elif args.action == "merged":
             azure.landed()
             print("merged")
