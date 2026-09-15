@@ -280,12 +280,12 @@ def build_plot_from_arrays(
     return build_waveform_plot(x=x, y=y, **kwargs)
 
 
-def _looks_like_csv_content(text: str, delimiter: str) -> bool:
+def _looks_like_csv_content(text: str) -> bool:
     """Return True when a string reads as CSV data rather than a file path."""
     s = text.strip()
     if not s:
         return False
-    return any(ch in s for ch in ("\n", "\r", delimiter, ",", ";", "\t"))
+    return "\n" in s or "\r" in s
 
 
 def build_plot_from_csv(
@@ -302,8 +302,8 @@ def build_plot_from_csv(
     Args:
         csv_source: File path (str or Path), raw CSV string, or readable text
             stream. A str is interpreted as raw CSV content only when it
-            contains a delimiter or line break; otherwise it is treated as a
-            file path and must exist (FileNotFoundError is raised otherwise).
+            contains a line break; otherwise it is treated as a file path and
+            must exist (FileNotFoundError is raised otherwise).
         x_col: Column name (str) or index (int) for the x-axis. Defaults to 0.
         y_cols: Column names or indices for the y-axis traces. Defaults to all other columns.
         delimiter: CSV field delimiter. Defaults to ','.
@@ -318,7 +318,7 @@ def build_plot_from_csv(
         p = Path(csv_source)
         if p.is_file():
             content = p.read_text(encoding="utf-8")
-        elif isinstance(csv_source, str) and _looks_like_csv_content(csv_source, delimiter):
+        elif isinstance(csv_source, str) and _looks_like_csv_content(csv_source):
             content = csv_source
         else:
             raise FileNotFoundError(errno.ENOENT, "No such CSV file", str(csv_source))
@@ -393,6 +393,11 @@ def build_plot_from_csv(
             else:
                 val = float("nan")
             y_vals[series_idx].append(val)
+
+    if not x_vals:
+        raise ValueError("CSV source contains no numeric data rows")
+    if not y_vals:
+        raise ValueError("CSV source contains no y columns to plot")
 
     traces = [
         PlotTrace(x=x_vals, y=y_vals[s_idx], label=y_labels[s_idx])

@@ -240,6 +240,15 @@ def test_build_plot_from_csv_missing_path_raises(tmp_path: Path) -> None:
         build_plot_from_csv(str(tmp_path / "also_missing.csv"))
 
 
+def test_build_plot_from_csv_pathlike_string_raises(tmp_path: Path) -> None:
+    """Verify single-line strings that are not existing files raise FileNotFoundError."""
+    with pytest.raises(FileNotFoundError, match="data,old.csv"):
+        build_plot_from_csv("data,old.csv")
+
+    with pytest.raises(FileNotFoundError, match="notes;v2.csv"):
+        build_plot_from_csv("/tmp/notes;v2.csv")
+
+
 def test_build_plot_from_csv_directory_raises(tmp_path: Path) -> None:
     """Verify passing a directory path fails instead of rendering an empty plot."""
     with pytest.raises(FileNotFoundError, match="No such CSV file"):
@@ -258,6 +267,30 @@ def test_build_plot_from_csv_raw_string(tmp_path: Path) -> None:
     assert block["type"] == "plot"
     assert out_png.exists()
     assert out_png.stat().st_size > 0
+
+
+def test_build_plot_from_csv_no_numeric_rows_raises(tmp_path: Path) -> None:
+    """Verify CSVs that yield zero usable samples fail instead of rendering empty."""
+    header_only = tmp_path / "header_only.csv"
+    header_only.write_text("time,voltage\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no numeric data"):
+        build_plot_from_csv(header_only)
+
+    non_numeric = tmp_path / "non_numeric.csv"
+    non_numeric.write_text("time,voltage\nfoo,bar\nbaz,qux\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no numeric data"):
+        build_plot_from_csv(non_numeric)
+
+    with pytest.raises(ValueError, match="no numeric data"):
+        build_plot_from_csv("t,V\nfoo,bar\n")
+
+
+def test_build_plot_from_csv_no_y_columns_raises(tmp_path: Path) -> None:
+    """Verify a single-column CSV fails instead of rendering an empty plot."""
+    single_col = tmp_path / "single.csv"
+    single_col.write_text("time\n0.0\n1.0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no y columns"):
+        build_plot_from_csv(single_col)
 
 
 def test_build_plot_from_csv_invalid_columns(tmp_path: Path) -> None:
