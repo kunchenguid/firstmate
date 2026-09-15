@@ -8,8 +8,11 @@
 # asserts that shape, that the classifier recovers it, and that a relaunch
 # through fm-control.sh reuses the same pane with the committed candidate
 # intact. Codex's directory-trust dialog is answered with Enter, as any first
-# launch in a new project root is. The relaunch submits the disposable brief,
-# so this guard is opt-in.
+# launch in a new project root is. A transient "Approaching rate limits"
+# model-suggestion dialog, which Codex pops once a turn settles under low
+# quota, is dismissed with Escape before /quit because while it is up it
+# captures input and swallows the command. The relaunch submits the disposable
+# brief, so this guard is opt-in.
 # Every Herdr call, including backend and control calls via the PATH shim,
 # routes through fm-herdr-lab.sh with an exact trailing named session.
 set -euo pipefail
@@ -130,13 +133,29 @@ wait_until 120 1 session_established \
 printf 'running_registration=%s\n' "$(record)"
 printf 'running_foreground=%s\n' "$(foreground)"
 
-lab pane send-text "$PANE_ID" /quit
-sleep 1.2
-lab pane send-keys "$PANE_ID" Enter
-if ! wait_until 50 0.2 shell_only; then
+rate_limit_dialog_up() {
+  lab pane read "$PANE_ID" 2>/dev/null | grep -q 'esc to go back'
+}
+# Escape backs out of the model-suggestion dialog without changing any model
+# setting; Enter would accept its default (switching the model).
+dismiss_rate_limit_dialog() {
+  while rate_limit_dialog_up; do
+    lab pane send-keys "$PANE_ID" Escape
+    sleep 0.5
+  done
+}
+tries=0
+until shell_only; do
+  tries=$((tries + 1))
+  [ "$tries" -le 3 ] || version_fail "codex did not exit to a shell after /quit: $(foreground)"
+  # /quit typed while the suggestion dialog is up never reaches the composer,
+  # so every attempt dismisses it first and submits a fresh /quit.
+  dismiss_rate_limit_dialog
+  lab pane send-text "$PANE_ID" /quit
+  sleep 1.2
   lab pane send-keys "$PANE_ID" Enter
-  wait_until 150 0.2 shell_only || version_fail "codex did not exit to a shell within 40s of /quit: $(foreground)"
-fi
+  wait_until 50 0.2 shell_only || true
+done
 printf 'shell_only_foreground=%s\n' "$(foreground)"
 
 # Shell output after the exit is what makes Herdr re-detect the pane and drop
