@@ -71,7 +71,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "failure" | "deferred";
   message: string;
 };
 
@@ -372,6 +372,12 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
+  // A live away-mode daemon owns this home's watcher singleton; fm-watch-arm.sh
+  // yielded without starting or stopping a watcher. Benign no-op: do not retry,
+  // surface, or deliver anything. The daemon owns supervision until state/.afk
+  // clears.
+  const deferred = combined.split(/\r?\n/).find((line) => /^watcher: deferred\b/.test(line));
+  if (deferred) return { kind: "deferred", message: deferred };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -960,6 +966,10 @@ export default function (pi: ExtensionAPI) {
         void processPendingActionables(owner);
         return;
       }
+      // Away-mode daemon owns supervision: the arm yielded and the daemon's own
+      // watcher serves the home. Nothing to restore or retry; a later arm
+      // trigger re-checks after state/.afk clears.
+      if (classification.kind === "deferred") return;
       if (!generationIsLive(owner)) return;
       if (owner.restoring) {
         // The pipeline is still delivering the wake this successor was

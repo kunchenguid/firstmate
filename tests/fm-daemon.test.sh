@@ -2174,6 +2174,84 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
   pass "max-defer does not flush or alarm while afk is inactive"
 }
 
+# --- bounded submit retry (2026-09-10 duplicate-escalation incident) --------
+# An unconfirmed submit against the Pi captain pane used to re-type and
+# re-submit the same buffered digest on every tick. These drive escalate_flush
+# through backend stubs that type but never confirm, and assert the typed
+# attempts are bounded and the wedge alarm fires instead of retyping.
+make_retry_case() {  # <name> -> echoes dir; state + submits.log
+  local name=$1 dir
+  dir=$(make_supercase "$name")
+  : > "$dir/submits.log"
+  printf '%s\n' "$dir"
+}
+
+# Shared stub set for a herdr pane that is safe to type into but never confirms.
+run_unconfirmed_flush() {  # <dir> <state> <flushes> <cap> <window>
+  local dir=$1 state=$2 flushes=$3 cap=$4 window=$5 i
+  local calls="$dir/submits.log"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'typed\n' >> "$calls"; printf 'unknown'; }
+    i=0
+    while [ "$i" -lt "$flushes" ]; do
+      i=$((i + 1))
+      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+        FM_ESCALATE_SUBMIT_MAX_ATTEMPTS="$cap" FM_ESCALATE_SUBMIT_INFLIGHT_SECS="$window" \
+        escalate_flush "$state" >/dev/null 2>&1 || true
+    done
+  )
+}
+
+test_escalate_flush_caps_identical_digest_attempts_and_alarms() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-cap)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick A"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 5 2 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "identical digest typed $typed times; expected the cap of 2"
+  [ -s "$state/.subsuper-escalations" ] || fail "capped digest buffer was dropped instead of preserved"
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "cap did not raise the wedge alarm marker"
+  pass "escalate_flush: an unconfirmed identical digest is typed at most the cap, then alarms"
+}
+
+test_escalate_flush_suppresses_retype_while_attempt_is_in_flight() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-inflight)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick B"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 3 9 9999
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 1 ] || fail "an in-flight unconfirmed digest was re-typed $typed times; expected 1"
+  [ -s "$state/.subsuper-escalations" ] || fail "in-flight digest buffer was dropped"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "in-flight suppression wrongly raised the wedge alarm"
+  pass "escalate_flush: an unconfirmed digest is not re-typed while its attempt may be in flight"
+}
+
+test_escalate_flush_changed_buffer_resets_the_attempt_bound() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-newevent)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick C"
+  afk_enter "$state"
+  # Cap of 1: the first flush types once and blocks the identical digest.
+  run_unconfirmed_flush "$dir" "$state" 2 1 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 1 ] || fail "cap of 1 typed the identical digest $typed times"
+  # A genuinely new escalation is a new identity, so it is never blocked by the
+  # previous digest's cap.
+  escalate_add "$state" "failed: a new captain-relevant event"
+  run_unconfirmed_flush "$dir" "$state" 1 1 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "a changed buffer was wrongly blocked by the prior digest's cap (typed=$typed)"
+  pass "escalate_flush: a changed buffer is a new identity and is never blocked by the prior cap"
+}
+
 # --- backend-independent active wedge alert ---------------------------------
 # These cover the 2026-07-10 overnight-incident fix: the max-defer wedge alarm's
 # ACTIVE alert channel must reach the captain even when the wedged pane and its
@@ -2872,6 +2950,9 @@ test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
+test_escalate_flush_caps_identical_digest_attempts_and_alarms
+test_escalate_flush_suppresses_retype_while_attempt_is_in_flight
+test_escalate_flush_changed_buffer_resets_the_attempt_bound
 test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing

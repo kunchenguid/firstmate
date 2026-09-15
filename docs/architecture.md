@@ -161,6 +161,7 @@ The daemon injects only into an affirmatively `empty` composer, so every other o
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+One identical buffered digest is typed a bounded number of times (`FM_ESCALATE_SUBMIT_MAX_ATTEMPTS`): an unconfirmed submit is not re-typed while a previous attempt may still be in flight (`FM_ESCALATE_SUBMIT_INFLIGHT_SECS`), and once the cap is reached the daemon raises the wedge alarm instead of retyping, so an unconfirmable pane can never duplicate the same digest unboundedly.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record archive, durable catch-up evidence, the return brief, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker the away session could not fix.
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op and is never typed into an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).

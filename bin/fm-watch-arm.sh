@@ -28,6 +28,9 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: deferred - away-mode daemon owns supervision - a live away-mode daemon
+#                                                          owns the home singleton; this arm
+#                                                          yields without starting or stopping one
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -405,6 +408,20 @@ if [ "$mode" = handling-delivered ]; then
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
     && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
   exit $?
+fi
+
+# Away-mode ownership gate. While a live, identity-matched away-mode daemon
+# holds this home's daemon lock, ITS watcher child is the one singleton for the
+# home: the daemon runs bin/fm-watch.sh one-shot and restarts it on every wake.
+# An arm that stopped that child (--restart) or forked a competitor would
+# displace per-wake triage and leave only the catch-all scan, with the daemon's
+# restarted children colliding on the held lock. Defer without touching the lock
+# or starting a child. This requires a LIVE daemon (fm_afk_daemon_owns_supervision
+# in bin/fm-wake-lib.sh), not merely state/.afk, so a legacy flag with no daemon
+# (the Pi posture) still arms normally.
+if fm_afk_daemon_owns_supervision "$STATE"; then
+  echo "watcher: deferred - away-mode daemon owns supervision"
+  exit 0
 fi
 
 if [ "$mode" = restart ]; then

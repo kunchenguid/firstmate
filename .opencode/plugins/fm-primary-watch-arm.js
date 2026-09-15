@@ -134,6 +134,12 @@ function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
+  // A live away-mode daemon owns this home's watcher singleton; fm-watch-arm.sh
+  // yielded without starting or stopping a watcher. Benign no-op: do not retry,
+  // surface, or deliver anything. The daemon owns supervision until state/.afk
+  // clears.
+  const deferred = combined.split(/\r?\n/).find((line) => /^watcher: deferred\b/.test(line));
+  if (deferred) return { kind: "deferred", message: deferred };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -171,6 +177,11 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   if (combined.split(/\r?\n/).some((line) => /^watcher: (?:started|attached)\b/.test(line))) {
     setArmStatus("armed");
     settleReadiness("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: deferred\b/.test(line))) {
+    setArmStatus("deferred");
+    settleReadiness("deferred");
     return;
   }
   if (combined.split(/\r?\n/).some((line) => /^watcher: healthy\b/.test(line))) {
@@ -390,7 +401,9 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    settleReadiness(
+      classification.kind === "actionable" ? "wake" : classification.kind === "deferred" ? "deferred" : "failed",
+    );
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
@@ -414,6 +427,13 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
       });
+      return;
+    }
+    // Away-mode daemon owns supervision: the arm yielded and the daemon's own
+    // watcher serves the home. Nothing to restore or retry; a later arm trigger
+    // re-checks after state/.afk clears.
+    if (classification.kind === "deferred") {
+      setArmStatus("deferred");
       return;
     }
     if (restorationInFlight) {

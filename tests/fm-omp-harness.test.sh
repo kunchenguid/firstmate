@@ -574,6 +574,45 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_watch_extension_treats_away_daemon_deferral_as_noop() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-deferral/repo"; home="$TMP_ROOT/watch-deferral/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+if (!tool) throw new Error("fm_watch_arm_omp was not registered");
+const result = await tool.execute();
+if (!/^watcher: started omp extension arm child 1;/.test(result.content[0].text)) throw new Error(`unexpected arm result: ${result.content[0].text}`);
+await new Promise((r) => setTimeout(r, 800));
+if (sent.length !== 0) throw new Error(`away-daemon deferral delivered a wake: ${JSON.stringify(sent)}`);
+await handlers.get("session_shutdown")({}, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp must treat an away-mode daemon deferral as a benign no-op: $out"
+  [ -z "$out" ] || fail "omp away-daemon deferral test printed output: $out"
+  pass ".omp watch extension: an away-mode daemon deferral is a benign no-op"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -585,3 +624,4 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_treats_away_daemon_deferral_as_noop

@@ -58,6 +58,14 @@
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
+#     A digest whose submit cannot be confirmed is retried only a BOUNDED number
+#     of times. escalate_flush records the digest's identity (a hash of the exact
+#     payload) and, while a previous typed attempt may still be in flight, does
+#     not re-type it; after FM_ESCALATE_SUBMIT_MAX_ATTEMPTS typed attempts for the
+#     same identical digest it raises the wedge alarm instead of typing again
+#     (the 2026-09-10 duplicate-escalation incident: an unconfirmed Pi submit
+#     re-typed the same buffered digest on every tick). A changed buffer resets
+#     the identity, so genuinely new escalations are never blocked.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -115,6 +123,18 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_ESCALATE_SUBMIT_MAX_ATTEMPTS
+#                                   hard cap on TYPED submit attempts for one
+#                                   identical digest before the daemon stops
+#                                   retyping and raises the wedge alarm instead
+#                                   (default 3; invalid/zero uses the default).
+#                                   Enter-only retries inside one attempt are
+#                                   owned by FM_INJECT_CONFIRM_RETRIES.
+#          FM_ESCALATE_SUBMIT_INFLIGHT_SECS
+#                                   seconds an unconfirmed typed submission is
+#                                   treated as plausibly in flight; the identical
+#                                   digest is not re-typed within this window
+#                                   (default 30; invalid uses the default)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -212,6 +232,12 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Bounded submit-attempt dedup for one identical escalation digest: after this
+# many typed attempts with no confirmed submit, raise the wedge alarm instead of
+# retyping. The in-flight window suppresses a re-type while the previous submit
+# may still land. See escalate_flush.
+ESCALATE_SUBMIT_MAX_ATTEMPTS_DEFAULT=3
+ESCALATE_SUBMIT_INFLIGHT_SECS_DEFAULT=30
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -701,18 +727,71 @@ escalate_add() {  # <state> <distilled-item>
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
+#
+# Bounded submit dedup: an unconfirmed submit must never re-type the SAME digest
+# unboundedly. Each flush computes the digest's identity (hash of the exact
+# payload) and records it with a typed-attempt count and timestamp in
+# state/.subsuper-escalations.attempt. A previous typed attempt still inside
+# FM_ESCALATE_SUBMIT_INFLIGHT_SECS suppresses a re-type; once the count reaches
+# FM_ESCALATE_SUBMIT_MAX_ATTEMPTS the flush raises the wedge alarm instead of
+# typing again. A changed buffer yields a new identity and resets the count, so
+# newly buffered escalations are never blocked. inject_msg's return code
+# distinguishes a real typed-but-unconfirmed submit (dedup applies) from a
+# pre-typing deferral (busy/pending/pane-gone/afk-off: nothing typed, no dedup).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg identity attempt_file prev_identity attempts last now cap window rc oldest
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || return 0
+  [ -s "$buf" ] || { rm -f "$state/.subsuper-escalations.attempt"; return 0; }
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
-  return 1
+  identity=$(_hash_text "$msg")
+  attempt_file="$state/.subsuper-escalations.attempt"
+  attempts=0
+  last=0
+  prev_identity=""
+  if [ -r "$attempt_file" ]; then
+    IFS=$(printf '\t') read -r prev_identity attempts last < "$attempt_file" 2>/dev/null || true
+    [ "$prev_identity" = "$identity" ] || { attempts=0; last=0; }
+    case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  fi
+  cap=${FM_ESCALATE_SUBMIT_MAX_ATTEMPTS:-$ESCALATE_SUBMIT_MAX_ATTEMPTS_DEFAULT}
+  case "$cap" in ''|*[!0-9]*|0) cap=$ESCALATE_SUBMIT_MAX_ATTEMPTS_DEFAULT ;; esac
+  window=${FM_ESCALATE_SUBMIT_INFLIGHT_SECS:-$ESCALATE_SUBMIT_INFLIGHT_SECS_DEFAULT}
+  case "$window" in ''|*[!0-9]*) window=$ESCALATE_SUBMIT_INFLIGHT_SECS_DEFAULT ;; esac
+  now=$(_now)
+  if [ "$attempts" -ge "$cap" ]; then
+    # The cap is a distinct alarm path, not another retype: surface the wedge so
+    # the captain learns delivery is stuck while the buffer survives.
+    oldest=$(_oldest_line_age "$buf")
+    log "escalate submit cap reached (${attempts}/${cap} typed); alarming instead of retyping the identical digest"
+    inject_wedge_alarm "$state" "$oldest"
+    return 1
+  fi
+  if [ "$attempts" -gt 0 ] && [ "$last" -gt 0 ] && [ $((now - last)) -lt "$window" ]; then
+    log "escalate submit attempt plausibly in flight ($((now - last))s < ${window}s); not retyping the identical digest"
+    return 1
+  fi
+  rc=0
+  inject_msg "$msg" "$state" || rc=$?
+  case "$rc" in
+    0)
+      : > "$buf"
+      rm -f "${buf}.since" "$attempt_file" "$state/.subsuper-inject-wedged"
+      return 0 ;;
+    3)
+      # Deferred before typing anything: no in-flight payload to dedup against,
+      # so let the caller retry freely (the guard will defer again until safe).
+      return 1 ;;
+    *)
+      printf '%s\t%s\t%s\n' "$identity" "$((attempts + 1))" "$now" > "$attempt_file"
+      log "escalate submit unconfirmed ($((attempts + 1))/${cap} typed); preserving buffer for bounded retry"
+      return 1 ;;
+  esac
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -1223,10 +1302,13 @@ window_for_task() {  # <task-key> [state]
 
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# Returns 0 on a confirmed submit, 3 when it deferred WITHOUT typing anything
+# (afk inactive, pane gone, supervisor busy, or composer not confirmed-empty),
+# and 1 when it typed the digest but could not confirm the submit. The 1-versus-3
+# split is what lets escalate_flush apply its bounded submit dedup only to a real
+# typed attempt; a bare deferral has no in-flight payload to protect. On any
+# non-zero the caller preserves the buffer so the escalation survives for the
+# next cycle or the catch-up flush.
 #
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
@@ -1247,13 +1329,13 @@ inject_msg() {  # <message> [state]
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  afk_active "$state" || { log "inject deferred: afk inactive"; return 3; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+  fm_operational_input_encode away-supervisor "$msg" encoded || return 3
   msg=$encoded
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
@@ -1262,11 +1344,11 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  fm_backend_target_exists "$backend" "$target" || return 3
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
+    return 3
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
@@ -1280,7 +1362,7 @@ inject_msg() {  # <message> [state]
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
-    return 1
+    return 3
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms

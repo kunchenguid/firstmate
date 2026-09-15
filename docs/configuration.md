@@ -179,6 +179,9 @@ Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1`
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+`FM_ESCALATE_SUBMIT_MAX_ATTEMPTS` (default 3) caps how many times one identical buffered digest may be typed with no confirmed submit before the daemon stops retyping and raises the wedge alarm instead.
+`FM_ESCALATE_SUBMIT_INFLIGHT_SECS` (default 30) is how long an unconfirmed typed submit is treated as plausibly in flight, during which the identical digest is not re-typed.
+A changed escalation buffer is a new digest identity and resets the count, so new escalations are never blocked.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
