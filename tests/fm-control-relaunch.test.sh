@@ -767,7 +767,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
 }
 
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
-  local dir state grok_path kimi_path token_path
+  local dir state grok_path kimi_path agy_path token_path
   dir=$(fm_test_tmproot fm-control-auth)
   state="$dir/state"
   mkdir -p "$state"
@@ -782,6 +782,15 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
   kimi_path=$(HOME="$dir/kh" fm_control_harness_turnend_auth_path kimi fm.222222222222)
   [ "$kimi_path" = "$dir/kh/.kimi-code/fm-turn-end.d/fm.222222222222" ] \
     || fail "kimi's registry path should resolve under the home store, got '$kimi_path'"
+  printf 'fm.333333333333\n' > "$state/x.agy-turnend-token"
+  token_path=$(fm_control_harness_turnend_token_path agy "$state" x)
+  [ "$token_path" = "$state/x.agy-turnend-token" ] \
+    || fail "the agy token path should be computed without reading it"
+  agy_path=$(HOME="$dir/ah" fm_control_harness_turnend_auth_path agy fm.333333333333)
+  [ "$agy_path" = "$dir/ah/.gemini/antigravity-cli/fm-turn-end.d/fm.333333333333" ] \
+    || fail "agy's registry path should resolve under the CLI state dir, got '$agy_path'"
+  agy_path=$(HOME="$dir/ah" fm_control_harness_turnend_auth_path agy 'not a token/../..')
+  [ -z "$agy_path" ] || fail "a malformed agy token must resolve to no path, got '$agy_path'"
   grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok 'not a token/../..')
   [ -z "$grok_path" ] || fail "a malformed token must resolve to no path, got '$grok_path'"
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"

@@ -877,11 +877,147 @@ test_agy_spawn_arms_no_busy_wiring() {
   expect_code 0 "$rc" "agy spawn should succeed"
   statedir="$HOME_DIR/state"
   [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
+  # The turn-end token is the ONE sidecar agy is allowed: its Stop hook reports
+  # turn END, which is clearable, unlike a busy START nothing could ever clear.
   for sidecar in "$statedir/$id.agy-"*; do
     [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
+    case "${sidecar##*/}" in
+      "$id.agy-turnend-token"|"$id.agy-trust") continue ;;
+    esac
+    fail "agy spawn left an unexpected adapter sidecar behind: $sidecar"
   done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  # Positively require the turn-end wiring, so silently dead arming cannot pass.
+  [ -s "$statedir/$id.agy-turnend-token" ] \
+    || fail "agy spawn minted no turn-end registry token"
+  grep -q '^token=fm\.' "$WT_DIR/.fm-agy-turnend" \
+    || fail "agy spawn wrote no turn-end pointer into the worktree"
+  pass "fm-spawn: agy arms no busy wiring and writes only its turn-end token"
+}
+
+# --- crew turn-end hook -----------------------------------------------------
+# agy's hooks facility is absent from --help and has changed inside its own
+# changelog, so these pin behavior rather than a version: the installer must own
+# exactly one key, preserve every operator hook, and refuse anything surprising
+# without a write. The hook is global, so it must also be inert for any
+# workspace that is not a live firstmate task.
+HOOK="$ROOT/bin/fm-agy-turnend-hook.sh"
+
+run_hook_install() { HOME="$1" "$HOOK" install 2>&1; }
+run_hook_remove() { HOME="$1" "$HOOK" remove 2>&1; }
+hooks_config() { printf '%s/.gemini/config/hooks.json\n' "$1"; }
+hook_script() { printf '%s/.gemini/antigravity-cli/fm-turn-end.sh\n' "$1"; }
+hook_registry() { printf '%s/.gemini/antigravity-cli/fm-turn-end.d\n' "$1"; }
+
+# The Stop payload shape agy delivers: fullyIdle plus the open workspace paths.
+hook_payload() {  # <fully-idle> <workspace>
+  printf '{"fullyIdle":%s,"workspacePaths":["%s"]}\n' "$1" "$2"
+}
+
+hook_key_value() {  # <config> <key>
+  node -e 'const fs=require("node:fs");const j=fs.existsSync(process.argv[1])?JSON.parse(fs.readFileSync(process.argv[1],"utf8")):{};console.log(JSON.stringify(j[process.argv[2]]));' "$1" "$2"
+}
+
+test_agy_hook_install_preserves_operator_hooks_and_remove_restores_them() {
+  local rec out config
+  rec=$(make_agy_trust_case hook-install)
+  read_agy_trust_case "$rec"
+  config=$(hooks_config "$HOME_DIR")
+  mkdir -p "$(dirname "$config")"
+  printf '%s\n' '{"operator-lint":{"PostToolUse":[]}}' > "$config"
+
+  out=$(run_hook_install "$HOME_DIR")
+  expect_code 0 $? "installing the turn-end hook must succeed: $out"
+  [ "$(hook_key_value "$config" operator-lint)" = '{"PostToolUse":[]}' ] \
+    || fail "the operator's own hook was lost on install"
+  [ "$(hook_key_value "$config" firstmate-turn-end)" != undefined ] \
+    || fail "the firstmate hook was not installed"
+  [ -x "$(hook_script "$HOME_DIR")" ] || fail "the hook script was not installed executable"
+
+  out=$(run_hook_remove "$HOME_DIR")
+  expect_code 0 $? "removing the turn-end hook must succeed: $out"
+  [ "$(hook_key_value "$config" operator-lint)" = '{"PostToolUse":[]}' ] \
+    || fail "the operator's own hook was lost on remove"
+  [ "$(hook_key_value "$config" firstmate-turn-end)" = undefined ] \
+    || fail "the firstmate hook survived removal"
+  [ ! -e "$(hook_script "$HOME_DIR")" ] || fail "the hook script survived removal"
+  [ ! -e "$(hook_registry "$HOME_DIR")" ] || fail "the token registry survived removal"
+  pass "fm-agy-turnend-hook.sh: install and remove leave operator hooks untouched"
+}
+
+# THE fullyIdle GATE IS LOAD-BEARING. agy moves a shell command that outruns its
+# WaitMsBeforeAsync into the background, yields the composer, and fires Stop with
+# fullyIdle false while that command is STILL RUNNING; a second Stop with
+# fullyIdle true follows once it finishes. Touching the marker on the first event
+# would report a worker done while its own build or test run is still going, so
+# the two events are driven apart here and only the true one may signal.
+test_agy_hook_signals_only_a_fully_idle_turn() {
+  local rec marker token registry
+  rec=$(make_agy_trust_case hook-fullyidle)
+  read_agy_trust_case "$rec"
+  run_hook_install "$HOME_DIR" >/dev/null || fail "install failed"
+  registry=$(hook_registry "$HOME_DIR")
+  marker="$CASE_DIR/task.turn-ended"
+  token=fm.aaaaaaaaaaaa
+  printf '%s\n' "$marker" > "$registry/$token"
+  printf 'token=%s\n' "$token" > "$WT_DIR/.fm-agy-turnend"
+
+  hook_payload false "$WT_DIR" | HOME="$HOME_DIR" bash "$(hook_script "$HOME_DIR")" >/dev/null
+  [ ! -e "$marker" ] || fail "a Stop with fullyIdle false reported the turn finished"
+
+  hook_payload true "$WT_DIR" | HOME="$HOME_DIR" bash "$(hook_script "$HOME_DIR")" >/dev/null
+  [ -e "$marker" ] || fail "a Stop with fullyIdle true did not signal the finished turn"
+  pass "fm-agy-turnend-hook.sh: signals only a fullyIdle turn end"
+}
+
+test_agy_hook_ignores_an_unregistered_token() {
+  local rec marker
+  rec=$(make_agy_trust_case hook-token)
+  read_agy_trust_case "$rec"
+  run_hook_install "$HOME_DIR" >/dev/null || fail "install failed"
+  marker="$CASE_DIR/task.turn-ended"
+  printf 'token=fm.zzzzzzzzzzzz\n' > "$WT_DIR/.fm-agy-turnend"
+  hook_payload true "$WT_DIR" | HOME="$HOME_DIR" bash "$(hook_script "$HOME_DIR")" >/dev/null
+  [ ! -e "$marker" ] || fail "an unregistered token signalled a turn end"
+  pass "fm-agy-turnend-hook.sh: ignores a workspace whose token is not registered"
+}
+
+# The hook blocks agy's own loop, so it must always answer with valid JSON and
+# exit zero even when it does nothing at all.
+test_agy_hook_always_answers_and_exits_zero() {
+  local rec out
+  rec=$(make_agy_trust_case hook-answer)
+  read_agy_trust_case "$rec"
+  run_hook_install "$HOME_DIR" >/dev/null || fail "install failed"
+  out=$(printf 'not json at all' | HOME="$HOME_DIR" bash "$(hook_script "$HOME_DIR")")
+  expect_code 0 $? "the hook must exit zero on an unparseable payload"
+  [ "$out" = '{}' ] || fail "the hook answered '$out' rather than an empty JSON object"
+  pass "fm-agy-turnend-hook.sh: always answers with {} and exits zero"
+}
+
+test_agy_hook_remove_refuses_while_a_task_token_is_live() {
+  local rec out
+  rec=$(make_agy_trust_case hook-live-token)
+  read_agy_trust_case "$rec"
+  run_hook_install "$HOME_DIR" >/dev/null || fail "install failed"
+  printf '%s\n' "$CASE_DIR/task.turn-ended" > "$(hook_registry "$HOME_DIR")/fm.bbbbbbbbbbbb"
+  out=$(run_hook_remove "$HOME_DIR")
+  expect_code 1 $? "removing the hook under a live task token must be refused: $out"
+  assert_contains "$out" "still registered" "the refusal did not name the live token"
+  [ -e "$(hook_script "$HOME_DIR")" ] || fail "the hook script was removed despite the refusal"
+  pass "fm-agy-turnend-hook.sh: refuses removal while a task still expects a wake"
+}
+
+test_agy_hook_refuses_a_malformed_config() {
+  local rec out config
+  rec=$(make_agy_trust_case hook-malformed)
+  read_agy_trust_case "$rec"
+  config=$(hooks_config "$HOME_DIR")
+  mkdir -p "$(dirname "$config")"
+  printf '%s\n' 'not json' > "$config"
+  out=$(run_hook_install "$HOME_DIR")
+  expect_code 1 $? "a malformed hooks config must be refused: $out"
+  grep -q 'not json' "$config" || fail "the malformed config was overwritten instead of left alone"
+  pass "fm-agy-turnend-hook.sh: refuses a malformed hooks config and leaves it untouched"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -914,3 +1050,9 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_agy_hook_install_preserves_operator_hooks_and_remove_restores_them
+test_agy_hook_signals_only_a_fully_idle_turn
+test_agy_hook_ignores_an_unregistered_token
+test_agy_hook_always_answers_and_exits_zero
+test_agy_hook_remove_refuses_while_a_task_token_is_live
+test_agy_hook_refuses_a_malformed_config

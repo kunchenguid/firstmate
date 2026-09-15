@@ -299,8 +299,11 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
-# agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
+# agy DOES expose a hook surface - named Stop hooks in
+# $HOME/.gemini/config/hooks.json (verified on agy 1.2.2) - so it carries a
+# global turn-end hook installed through bin/fm-agy-turnend-hook.sh, gated by a
+# per-task token exactly like grok's and kimi's. It carries no busy-source
+# wiring, so busy state stays a rendered-tail fallback. Its brief rides the launch
 # command, but a fresh worktree would park it on a folder-trust dialog, so the
 # spawn pre-registers the worktree in agy's own trust store through
 # bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
@@ -1742,8 +1745,9 @@ launch_template() {
   # reason cursor clears them: agy publishes no marker of its own and does not
   # clear an inherited CLAUDECODE (verified in the /proc environ of a live 1.2.0
   # TUI), so bin/fm-harness.sh must not read an agy worker as its launcher.
-  # agy exposes no hook surface, so busy state is a rendered-tail fallback
-  # (bin/fm-busy-lib.sh) and nothing is armed below.
+  # agy's busy state is a rendered-tail fallback (bin/fm-busy-lib.sh) because
+  # its hook payload reports turn END, not turn START. The turn-end half IS
+  # armed, by the global Stop hook the trust block below installs.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
@@ -1921,8 +1925,10 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+# agy's Stop hook carries CREW turn-end wakes, but it is not a primary
+# supervision protocol: the payload reports only that a turn ended, and
+# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.2). A
+# secondmate is refused on that gap, not on the absence of hooks.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
@@ -3593,6 +3599,10 @@ agy)
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
     fi
+    "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install || {
+      echo "error: refusing agy spawn because the global turn-end hook could not be installed safely" >&2
+      exit 1
+    }
   fi
   ;;
 esac
@@ -3996,6 +4006,23 @@ EOF
     printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.kimi-turnend-token"
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
+    ;;
+  agy*)
+    # agy's Stop hook is global, but it is inert unless a workspace in the
+    # payload contains this task's token pointer and the token resolves
+    # through Firstmate's private registry. The installer above owns the
+    # key-preserving hooks.json edit and the always-zero, silent hook script;
+    # the hook itself fires only on fullyIdle, so a turn that merely
+    # backgrounded a command does not report the worker done.
+    AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
+    old_umask=$(umask)
+    umask 077
+    auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+    umask "$old_umask"
+    printf '%s\n' "$TURNEND" >"$auth_file"
+    printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.agy-turnend-token"
+    printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-agy-turnend"
+    exclude_path '.fm-agy-turnend'
     ;;
   esac
 fi

@@ -60,8 +60,9 @@
 # Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
 # redesign, because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
-# path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
+# path firstmate drives, see references/harness/rovo.md; agy's Stop hook
+# reports turn END, so it cannot source a busy START, see
+# references/harness/agy.md); each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
@@ -859,9 +860,10 @@ fm_busy_rovo_tail_busy() {
 # shows `? for shortcuts` instead). The `Generating...` spinner word that
 # renders beside it is deliberately NOT matched: it is a free-floating output
 # line, so ordinary worker output echoing the word would classify an idle
-# worker as busy. agy exposes no hook surface, so this fallback is the only
-# pane-side source; it is never armed as a semantic writer
-# (fm_busy_sources_for_harness trusts nothing for agy).
+# worker as busy. agy's global Stop hook (bin/fm-agy-turnend-hook.sh) carries
+# turn END only, so this fallback remains the only source for busy START; it is
+# never armed as a semantic writer (fm_busy_sources_for_harness trusts nothing
+# for agy).
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
