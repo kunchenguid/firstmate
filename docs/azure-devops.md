@@ -38,11 +38,11 @@ The legacy collection component remains part of the requested identity; a differ
 ## Completion and cleanup
 
 `bin/fm-pr-check.sh` owns PR registration, and `bin/fm-pr-merge.sh` remains the sole authorized task merge entrypoint.
-The Azure transport verifies a non-draft active PR, successful mergeability, reviewer votes, applicable mandatory policy evaluations, checks, discussions and the selected allowed merge strategy before requesting completion.
+The Azure transport verifies a non-draft active PR, successful mergeability, required reviewer approvals, applicable mandatory policy evaluations, checks, any mandatory comment-resolution policy, and the selected allowed merge strategy before requesting completion.
 It rejects missing or outdated mandatory evaluations and binds required builds to the source or candidate merge commit.
 A changed source, target, review or completion selection during verification stops the request.
 Azure's `lastMergeSourceCommit` mechanism binds completion to the verified source commit, with policy bypass and source-branch deletion explicitly disabled.
-Azure rechecks its mandatory policies at completion; the separate REST reads are not a server-side transaction and cannot freeze policies, the target branch, votes or discussions against concurrent changes.
+Azure rechecks its mandatory policies at completion; the separate REST reads are not a server-side transaction and cannot freeze policies, the target branch, votes, or mandatory comment resolutions against concurrent changes.
 Configure any requirement that must survive that final race as a mandatory Azure policy.
 
 Firstmate preserves the PR-selected allowed merge strategy, or uses the sole allowed strategy when unambiguous.
@@ -60,12 +60,12 @@ Azure cleanup additionally proves that clean local work is contained in the comp
 
 An incomplete API response carrying a continuation token is refused rather than treating the first page as complete evidence.
 For each check context, the newest status must be successful and bound to the current iteration; an older failed status can be superseded by a newer current-iteration success, but a newest unbound or old-iteration status requires reconciliation.
-Unresolved user discussions stop completion even without a mandatory comment policy.
+Unresolved user discussions stop completion only when a mandatory Azure comment-resolution policy makes them blocking.
 An unsupported policy response or unknown merge strategy needs operator attention, never a guessed approval.
 No optional tool installation or authentication repair is performed automatically.
 
 `tests/azure-pr-contract.py`, invoked by `tests/fm-pr-merge.test.sh`, covers the Azure CLI boundary with synthetic REST responses, including identity parsing, current policy revisions, build/check failures, revision races and accepted-but-unconfirmed completion.
 `tests/fm-teardown.test.sh` covers completed versus abandoned cleanup with real disposable Git repositories.
-`tests/fm-task-delivery.test.sh` and `tests/fm-review-diff.test.sh` cover prefix selection through scaffold, promotion, comparison and local landing.
+`tests/fm-task-delivery.test.sh` and `tests/fm-review-diff.test.sh` cover prefix selection through scaffold, promotion, and comparison.
 These are deterministic regressions, not evidence that an Azure merge was performed live.
 A live completion test requires a separately approved disposable Azure repository; reading an existing project never authorizes a test PR, vote, policy change or merge there.
