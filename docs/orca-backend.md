@@ -36,7 +36,7 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca repo uuid>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
@@ -59,8 +59,9 @@ Grok alone retains its isolated rendered-tail fallback.
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
-A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
+Cleanup first validates the composite identity against the recorded worktree using `fm_backend_orca_worktree_id_valid` in `bin/fm-backend.sh`.
+Before release, cleanup also resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
+A missing, malformed, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
