@@ -819,8 +819,10 @@ test_reconciliation_never_calls_forge() {
 }
 
 run_real_reconcile() {
-  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+  local home=${1:-$MAIN}
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_RUN_FIXTURE="$WORLD/run" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_RUNS_FIXTURE="$WORLD/runs" \
     "$RECON" scan --startup
 }
 
@@ -841,6 +843,7 @@ test_vanished_worker_run_is_observed() {
 #!/usr/bin/env bash
 case "$1 $2" in
   'axi status') cat "$FM_RUN_FIXTURE" ;;
+  'runs --limit') cat "$FM_RUNS_FIXTURE" 2>/dev/null ;;
   'daemon status') [ "${FM_DAEMON_DOWN:-0}" != 1 ] ;;
 esac
 SH
@@ -921,6 +924,48 @@ SH
     out=$(run_real_reconcile)
     [ -z "$out" ] || fail "elapsed display noise created a duplicate gate notification"
   done
+  printf 'run:\n  id: foreign\n  branch: fm/other\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  printf 'running fm/recovery %s 2026-09-15 12:00\n' "${head:0:8}" > "$WORLD/runs"
+  out=$(run_real_reconcile)
+  case "$out" in
+    *"only coarse ledger state"*) ;;
+    *) fail "a coarsely attributed workerless run stayed silent: $out" ;;
+  esac
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "an unchanged coarse run ambiguity repeated: $out"
+  : > "$WORLD/runs"
+
+  bind_secondmate local
+  write_child "$MATE" unknown-gate 'done: older delivery'
+  printf 'backend=zellij\n' >> "$MATE/state/unknown-gate.meta"
+  age "$MATE/state/unknown-gate.meta"
+  mkdir -p "$MATE/projects/unknown-gate"
+  git -C "$MATE/projects/unknown-gate" init -q
+  git -C "$MATE/projects/unknown-gate" checkout -q -b fm/unknown-gate
+  git -C "$MATE/projects/unknown-gate" commit -q --allow-empty -m initial
+  head=$(git -C "$MATE/projects/unknown-gate" rev-parse HEAD)
+  printf 'run:\n  id: unknown-gate-run\n  branch: fm/unknown-gate\n  head: %s\n  status: awaiting_approval\n' "$head" > "$WORLD/run"
+  out=$(run_real_reconcile "$MATE")
+  [ -n "$out" ] || fail "unknown secondmate endpoint blocked authoritative gate reconciliation"
+
+  write_child "$MATE" duplicate 'done: completed delivery'
+  printf 'backend=zellij\n' >> "$MATE/state/duplicate.meta"
+  age "$MATE/state/duplicate.meta"
+  mkdir -p "$MATE/projects/duplicate"
+  git -C "$MATE/projects/duplicate" init -q
+  git -C "$MATE/projects/duplicate" checkout -q -b fm/duplicate
+  git -C "$MATE/projects/duplicate" commit -q --allow-empty -m initial
+  head=$(git -C "$MATE/projects/duplicate" rev-parse HEAD)
+  printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  [ "$(grep -c 'child duplicate done:' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the ledger and completed run published one delivery twice: $(cat "$MAIN/state/mate.status")"
+  printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "a genuinely newer terminal run was hidden by the ledger receipt: $(cat "$MAIN/state/mate.status")"
   # A reused task id cannot inherit the previous incarnation's active observer,
   # and another branch's run cannot be reported as this task's decision.
   printf 'spawn_gen=reused-task\n' >> "$MAIN/state/child.meta"

@@ -2463,7 +2463,7 @@ hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_CREW_STATE="${FM_HOLD_FAKE_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -2592,6 +2592,43 @@ test_ended_worker_inherited_wedge_becomes_wait() {
   pass "a stopped held worker drops inherited wedges and rechecks unchanged panes on the decision cadence"
 }
 
+test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
+  local dir state out capture key
+  dir=$(make_hold_home ended-unheld-wedge 'working: interrupted by reboot' nohold) \
+    || fail "could not build stopped worker recovery fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  key=$(hold_key)
+  printf 'preserved shell\n' > "$capture"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped unheld worker did not report recovery"; }
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "stopped unheld worker inherited a false wedge: $(cat "$out")"
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    || fail "stopped unheld worker did not report recovery: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge ended-worker recovery"
+  : > "$out"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped unheld worker repeated its recovery alarm"
+  fi
+  reap "$HOLD_WATCH_PID"
+  export FM_HOLD_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "a surviving run stayed suppressed as an ended worker"
+  fi
+  reap "$HOLD_WATCH_PID"
+  unset FM_HOLD_FAKE_CREW_STATE
+  pass "an unheld stopped worker reports recovery once without suppressing a surviving run"
+}
+
 
 
 # The other half of the same bound, and the one that decides whether widening the
@@ -2603,8 +2640,7 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
   for spec in \
     'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'unheld-blocker|blocked: cannot reach the release host' \
-    'unheld-worker-line|working: still tidying the branch'
+    'unheld-blocker|blocked: cannot reach the release host'
   do
     name=${spec%%|*}; line=${spec#*|}
     dir=$(make_hold_home "$name" "$line" nohold) \
@@ -4905,6 +4941,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_open_captain_call_bounds_stale_churn
 test_ended_worker_inherited_wedge_becomes_wait
+test_unheld_ended_worker_inherited_wedge_becomes_recovery
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
