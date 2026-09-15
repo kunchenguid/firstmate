@@ -36,6 +36,8 @@
 # fm_brief_intent_overlay it is a distinctly titled launch section that states
 # its own precedence, so a brief or project instruction that authors a
 # conflicting role is superseded rather than duplicated.
+# fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
+# ordinary ship brief and the durable contract written during scout promotion.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -51,6 +53,25 @@ Never inspect or change any other home's endpoint namespace; this authorization 
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
+}
+
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
+  local mode=$1 id=$2
+  case "$mode" in
+    direct-PR)
+      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
+      ;;
+    local-only)
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      ;;
+    no-mistakes)
+      printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
+      ;;
+    *)
+      echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold

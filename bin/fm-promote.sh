@@ -178,14 +178,34 @@ PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
-promote_delivery_precedence() {
+IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
+If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
+1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
+2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
+3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
+5. If you reproduced a bug, turn that reproduction into a regression test.
+6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
+7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule, except where the current delivery contract below explicitly replaces scout-only delivery rules.
+EOF
+promote_delivery_contract() {
   cat <<EOF
 # Current delivery mode contract
 This task is now kind=ship with mode=$MODE.
 This section supersedes every earlier brief instruction about delivery mode.
+These current ship instructions supersede the scout delivery rules and report-based Definition of done.
 Any earlier "Never push" or scout-only delivery language in this file is superseded.
 The mode-specific Definition of done below is the current delivery contract.
+
+# Current ship safety rule
 EOF
+  fm_ship_rule_one "$MODE" "$ID"
+  if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
+    printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
+    printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
+  fi
+  printf '\n'
+  fm_dod_block "$MODE" "$ID"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -194,10 +214,6 @@ TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
   cat <<EOF
 Your scout task has been promoted to a ship task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
 
-EOF
-  promote_delivery_precedence
-  cat <<EOF
-
 # Task
 ## Captain's intent
 EOF
@@ -205,17 +221,10 @@ EOF
   cat <<EOF
 
 ## Firstmate spec
-1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
-2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
-4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
-5. If you reproduced a bug, turn that reproduction into a regression test.
-6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
-$PROMOTION_ASK_USER_BLOCK
-7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
+$PROMOTION_SHIP_SPEC
+
 EOF
-  printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  promote_delivery_contract
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
@@ -228,13 +237,8 @@ BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
 {
   cat "$SCOUT_BRIEF"
   printf '\n\n'
-  promote_delivery_precedence
-  if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
-    printf '\n\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
-    printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
-  fi
-  printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  printf '# Current ship Firstmate spec\n%s\n\n' "$PROMOTION_SHIP_SPEC"
+  promote_delivery_contract
 } > "$BRIEF_REPLACEMENT" || {
   echo "error: could not render the promoted brief for mode=$MODE" >&2
   exit 1
