@@ -2103,6 +2103,46 @@ test_recovery_retry_preserves_incomplete_cleanup_warning() {
   pass "recovery preserves incomplete-cleanup evidence across a failed replay"
 }
 
+# The replay is the fourth removal site for state/<id>.meta, so it owes the
+# same retention teardown does: the record lands in data/<id>/record/ before
+# the meta goes, and a retention that cannot be written refuses the replay
+# with every record still in place for the next session to retry.
+test_recovery_retains_the_task_record_before_removing_it() {
+  local case_dir home id marker record out
+  id=atomic-heal-retain-record-b12
+  case_dir=$(make_home heal-retain-record "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-retain"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-retain\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" > "$marker"
+  cp "$home/state/$id.meta" "$case_dir/meta.before"
+  record="$home/data/$id/record"
+  chmod 500 "$home/data/$id"
+
+  out=$(run_bootstrap "$case_dir")
+  chmod 700 "$home/data/$id"
+  assert_contains "$out" "could not be retained" \
+    "recovery did not say the record could not be retained"
+  assert_present "$home/state/$id.meta" \
+    "a refused retention still destroyed the interrupted task record"
+  assert_present "$marker" "a refused retention discarded its pending close"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "a refused retention transitioned the backlog row: $out"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "the retried replay left the item In flight: $out"
+  assert_absent "$home/state/$id.meta" \
+    "the retried replay left the runtime task record behind"
+  assert_absent "$marker" "the retried replay retained its applied marker"
+  cmp -s "$case_dir/meta.before" "$record/meta" \
+    || fail "the replayed cleanup did not retain the task's own meta"
+  pass "recovery retains the supervisor's record before removing it"
+}
+
 test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   local case_dir id out
   id=atomic-heal-same-incarnation-b11
@@ -3056,6 +3096,7 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
+test_recovery_retains_the_task_record_before_removing_it
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails

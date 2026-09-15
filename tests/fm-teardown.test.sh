@@ -2784,10 +2784,6 @@ test_teardown_retains_the_supervisor_record() {
   assert_grep 'checks green' "$record/status" "the retained record lost the task's own outcome"
   [ "$(retained_field "$case_dir" schema)" = fm-task-record.v1 ] \
     || fail "retain-task-record: the retained record does not declare its schema"
-  [ "$(retained_field "$case_dir" status_lines)" = 2 ] \
-    || fail "retain-task-record: wrong retained status line count"
-  [ "$(retained_field "$case_dir" status_lines_elided)" = 0 ] \
-    || fail "retain-task-record: a short status stream reported elided events"
   # Secrets and live-endpoint scaffolding are not evidence and stay out.
   assert_absent "$record/grok-turnend-token" "cleanup retained a per-task auth token"
   pass "cleanup retains the supervisor's record of what ran before removing it"
@@ -2825,38 +2821,6 @@ test_teardown_refuses_rather_than_losing_the_record() {
   pass "cleanup refuses and keeps every record when the retention cannot be written"
 }
 
-test_teardown_bounds_the_retained_status_stream() {
-  local case_dir i record kept
-  case_dir=$(make_case retain-task-record-bounded)
-  write_meta "$case_dir" no-mistakes ship
-  seed_task_evidence "$case_dir"
-  : > "$case_dir/state/task-x1.status"
-  i=1
-  while [ "$i" -le 450 ]; do
-    printf 'working: event %s\n' "$i" >> "$case_dir/state/task-x1.status"
-    i=$((i + 1))
-  done
-  land_shippable_commit "$case_dir"
-
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "retain-task-record-bounded: teardown should succeed on landed work"
-
-  record="$case_dir/data/task-x1/record"
-  kept=$(wc -l < "$record/status" | tr -d ' ')
-  [ "$kept" = 400 ] \
-    || fail "retain-task-record-bounded: retained $kept status events, expected the 400-event bound"
-  [ "$(retained_field "$case_dir" status_lines)" = 400 ] \
-    || fail "retain-task-record-bounded: the record misreports how many events it kept"
-  [ "$(retained_field "$case_dir" status_lines_elided)" = 50 ] \
-    || fail "retain-task-record-bounded: the record does not disclose the 50 dropped events"
-  # The bound drops the oldest events, never the outcome.
-  [ "$(tail -1 "$record/status")" = 'working: event 450' ] \
-    || fail "retain-task-record-bounded: the bound dropped the newest event"
-  assert_no_grep 'event 50$' "$record/status" \
-    "retain-task-record-bounded: an elided event was retained anyway"
-  pass "a runaway status stream is retained newest-first under a disclosed bound"
-}
-
 test_teardown_retains_a_task_that_never_reported() {
   local record case_dir
   case_dir=$(make_case retain-task-record-silent)
@@ -2873,8 +2837,6 @@ test_teardown_retains_a_task_that_never_reported() {
   assert_present "$record/busy-state" "a silent task's record omits the turn-activity slot entirely"
   [ ! -s "$record/status" ] \
     || fail "retain-task-record-silent: invented status events for a task that reported none"
-  [ "$(retained_field "$case_dir" status_lines)" = 0 ] \
-    || fail "retain-task-record-silent: the record misreports an empty status stream"
   pass "a task that never reported still leaves a complete, honest record"
 }
 
@@ -3911,5 +3873,4 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_teardown_retains_the_supervisor_record
 test_teardown_refuses_rather_than_losing_the_record
-test_teardown_bounds_the_retained_status_stream
 test_teardown_retains_a_task_that_never_reported

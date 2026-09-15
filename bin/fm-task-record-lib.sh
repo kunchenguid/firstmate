@@ -6,7 +6,8 @@
 #
 # Cleanup removes state/<id>.meta, state/<id>.status, and state/<id>.busy-state
 # (bin/fm-teardown.sh, bin/fm-classify-lib.sh's status_retire_presentation_task,
-# and bin/fm-busy-event.sh retire). The worker's own transcript survives under
+# bin/fm-busy-event.sh retire, and bin/fm-backlog-transition-lib.sh's
+# close-marker replay). The worker's own transcript survives under
 # its harness session directory, but firstmate's side of the task did not: which
 # model ran it, on which backend and endpoint, under which delivery mode and
 # merge posture, the status-event stream, and the last turn-activity record.
@@ -18,9 +19,9 @@
 # to do and what actually ran for it.
 #
 #   data/<id>/record/meta         state/<id>.meta, byte for byte
-#   data/<id>/record/status       the status-event stream, newest lines
+#   data/<id>/record/status       the status-event stream, whole
 #   data/<id>/record/busy-state   the last turn-activity record, or empty
-#   data/<id>/record/retained     when retention ran and what it elided
+#   data/<id>/record/retained     when retention ran
 #
 # The copies keep their source mtimes, because status lines carry no timestamp
 # of their own and the file's mtime is the only record of when the last one
@@ -36,16 +37,14 @@
 # extensions, busy-source bindings, the steering inbox, and per-task caches are
 # scaffolding for a live endpoint and are not retained.
 #
-# WHAT BOUNDS IT: the status stream is the only part a task controls the size
-# of, so it is capped at FM_TASK_RECORD_STATUS_MAX_LINES newest lines and the
-# retained record discloses how many older ones were dropped. The cap is far
-# above any real log - a status line is meant to be a phase change a supervisor
-# would act on, and observed logs run to single digits against a session-start
-# digest that tails five. Everything else is fixed: the meta is one spawn
-# record, the turn-activity record is one line, and the provenance file is five.
-# Across tasks this adds no growth axis, because data/<id>/ already exists per
-# task and already retains a brief many times this size. Re-running cleanup
-# replaces the record rather than appending to it.
+# WHAT BOUNDS IT: nothing new. The status stream is copied whole: it already
+# lived unbounded in state/, so retaining it adds no growth axis, and a status
+# line is a phase change a supervisor would act on - observed logs run to
+# single digits. Everything else is fixed: the meta is one spawn record, the
+# turn-activity record is one line, and the provenance file is three. Across
+# tasks this adds nothing either, because data/<id>/ already exists per task
+# and already retains a brief many times this size. Re-running cleanup replaces
+# the record rather than appending to it.
 #
 # FAILS CLOSED: retention runs before the first removal, and a caller that
 # cannot retain must refuse rather than continue, because a cleanup that
@@ -61,7 +60,6 @@
 # records are already gone is a no-op success.
 
 FM_TASK_RECORD_SCHEMA=fm-task-record.v1
-FM_TASK_RECORD_STATUS_MAX_LINES=400
 
 # fm_task_record_dir <data> <id>: where <id>'s retained record lives.
 fm_task_record_dir() {
@@ -106,7 +104,7 @@ _fm_task_record_identical() {
 fm_task_record_retain() {
   local state=$1 data=$2 id=$3
   local meta="$state/$id.meta" status="$state/$id.status" busy="$state/$id.busy-state"
-  local dir staging stale total kept elided retained_at
+  local dir staging stale retained_at
   FM_TASK_RECORD_ERROR=
 
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
@@ -139,32 +137,11 @@ fm_task_record_retain() {
   _fm_task_record_identical "$meta" "$staging/meta" "$meta" \
     || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
 
-  total=0
-  kept=0
-  elided=0
   if [ -f "$status" ] && [ ! -L "$status" ]; then
-    total=$(LC_ALL=C command awk 'END { print NR }' "$status" 2>/dev/null) || total=
-    case "${total:-}" in
-      ''|*[!0-9]*) _fm_task_record_abandon "$staging" "could not count the status events in $status" || return 1 ;;
-    esac
-    if [ "$total" -le "$FM_TASK_RECORD_STATUS_MAX_LINES" ]; then
-      kept=$total
-      cp -p -- "$status" "$staging/status" \
-        || _fm_task_record_abandon "$staging" "could not copy $status" || return 1
-      _fm_task_record_identical "$status" "$staging/status" "$status" \
-        || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
-    else
-      kept=$FM_TASK_RECORD_STATUS_MAX_LINES
-      elided=$((total - kept))
-      LC_ALL=C command tail -n "$kept" < "$status" > "$staging/status" \
-        || _fm_task_record_abandon "$staging" "could not copy the newest events of $status" || return 1
-      LC_ALL=C command tail -n "$kept" < "$status" > "$staging/.status.reread" \
-        || _fm_task_record_abandon "$staging" "could not re-read the newest events of $status" || return 1
-      _fm_task_record_identical "$staging/.status.reread" "$staging/status" "the newest events of $status" \
-        || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
-      rm -f -- "$staging/.status.reread" \
-        || _fm_task_record_abandon "$staging" "could not clear the re-read of $status" || return 1
-    fi
+    cp -p -- "$status" "$staging/status" \
+      || _fm_task_record_abandon "$staging" "could not copy $status" || return 1
+    _fm_task_record_identical "$status" "$staging/status" "$status" \
+      || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
   elif [ -e "$status" ] || [ -L "$status" ]; then
     _fm_task_record_abandon "$staging" "$status is not a regular file" || return 1
   else
@@ -177,6 +154,8 @@ fm_task_record_retain() {
       || _fm_task_record_abandon "$staging" "could not copy $busy" || return 1
     _fm_task_record_identical "$busy" "$staging/busy-state" "$busy" \
       || _fm_task_record_abandon "$staging" "$FM_TASK_RECORD_COMPARE_ERROR" || return 1
+  elif [ -e "$busy" ] || [ -L "$busy" ]; then
+    _fm_task_record_abandon "$staging" "$busy is not a regular file" || return 1
   else
     : > "$staging/busy-state" \
       || _fm_task_record_abandon "$staging" "could not record an absent turn-activity record" || return 1
@@ -190,9 +169,7 @@ fm_task_record_retain() {
   {
     printf 'schema=%s\n' "$FM_TASK_RECORD_SCHEMA" \
       && printf 'task=%s\n' "$id" \
-      && printf 'retained_at=%s\n' "$retained_at" \
-      && printf 'status_lines=%s\n' "$kept" \
-      && printf 'status_lines_elided=%s\n' "$elided"
+      && printf 'retained_at=%s\n' "$retained_at"
   } > "$staging/retained" \
     || _fm_task_record_abandon "$staging" "could not record the retention itself" || return 1
 

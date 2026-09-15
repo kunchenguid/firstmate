@@ -879,13 +879,13 @@ remote_secondmate_teardown() {
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
-  tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv -f -- "$tmp" "$SECONDMATE_REG"
   fm_task_record_retain "$STATE" "$DATA" "$ID" || {
     echo "error: $ID's record of what ran could not be retained ($FM_TASK_RECORD_ERROR); preserving every record for retry" >&2
     return 1
   }
+  tmp="$SECONDMATE_REG.tmp.$$"
+  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"

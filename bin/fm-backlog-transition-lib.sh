@@ -78,6 +78,10 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+# Retention before the replay's meta removal is fm-task-record-lib.sh's alone;
+# it is stateless for the same reason fm-timeout-lib.sh is.
+# shellcheck source=bin/fm-task-record-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-task-record-lib.sh"
 
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
 # command substitution, so the subshell can READ this latch but cannot set it;
@@ -1195,6 +1199,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
       || return 1
     cleanup_incomplete=1
+    fm_task_record_retain "$state" "$data" "$id" || {
+      FM_BACKLOG_TRANSITION_ERROR="$id's record of what ran could not be retained ($FM_TASK_RECORD_ERROR)"
+      return 1
+    }
     fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
       || return 1
   fi
