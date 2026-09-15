@@ -180,24 +180,34 @@ case "${1:-}" in
     # the session's active pane and exits 0. These fixtures model a live
     # supervisor pane, addressed as FM_SUPERVISOR_TARGET (the production default
     # otherwise), plus the crew pane under test in FM_FAKE_TMUX_WINDOW, whose
-    # value carries its "<session>:<window>" target. The requested -F format
-    # decides the rendering, exactly as tmux's would.
+    # value carries its "<session>:<window>" target. Each window has a real
+    # identity, so the requested -F field decides the rendering exactly as
+    # tmux's would: a numeric window names an INDEX, an @-prefixed window an id,
+    # and anything else a name.
     fmt=""; session=""; prev=""
     for arg in "$@"; do
       [ "$prev" = -t ] && session=$arg
       [ "$prev" = -F ] && fmt=$arg
       prev=$arg
     done
+    idx=0
     for win in "${FM_FAKE_TMUX_WINDOW:-}" "${FM_SUPERVISOR_TARGET:-firstmate:0}"; do
       [ -n "$win" ] || continue
+      wsession=${win%%:*}; wpart=${win#*:}
+      [ -z "$session" ] || [ "$wsession" = "$session" ] || continue
+      case "$wpart" in
+        @*) wid=$wpart; windex=$idx; wname=win$idx ;;
+        *[!0-9]*) wid=@$idx; windex=$idx; wname=$wpart ;;
+        *) wid=@$idx; windex=$wpart; wname=win$wpart ;;
+      esac
       case "$fmt" in
-        *session_name*) printf '%s\n' "$win"; continue ;;
+        *'#{session_name}:#{window_name}'*) printf '%s\n' "$wsession:$wname" ;;
+        *session_name*) printf '%s\n' "$wsession" ;;
+        *window_id*) printf '%s\n' "$wid" ;;
+        *window_index*) printf '%s\n' "$windex" ;;
+        *window_name*) printf '%s\n' "$wname" ;;
       esac
-      case "$win" in
-        *:*) [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
-             printf '%s\n' "${win#*:}" ;;
-        *) printf '%s\n' "$win" ;;
-      esac
+      idx=$((idx + 1))
     done
     exit 0 ;;
   capture-pane)
@@ -289,7 +299,7 @@ case "${1:-}" in
   list-windows)
     # Same inventory contract as the shared fake above: the session inventory is
     # the only presence proof, so the live supervisor pane must be listed here
-    # for an injection to reach it.
+    # for an injection to reach it, rendered by the requested -F field.
     fmt=""; session=""; prev=""
     for arg in "$@"; do
       [ "$prev" = -t ] && session=$arg
@@ -298,16 +308,24 @@ case "${1:-}" in
     done
     # The bordered fixture's world holds the supervisor pane plus the "sess:win"
     # pane its fm-send cases address explicitly.
+    idx=0
     for win in "${FM_FAKE_TMUX_WINDOW:-sess:win}" "${FM_SUPERVISOR_TARGET:-firstmate:0}"; do
       [ -n "$win" ] || continue
+      wsession=${win%%:*}; wpart=${win#*:}
+      [ -z "$session" ] || [ "$wsession" = "$session" ] || continue
+      case "$wpart" in
+        @*) wid=$wpart; windex=$idx; wname=win$idx ;;
+        *[!0-9]*) wid=@$idx; windex=$idx; wname=$wpart ;;
+        *) wid=@$idx; windex=$wpart; wname=win$wpart ;;
+      esac
       case "$fmt" in
-        *session_name*) printf '%s\n' "$win"; continue ;;
+        *'#{session_name}:#{window_name}'*) printf '%s\n' "$wsession:$wname" ;;
+        *session_name*) printf '%s\n' "$wsession" ;;
+        *window_id*) printf '%s\n' "$wid" ;;
+        *window_index*) printf '%s\n' "$windex" ;;
+        *window_name*) printf '%s\n' "$wname" ;;
       esac
-      case "$win" in
-        *:*) [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
-             printf '%s\n' "${win#*:}" ;;
-        *) printf '%s\n' "$win" ;;
-      esac
+      idx=$((idx + 1))
     done
     exit 0 ;;
   send-keys)

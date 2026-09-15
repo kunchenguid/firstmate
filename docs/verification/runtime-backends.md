@@ -156,7 +156,7 @@ Observed output (the active pane's own id, `%0` on a fresh server):
 ```
 
 Each of the first, second, and fourth calls reported the active window's own pane instead of failing.
-`tests/fm-backend-tmux-smoke.test.sh` asserts that fallback is still present in the installed tmux and that `fm_backend_target_exists` reads a vanished window name absent while the live window and a bare pane id read present; run it to refresh this evidence.
+`tests/fm-backend-tmux-smoke.test.sh` asserts that fallback is still present in the installed tmux and that `fm_backend_target_exists` reads a vanished window name (and an absent index or `@id`) absent while the live window, the live index/`@id`, and a bare pane id read present; run it to refresh this evidence.
 
 ### Agent liveness name sources
 

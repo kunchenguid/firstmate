@@ -1139,8 +1139,8 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
 # name to the addressed session's active window and exits 0, so a bare
 # `display-message -t <session>:<window>` reported every vanished worker window
 # as a live endpoint - a whole fleet of dead workers read as alive and busy. The
-# probe must prove the endpoint from tmux's own answer instead: a window name
-# from the session inventory, and a pane id by the id coming back.
+# probe must prove the endpoint from tmux's own answer instead: a window name,
+# index, or @id from the session inventory, and a pane id by the id coming back.
 test_target_exists_tmux_requires_recorded_window() {
   local fb
   fb="$TMP_ROOT/target-exists-fakebin"; mkdir -p "$fb"
@@ -1151,9 +1151,10 @@ test_target_exists_tmux_requires_recorded_window() {
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-target=""; prev=""
+target=""; fmt=""; prev=""
 for a in "$@"; do
   [ "$prev" = -t ] && target=$a
+  [ "$prev" = -F ] && fmt=$a
   prev=$a
 done
 case "${1:-}" in
@@ -1167,6 +1168,10 @@ case "${1:-}" in
     ;;
   list-windows)
     [ "$target" = live-sess ] || exit 1
+    case "$fmt" in
+      *#{window_id}*) printf '@7\n@8\n@9\n@10\n'; exit 0 ;;
+      *#{window_index}*) printf '0\n1\n2\n3\n'; exit 0 ;;
+    esac
     printf 'real-win\nfm-dotted.id\nfm-dotted\nfm-auth\n'
     exit 0
     ;;
@@ -1189,13 +1194,17 @@ SH
   PATH="$fb:$PATH" fm_backend_target_exists tmux gone-sess:real-win && \
     fail "a session that answers no inventory must not read as a live endpoint"
 
-  # Only an exact window name is a recorded endpoint. An index, @id, or
-  # pane-qualified form must never let tmux's own resolution stand in, because
-  # tmux reads a trailing ".N" as a pane qualifier and answers a sibling pane.
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:0 && \
-    fail "a window index is not a recorded window name and must not read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@7 && \
-    fail "a window @id is not a recorded window name and must not read as a live endpoint"
+  # A window index or @id is proved from the inventory's own index/@id fields,
+  # never from tmux's resolution; an index or id the session does not hold is
+  # absent. A pane-qualified form is never accepted.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:0 \
+    || fail "a window index the session inventory holds must read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:9 && \
+    fail "a window index the session inventory does not hold must NOT read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@7 \
+    || fail "a window @id the session inventory holds must read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@99 && \
+    fail "a window @id the session inventory does not hold must NOT read as a live endpoint"
   PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win.0 && \
     fail "a pane-qualified form must not read as a live endpoint even when tmux resolves its pane"
 

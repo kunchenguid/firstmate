@@ -105,6 +105,34 @@ fm_backend_target_exists tmux "$PANE_ID" \
 if fm_backend_target_exists tmux '%999999'; then
   fail "a missing pane id, which real tmux answers with an empty pane_id, must not read as live"
 fi
+# The away-mode supervisor fallback addresses the default window by INDEX
+# ("firstmate:0"), so a window index must be proved present from the session's
+# own inventory, and an index the session does not hold must read absent.
+tmux list-windows -t "$SESSION" -F '#{window_index}' | grep -qx '0' \
+  || fail "fixture drifted: the smoke session must hold window index 0"
+fm_backend_target_exists tmux "$SESSION:0" \
+  || fail "the away-mode supervisor index target '$SESSION:0' must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:999"; then
+  fail "a window index the session does not hold must not read as a live endpoint"
+fi
+FIRST_ID=$(tmux list-windows -t "$SESSION" -F '#{window_id}' | head -n1)
+[ -n "$FIRST_ID" ] || fail "real tmux: could not read a window id"
+fm_backend_target_exists tmux "$SESSION:$FIRST_ID" \
+  || fail "a window id the session holds must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:@999999"; then
+  fail "a window id the session does not hold must not read as a live endpoint"
+fi
+# A dotted name whose prefix window is live must still read absent: tmux reads
+# the trailing ".0" as a pane qualifier and resolves it to the prefix window.
+tmux new-window -d -t "$SESSION:" -n 'fm-prefix' \
+  || fail "real tmux: could not create the fm-prefix window"
+fm_backend_target_exists tmux "$SESSION:fm-prefix" \
+  || fail "the live prefix window must read as a live endpoint"
+tmux display-message -p -t "$SESSION:fm-prefix.0" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "fixture drifted: tmux must resolve the dotted name to its live prefix window"
+if fm_backend_target_exists tmux "$SESSION:fm-prefix.0"; then
+  fail "an absent dotted window whose live prefix window tmux resolved must not read as a live endpoint"
+fi
 pass "real tmux: endpoint presence is proved from tmux's own answer, never its silent fallback"
 
 # --- send text + Enter -------------------------------------------------------
