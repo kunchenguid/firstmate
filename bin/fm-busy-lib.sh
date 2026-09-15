@@ -48,7 +48,8 @@
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
-#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
+#   1. a busy record on a positively absent local endpoint
+#      (fm_busy_classify_live only)              -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
@@ -1021,19 +1022,26 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
 }
 
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
-# override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
-# be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
+# override - a durable busy record can only describe an endpoint that still
+# exists, so a busy verdict on a positively absent local endpoint is dead,
+# never busy. A remote endpoint is proved on its own host and keeps its record;
+# where absence must be told apart from unreadability the recovery-grade
+# classifier (fm_backend_agent_state's missing/dead) is the authority, never a
+# bare presence-probe failure. Requires fm-backend.sh to be sourced.
+fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label] [tail40]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} tail40=${7-} verdict
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
   fi
-  if ! fm_backend_target_exists "$backend" "$target" "$label" 2>/dev/null; then
-    printf 'dead endpoint-gone'
-    return 0
-  fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
+  verdict=$(fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40")
+  [ "${verdict%% *}" = busy ] || { printf '%s' "$verdict"; return 0; }
+  case "$target" in remote:*) printf '%s' "$verdict"; return 0 ;; esac
+  fm_backend_target_exists "$backend" "$target" "$label" 2>/dev/null && { printf '%s' "$verdict"; return 0; }
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
+    missing|dead) printf 'dead endpoint-gone' ;;
+    *) printf '%s' "$verdict" ;;
+  esac
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every

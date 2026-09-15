@@ -363,15 +363,23 @@ test_dead_endpoint_overrides() {
   gen=$("$EV" arm "$state" t1)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 1; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'missing'; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
+  # A bare presence-probe failure is not absence: only the recovery-grade
+  # classifier's positive missing/dead verdict overrides a busy record.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'unreadable'; }
+  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "an unreadable endpoint must keep its record, got '$out'"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 0; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
   out=$(fm_busy_classify_live tmux '' claude t1 "$state")
   [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
-  unset -f fm_backend_target_exists
+  unset -f fm_backend_target_exists fm_backend_agent_state
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
