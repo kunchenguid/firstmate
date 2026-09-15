@@ -4927,10 +4927,81 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+# The routine-repeat filter stops an unchanged operational state from spending
+# the lead model's context: the first routine outcome for a task delivers, an
+# unchanged repeat is stored and marked read but never merged, a materially
+# changed summary delivers, and a captain outcome is never a repeat candidate.
+test_routine_repeat_is_not_redelivered_to_main() {
+  local repo home status
+  repo="$TMP_ROOT/routine-repeat-root"
+  home="$TMP_ROOT/routine-repeat-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, defaultSessionCtx, home }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, defaultSessionCtx);
+
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: repeat-suppression wake");
+if (!offer.accepted) throw new Error("branch did not accept the routine wake");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "routine wake prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+const first = await report.execute("repeat-1", { task: "branch-driver", verdict: "routine", summary: "worker healthy, no action needed" }, undefined, undefined, {});
+if (first.isError) throw new Error(`first routine report failed: ${JSON.stringify(first)}`);
+finishWakePrompt();
+await offer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+if (sentToMain.length !== 1) throw new Error(`first routine outcome did not deliver exactly one note: ${sentToMain.length}`);
+
+// A case/whitespace-only variation is the same evidence and must not reach main.
+const repeat = await report.execute("repeat-2", { task: "branch-driver", verdict: "routine", summary: "Worker   Healthy, no action needed" }, undefined, undefined, {});
+if (repeat.isError) throw new Error(`repeat routine report was refused: ${JSON.stringify(repeat)}`);
+if (!String(repeat.content?.[0]?.text || "").includes("not re-delivered")) {
+  throw new Error(`the suppressed repeat was not reported as not re-delivered: ${JSON.stringify(repeat)}`);
+}
+if (sentToMain.length !== 1) throw new Error(`an unchanged routine repeat reached main: ${JSON.stringify(sentToMain.map((sent) => sent.message.content))}`);
+
+// A materially changed summary is new evidence and delivers.
+const changed = await report.execute("repeat-3", { task: "branch-driver", verdict: "routine", summary: "worker healthy, PR opened" }, undefined, undefined, {});
+if (changed.isError) throw new Error(`changed routine report was refused: ${JSON.stringify(changed)}`);
+if (sentToMain.length !== 2) throw new Error(`a changed routine outcome was suppressed: ${JSON.stringify(sentToMain.map((sent) => sent.message.content))}`);
+if (!String(sentToMain[1].message.content).includes("PR opened")) throw new Error("the changed routine note lost its new evidence");
+
+// A captain outcome with an identical body still opens its processing turn.
+const captain = await report.execute("repeat-4", { task: "branch-driver", verdict: "captain", summary: "worker healthy, no action needed" }, undefined, undefined, {});
+if (captain.isError) throw new Error(`captain report was refused: ${JSON.stringify(captain)}`);
+if (!sentToMain.some((sent) => sent.message.customType === "fm-branch-process" && String(sent.message.content).includes("worker healthy, no action needed"))) {
+  throw new Error("a captain outcome with an identical body was suppressed");
+}
+
+// The suppressed repeat is still durable, and its cursor advanced past it.
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 4) throw new Error(`expected 4 durable rows, got ${rows.length}`);
+if (rows[1].summary !== "Worker   Healthy, no action needed") throw new Error("the suppressed repeat was not stored durably");
+if (outcomeScript(["unread"]) !== "") throw new Error("the suppressed repeat was not marked read");
+EOF
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    cat "$TMP_ROOT/node-output"
+    fail "routine repeat suppression driver failed"
+  fi
+  pass "an unchanged routine outcome is stored and marked read but never re-delivered to main"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
+test_routine_repeat_is_not_redelivered_to_main
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot

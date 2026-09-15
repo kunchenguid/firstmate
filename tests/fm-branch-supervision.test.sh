@@ -127,6 +127,85 @@ PY
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
+# The unchanged-routine filter: the same task's routine summary repeated is
+# suppressed, while the first occurrence, a changed summary, a different task,
+# a captain verdict, and a changed silent flag all stay deliverable.
+test_outcome_store_filters_unchanged_routine_repeats() {
+  local home out seq
+  home="$TMP_ROOT/store-repeat-home"
+  mkdir -p "$home/state"
+  repeated_check() { # <seq>
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" repeated --seq "$1"
+  }
+
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'worker healthy, no action needed') \
+    || fail "first routine append failed"
+  [ "$(repeated_check "$seq")" = no ] || fail "a task's first routine outcome was reported as a repeat"
+
+  # Case- and whitespace-only differences are the same evidence.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'Worker   Healthy, no action needed') \
+    || fail "repeat routine append failed"
+  [ "$(repeated_check "$seq")" = yes ] || fail "an unchanged routine outcome was not reported as a repeat"
+
+  # A materially changed summary is new evidence and must deliver.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'worker healthy, PR opened') \
+    || fail "changed routine append failed"
+  [ "$(repeated_check "$seq")" = no ] || fail "a changed routine summary was suppressed as a repeat"
+
+  # The comparison is scoped to the same task.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'worker healthy, no action needed') \
+    || fail "other-task routine append failed"
+  [ "$(repeated_check "$seq")" = no ] || fail "a different task's routine outcome was suppressed"
+
+  # Captain outcomes are never repeat candidates, even with an identical body.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'worker healthy, no action needed') \
+    || fail "captain append failed"
+  [ "$(repeated_check "$seq")" = no ] || fail "a captain outcome was treated as a suppressible repeat"
+
+  # A changed silent flag is a different disposition, not a repeat.
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --summary 'fleet reviewed' --silent true) \
+    || fail "silent fleet append failed"
+  [ "$(repeated_check "$seq")" = no ] || fail "the first silent fleet outcome was suppressed"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --summary 'fleet reviewed' --silent true) \
+    || fail "repeated silent fleet append failed"
+  [ "$(repeated_check "$seq")" = yes ] || fail "a repeated silent no-op was not suppressed"
+
+  # Session-start replay applies the same filter, and still marks the filtered
+  # row read so the cursor advances past it.
+  local replay_home replay
+  replay_home="$TMP_ROOT/store-repeat-replay-home"
+  mkdir -p "$replay_home/state"
+  FM_HOME="$replay_home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'same state' >/dev/null || fail "replay first append failed"
+  FM_HOME="$replay_home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'same state' >/dev/null || fail "replay repeat append failed"
+  FM_HOME="$replay_home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'changed state' >/dev/null || fail "replay changed append failed"
+  replay=$(FM_HOME="$replay_home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) \
+    || fail "repeat-aware startup replay failed"
+  [ "$(printf '%s\n' "$replay" | grep -c 'same state')" -eq 1 ] \
+    || fail "startup replay printed an unchanged routine repeat"
+  assert_contains "$replay" "changed state" "startup replay dropped a changed routine outcome"
+  [ -z "$(FM_HOME="$replay_home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
+    || fail "startup replay did not mark the filtered repeat read"
+
+  # An unknown seq and a store that cannot be read answer safely.
+  [ "$(repeated_check 999)" = no ] || fail "an unknown seq did not answer no"
+  printf 'torn\n' >> "$home/state/branch-outcomes.jsonl"
+  if out=$(repeated_check 1 2>&1); then
+    fail "a torn store did not fail the repeat check"
+  fi
+  assert_contains "$out" "malformed or non-sequential" "torn-store repeat refusal lost its diagnostic"
+  pass "unchanged routine outcomes are detected while first, changed, other-task, captain, and silent rows stay deliverable"
+}
+
 test_outcome_startup_replay_preserves_silence() {
   local home replay out status store
   home="$TMP_ROOT/store-silent-home"
@@ -839,6 +918,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
+test_outcome_store_filters_unchanged_routine_repeats
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed

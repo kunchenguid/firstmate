@@ -63,6 +63,12 @@
 #     Append one outcome record; prints the assigned seq.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
+#   fm-branch-outcome.sh repeated --seq <seq>
+#     Print `yes` when the routine record at <seq> repeats the same task's most
+#     recent earlier routine record (same `silent` flag and a case- and
+#     whitespace-insensitive equal summary), `no` otherwise. A captain record
+#     and a task's first routine record always print `no`. Exit 1 when the store
+#     cannot be read, so a caller never mistakes an uncertain read for a repeat.
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after handing the records to Pi.
 #   fm-branch-outcome.sh unprocessed
@@ -84,7 +90,8 @@
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
-#     field is true, and mark those leading routine rows read. Stop before the
+#     field is true or that are unchanged routine repeats, and mark those
+#     leading routine rows read. Stop before the
 #     first captain row because only Pi's sequence-keyed visible entry may
 #     acknowledge that row. Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
@@ -107,7 +114,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | repeated --seq <seq> | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -210,6 +217,35 @@ last_seq() {
 record_seq() { # <jsonl-line>
   [ -n "$1" ] || return 0
   printf '%s\n' "$1" | jq -er '.seq'
+}
+
+# Decide whether the routine outcome at <seq> is a semantically unchanged
+# repeat of the most recent earlier routine outcome for the SAME task. The
+# comparison ignores case, leading/trailing space, and runs of whitespace so a
+# rephrased-but-identical note still counts as unchanged; it includes the
+# `silent` flag so a no-change heartbeat and a rendered note with the same text
+# are not confused. Captain rows and a task's first routine row are never
+# repeats, so the first occurrence is always delivered. Deterministic over the
+# append-only store: the predecessors of a row never change, so recomputing the
+# answer on a replay is stable (the decision is not persisted, but it does not
+# need to be). Return 0 for a repeat, 1 for not, 2 when the store cannot be
+# read - and callers treat 2 as "not a repeat" so an uncertain read delivers
+# rather than swallowing a routine note.
+row_is_repeat() { # <seq>
+  local seq=$1 out
+  out=$(jq -sr --argjson seq "$seq" '
+    def norm: (.summary | ascii_downcase | gsub("[[:space:]]+"; " ") | sub("^ +"; "") | sub(" +$"; ""));
+    ([.[] | select(.seq == $seq)] | first) as $cur
+    | if $cur == null or $cur.verdict != "routine" then "no"
+      else
+        ([.[] | select(.verdict == "routine" and .task == $cur.task and .seq < $seq)] | last) as $prev
+        | if $prev == null then "no"
+          elif (($prev.silent // false) == ($cur.silent // false)) and (($prev | norm) == ($cur | norm)) then "yes"
+          else "no"
+          end
+      end
+  ' "$STORE" 2>/dev/null) || return 2
+  [ "$out" = yes ]
 }
 
 outcome_index_path() { # <task>
@@ -488,6 +524,29 @@ case "$CMD" in
     print_unread
     fm_lock_release "$LOCK"
     ;;
+  repeated)
+    [ "${1:-}" = --seq ] || usage
+    REPEAT_SEQ=${2:-}
+    [ "$#" -eq 2 ] || usage
+    bounded_uint "$REPEAT_SEQ" || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing repeat check because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    REPEAT_RC=0
+    row_is_repeat "$REPEAT_SEQ" || REPEAT_RC=$?
+    fm_lock_release "$LOCK"
+    case "$REPEAT_RC" in
+      0) printf 'yes\n' ;;
+      1) printf 'no\n' ;;
+      *)
+        echo "error: refusing repeat check because the outcome store could not be read" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   mark-read)
     [ "${1:-}" = --through ] || usage
     THROUGH=${2:-}
@@ -624,6 +683,21 @@ case "$CMD" in
         | .[0:($captain // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
+      # An unchanged routine repeat is filtered before it can reach the main
+      # session, exactly as the live delivery path filters it; the row is still
+      # marked read below so the cursor advances past it.
+      FILTERED=''
+      while IFS= read -r REPLAY_LINE; do
+        [ -n "$REPLAY_LINE" ] || continue
+        REPLAY_SEQ=$(printf '%s\n' "$REPLAY_LINE" | jq -er '.seq') || REPLAY_SEQ=
+        if [ -n "$REPLAY_SEQ" ] && row_is_repeat "$REPLAY_SEQ"; then
+          continue
+        fi
+        FILTERED+="$REPLAY_LINE"$'\n'
+      done <<EOF
+$VISIBLE
+EOF
+      VISIBLE=${FILTERED%$'\n'}
       if [ -n "$VISIBLE" ]; then
         printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
         printf '%s\n' "$VISIBLE"

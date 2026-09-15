@@ -266,6 +266,8 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
+#     __PITRUST__  --approve when the resolved Pi-family executable advertises it;
+#                  a probe that cannot prove the flag refuses the spawn (see below)
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
@@ -1577,6 +1579,21 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
+# Pi's project-trust control is version-dependent, but unlike the optional
+# --tui-mode it has no safe omission: a worker launched into a fresh worktree
+# without it stops at the interactive trust dialog instead of processing its
+# instructions, and no unattended supervisor can answer that dialog. So the
+# launch requires a positive probe for --approve and REFUSES when the resolved
+# executable does not advertise it, rather than launching a worker that will
+# wedge. Project trust and --approve/--no-approve predate every Pi version this
+# repo's harness contract verifies (0.82.0), so the refusal is a genuine
+# capability guard, not a routine path.
+pi_supports_project_approve() {
+  local executable=$1 help
+  help=$("$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([[:space:],=]|$)'
+}
+
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -1693,8 +1710,14 @@ launch_template() {
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Pi and Pi-signed. --approve is the project-trust control: a fresh task
+  # worktree or secondmate home carries project resources (.pi, .agents/skills),
+  # so an interactive Pi session with no saved decision parks on the trust
+  # dialog and never reads its brief (observed 2026-09-15). --approve trusts
+  # those project-local files for this run only, never writing a global trust
+  # decision; the probe and refusal below own why it cannot be omitted.
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE__'
+    printf '%s' '__PIBIN____PITRUST____PITUIMODE__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -1947,6 +1970,11 @@ pi | pi-signed)
   if pi_supports_tui_mode "$PI_BIN"; then
     PI_TUI_MODE=' --tui-mode regular'
   fi
+  if ! pi_supports_project_approve "$PI_BIN"; then
+    echo "error: $HARNESS at $PI_BIN does not advertise --approve, so a fresh worktree would park its worker on Pi's project-trust dialog; update $HARNESS to a project-trust-capable version" >&2
+    exit 1
+  fi
+  LAUNCH=${LAUNCH//__PITRUST__/' --approve'}
   LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
   LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
   ;;
