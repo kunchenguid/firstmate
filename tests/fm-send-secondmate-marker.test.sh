@@ -59,7 +59,17 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # The session inventory is the presence proof for an explicit target, so
+    # this fixture's synthetic panes must be listed: other:win has metadata and
+    # outside:window deliberately does not.
+    session=""; prev=""
+    for a in "$@"; do [ "$prev" = -t ] && session=$a; prev=$a; done
+    case "$session" in
+      other) printf 'win\n' ;;
+      outside) printf 'window\n' ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

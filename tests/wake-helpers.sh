@@ -175,7 +175,30 @@ case "${1:-}" in
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    # Real tmux's session inventory, which is the only presence proof: an
+    # addressed display-message call silently resolves an unknown window name to
+    # the session's active pane and exits 0. These fixtures model a live
+    # supervisor pane, addressed as FM_SUPERVISOR_TARGET (the production default
+    # otherwise), plus the crew pane under test in FM_FAKE_TMUX_WINDOW, whose
+    # value carries its "<session>:<window>" target. The requested -F format
+    # decides the rendering, exactly as tmux's would.
+    fmt=""; session=""; prev=""
+    for arg in "$@"; do
+      [ "$prev" = -t ] && session=$arg
+      [ "$prev" = -F ] && fmt=$arg
+      prev=$arg
+    done
+    for win in "${FM_FAKE_TMUX_WINDOW:-}" "${FM_SUPERVISOR_TARGET:-firstmate:0}"; do
+      [ -n "$win" ] || continue
+      case "$fmt" in
+        *session_name*) printf '%s\n' "$win"; continue ;;
+      esac
+      case "$win" in
+        *:*) [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
+             printf '%s\n' "${win#*:}" ;;
+        *) printf '%s\n' "$win" ;;
+      esac
+    done
     exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
@@ -263,7 +286,30 @@ case "${1:-}" in
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # Same inventory contract as the shared fake above: the session inventory is
+    # the only presence proof, so the live supervisor pane must be listed here
+    # for an injection to reach it.
+    fmt=""; session=""; prev=""
+    for arg in "$@"; do
+      [ "$prev" = -t ] && session=$arg
+      [ "$prev" = -F ] && fmt=$arg
+      prev=$arg
+    done
+    # The bordered fixture's world holds the supervisor pane plus the "sess:win"
+    # pane its fm-send cases address explicitly.
+    for win in "${FM_FAKE_TMUX_WINDOW:-sess:win}" "${FM_SUPERVISOR_TARGET:-firstmate:0}"; do
+      [ -n "$win" ] || continue
+      case "$fmt" in
+        *session_name*) printf '%s\n' "$win"; continue ;;
+      esac
+      case "$win" in
+        *:*) [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
+             printf '%s\n' "${win#*:}" ;;
+        *) printf '%s\n' "$win" ;;
+      esac
+    done
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0

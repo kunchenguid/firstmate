@@ -73,6 +73,40 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- endpoint presence: tmux's silent fallbacks ------------------------------
+#
+# Regression (2026-09-14 fleet-loss incident): tmux resolves an UNKNOWN window
+# name to the session's active window and exits 0, so an addressed
+# display-message call is not a presence proof. Assert that real behavior first -
+# if a future tmux stops doing this, this guard fails loudly and names the
+# version rather than letting the endpoint-presence contract rot silently - then
+# prove the probe trusts tmux's own answer: a vanished window name reads absent
+# while its session is genuinely alive, and the real window still reads present.
+if ! tmux display-message -p -t "$SESSION:no-such-window-xyz" '#{pane_id}' >/dev/null 2>&1; then
+  fail "real tmux ($(tmux -V 2>/dev/null || printf 'version unknown')) no longer silently resolves an unknown window name to the active window; re-verify the endpoint-presence contract"
+fi
+fm_backend_tmux_target_present "$TARGET" \
+  || fail "fm_backend_tmux_target_present must read a live window as present"
+if fm_backend_tmux_target_present "$SESSION:no-such-window-xyz"; then
+  fail "fm_backend_tmux_target_present must not read a name tmux silently resolved to the active window as present"
+fi
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must read a live window as present"
+if fm_backend_target_exists tmux "$SESSION:no-such-window-xyz"; then
+  fail "fm_backend_target_exists must not read a vanished window name as a live endpoint"
+fi
+# The away-mode daemon addresses the supervisor PANE (its own $TMUX_PANE), so
+# the bare pane-id shape must keep reading present, while a missing pane id - for
+# which real tmux answers an empty pane_id and exit 0 - must not.
+PANE_ID=$(tmux display-message -p -t "$TARGET" '#{pane_id}')
+[ -n "$PANE_ID" ] || fail "real tmux: could not read the task pane id"
+fm_backend_target_exists tmux "$PANE_ID" \
+  || fail "the away-mode daemon's bare pane-id target must read as a live endpoint"
+if fm_backend_target_exists tmux '%999999'; then
+  fail "a missing pane id, which real tmux answers with an empty pane_id, must not read as live"
+fi
+pass "real tmux: endpoint presence is proved from tmux's own answer, never its silent fallback"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line

@@ -44,9 +44,14 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Endpoint presence
+
+The cheap endpoint-presence probe (`fm_backend_tmux_target_present` in `bin/backends/tmux.sh`) proves an endpoint from tmux's own answer.
+`tmux display-message -t <target>` alone is not a presence proof: tmux resolves an unknown window name to the addressed session's active window and still exits 0, so a vanished worker window used to read as a live endpoint.
+The probe matches the window tmux actually resolved against the recorded address - the exact window name, or an exact index, `@id`, or pane-qualified form - and proves a bare `%N` pane address by the pane id coming back nonempty, because tmux answers a missing pane id with an empty one.
+
 ### Agent liveness probe
 
-A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, Rovo, and AGY process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 The process-name vocabulary behind those verdicts is owned by `bin/fm-agent-process-lib.sh` and shared with the Herdr adapter, which proves a registered agent against the same names ([herdr-backend.md](herdr-backend.md) "Restart and liveness behavior").

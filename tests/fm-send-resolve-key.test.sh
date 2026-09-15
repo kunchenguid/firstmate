@@ -73,7 +73,11 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows)
-    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9 fm-mate
+    # The session's real window inventory. An explicit target is verified by
+    # finding its exact window name here, never by tmux's silent resolution of
+    # an unknown name to the active pane, so every live target this suite sends
+    # to must be listed.
+    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9 fm-mate elsewhere
     exit 0 ;;
 esac
 exit 0

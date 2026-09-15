@@ -131,6 +131,33 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Endpoint presence requires tmux's own window answer
+
+Verified on 2026-09-15 with tmux 3.6 on Linux x86_64 on a private socket.
+`tmux display-message -p -t <target>` answers for a window name that does not exist by resolving it to the addressed session's active window and exiting 0, and answers a missing pane id with an empty `#{pane_id}` and exit 0, so the addressed call alone cannot prove an endpoint exists.
+The exact-match `=` target prefix does not change the window-name fallback, so the probe proves membership from the session inventory instead.
+
+```sh
+tmux new-session -d -s sess -n alpha
+tmux new-window -d -t sess: -n beta
+tmux display-message -p -t sess:no-such-window '#{pane_id}'
+tmux display-message -p -t sess:9 '#{pane_id}'
+tmux display-message -p -t '%999999' '#{pane_id}'
+tmux display-message -p -t '=sess:=no-such-window' '#{pane_id}'
+```
+
+Observed output (the active pane's own id, `%0` on a fresh server):
+
+```text
+<active pane id>   sess:no-such-window answered anyway, exit 0
+<active pane id>   sess:9 resolved to the active window
+(empty)            %999999 answered a missing pane with no id
+<active pane id>   =sess:=no-such-window answered anyway, exit 0
+```
+
+Each of the first, second, and fourth calls reported the active window's own pane instead of failing.
+`tests/fm-backend-tmux-smoke.test.sh` asserts that fallback is still present in the installed tmux and that `fm_backend_target_exists` reads a vanished window name absent while the live window and a bare pane id read present; run it to refresh this evidence.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

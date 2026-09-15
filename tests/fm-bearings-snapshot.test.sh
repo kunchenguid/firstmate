@@ -39,6 +39,24 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  list-windows)
+    # The session's true window inventory, derived from the recorded window=
+    # metadata: an addressed display-message call is not a presence proof any
+    # more than real tmux's silent active-pane fallback is, so the recorded
+    # window must be found here. The fixture's dead-* convention (which
+    # display-message refuses) is omitted from the inventory too.
+    session=; prev=
+    for _a in "$@"; do [ "$prev" = -t ] && session="$_a"; prev="$_a"; done
+    [ -n "$session" ] || exit 0
+    for _meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
+      [ -f "$_meta" ] || continue
+      _win=$(sed -n 's/^window=//p' "$_meta")
+      case "$_win" in
+        *dead-*) continue ;;
+        "$session":*) printf '%s\n' "${_win#*:}" ;;
+      esac
+    done
+    exit 0 ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;
@@ -2996,10 +3014,17 @@ EOF
   printf 'working: old generation\n' > "$home/state/generation-race.status"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = display-message ]; then
-  if mkdir "$RACE_ONCE" 2>/dev/null; then
-    tmp="$RACE_META.tmp.$$"
-    cat > "$tmp" <<EOF
+# The presence probe is the session inventory now, so the relaunch race is
+# triggered from whichever addressed read the snapshot makes first: the old
+# endpoint's window is gone from the inventory while a replacement already
+# reused the same target.
+case "${1:-}" in
+  list-windows|display-message) ;;
+  *) exit 0 ;;
+esac
+if mkdir "$RACE_ONCE" 2>/dev/null; then
+  tmp="$RACE_META.tmp.$$"
+  cat > "$tmp" <<EOF
 window=fixture:fm-generation-race
 worktree=$RACE_WORKTREE
 project=firstmate
@@ -3008,14 +3033,13 @@ kind=ship
 mode=no-mistakes
 spawn_gen=new-generation
 EOF
-    mv "$tmp" "$RACE_META"
-    printf 'needs-decision[replacement]: replacement-only decision https://github.com/acme/firstmate/pull/999\n' > "$RACE_STATUS"
-    mkdir -p "$(dirname "$RACE_REPORT")"
-    printf 'replacement-only report\n' > "$RACE_REPORT"
-  fi
-  # The old endpoint disappeared while a replacement reused the same target.
-  exit 1
+  mv "$tmp" "$RACE_META"
+  printf 'needs-decision[replacement]: replacement-only decision https://github.com/acme/firstmate/pull/999\n' > "$RACE_STATUS"
+  mkdir -p "$(dirname "$RACE_REPORT")"
+  printf 'replacement-only report\n' > "$RACE_REPORT"
 fi
+# The old endpoint disappeared while a replacement reused the same target.
+[ "${1:-}" = display-message ] && exit 1
 exit 0
 SH
   chmod +x "$fakebin/tmux"
