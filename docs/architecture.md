@@ -52,8 +52,9 @@ A crew that declares `paused:` for a known external wait, or carries a verified 
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint while attended; the pause classification itself is recovered only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, so a worker genuinely waiting on a decision is never silenced.
 Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
-A confidently ended ordinary worker with a backlog-held captain call is classified before pane capture and before any inherited wedge timer, so preserved work on an unchanged shell remains a wait rather than repeated evidence of a stuck agent.
-Unread instructions and positive busy evidence keep their existing escalation paths; the bounded wait and its declaration identity are owned by `bin/fm-watch.sh`.
+A confidently ended ordinary worker is classified before pane capture and again at the shared wedge boundary, so preserved state remains a recovery wait rather than repeated evidence of a stuck agent.
+An open captain call names that wait as captain-owned; otherwise it produces one recovery notice on the same bounded cadence.
+Unread instructions, positive busy evidence, and an authoritative run keep their existing paths; the bounded wait and its declaration identity are owned by `bin/fm-watch.sh`.
 A secondmate's endpoint liveness is still never read at all; a mate is admitted to that same cadence only to serve a status-declared wait's bounded re-surface, so a forgotten `paused:` declaration, or an attended `captain-held` declaration, cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while a daemon-backed away posture self-handles that routine signal and owns later external-wait rechecks.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
