@@ -1295,7 +1295,8 @@ ended_worker_stale_check() {  # <window> <task>
   key=$(window_key "$win")
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
-    *"source: run-step"*|'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
+    *"source: run-step"*) clear_stale_hash_tracking "$key"; return 0 ;;
+    'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
     'state: unknown '*|'state: stopped '*) ;;
     *) return 1 ;;
   esac
