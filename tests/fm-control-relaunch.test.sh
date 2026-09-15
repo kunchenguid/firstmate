@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -429,6 +431,43 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# A relaunch republishes the record while a registered PR poll stays armed, so
+# the metadata it adds must not land after the registration lines the poll's
+# authenticated identity parse requires to be terminal.
+test_relaunch_keeps_a_registered_pr_poll_authenticated() {
+  local dir out rc
+  dir=$(new_case pr-poll rl47)
+  add_ship_task "$dir" rl47 claude
+  mkdir -p "$dir/root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/root/bin/fm-guard.sh"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+SH
+  chmod +x "$dir/root/bin/fm-guard.sh" "$dir/fakebin/gh"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    "$ROOT/bin/fm-pr-check.sh" rl47 https://github.com/example/repo/pull/47 2>&1) \
+    || fail "could not register the PR for the relaunch fixture"$'\n'"$out"
+  [ "$(meta_field "$dir" rl47 pr_head)" = 0123456789abcdef0123456789abcdef01234567 ] \
+    || fail "the fixture registration did not record the forge head"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl47 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the registered PR poll was not authenticated before relaunch"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  out=$(run_control "$dir" rl47 relaunch --note "continue while the PR waits on a decision"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with a registered PR"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl47 control_relaunch_tx)" ] \
+    || fail "relaunch must still record its transaction token"
+  fm_trace_context_valid "$(meta_field "$dir" rl47 traceparent)" \
+    || fail "relaunch must still record the replacement's trace carrier"
+  [ "$(meta_field "$dir" rl47 pr)" = https://github.com/example/repo/pull/47 ] \
+    || fail "the registered PR must survive relaunch"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl47 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch metadata invalidated the registered PR poll"
+  pass "fm-control relaunch: a registered PR poll stays authenticated across replacement launch publication"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1620,6 +1659,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_a_registered_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
