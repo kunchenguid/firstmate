@@ -19,6 +19,13 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# Every run also enforces one interface boundary over the production shell
+# roots it lints: firstmate reaches its backlog through tasks-axi and never
+# through the beads CLI directly (see fm_lint_run_backend_purity). The
+# check's roots are the production bin/ and bin/backends/ scripts, so test
+# scripts are out of scope by construction: a beads-backed test fixture must
+# bootstrap its scratch graph with `bd` before tasks-axi can operate on it at
+# all, as tests/fm-captain-hold-lifecycle.test.sh documents.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -206,7 +213,7 @@ fm_lint_run_backend_purity() {
         previous=segment
         sub(/^(if|then|elif|else|while|until|do)[[:space:]]+/, "", segment)
         sub(/^![[:space:]]+/, "", segment)
-        sub(/^(command|exec)[[:space:]]+/, "", segment)
+        sub(/^(command|exec|sudo|time|xargs|nohup|timeout)[[:space:]]+/, "", segment)
         sub(/^[[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+/, "", segment)
         if (segment ~ /^env[[:space:]]+/) {
           sub(/^env[[:space:]]+/, "", segment)
@@ -883,5 +890,4 @@ if [ "$overall_rc" -eq 0 ]; then
 else
   fm_lint_run_workflows || true
 fi
-
 exit "$overall_rc"
