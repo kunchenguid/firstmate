@@ -1471,6 +1471,54 @@ EOF
   pass "branch prompt_cache_key is stable per home across sessions and distinct between homes"
 }
 
+test_retained_preview_no_change_delivery() {
+  local repo home
+  repo="$TMP_ROOT/retained-preview-root"
+  home="$TMP_ROOT/retained-preview-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  if ! PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { dispatch, settle, home, sentToMain, mainEntries, outcomeScript, fire, defaultSessionCtx }; })()`);
+const { dispatch, settle, home, sentToMain, mainEntries, outcomeScript, fire, defaultSessionCtx } = globalThis.__t;
+await fire("session_start", {}, defaultSessionCtx);
+import { createServer } from "node:http";
+import { readFileSync, writeFileSync } from "node:fs";
+const preview = createServer((_req, res) => res.end("retained preview"));
+await new Promise((resolve) => preview.listen(0, "127.0.0.1", resolve));
+const url = `http://127.0.0.1:${preview.address().port}`;
+writeFileSync(`${home}/state/branch-driver.status`, "done: requested view delivered\nworking: preview retained; no further changes requested\n");
+dispatch("stale: branch-driver (idle, possible wedge)");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "retained preview review");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const publish = async (verdict, summary, silent = false) => {
+  const result = await report.execute("preview", { task: "branch-driver", verdict, summary, silent }, undefined, undefined, {});
+  if (result.isError) throw new Error(`report rejected: ${JSON.stringify(result)}`);
+};
+await publish("captain", "Requested enlarged view delivered; preview retained");
+for (let i = 0; i < 3; i++) {
+  await publish("routine", `Completed view remains unchanged, review ${i}; no unread instructions`, true);
+  const note = sentToMain.at(-1);
+  if (note.message.display !== false || note.options.triggerTurn) throw new Error("unchanged retained preview review surfaced");
+  if (await (await fetch(url)).text() !== "retained preview") throw new Error("review disrupted preview");
+}
+for (const summary of ["Preview check failed", "New instruction cannot be delivered", "Worker is genuinely stuck", "Approval required"]) {
+  await publish("captain", summary);
+}
+const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (visible.length !== 5) throw new Error("first completion or new actionable outcomes lost");
+const bad = await report.execute("invalid-silent", { task: "branch-driver", verdict: "captain", summary: "failure", silent: true }, undefined, undefined, {});
+if (!bad.isError) throw new Error("silent captain outcome accepted");
+const rows = outcomeScript(["list", "--recent", "20"]).trim().split("\n").map(JSON.parse);
+if (rows.length !== 8 || rows.filter((row) => row.silent).length !== 3) throw new Error("no-change outcomes not durably recorded");
+if (Number(readFileSync(`${home}/state/.branch-outcomes-cursor`, "utf8").trim()) !== rows.at(-1).seq) throw new Error("delivery acknowledgement did not advance");
+await new Promise((resolve) => preview.close(resolve));
+process.exit(0);
+EOF
+  then fail "retained preview delivery regression failed: $(cat "$TMP_ROOT/node-output")"; fi
+  pass "retained preview no-change reviews stay silent while first completion and new alerts remain visible and durable"
+}
+
 test_branch_default_on_heartbeat_afk_and_fallback() {
   local repo broken home out status
   repo="$TMP_ROOT/gating-root"
@@ -5277,6 +5325,7 @@ test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
+test_retained_preview_no_change_delivery
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
 test_away_only_wake_rejects_when_record_is_archived_before_drain

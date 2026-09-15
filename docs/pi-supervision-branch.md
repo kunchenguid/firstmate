@@ -123,8 +123,8 @@ The first two presentations of a given sequence set open a turn of their own; af
 Routine outcomes never enter this path and stay turn-free.
 A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
-The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
+A no-change review explicitly reported with verdict `routine` and `silent=true` is delivered silently with no rendered note, for task-scoped reviews as well as fleet heartbeats; other `routine` outcomes stay rendered with their sailboat prefix.
+The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged reviews remain silent, and doubt escalates.
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
@@ -138,7 +138,7 @@ Those rows are main-owned while attended: they are excluded from what the branch
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
 What all-or-nothing still guarantees is unchanged: the branch takes every branch-ownable unread row or none of them, and an unresolvable task-local row, an unknown row kind, or an unreadable queue still defers the whole review to main.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.
-A review that found literally nothing worth reporting uses verdict `routine`, `task=fleet`, and `silent=true` so it has no rendered note, while a fleet-wide routine action omits `silent` and keeps its rendered sailboat note.
+The same no-change disposition applies to a task retained for a preview: delivery stays silent without retiring the task, disrupting its preview, or bypassing report storage and wake acknowledgement (`tests/fm-pi-branch-extension.test.sh`).
 Only a captain-worthy finding reports verdict `captain` and appends a visible captain outcome entry.
 Every other fleet-wide or unresolvable wake - including watcher-failure alarms, which are never offered to the branch - keeps today's wake-to-main path in both postures.
 

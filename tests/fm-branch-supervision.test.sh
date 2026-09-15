@@ -50,7 +50,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"An unchanged review, whether task-scoped or fleet-wide, is routine with silent true"*) ;;
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
@@ -137,13 +137,11 @@ test_outcome_startup_replay_preserves_silence() {
     --task task-a --verdict captain --summary 'blocked' --silent true 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "append accepted a silent captain outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent captain refusal lost its diagnostic"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-a --verdict routine --summary 'healthy' --silent true 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "append accepted a silent task-scoped outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent task refusal lost its diagnostic"
-  [ ! -e "$store" ] || fail "refused silent outcomes changed the durable store"
+  assert_contains "$out" "silent outcomes must be routine outcomes" "silent captain refusal lost its diagnostic"
+  [ ! -e "$store" ] || fail "refused silent outcome changed the durable store"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'completed preview unchanged' --silent true >/dev/null \
+    || fail "silent task-scoped outcome rejected"
 
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
@@ -154,23 +152,24 @@ test_outcome_startup_replay_preserves_silence() {
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
   assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
+  assert_not_contains "$replay" "completed preview unchanged" "startup replay printed a silent task review"
   assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the silent and visible rows read"
 
-  printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
     >> "$home/state/branch-outcomes.jsonl"
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
 
-  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
+  printf '%s\n' '{"seq":5,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a stored silent captain outcome"
   assert_contains "$out" "malformed or non-sequential" "stored silent captain refusal lost its diagnostic"
-  pass "only routine fleet outcomes can be silent"
+  pass "routine fleet and task reviews can be silent, but captain outcomes cannot"
 }
 
 test_outcome_startup_replay_stops_at_captain_barrier() {
