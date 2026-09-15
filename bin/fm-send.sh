@@ -2,15 +2,20 @@
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+#    or: fm-send.sh <target> ... -     (body from non-terminal stdin)
+#    or: fm-send.sh <target> ...       with the body piped or heredoc'd on stdin
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
-# The text must be nonempty: an empty or whitespace-only message is refused
-# before anything is marked, recorded, or typed, because an empty marked
-# secondmate request delivers only marker and correlation bytes and leaves the
-# parent waiting on a reply to nothing.
+# The text must be nonempty: argv is the documented source; non-terminal stdin
+# is accepted when no argv text remains, or when the remaining argument is
+# exactly '-'. A terminal is never read (that would hang an agent shell). An
+# empty or whitespace-only body is refused before anything is marked, recorded,
+# or typed, because an empty marked secondmate request delivers only marker and
+# correlation bytes and leaves the parent waiting on a reply to nothing. Nonempty
+# argv wins and leftover stdin is ignored.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -328,6 +333,36 @@ fm_send_count_colons() { # <string>
   printf '%s' $((${#s} - ${#no_colons}))
 }
 
+# Read stdin into <varname> without stripping a trailing newline. Refuses a
+# terminal so an interactive or agent invocation cannot hang waiting for EOF.
+fm_send_read_stdin_into() { # <varname>
+  local _body
+  if [ -t 0 ]; then
+    echo "error: a text steer does not read stdin from a terminal; pass the message as command arguments: fm-send.sh <target> <text...> (or pipe stdin, or pass '-' when stdin is not a terminal)" >&2
+    return 1
+  fi
+  _body=$(cat; printf x) || return 1
+  _body=${_body%x}
+  printf -v "$1" '%s' "$_body"
+}
+
+# Assemble the text-plane body into MESSAGE from remaining argv, or from
+# non-terminal stdin when argv is empty or is exactly '-'.
+fm_send_collect_text() {
+  MESSAGE=
+  if [ "${1:-}" = "-" ] && [ "$#" -eq 1 ]; then
+    fm_send_read_stdin_into MESSAGE || return 1
+    return 0
+  fi
+  if [ "$#" -gt 0 ]; then
+    MESSAGE=$*
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    fm_send_read_stdin_into MESSAGE || return 1
+  fi
+}
+
 fm_send_resolve_target() { # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -603,6 +638,11 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     }
 fi
 
+MESSAGE=
+if [ "${1:-}" != "--key" ]; then
+  fm_send_collect_text "$@" || exit 1
+fi
+
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -612,7 +652,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
-  if [ -z "$*" ]; then
+  if [ -z "${MESSAGE//[[:space:]]/}" ]; then
     echo "error: --resolve-key requires a nonempty answer message" >&2
     exit 1
   fi
@@ -638,7 +678,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
   done
   # Refuse before send when a named status-log key cannot actually close: a
   # reserved key with an answered: note is a silent no-op in the fold.
-  resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  resolve_excerpt=$(printf '%s' "$MESSAGE" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     probe=$(fm_send_resolve_close_note "$k" "$resolve_excerpt")
     if ! _fm_decision_key_transition_allowed "$k" "$probe"; then
@@ -751,9 +791,8 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
-  MESSAGE=$*
   if [ -z "${MESSAGE//[[:space:]]/}" ]; then
-    echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
+    echo "error: a text steer requires a nonempty message as command arguments (or non-terminal stdin, including '-'); nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
   fi
   if [ "$TARGET_BACKEND" = remote ]; then
@@ -1059,7 +1098,7 @@ else
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
   # needlessly slow plain text to claude/opencode/pi. The target backend's
   # verified submit retry still backs the settle up either way.
-  case "$*" in
+  case "$MESSAGE" in
   /*) settle=1.2 ;;
   \$*)
     if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi

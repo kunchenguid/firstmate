@@ -24,7 +24,9 @@
 #      typed, and a just-created pending-reply expectation is discarded.
 #  10. An empty or whitespace-only text steer is refused before anything is
 #      marked, recorded, or typed - on the marked secondmate path that means
-#      no marker-only record and no pending-reply expectation.
+#      no marker-only record and no pending-reply expectation. Non-terminal
+#      stdin (including '-') is a supported nonempty source; empty stdin is
+#      the same refusal. Nonempty argv wins over leftover stdin.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -404,11 +406,58 @@ test_empty_message_refused() {
     "the whitespace-only refusal should be explicit"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a whitespace-only steer still wrote an inbox record"
 
+  # Piped empty stdin is the same contentless refusal (the Ken stdin defect).
+  dir=$(setup_case empty-stdin)
+  err="$dir/send.err"
+  printf '' | run_send "$dir" "$err" -- t1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "empty stdin should refuse"
+  assert_contains "$(cat "$err")" "nonempty message" \
+    "the empty-stdin refusal should name a nonempty message"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "empty stdin still wrote an inbox record"
+
   # The --key lifecycle path is unaffected: it takes no text at all.
   dir=$(setup_case keypath-after-refusal)
   err="$dir/send.err"
   run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should still succeed"
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
+}
+
+test_stdin_message_is_recorded() {
+  local dir err rc body
+  dir=$(setup_case stdin-body)
+  err="$dir/send.err"
+  printf '%s' 'please continue from stdin' | run_send "$dir" "$err" -- t1
+  rc=$?
+  expect_code 0 "$rc" "a nonempty stdin steer should exit 0 at enqueue"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "please continue from stdin" ] || fail "piped stdin body differs: $body"
+
+  dir=$(setup_case stdin-dash)
+  err="$dir/send.err"
+  printf '%s' 'dash stdin body' | run_send "$dir" "$err" -- t1 -
+  rc=$?
+  expect_code 0 "$rc" "a '-' stdin steer should exit 0 at enqueue"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "dash stdin body" ] || fail "'-' stdin body differs: $body"
+
+  dir=$(setup_case argv-wins)
+  err="$dir/send.err"
+  printf '%s' 'ignored stdin' | run_send "$dir" "$err" -- t1 "argv body wins"
+  rc=$?
+  expect_code 0 "$rc" "argv should win over leftover stdin"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "argv body wins" ] || fail "argv should win over stdin, got: $body"
+
+  dir=$(setup_case stdin-multiline)
+  err="$dir/send.err"
+  printf '%s' $'first stdin line\nsecond stdin line' | run_send "$dir" "$err" -- t1
+  rc=$?
+  expect_code 0 "$rc" "multiline stdin should enqueue"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = $'first stdin line\nsecond stdin line' ] ||
+    fail "multiline stdin body did not round-trip:"$'\n'"$body"
+  pass "fm-send inbox: non-terminal stdin delivers a nonempty body; argv wins over leftover stdin"
 }
 
 test_text_steer_rides_inbox
@@ -424,3 +473,4 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_stdin_message_is_recorded
