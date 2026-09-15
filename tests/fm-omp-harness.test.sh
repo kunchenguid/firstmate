@@ -574,6 +574,57 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_watch_extension_retry_arms_as_a_cold_start() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-retry/repo"; home="$TMP_ROOT/watch-retry/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # The first cycle dies the way the 2026-09-15 cascade died: established, then
+  # exit 1 with no reason line at all. Every arm records the predecessor pid it
+  # was handed, which is the one input fm-watch-arm.sh turns into
+  # FM_WATCH_HANDLING_SUCCESSOR - and a handling successor skips the
+  # state/.watcher-down reopen that recovers the home.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'pred=[%s]\n' "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_HOME:?}/state/arm-calls.log"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+if [ ! -e "$FM_HOME/state/.first-cycle-failed" ]; then
+  : > "$FM_HOME/state/.first-cycle-failed"
+  exit 1
+fi
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+let tool = null; const sent = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+await new Promise((r) => setTimeout(r, 1500));
+const calls = readFileSync(`${process.env.FM_HOME}/state/arm-calls.log`, "utf8").trim().split("\n");
+if (calls.length !== 2) throw new Error(`expected exactly one retry after the failed cycle, saw ${calls.length}: ${calls.join("|")}`);
+if (calls[1] !== "pred=[]") throw new Error(`the retry after a failed cycle must arm as a cold start, got ${calls[1]}`);
+if (sent.length !== 0) throw new Error(`a failed cycle with a live retry must surface nothing, saw ${JSON.stringify(sent)}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension retry contract: $out"
+  [ -z "$out" ] || fail "omp watch extension retry test printed output: $out"
+  pass ".omp watch extension: a retry after a failed cycle arms as a cold start, so the next child can reopen the recovery marker"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -585,3 +636,4 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_retry_arms_as_a_cold_start

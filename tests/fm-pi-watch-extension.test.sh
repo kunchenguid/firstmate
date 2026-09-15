@@ -1652,7 +1652,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'arm=%s pred=[%s]\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then exit 0; fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -1689,6 +1689,10 @@ for (let i = 0; i < 250; i += 1) {
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`clean empty close was ignored: ${rows.join(" | ")}`);
+// A retry follows a FAILED cycle, so it must arm cold: handing the dead
+// predecessor's pid to fm-watch-arm.sh makes the next child a handling
+// successor, which skips the state/.watcher-down reopen that recovers the home.
+if (!/ pred=\[\]$/.test(rows[1])) throw new Error(`the retry after a failed cycle must arm as a cold start: ${rows[1]}`);
 if (prompts !== 0) throw new Error(`restored transient close surfaced ${prompts} failure prompts`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);

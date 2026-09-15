@@ -200,6 +200,32 @@ if [ "$(uname)" = Darwin ]; then
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
+
+# Exit a failed cycle with a NAMED reason on stderr. bin/fm-watch-arm.sh can
+# only classify a child that dies with no reason line as a bare `nonzero-exit`
+# and synthesize "exited 1 without an actionable reason"; that is what made the
+# 2026-09-15 cascade unreadable - five silent exit-1 cycles in a row with
+# nothing anywhere saying why. Every inner failure exit names itself here
+# instead, and the arm layer keeps the line durably in
+# state/.watch-arm-stderr.log.
+watch_fail() {  # <reason>
+  echo "watcher: FAILED - $1" >&2
+  exit 1
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+watch_signal_fail() {  # <signal-name>
+  trap '' HUP INT TERM
+  watch_fail "signal SIG$1"
+}
+
+# The process-wide failure traps. A TERM landing inside the signal-grace sleep
+# used to be indistinguishable from a scripted `exit 1`; now it names itself.
+watch_install_signal_traps() {
+  trap 'watch_signal_fail HUP' HUP
+  trap 'watch_signal_fail INT' INT
+  trap 'watch_signal_fail TERM' TERM
+}
 # bin/fm-classify-lib.sh owns status reported-state signatures and presentation
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
@@ -408,7 +434,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
   fi
-  fm_wake_append stale "$w" "$reason" || exit 1
+  fm_wake_append stale "$w" "$reason" || watch_fail "stale wake could not be queued"
   if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
     echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
     exit 1
@@ -472,7 +498,7 @@ inbox_steer_check() {  # <window> <task>
         fi
         if [ -d "${rec%/*}" ]; then
           reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
-          fm_wake_append stale "$w" "$reason" || exit 1
+          fm_wake_append stale "$w" "$reason" || watch_fail "stale wake could not be queued"
           wake "$reason"
         fi
       fi
@@ -484,7 +510,7 @@ inbox_steer_check() {  # <window> <task>
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi
-      fm_wake_append stale "$w" "$reason" || exit 1
+      fm_wake_append stale "$w" "$reason" || watch_fail "stale wake could not be queued"
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
         exit 1
@@ -881,7 +907,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
     [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
-  fm_wake_append stale "$win" "$reason" || exit 1
+  fm_wake_append stale "$win" "$reason" || watch_fail "stale wake could not be queued"
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
 }
@@ -955,7 +981,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
-        fm_wake_append stale "$win" "$reason" || exit 1
+        fm_wake_append stale "$win" "$reason" || watch_fail "stale wake could not be queued"
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         wake "$reason"
@@ -1088,7 +1114,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        fm_wake_append stale "$win" "stale: $win" || exit 1
+        fm_wake_append stale "$win" "stale: $win" || watch_fail "stale wake could not be queued"
         printf '%s' "$declared" > "$STATE/.stale-$key"
         wake "stale: $win"
       fi
@@ -1120,6 +1146,21 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
+}
+
+# A recorded window whose endpoint the backend PROVES is gone can never go
+# un-stale again: every later poll re-reads the same husk, trips the stale
+# threshold, and escalates a wedge nobody can act on. Three closed Herdr panes
+# did exactly that on 2026-09-15, each rising escalation reaching firstmate as a
+# fresh stale wake. Retire that window's per-window records instead of waking
+# anyone. Only proof retires them (fm_backend_endpoint_confirmed_gone): a window
+# that still exists keeps every marker. The task's own durable records - its
+# metadata, status log, worktree - are never touched here; teardown owns those.
+retire_gone_window_records() {  # <window> <window-key>
+  local w=$1 key=$2
+  clear_pause_tracking "$key"
+  rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.churn-since-$key"
+  triage_log "retired stale records (the backend confirms this endpoint no longer exists): $w"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1335,7 +1376,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
-    fm_wake_append stale "$win" "stale: $win" || exit 1
+    fm_wake_append stale "$win" "stale: $win" || watch_fail "stale wake could not be queued"
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -1536,13 +1577,13 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  watch_install_signal_traps
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || watch_fail "signal arrived while a state check was running"
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -1880,7 +1921,7 @@ watcher_cleanup() {
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+watch_install_signal_traps
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -1899,7 +1940,7 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 # Finish only identity-bound retirement receipts before any check can run.
 if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
-  fm_wake_append check pr-poll-retirement "$reason" || exit 1
+  fm_wake_append check pr-poll-retirement "$reason" || watch_fail "check wake could not be queued"
   touch "$STATE/.last-check"
   wake "$reason"
 fi
@@ -2085,7 +2126,7 @@ while :; do
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
-        fm_wake_append check "$c" "$reason" || exit 1
+        fm_wake_append check "$c" "$reason" || watch_fail "check wake could not be queued"
         touch "$STATE/.last-check"
         wake "$reason"
       fi
@@ -2093,7 +2134,7 @@ while :; do
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      fm_wake_append check unauthenticated-state-checks "$reason" || watch_fail "check wake could not be queued"
       touch "$STATE/.last-check"
       wake "$reason"
     fi
@@ -2168,7 +2209,7 @@ EOF
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        fm_wake_append signal "$(basename "$f")" "$file_reason" || watch_fail "signal wake could not be queued"
       done <<EOF
 $pending
 EOF
@@ -2215,7 +2256,7 @@ EOF
       if [ "$signal_commit_error" -ne 0 ]; then
         while IFS=$(printf '\t') read -r sf sig f; do
           [ -n "$sf" ] || continue
-          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+          fm_wake_append signal "$(basename "$f")" "$reason" || watch_fail "signal wake could not be queued"
         done <<EOF
 $pending
 EOF
@@ -2270,8 +2311,17 @@ EOF
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
-        # The pane is idle/stale at hash $h. Triage decides whether this wakes
-        # firstmate. Detection itself is unchanged from above.
+        # The pane is idle/stale at hash $h. Before triage: an endpoint the
+        # backend proves is gone leaves a husk that captures and hashes just
+        # like an idle pane, so it would otherwise wedge-escalate forever.
+        # Retire it silently; the probe costs one backend read per
+        # stale-classified window, and never runs for a churning or busy one.
+        if fm_backend_endpoint_confirmed_gone "$(window_backend "$w")" "$w"; then
+          retire_gone_window_records "$w" "$key"
+          continue
+        fi
+        # Triage decides whether this wakes firstmate. Detection itself is
+        # unchanged from above.
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
@@ -2285,7 +2335,7 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            fm_wake_append stale "$w" "stale: $w" || watch_fail "stale wake could not be queued"
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
@@ -2323,7 +2373,7 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              fm_wake_append stale "$w" "stale: $w" || watch_fail "stale wake could not be queued"
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
@@ -2462,7 +2512,7 @@ EOF
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat heartbeat || watch_fail "heartbeat wake could not be queued"
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
@@ -2470,13 +2520,13 @@ EOF
       # Enqueue first, then record every status log surfaced through its end so the
       # next heartbeat does not re-fire it (enqueue-before-suppress preserved);
       # this wake sends firstmate to the whole fleet, so every log is read.
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat heartbeat || watch_fail "heartbeat wake could not be queued"
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     else
       if ! mark_all_captain_relevant_surfaced; then
-        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        fm_wake_append heartbeat heartbeat heartbeat || watch_fail "heartbeat wake could not be queued"
         touch "$STATE/.last-heartbeat"
         wake "heartbeat"
       fi

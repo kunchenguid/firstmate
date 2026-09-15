@@ -1969,6 +1969,67 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- stale pane whose ENDPOINT the backend proves is gone: records retired ----
+# The 2026-09-15 case: three closed Herdr panes kept waking firstmate. Nothing on
+# this path re-read a recorded window's presence, so each husk still captured,
+# hashed stably, tripped the stale threshold, and wedge-escalated with a rising
+# count - wakes no supervision action could ever clear. Proof of absence now
+# retires that window's per-window records silently, while a window the backend
+# does NOT prove gone keeps every record and still surfaces. One poll drives both
+# halves apart: state/*.meta is globbed in order, so the ghost is triaged first
+# and the live window's own stale is what ends the cycle.
+test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
+  local dir state fakebin out drain_out capture_file ghost live ghost_key live_key pane_hash sig pid
+  dir=$(make_case stale-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  ghost="test:fm-a-ghost"; live="test:fm-z-live"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$ghost" > "$state/a-ghost.meta"
+  printf 'window=%s\nkind=ship\n' "$live" > "$state/z-live.meta"
+  printf 'working: implementing\n' > "$state/a-ghost.status"
+  printf 'working: implementing\n' > "$state/z-live.status"
+  sig=$(seen_sig "$state/a-ghost.status"); printf '%s' "$sig" > "$state/.seen-a-ghost_status"
+  sig=$(seen_sig "$state/z-live.status"); printf '%s' "$sig" > "$state/.seen-z-live_status"
+  ghost_key=$(printf '%s' "$ghost" | tr ':/.' '___')
+  live_key=$(printf '%s' "$live" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  # Both panes are one poll away from stale, and both already carry the marker
+  # set a long-running window accumulates.
+  for key in "$ghost_key" "$live_key"; do
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf 'an-older-hash' > "$state/.stale-$key"
+    date +%s > "$state/.stale-since-$key"
+    date +%s > "$state/.churn-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+  done
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # The session inventory names only the live window, which is what makes the
+  # ghost's absence PROVEN rather than merely unreadable.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS='fm-z-live' \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "watcher did not surface the live window's stale"
+  grep -Fx "stale: $live" "$out" >/dev/null || fail "the live window's stale was not surfaced: $(cat "$out")"
+  grep -F "$ghost" "$out" >/dev/null && fail "a window the backend proves is gone must never wake firstmate"
+  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$ghost" >/dev/null \
+    || fail "the confirmed-gone window's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  for suffix in hash count stale stale-since churn-since wedge-escalations; do
+    [ ! -e "$state/.$suffix-$ghost_key" ] \
+      || fail ".$suffix-$ghost_key survived the retirement of a confirmed-gone endpoint"
+  done
+  # Retirement is scoped to that one key: the live window keeps its own records,
+  # with the stale suppressor advanced by the surface exactly as before.
+  [ -e "$state/.churn-since-$live_key" ] || fail "retirement removed a live window's records"
+  [ "$(cat "$state/.stale-$live_key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "the live window's stale suppressor was not advanced on surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$live" >/dev/null || fail "the live stale wake was not queued"
+  grep -F "$ghost" "$drain_out" >/dev/null && fail "a confirmed-gone window reached the durable queue"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane whose endpoint the backend proves is gone has its records retired without a wake, and a live window keeps its own"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -4859,6 +4920,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_stale_records_retired_when_the_endpoint_is_confirmed_gone
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

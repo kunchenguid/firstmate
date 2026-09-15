@@ -841,9 +841,57 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
+# A cycle killed by a signal used to die through a bare `trap 'exit 1'`: no
+# output at all, so the arm could only classify it as `nonzero-exit` and
+# synthesize "exited 1 without an actionable reason". The watcher's stderr was
+# also lost, because a persistent adapter keeps that stream in memory. Five such
+# cycles in a row on 2026-09-15 left nothing to read anywhere. The cycle must now
+# name the signal, and the arm must keep that line on disk.
+test_signaled_cycle_names_its_signal_and_persists_the_reason() {
+  local dir home state fakebin armout armerr watcher_pid status i
+  dir=$(make_case signaled-cycle-reason)
+  home="$dir"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armerr="$dir/arm.err"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$armout" 2> "$armerr" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q '^watcher: started ' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started ' "$armout" \
+    || fail "the arm never started a watcher: $(cat "$armout") $(cat "$armerr")"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "the started watcher recorded no pid in the lock"
+  kill -TERM "$watcher_pid" 2>/dev/null || fail "could not signal watcher pid $watcher_pid"
+
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  [ "$status" -ne 124 ] || fail "the arm never closed after its cycle was signaled"
+  [ "$status" -ne 0 ] || fail "a signaled cycle closed as a success: $(cat "$armout") $(cat "$armerr")"
+  grep -qF 'watcher: FAILED - signal SIGTERM' "$armerr" \
+    || fail "the signaled cycle did not name its signal to the adapter: $(cat "$armerr")"
+  grep -qF 'watcher: FAILED - signal SIGTERM' "$state/.watch-arm-stderr.log" \
+    || fail "the reason was not persisted: $(cat "$state/.watch-arm-stderr.log" 2>/dev/null)"
+  ! grep -qF 'without an actionable reason' "$armout" \
+    || fail "the arm synthesized a vague failure over the watcher's own reason: $(cat "$armout")"
+  grep -Eq 'reason=(nonzero-exit|signal-exit)' "$state/.watch-cycle-exits.log" \
+    || fail "the signaled cycle was not classified in the lifecycle ledger"
+  ! ls "$state"/.watch-child-stderr.* >/dev/null 2>&1 \
+    || fail "the flushed stderr capture was left behind"
+  pass "watch-arm: a signaled cycle names its signal and the arm keeps that reason on disk"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
+test_signaled_cycle_names_its_signal_and_persists_the_reason
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence
