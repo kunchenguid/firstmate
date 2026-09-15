@@ -398,21 +398,31 @@ STUB
 }
 
 test_project_branch_prefix_selection() {
-  local home id prefix out
+  local home id local_id prefix out
   home="$TMP_ROOT/branch-prefix/home"
   mkdir -p "$home/state"
   id=branch-prefix
   FM_HOME="$home" "$BRIEF" "$id" fixture --scout >/dev/null 2>&1 || fail "scout scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "Ship the fix." "Keep project branch naming."
   printf 'kind=scout\nworktree=/tmp/unused\n' > "$home/state/$id.meta"
-  FM_HOME="$home" "$PROMOTE" "$id" --mode local-only --yolo off --branch-prefix users/example >/dev/null 2>&1 \
+  FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off --branch-prefix users/example >/dev/null 2>&1 \
     || fail "prefix promotion"
   assert_grep "git checkout -b users/example/$id" "$home/data/$id/ship-instructions.md" "promotion ignored prefix"
-  assert_grep "ready in branch users/example/$id" "$home/data/$id/ship-instructions.md" "promotion DOD ignored prefix"
-  FM_HOME="$home" "$BRIEF" ship-prefix fixture --mode local-only --branch-prefix users/example >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" ship-prefix fixture --mode direct-PR --branch-prefix users/example >/dev/null 2>&1 \
     || fail "prefix ship scaffold"
   assert_grep 'git checkout -b users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold ignored prefix"
-  assert_grep 'ready in branch users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold DOD ignored prefix"
+  if out=$(FM_HOME="$home" "$BRIEF" local-prefix fixture --mode local-only --branch-prefix users/example 2>&1); then
+    fail "local-only brief accepted a custom branch prefix"
+  fi
+  assert_contains "$out" 'mode=local-only' "local-only brief refusal lacked diagnostic"
+  local_id=branch-prefix-local
+  FM_HOME="$home" "$BRIEF" "$local_id" fixture --scout >/dev/null 2>&1 || fail "local-only scout scaffold"
+  fill_brief_subsections "$home/data/$local_id/brief.md" "Ship the fix." "Keep project branch naming."
+  printf 'kind=scout\nworktree=/tmp/unused\n' > "$home/state/$local_id.meta"
+  if out=$(FM_HOME="$home" "$PROMOTE" "$local_id" --mode local-only --yolo off --branch-prefix users/example 2>&1); then
+    fail "local-only promotion accepted a custom branch prefix"
+  fi
+  assert_contains "$out" 'mode=local-only' "local-only promotion refusal lacked diagnostic"
   # shellcheck disable=SC2016  # literal shell metacharacters are refusal cases
   for prefix in '' '../bad' 'users//name' 'users/name;touch' 'users/name`id`' '-bad' 'refs/heads/foo'; do
     if out=$(FM_HOME="$home" "$BRIEF" invalid-prefix fixture --mode no-mistakes --branch-prefix "$prefix" 2>&1); then
@@ -421,7 +431,7 @@ test_project_branch_prefix_selection() {
     assert_contains "$out" 'invalid task branch prefix' "invalid prefix lacked diagnostic"
     [ ! -f "$home/data/invalid-prefix/brief.md" ] || fail "invalid branch wrote brief"
   done
-  pass "project-specific branch prefixes reach scaffold, promotion and DOD; unsafe prefixes refuse"
+  pass "project-specific PR branch prefixes work while local-only stays fixed"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the

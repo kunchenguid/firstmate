@@ -23,8 +23,8 @@
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
-# --branch-prefix selects the same per-task convention as fm-brief.sh;
-# bin/fm-dod-lib.sh owns branch validation and the default fm prefix.
+# --branch-prefix selects the same per-task convention as fm-brief.sh for
+# PR-based ship tasks; bin/fm-dod-lib.sh owns branch validation and the default fm prefix.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +55,7 @@ YOLO=
 MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX=fm
+BRANCH_PREFIX_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -65,14 +66,14 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
-      branch-prefix) BRANCH_PREFIX=$a ;;
+      branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
     esac
     want_value=
     continue
   fi
   case "$a" in
     --branch-prefix) want_value=branch-prefix ;;
-    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
@@ -97,6 +98,10 @@ case "$MODE" in
     exit 1 ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
+if [ "$MODE" = local-only ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-prefix is unavailable for mode=local-only; local-only delivery always uses fm/<task-id>" >&2
+  exit 1
+fi
 case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;

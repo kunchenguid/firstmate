@@ -824,12 +824,12 @@ test_no_mistakes_truly_unpushed_refuses() {
 
 test_azure_requires_completed_pr_and_local_containment() {
   local case_dir state head rc expected api_state
-  for state in active abandoned completed unreadable dirty later unregistered; do
+  for state in active abandoned completed unreadable dirty later unregistered-https unregistered-legacy; do
     case_dir=$(make_case "azure-$state")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello
     head=$(git -C "$case_dir/wt" rev-parse HEAD)
-    if [ "$state" != unregistered ]; then
+    if [[ "$state" != unregistered-* ]]; then
       printf '%s\n' 'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' >> "$case_dir/state/task-x1.meta"
     fi
     api_state=$state
@@ -852,9 +852,14 @@ SH
     esac
     # Reaching a remote feature branch is not evidence of Azure completion.
     add_fork_with_pushed_branch "$case_dir"
-    if [ "$state" = unregistered ]; then
-      git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
-    fi
+    case "$state" in
+      unregistered-https)
+        git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+        ;;
+      unregistered-legacy)
+        git -C "$case_dir/wt" remote set-url origin 'example@vs-ssh.visualstudio.com:v3/example/Project/repo'
+        ;;
+    esac
     expected=1
     [ "$state" != completed ] || expected=0
     rc=0

@@ -16,7 +16,7 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--branch-prefix <prefix>]
 #   --branch-prefix selects this task's project branch convention, e.g.
-#   users/example; default fm. Only ship tasks accept it. No identity is inferred.
+#   users/example; default fm. Only PR-based ship tasks accept it. No identity is inferred.
 #   bin/fm-dod-lib.sh owns validation and branch-name construction.
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
@@ -181,6 +181,10 @@ if [ "$KIND" = ship ]; then
       exit 1 ;;
     *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
+  if [ "$MODE" = local-only ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+    echo "error: --branch-prefix is unavailable for mode=local-only; local-only delivery always uses fm/<task-id>" >&2
+    exit 1
+  fi
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
