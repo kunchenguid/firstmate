@@ -965,6 +965,44 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+test_forced_secondmate_reassigned_child_record_cleanup() {
+  local dir id=parent-mate child=stale-child other=claimant second_home
+
+  dir=$(make_case nested-slot-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  second_home="$dir/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data" "$second_home/config"
+  printf '%s\n' "$id" > "$second_home/.fm-secondmate-home"
+  printf -- '- %s - fixture (home: %s; scope: fixture; projects: alpha; added 2026-07-14)\n' \
+    "$id" "$second_home" > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=secondmate" "home=$second_home"
+  fm_write_meta "$second_home/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "forced secondmate teardown of a reassigned child record failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" \
+    "forced secondmate teardown left the parent record behind"
+  assert_absent "$second_home/state/$child.meta" \
+    "forced secondmate teardown left the stale child record behind"
+  assert_present "$dir/home/state/$other.meta" \
+    "forced secondmate teardown removed the claimant's record"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "forced secondmate teardown removed the claimant's slot claim"
+  assert_present "$dir/pool/1/project/.git" \
+    "forced secondmate teardown touched the claimant's copy"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "forced secondmate teardown returned the claimant's slot: $(cat "$dir/runtime.log")"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1012,6 +1050,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_forced_secondmate_reassigned_child_record_cleanup
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
