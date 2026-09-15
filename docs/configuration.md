@@ -476,7 +476,7 @@ A concrete entry needs `harness` and `model`; `effort` is optional and is passed
 A group entry names one `harness` and a non-empty `use` array of models tried in that order, so "Cursor with those same three models" is one group placed after the concrete candidates it backs up.
 `provider` names the quota-axi provider whose rows bound the candidate when the helper's derivation from the harness and model prefix does not fit.
 `codexReviewFloorPercent` (default 20) skips a Codex-bounded candidate whose remaining percent is under it, or whose runway says it will run out before reset.
-`lowTankPercent` (default 20) is the band edge for every other candidate; an exhausted quota is always in the band.
+`lowTankPercent` (default 20) is the remaining-percent band edge after those Codex-specific skips; an exhausted quota is always in the band.
 Unknown quota never disqualifies a candidate, and a list that skips every candidate leaves the current pin untouched and returns the decision to firstmate.
 Malformed JSON, an empty list, an unknown effort, or a harness without a no-mistakes agent is an error, never a selection.
 See [`docs/examples/review-dispatch.json`](examples/review-dispatch.json) for a starting point to copy into local `config/review-dispatch.json`.

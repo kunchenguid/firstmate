@@ -23,7 +23,7 @@ Only this helper writes it; firstmate never hand-edits it, never asks a worker t
 2. Otherwise run `bin/fm-review-pin.sh pin --task <id> --repo <worktree>` with the task's recorded worktree, and read the exit status:
    - `0`: the tuple printed on stdout is now the review agent; trigger validation through the harness invocation owned by `harness-adapters`.
      The stderr reason lines are your evidence for why earlier candidates were skipped.
-   - `1` (`none`): every accepted candidate is in the low-tank band or exhausted.
+   - `1` (`none`): every accepted candidate was skipped.
      Do not trigger on a guess and do not fall back to an unlisted agent; report the skipped candidates and their reasons to the captain, hold the validation, and re-run `pin` when quota clears or the captain names a route.
    - `3`: a review is in flight or another task holds the pin.
      Leave the running review alone, hold this validation, and recheck with `bin/fm-review-pin.sh status` at the next heartbeat; pin and trigger once it prints `in-flight: none` and `free`.
