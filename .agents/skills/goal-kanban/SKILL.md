@@ -25,7 +25,8 @@ Do not create a new persistent board or invent a second source of truth.
 - `Ready`: the card has an auditable `/goal` or an approved chain contract and is ready for a separate Firstmate workflow.
 - `Closed`: planning is complete or the caller archived the card, and this state never means that implementation finished.
 
-A card should contain an id, title, raw idea, current state, ordered question-and-answer history, selected scenario, and either a rendered goal or a chain contract.
+A card should contain an id, title, raw idea, current state, and ordered question-and-answer history.
+At `Ready`, it must also contain the selected scenario and either a rendered goal or a chain contract.
 Keep the raw idea and answers intact enough for a reviewer to audit how the plan was formed.
 Move one card at a time unless the caller explicitly asks for a different review order.
 
@@ -65,7 +66,7 @@ Each part must be understandable without copying a neighboring part's full text.
 Render each part as a complete `/goal` by combining the shared Objective, Scope, and Constraints with that part's proof and stop sections.
 Keep the shared contract stored once and inject it only when presenting a part for review.
 
-Use this planning shape.
+Use this abbreviated, non-Ready sketch to illustrate the planning shape.
 
 ```text
 Chain: <shared objective and the ordered part map>
