@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Azure DevOps Services PR identity, live verification and completion transport.
 
-Usage: fm-azure-pr.py parse|head|merged|landed|verify|complete <canonical-pr-url>
+Usage: fm-azure-pr.py parse|head|merged|landed|complete <canonical-pr-url>
 `parse` prints host, repository path and number; `head` prints the live source
 SHA; `merged` prints only `merged` after proof; `landed` prints the completed
-source SHA. `verify` is read-only. `complete` is called only by fm-pr-merge.sh
-under its authority locks and repeats verification immediately before PATCH.
+source SHA. `complete` is called only by fm-pr-merge.sh under its authority
+locks and repeats verification immediately before PATCH.
 Requires python3 and az with azure-devops (1.0.5+). REST 7.1 via devops invoke
 retains continuation_token, unlike typed CLI views. Partial lists are refused.
 No CLI defaults, auto-complete, bypass, branch deletion or caller body overrides.
@@ -305,7 +305,7 @@ class Azure:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("parse", "head", "merged", "landed", "verify", "complete"))
+    parser.add_argument("action", choices=("parse", "head", "merged", "landed", "complete"))
     parser.add_argument("url")
     args = parser.parse_args()
     try:
@@ -321,8 +321,6 @@ def main():
             print("merged")
         elif args.action == "landed":
             print(azure.landed())
-        elif args.action == "verify":
-            print(*azure.verify())
         else:
             azure.complete()
     except (Refused, ValueError, KeyError, TypeError, AttributeError) as exc:

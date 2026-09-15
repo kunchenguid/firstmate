@@ -227,7 +227,7 @@ class AzureContract(unittest.TestCase):
                          settings=dict(filenamePatterns=['*.tmp']))
         self.rows("policyConfigurations", self.configs + [file_size, case_enforcement, max_path_length, reserved_names, author_email, file_path])
         self.rows("evaluations", self.policies)
-        p = self.run_helper("verify")
+        p = self.run_helper("complete")
         self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_required_build_exact_revision(self):
@@ -236,7 +236,9 @@ class AzureContract(unittest.TestCase):
         self.rows("evaluations", [self.policies[0], dict(self.policies[1], configuration=c, context=dict(buildId=10))])
         build = dict(status="completed", result="succeeded", repository=dict(id=REPO), sourceVersion=MERGE)
         self.save("builds", build)
-        self.assertEqual(self.run_helper("verify").returncode, 0)
+        self.assertEqual(self.run_helper("complete").returncode, 0)
+        (self.dir / "patch").unlink()
+        self.save("pullRequests", self.pr)
         for change in (dict(sourceVersion=TARGET), dict(result="failed"), dict(status="inProgress")):
             self.save("builds", dict(build, **change))
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
@@ -249,13 +251,14 @@ class AzureContract(unittest.TestCase):
             self.assertNotEqual(self.run_helper("complete").returncode, 0)
         self.rows("pullRequestStatuses", [])
         self.rows("pullRequestThreads", [dict(status="active", comments=[dict(commentType="text")])])
-        self.assertEqual(self.run_helper("verify").returncode, 0)
-        self.assertFalse((self.dir / "patch").exists())
+        self.assertEqual(self.run_helper("complete").returncode, 0)
 
     def test_status_policy_record_is_revision_bound(self):
         self.rows("evaluations", [dict(self.policies[0], context=dict(latestStatusId=1)), self.policies[1]])
-        p = self.run_helper("verify")
+        p = self.run_helper("complete")
         self.assertEqual(p.returncode, 0, p.stderr)
+        (self.dir / "patch").unlink()
+        self.save("pullRequests", self.pr)
         self.rows("pullRequestStatuses", [dict(id=1, state="succeeded", iterationId=1, context=dict(name="ci")),
                                            dict(id=2, state="succeeded", iterationId=2, context=dict(name="ci"))])
         self.assertIn("status policy", self.run_helper("complete").stderr)
@@ -265,19 +268,24 @@ class AzureContract(unittest.TestCase):
         older = dict(id=1, context=dict(name="ci"), state="failed", iterationId=1)
         current = dict(id=2, context=dict(name="ci"), state="succeeded", iterationId=2)
         self.rows("pullRequestStatuses", [older, current])
-        p = self.run_helper("verify")
+        p = self.run_helper("complete")
         self.assertEqual(p.returncode, 0, p.stderr)
+        (self.dir / "patch").unlink()
+        self.save("pullRequests", self.pr)
         self.rows("pullRequestStatuses", [older, current, dict(current, id=3, state="pending")])
-        self.assertIn("not successful", self.run_helper("verify").stderr)
+        self.assertIn("not successful", self.run_helper("complete").stderr)
+        self.save("pullRequests", self.pr)
         self.rows("pullRequestStatuses", [older, current, dict(id=3, context=dict(name="ci"), state="succeeded")])
-        self.assertIn("not bound", self.run_helper("verify").stderr)
+        self.assertIn("not bound", self.run_helper("complete").stderr)
 
     def test_ambiguous_method_needs_selection(self):
         self.save("pullRequests", dict(self.pr, completionOptions={}))
-        self.assertEqual(self.run_helper("verify").returncode, 0)  # single allowed method
+        self.assertEqual(self.run_helper("complete").returncode, 0)  # single allowed method
+        (self.dir / "patch").unlink()
+        self.save("pullRequests", dict(self.pr, completionOptions={}))
         self.rows("policyConfigurations", [])
         self.rows("evaluations", [])
-        self.assertIn("ambiguous", self.run_helper("verify").stderr)
+        self.assertIn("ambiguous", self.run_helper("complete").stderr)
 
     def test_auth_network_json_and_partial_errors(self):
         for flag in ("fail", "malformed", "missing-continuation"):
