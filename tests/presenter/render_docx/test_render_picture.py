@@ -96,6 +96,25 @@ def test_unknown_artifact_reference_raises(
         )
 
 
+def test_mapped_artifact_with_missing_target_names_mapped_path(
+    tmp_path: Path, docx_binding: object
+) -> None:
+    target = tmp_path / "missing-target.png"
+    with pytest.raises(FileNotFoundError, match="missing-target.png"):
+        render(
+            [
+                {
+                    "type": "image",
+                    "source": "artifact:wave-01",
+                    "width_in": None,
+                    "caption": None,
+                }
+            ],
+            docx_binding(artifacts={"artifact:wave-01": str(target)}),
+            tmp_path / "x.docx",
+        )
+
+
 def test_picture_caption_follows_the_picture_paragraph(
     tmp_path: Path, png_image: Path, docx_binding: object, paragraph_text: object
 ) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
 
 from presenter.render_docx import render
 
@@ -72,6 +73,18 @@ def test_empty_template_field_renders_blank_document(
     assert result["template"] is None
     document = Document(str(output))
     assert document.paragraphs[-1].text == "hello"
+
+
+def test_missing_template_path_raises_instead_of_blank_fallback(
+    tmp_path: Path, docx_binding: object
+) -> None:
+    missing = tmp_path / "no-such-template.docx"
+    with pytest.raises(PackageNotFoundError):
+        render(
+            [{"type": "text", "style": "body", "text": "hello"}],
+            docx_binding(template=missing),
+            tmp_path / "out.docx",
+        )
 
 
 def test_none_binding_renders_blank_document(tmp_path: Path) -> None:

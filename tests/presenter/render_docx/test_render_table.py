@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -156,3 +157,21 @@ def test_ragged_rows_are_padded_to_header_width(
     )
     table = Document(str(output)).tables[0]
     assert table.cell(1, 2).text == ""
+
+
+def test_row_wider_than_headers_raises_naming_row_index(
+    tmp_path: Path, docx_binding: object
+) -> None:
+    with pytest.raises(ValueError, match=r"row 1 has 3 cells"):
+        render(
+            [
+                {
+                    "type": "table",
+                    "headers": ["X", "Y"],
+                    "rows": [["1", "2"], ["a", "b", "c"]],
+                    "style": "grid",
+                }
+            ],
+            docx_binding(),
+            tmp_path / "x.docx",
+        )

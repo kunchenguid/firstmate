@@ -73,8 +73,11 @@ def render(
 
     When ``binding["template"]`` names an existing .docx file, the document
     starts from that template (its content and styles are preserved and the
-    blocks are appended); otherwise a blank document is used. A ``binding``
-    whose ``format`` is present and is not ``"docx"`` is rejected.
+    blocks are appended); when ``template`` is empty or absent, a blank
+    document is used. A template path that does not exist raises (python-docx
+    ``PackageNotFoundError``) rather than silently falling back to a blank
+    document. A ``binding`` whose ``format`` is present and is not
+    ``"docx"`` is rejected.
 
     Returns a plain JSON-serializable summary dict with ``format``,
     ``output_path``, ``template`` (path or None), and ``blocks_rendered``.
@@ -180,6 +183,13 @@ def _add_table(
 ) -> None:
     headers = [str(header) for header in (block.get("headers") or [])]
     rows = [list(row) for row in (block.get("rows") or [])]
+    if headers:
+        for row_index, row in enumerate(rows):
+            if len(row) > len(headers):
+                raise ValueError(
+                    f"table row {row_index} has {len(row)} cells, more than "
+                    f"the {len(headers)} header columns"
+                )
     caption = block.get("caption")
     if caption:
         _add_caption(document, str(caption), styles)
@@ -225,8 +235,14 @@ def _resolve_picture_source(source: str, binding: Binding) -> Path:
     artifacts = binding.get("artifacts") or {}
     if isinstance(artifacts, Mapping):
         mapped = artifacts.get(source)
-        if isinstance(mapped, (str, Path)) and Path(mapped).is_file():
-            return Path(mapped)
+        if isinstance(mapped, (str, Path)):
+            mapped_path = Path(mapped)
+            if mapped_path.is_file():
+                return mapped_path
+            raise FileNotFoundError(
+                f"picture source {source!r} maps to {str(mapped_path)!r} in "
+                "binding['artifacts'] but that file does not exist"
+            )
     raise FileNotFoundError(
         f"picture source not found on disk and not mapped in binding['artifacts']: {source!r}"
     )
