@@ -48,6 +48,18 @@ A captain-held task closed outside this owner leaves no durable answer, so the c
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
+Captain-facing escalation uses one filter, and this skill owns it:
+
+- DO IT: no genuine human judgment remains; execute or resolve it and report minimally, never creating a live captain call.
+- DECIDE: a consequential choice remains after reasonable evidence retrieval, with more than one materially defensible option or a captain-only truth; hold it as a live ask.
+- REVIEW: a finished or review-ready artifact genuinely needs the captain's judgment, taste, or approval; hold it as a live ask.
+- PARK/HOLD is execution state, not a current captain decision, even when resuming it would eventually need captain authorization.
+
+Record parked or standby state with `hold --park` (optional `--until` when the park itself has a date) rather than a plain `hold`; the structured hold kind becomes `parked`, it receives no hold-set stamp, and it is excluded from the OPEN DECISIONS drain (`bin/fm-classify-lib.sh`'s `scan_open_decisions`/`scan_open_decisions_incremental`, guarded by the `state/<task-id>.parked` marker `hold --park` writes).
+A live ask still uses plain `hold`.
+Parking a task that already carried a live, unresolved captain hold resolves that occurrence's needs-decision instead of leaving it dangling - `bin/fm-captain-hold.sh`'s header owns the exact mechanics.
+`ask-user-authority` maps ask-user findings onto this same three-way filter and does not own a second procedure.
+
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.
 `bin/fm-captain-hold.sh diverged` reports that contradiction and the wake drain prints it as `RECORD DIVERGENCE`; it closes nothing, because a captain call closed wrongly leaves review entirely, which is worse than the noise.
 Read such a line as "these two records disagree", never as "the captain ruled and someone forgot to file it": a call can dissolve because its premise was false, or turn out to have been a question of fact rather than the captain's to answer.
@@ -57,8 +69,8 @@ The absence of a routed work item is not a divergence and the guard never requir
 ## Operating sequence
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
-2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
-3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
+2. Inventory only genuine unresolved choices that require the captain now, and find the task each one gates.
+3. Hold that task as a live ask - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options; use `hold --park` for parked or standby state that is not a current ask.
 4. Run `complete` with the full captain-held inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.

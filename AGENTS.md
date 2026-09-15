@@ -30,7 +30,9 @@ Hard rules, in priority order:
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
-   A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
+   A project's captain-approved `yolo` posture is the only standing relaxation for merge authority.
+   An explicitly authorized execution packet may also grant bounded packet-scoped merge authority (`bin/fm-packet.sh`) that expires when that packet closes; that grant is a current explicit captain instruction for that packet's conforming in-scope PRs only, never standing yolo.
+   Section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
@@ -107,6 +109,8 @@ state/               runtime records and signals; gitignored
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
   <id>.backlog-close  the exact backlog transition a teardown recorded before removing the task's record, so an interrupted cleanup can still be finished at the next session start; bin/fm-backlog-transition-lib.sh owns its format and replay, and a landed transition removes it
+  <id>.parked  marks a captain hold as parked/standby execution state rather than a live captain call; written by `bin/fm-captain-hold.sh hold --park`, excludes the task from the OPEN DECISIONS drain (bin/fm-classify-lib.sh), and is removed by an ordinary `hold` without `--park`
+  <id>.park-pending-resolve  durable marker that a parked task's prior live hold still owes its parent channel a resolved event after a failed publish attempt; written by `bin/fm-captain-hold.sh hold --park` before that attempt and removed only once it is confirmed delivered, so a later `hold --park` retries it
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
@@ -349,10 +353,12 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
-`yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
+`yolo` governs standing merge authority only: with it off, the captain approves every PR merge and every local-only landing unless a current packet-scoped grant applies; with it on, firstmate merges green, in-scope work itself.
 Never merge a red PR under either setting unless a current explicit captain instruction names the single GitHub check waived through `fm-pr-merge.sh --allow-red`; that attended-only waiver still requires every other check green.
 Destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
+An explicitly authorized execution packet may grant bounded packet-scoped merge authority through `bin/fm-packet.sh`: while the named packet remains open and granted, a conforming, in-scope PR (repo checked via `fm-packet.sh check`) may merge without another per-PR captain word, provided every other condition here still holds - tests/checks pass, required review completes, findings are repaired or dispositioned, verification passes, no material scope expansion occurs, and no reserved human gate appears.
+This authority expires the instant the packet closes (`fm-packet.sh close`), never enables yolo, and is never standing global autonomous-merge authority.
 Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
@@ -388,7 +394,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full `https://...` URL copied from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
-A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
+A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority, and an open, granted packet-scoped grant is the bounded non-standing one (above).
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
@@ -497,6 +503,9 @@ Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
+Captain-facing escalation uses the DO IT / DECIDE / REVIEW filter owned by `captain-hold-lifecycle`; `ask-user-authority` maps findings onto that same filter.
+A parked, held, or standby item is state, not a current human decision, unless it carries a live ask; do not escalate merely because resuming it would eventually need captain authorization.
+
 Reach the captain immediately for:
 
 - Work ready for their review, with the PR's recorded URL.
@@ -505,6 +514,9 @@ Reach the captain immediately for:
 - A real blocker or failure after the relevant playbook is exhausted.
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
+
+When the primary produces a captain-facing return explicitly intended to be carried back to ChatGPT, write it through `bin/fm-chatgpt-return.sh` before presenting it in chat; that script is the sole writer, refuses from a secondmate home or a task worker, and verifies enumerated PR/item counts agree.
+Do not write routine status updates or every internal message through it - the destination is transient transport, not canonical storage.
 
 In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
@@ -519,7 +531,7 @@ Mention cost as a courtesy when unusually much work is running, but never block 
 The configured `tasks-axi` backend is the durable queue; the tracked default is `data/backlog.md`.
 It tracks work items only, never agents; persistent secondmates never appear as backlog items.
 Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
-A decision is simply a task held for the captain: create the task with `bin/fm-tasks-axi.sh add` when needed, then always hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers it.
+A decision is simply a task held for the captain: create the task with `bin/fm-tasks-axi.sh add` when needed, then always hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers a live ask, and with `--park` when the item is parked or standby without a live ask.
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
@@ -602,6 +614,7 @@ Never infer an override, broaden its scope, apply it by analogy, carry it to ano
 Ambiguous scope or conflict still requires one concise clarification before action.
 Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
 Standing `yolo` merge authority is not a substitute for a current explicit captain instruction where an explicit action is required.
+A packet-scoped merge grant (section 7, `bin/fm-packet.sh`) is a current explicit captain instruction for that packet's conforming in-scope PRs only; it expires when the packet closes and does not become standing global autonomous-merge authority.
 
 ## Maintaining this file
 

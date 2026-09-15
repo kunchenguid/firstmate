@@ -594,11 +594,20 @@ EOF
 # above remains the ONE place the open/resolved semantics are decided. Prints
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
+#
+# A task carrying a `state/<task-id>.parked` marker (written by
+# `bin/fm-captain-hold.sh hold --park`) is skipped: PARK/HOLD is execution
+# state, not a current captain decision, and must not surface here merely
+# because its own status log still carries an unresolved needs-decision line
+# from before it was parked - that line stays in the durable log untouched,
+# just excluded from this presentation. Un-parking (an ordinary `hold` without
+# `--park`) removes the marker and the task surfaces again as usual.
 scan_open_decisions() {  # <state>
   local state=$1 f task open line
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    [ -e "$state/$task.parked" ] && continue
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -871,6 +880,11 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
+#
+# A parked task (see scan_open_decisions above) is still folded - the cursor
+# still advances past its new appends, so nothing floods back in once it is
+# un-parked - but its lines are not printed while the `state/<task-id>.parked`
+# marker is present.
 scan_open_decisions_incremental() {  # <state>
   local state=$1 f task open line
   for f in "$state"/*.status; do
@@ -878,6 +892,7 @@ scan_open_decisions_incremental() {  # <state>
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
+    [ -e "$state/$task.parked" ] && continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       printf '%s\t%s\n' "$task" "$line"

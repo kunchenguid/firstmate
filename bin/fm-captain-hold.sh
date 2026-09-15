@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] \
+#     [--until YYYY-MM-DD] [--park]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -46,6 +47,15 @@
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
+# `--park` records parked or standby execution state through `tasks-axi hold
+# --kind parked` instead of `--kind captain`: it is not a live captain call, so
+# it receives no hold-set stamp and publishes no new needs-decision, and a
+# `state/<task-id>.parked` marker excludes it from the OPEN DECISIONS drain
+# (fm-classify-lib.sh). Parking a task that already carried a LIVE unresolved
+# captain hold instead publishes that occurrence's `resolved parked` event, so
+# the call it replaces does not dangle open forever. `hold` without `--park`
+# on a previously parked task removes the marker and resumes the ordinary live
+# path. `--until` on a park is a date gate on that work, not a deferred ask.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -823,7 +833,8 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 park=0 hold_kind_flag=captain
+  local park_pending_marker=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -833,6 +844,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --park) park=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -889,29 +901,66 @@ command_hold() {
         || fail "could not create task $id"
     fi
   fi
-  # Publish the timestamp before the captain-hold annotation. A concurrent
-  # snapshot may see the harmless stamp by itself, but can never see a newly
-  # held task without the timestamp that defines this hold lifecycle's age.
-  task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
-  write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
-  task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
-    || fail "task $id did not retain its hold-set stamp"
-  if [ -n "$until" ]; then
-    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
+  if [ "$park" = 1 ]; then
+    hold_kind_flag=parked
   else
-    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+    # Publish the timestamp before the captain-hold annotation. A concurrent
+    # snapshot may see the harmless stamp by itself, but can never see a newly
+    # held task without the timestamp that defines this hold lifecycle's age.
+    task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
+    write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
+    task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
+    [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+      || fail "task $id did not retain its hold-set stamp"
+  fi
+  if [ -n "$until" ]; then
+    tasks_axi hold "$id" --reason "$reason" --kind "$hold_kind_flag" --until "$until" >/dev/null \
+      || fail "could not hold task $id"
+  else
+    tasks_axi hold "$id" --reason "$reason" --kind "$hold_kind_flag" >/dev/null \
+      || fail "could not hold task $id"
   fi
   task_show "$id" || fail "task $id disappeared while holding it"
   show=$TASK_SHOW_OUTPUT
   hold_kind=$(show_field_value "$show" hold_kind)
-  [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
-    || fail "task $id lost its hold-set stamp while being held"
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  [ "$hold_kind" = "$hold_kind_flag" ] || fail "task $id did not retain its $hold_kind_flag hold"
+  if [ "$park" = 1 ]; then
+    # Parking is execution state, not a live captain call: it publishes no new
+    # needs-decision. But if this task already carried a LIVE unresolved
+    # captain hold, that occurrence's needs-decision is now being replaced by
+    # park state, so its parent-channel record must transition to resolved
+    # here - otherwise it is left dangling forever (never resolved, never
+    # re-surfaced), which is the defect diagnosed in the parked upstream
+    # branch. occurrence is recomputed from the body read BEFORE this park
+    # took effect, so it names the exact occurrence that was left open.
+    #
+    # A first attempt's transition from captain to parked already lands
+    # durably in the backlog even when the parent-channel write itself fails
+    # (a broken route, an unreachable parent home): existing_hold_kind then
+    # reads "parked" on any later retry, and re-holding without this durable
+    # marker would silently drop the still-owed resolution forever. The
+    # marker is written before the publish attempt and removed only once
+    # publish_parent_hold confirms delivery (or confirms this is a main home
+    # with nothing to publish), so a retry keeps trying until it lands.
+    park_pending_marker="$STATE/$id.park-pending-resolve"
+    if { [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; } \
+      || [ -e "$park_pending_marker" ]; then
+      : > "$park_pending_marker"
+      occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+      publish_parent_hold "$id" "$occurrence" resolved parked
+      [ "$PARENT_HOLD_PUBLISHED" = 1 ] && rm -f -- "$park_pending_marker"
+    fi
+  else
+    occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+    [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+      || fail "task $id lost its hold-set stamp while being held"
+    publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  fi
+  if [ "$park" = 1 ]; then
+    : > "$STATE/$id.parked"
+  else
+    rm -f -- "$STATE/$id.parked"
+  fi
   printf '%s\n' "$id"
 }
 
