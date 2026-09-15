@@ -228,11 +228,33 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .runtime_evidence.endpoint_status == "unavailable"
         and .hold.classification == "blocked" and .blockers == ["security-review"]
         and .gate == {status:"blocked",label:"security-review"})
+    and .counts.blocked == 2
+    and ([.projects[] | select(.id == "omega")][0].blocker_count == 1)
     and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")
   ' "$model" >/dev/null || fail "bounded secondmate surfaces were not projected with stable identity and deduplication"
   ! grep -Fq 'PRIVATE-REMOTE-' "$model" || fail "secondmate prose outside the allowlist leaked into the cockpit"
   pass "secondmate structured surfaces project once through the cockpit allowlist"
+}
+
+test_cached_secondmate_authority_controls_freshness() {
+  local model=$TMP_ROOT/cached-secondmate.json
+  jq '.secondmate_current={
+        records:[{
+          id:"cache-mate",home:"/fleet/mates/cache",provenance:{selected:"structured-home",summary_source:"remote-ledger-cache"},
+          freshness:{status:"cached",observed_at:"2026-09-15T11:00:00Z",age_seconds:3660},
+          active_children:[{id:"cached-work",kind:"ship",state:"working",repo:"cached",name:"Cached implementation",source:"structured-home",started_at:null}],
+          decisions_open:[],queued:[],landed:[],omitted:[]
+        }],total:1,shown:1,truncated:0
+      }' "$FIXTURES/empty.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$model"
+  jq -e '.freshness == "stale" and .age_seconds == 3660
+      and .inventory.status == "partial"
+      and (.inventory.partial_reasons | index("secondmate cache-mate authority cached from remote-ledger-cache at 2026-09-15T11:00:00Z")) != null
+      and (.inventory.partial_reasons | index("secondmate cache-mate authority stale (3660s)")) != null
+      and ([.projects[].tasks[] | select(.id == "cache-mate:cached-work")] | length) == 1' "$model" >/dev/null \
+    || fail "cached secondmate authority was presented as fresh parent data"
+  pass "cached secondmate authority propagates provenance and stale age"
 }
 
 test_attention_precedes_completed_history_and_project_caps() {
@@ -508,6 +530,7 @@ test_projection_is_deterministic_and_allowlisted
 test_stale_partial_invalid_empty_and_replacement_states
 test_nested_bounds_disclose_only_real_omissions
 test_secondmate_structured_surfaces_are_projected_once
+test_cached_secondmate_authority_controls_freshness
 test_attention_precedes_completed_history_and_project_caps
 test_builder_is_fail_closed_and_atomic
 test_build_path_does_not_mutate_fleet_or_invoke_authority

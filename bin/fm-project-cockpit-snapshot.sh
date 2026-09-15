@@ -176,6 +176,8 @@ jq \
     else "running" end;
   def attention_for($state; $actionable):
     ($actionable == true or $state == "blocked" or $state == "failed");
+  def blocked_evidence:
+    (.state == "blocked" or .state == "failed" or .gate.status == "blocked" or (.blockers | length) > 0);
   def task_projection($now):
     . as $task
     | (task_state) as $state
@@ -369,6 +371,15 @@ jq \
   | ($observed_at | fromdateiso8601) as $now
   | ($snapshot.generated | fromdateiso8601) as $generated_epoch
   | (($now - $generated_epoch) | floor | if . < 0 then 0 else . end) as $age
+  | ([ ($snapshot.secondmate_current.records // [])[]?
+       | select(.provenance.selected == "structured-home")
+       | .freshness.age_seconds
+       | select(type == "number" and . >= 0)
+     ] | max // 0) as $secondmate_age
+  | (any(($snapshot.secondmate_current.records // [])[]?;
+       .provenance.selected == "structured-home"
+       and (.freshness.status == "stale" or ((.freshness.age_seconds // 0) > $stale_after)))) as $secondmate_stale
+  | ([$age,$secondmate_age] | max) as $effective_age
   | ([ $snapshot.tasks[] | task_projection($now) + {_identity:("main:" + .id),_priority:0} ]) as $live_tasks
   | ([ $snapshot.backlog.records[]?
        | select(.structured == true and .state == "queued")
@@ -419,6 +430,18 @@ jq \
   | ([
       if $snapshot.main_inventory.valid != true then ($snapshot.main_inventory.reason // "invalid main inventory") | text(240) else empty end,
       if (($snapshot.secondmate_current.truncated // 0) != 0) then "secondmate inventory truncated" else empty end,
+      (($snapshot.secondmate_current.records // [])[]?
+        | select(.provenance.selected == "structured-home" and .freshness.status == "cached")
+        | . as $mate
+        | ("secondmate " + (($mate.id | ident) // "unknown") + " authority cached from "
+           + (($mate.provenance.summary_source | text(40)) // "unknown") + " at "
+           + (($mate.freshness.observed_at | time) // "unknown time")) | text(240)),
+      (($snapshot.secondmate_current.records // [])[]?
+        | select(.provenance.selected == "structured-home"
+            and (.freshness.status == "stale" or ((.freshness.age_seconds // 0) > $stale_after)))
+        | . as $mate
+        | ("secondmate " + (($mate.id | ident) // "unknown") + " authority stale ("
+           + (($mate.freshness.age_seconds // 0) | floor | tostring) + "s)") | text(240)),
       (($snapshot.secondmate_current.records // [])[]?.omitted[]?
         | select((.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0)
         | "secondmate " + .surface + " truncated"),
@@ -435,7 +458,7 @@ jq \
            id:$pid,label:$pid,
            attention_count:([$tasks[] | select(.attention)] | length),
            active_count:([$tasks[] | select(.lane == "running" or .lane == "waiting")] | length),
-           blocker_count:([$tasks[] | select(.state == "blocked" or .state == "failed")] | length),
+           blocker_count:([$tasks[] | select(blocked_evidence)] | length),
            latest_phase:(([ $tasks[] | select(.lane == "running" or .lane == "waiting") ][0].state) // "quiet"),
            last_observed_at:([ $tasks[].observed_at | select(. != null and test("T")) ] | sort | last // null),
            oldest_active_seconds:([ $tasks[] | select(.lane == "running" or .lane == "waiting") | .elapsed_seconds | select(. != null) ] | max // null),
@@ -449,7 +472,7 @@ jq \
   | ($all_projects[:$max_projects] | map(del(._priority))) as $projects
   | ([ $all_tasks[] | select(.lane == "running") ] | length) as $running
   | ([ $all_tasks[] | select(.lane == "waiting") ] | length) as $waiting
-  | ([ $all_tasks[] | select(.state == "blocked" or .state == "failed") ] | length) as $blocked
+  | ([ $all_tasks[] | select(blocked_evidence) ] | length) as $blocked
   | ([ $all_tasks[] | select(.attention) ] | length) as $attention
   | (if $snapshot.main_inventory.valid != true then "invalid"
      elif ($partial_reasons | length) > 0 then "partial"
@@ -459,9 +482,9 @@ jq \
       schema:"fm-project-cockpit.v1",
       generated:$snapshot.generated,
       observed_at:$observed_at,
-      age_seconds:$age,
+      age_seconds:$effective_age,
       stale_after_seconds:$stale_after,
-      freshness:(if $age > $stale_after then "stale" else "fresh" end),
+      freshness:(if $age > $stale_after or $secondmate_stale then "stale" else "fresh" end),
       inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or $nested_truncated or (($snapshot.secondmate_current.truncated // 0) != 0) or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
