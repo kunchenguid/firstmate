@@ -7,7 +7,8 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <url or commands>)",
+#                 "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -17,6 +18,9 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "PROCEVENT: process-event state root is not a private
+#                 directory - chmod 750 <state> to resume polling its
+#                 registered sources",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -53,6 +57,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A PROCEVENT line means this home has registered process-event sources
+#          (state/procevent exists) but its state root fails fm-procevent.sh's
+#          own private-directory check, which otherwise leaves every registered
+#          source silently unpolled with no wake at all; the fix is the printed
+#          chmod.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -64,6 +73,10 @@
 #          nonvisual dispatch continues with plain-text decisions and reports,
 #          but Lavish use still requires a compatible build at or above its floor.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
+#          perl JSON::PP is also reported as MISSING_MANUAL when `perl -MJSON::PP
+#          -e1` fails; its instructions field carries OS package commands instead
+#          of a URL, since the perl consumers need the module installed, not a single
+#          canonical download location.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -884,6 +897,19 @@ manual_install_url() {
   esac
 }
 
+# Three surfaces decode or encode JSON through `perl -MJSON::PP`:
+# bin/fm-captain-hold.sh's answer/show path, bin/fm-procevent-lavish.sh, and
+# bin/fm-procevent-extension-capture.pl. JSON::PP ships with a full perl
+# distribution but is packaged separately on minimal installs (observed on
+# JLAP 2026-08-31: bare Fedora perl, module absent), so a home can have perl
+# and still fail mid-run with a raw "Can't locate JSON/PP.pm" trace. This
+# check is detect-only, matching the rest of bootstrap: never installs
+# without captain consent.
+perl_jsonpp_diagnostic() {
+  perl -MJSON::PP -e1 >/dev/null 2>&1 && return 0
+  echo "MISSING_MANUAL: perl JSON::PP module (instructions: install the OS package - Fedora/RHEL: 'sudo dnf install perl-JSON-PP', Debian/Ubuntu: 'sudo apt install libjson-pp-perl', macOS/other: 'cpan JSON::PP'; required by bin/fm-captain-hold.sh, bin/fm-procevent-lavish.sh, and bin/fm-procevent-extension-capture.pl)"
+}
+
 missing_tool_diagnostic() {
   local tool=$1 instructions
   if instructions=$(manual_install_url "$tool"); then
@@ -1450,6 +1476,7 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
+  perl_jsonpp_diagnostic
 }
 
 detect_local_config() {
@@ -1484,6 +1511,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_code_root_backlog_fork
+  detect_procevent_state_root
   detect_home_summary_publication
 }
 
@@ -1502,6 +1530,38 @@ detect_code_root_backlog_fork() {
     [ "$root_copy" -ef "$DATA/$name" ] && continue
     echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
   done
+}
+
+# fm-procevent.sh's own private-directory check is otherwise only observed by
+# a caller that inspects its exit status, and the watcher's reconcile call
+# (bin/fm-watch.sh) deliberately treats every failure as bounded liveness
+# noise rather than a session-start-visible problem. Surface it here, once,
+# in the same actionable-diagnostic style as every other line above, so a
+# state root that regressed to group/world-writable (022) is visible before
+# it silently stops every registered source from ever being polled again.
+# Read-only: `fm-procevent.sh list` triggers the exact same check
+# fm-procevent.sh applies to itself and mutates nothing.
+#
+# "chmod 750" only actually fixes the mode-bits case; the same check also
+# fails when state/ is owned by another user or reached through a symlinked
+# ancestor, and an operator running the printed chmod there would see the
+# problem persist with no hint why. fm-procevent.sh's die message carries the
+# specific reason (fm_procevent_private_directory_diagnose); read it back out
+# of its stderr rather than duplicating the check here.
+detect_procevent_state_root() {
+  [ -d "$STATE/procevent" ] || return 0
+  local err
+  err=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>&1 >/dev/null) && return 0
+  case "$err" in
+    *'reason: bad-mode'*)
+      echo "PROCEVENT: process-event state root is not a private directory - chmod 750 $STATE to resume polling its registered sources" ;;
+    *'reason: not-owned'*)
+      echo "PROCEVENT: process-event state root ($STATE) is not owned by the current user - chmod will not fix this; fix ownership to resume polling its registered sources" ;;
+    *'reason: symlinked-ancestor'*)
+      echo "PROCEVENT: process-event state root ($STATE) is reached through a symlinked ancestor - chmod will not fix this; remove the symlink from its path to resume polling its registered sources" ;;
+    *)
+      echo "PROCEVENT: process-event state root is not usable, so its registered sources are not being polled - $err" ;;
+  esac
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle

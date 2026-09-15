@@ -78,7 +78,11 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A ship crew's paused:
+#      line claiming a no-mistakes run (status_pause_claims_nm_run) reads
+#      unknown here, never paused: the run it names was not found.
+#   The run is looked for in the worktree, or in the clone the crew registered
+#   with bin/fm-nm-watch.sh register-clone (nm_clone=) when it validates there.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -149,6 +153,12 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+# Where this crew's no-mistakes run executes: the worktree, or the clone a
+# worker registered because its pipeline validates outside it (nm_clone=,
+# written by bin/fm-nm-watch.sh register-clone). Every run read below uses it.
+NM_WT=$WT
+NM_CLONE=$(meta_value nm_clone)
+[ -n "$NM_CLONE" ] && [ -d "$NM_CLONE" ] && NM_WT=$NM_CLONE
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -264,7 +274,7 @@ crew_busy_verdict() {  # <target>
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
-  fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+  fm_nm_run "$NM_WT" "$NM_TIMEOUT" "$@"
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -466,7 +476,7 @@ nm_reclassify_failed_run_as_held_green() {
 # refused socket, timeout, non-zero answer - means the daemon is not provably
 # up, which is the only fact the coarse fallback needs.
 nm_daemon_probe_down() {
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
+  fm_nm_run_checked "$NM_WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
   return 1
 }
 
@@ -547,7 +557,7 @@ nm_runs_list() {
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
-CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+CREW_BRANCH=$(git -C "$NM_WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
 # identity. Branch match is a precondition (caller). Rule owned by
@@ -555,7 +565,7 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_head_matches_worktree "$NM_WT" "$run_head"
 }
 
 HAVE_RUN=0
@@ -602,7 +612,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
       # itself did not respond, so retrying it immediately with a second
       # bounded call would just double the wait for no better answer.
-      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$NM_WT" "$CREW_BRANCH" "$(nm_runs_list)")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         # A branch-matching answer the strict rule rejected is this branch's
@@ -853,6 +863,10 @@ fi
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  # A pause that claims a no-mistakes run is not a wait when no run exists.
+  if [ "$LOG_STATE" = paused ] && [ "$KIND" = ship ] && status_pause_claims_nm_run "$LOG_LINE"; then
+    emit unknown status-log "$(status_line_note "$LOG_LINE")${SEP}no no-mistakes run found for $NM_WT"
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

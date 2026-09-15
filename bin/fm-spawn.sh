@@ -4508,3 +4508,17 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# D5: register the deterministic pipeline-state watch for this task, so the
+# worker can end its turn on a declared wait instead of burning model turns on
+# a sleep loop (bin/fm-dod-lib.sh's Definition of done tells it to). The watch
+# is a process-event `when` source: its condition runs in a blocking child
+# with no model turn, and its action rings this task's steering inbox. It is a
+# repeat watch because a pipeline changes state several times per run, and it
+# carries FM_HOME because fm-send refuses to resolve a target without one.
+# bin/fm-nm-watch.sh owns the watch shape and re-arms idempotently, so a
+# relaunch converges on the watch its original spawn armed; a failure there
+# queues a durable check wake and never fails the spawn.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-nm-watch.sh" arm "$ID" || true
+fi

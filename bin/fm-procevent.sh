@@ -239,7 +239,13 @@ state_root_bind() {  # [create]
 }
 
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
-  state_root_bind || die "process-event state root is not a private directory"
+  # Captured before the call: state_root_bind reassigns $STATE to the empty
+  # string as a side effect of its own failed resolve (`STATE=$(...) || return
+  # 1` still performs the assignment before the `||` is evaluated), so reading
+  # $STATE for a diagnosis message after a failed call would always see "".
+  procevent_state_root_before_bind=$STATE
+  state_root_bind \
+    || die "process-event state root is not a private directory (reason: $(fm_procevent_private_directory_diagnose "$procevent_state_root_before_bind" 0))"
 fi
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }

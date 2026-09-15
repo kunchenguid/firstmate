@@ -947,19 +947,48 @@ fm_procevent_state_root_resolve() {  # <state-root>
 }
 
 fm_procevent_private_directory_valid() {
+  [ "$(fm_procevent_private_directory_diagnose "$1" "$2")" = ok ]
+}
+
+# fm_procevent_private_directory_diagnose <directory> <exact-mode>
+# Same criteria as fm_procevent_private_directory_valid, but names which
+# criterion failed instead of collapsing every cause to a single boolean.
+# "chmod 750 <dir>" only actually fixes the bad-mode case - a directory owned
+# by another user, or reached through a symlinked ancestor, stays broken after
+# that chmod with no hint why. Callers that print a remedy use this instead of
+# the boolean so they can withhold or replace the chmod suggestion when it
+# would not help.
+fm_procevent_private_directory_diagnose() {  # <directory> <exact-mode>
   local directory=$1 exact_mode=$2 canonical normalized mode
-  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
-  fm_procevent_directory_owned_by_current_user "$directory" || return 1
-  mode=$(fm_pr_file_mode "$directory") || return 1
-  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
-  if [ "$exact_mode" = 1 ]; then
-    [ "$mode" = 700 ] || return 1
-  elif [ $((8#$mode & 8#022)) -ne 0 ]; then
-    return 1
+  if [ -L "$directory" ]; then
+    directory=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && pwd -P) || { printf 'missing\n'; return 0; }
   fi
-  canonical=$(cd -P -- "$directory" && pwd -P) || return 1
-  normalized=$(fm_procevent_path_normalize "$directory") || return 1
-  [ "$canonical" = "$normalized" ]
+  if [ ! -d "$directory" ]; then
+    printf 'missing\n'
+    return 0
+  fi
+  if ! fm_procevent_directory_owned_by_current_user "$directory"; then
+    printf 'not-owned\n'
+    return 0
+  fi
+  mode=$(fm_pr_file_mode "$directory") || { printf 'missing\n'; return 0; }
+  case "$mode" in ''|*[!0-7]*) printf 'missing\n'; return 0 ;; esac
+  if [ "$exact_mode" = 1 ]; then
+    if [ "$mode" != 700 ]; then
+      printf 'bad-mode\n'
+      return 0
+    fi
+  elif [ $((8#$mode & 8#022)) -ne 0 ]; then
+    printf 'bad-mode\n'
+    return 0
+  fi
+  canonical=$(cd -P -- "$directory" && pwd -P) || { printf 'missing\n'; return 0; }
+  normalized=$(fm_procevent_path_normalize "$directory") || { printf 'missing\n'; return 0; }
+  if [ "$canonical" != "$normalized" ]; then
+    printf 'symlinked-ancestor\n'
+    return 0
+  fi
+  printf 'ok\n'
 }
 
 fm_procevent_capture_inbox_prepare() {
