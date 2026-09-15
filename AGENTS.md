@@ -83,6 +83,7 @@ config/trace-context  optional presence flag enabling default-off native W3C tra
 config/turnend-churn-absorb  optional presence flag opting this home into the default-off absorb of bare turn-end wakes on pane churn; LOCAL, gitignored, and not inherited; see docs/configuration.md "Turn-end pane-churn absorb"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/telegram-bot-token config/telegram-chat-id optional private Telegram notification credentials; LOCAL, gitignored, owner-only permissions; see docs/telegram-notifications.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -142,6 +143,7 @@ state/               runtime records and signals; gitignored
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity plus independent annotation and outcome-backstop byte offsets, with a serialization lock preventing already-presented lines from replaying while preserving delayed signal annotations; owned by fm-classify-lib.sh, with each task's row retired by teardown
   .afk-contract      the away-posture record: the captain's verbatim away words, expected return, reach profile, spend cap, and structured mandate clauses; written only by bin/fm-afk-contract.sh after the captain confirms the read-back, archived under afk-contracts/ at return; its presence IS the away posture in every harness; its sibling .afk-contract.lock serializes actions authorized by the live record (contract: bin/fm-afk-contract.sh)
+  .telegram-notifications .telegram-notifications.lock .telegram-progress  bounded private per-away-session Telegram deduplication journal, its serialization lock, and the aggregate progress cadence marker; written only by bin/fm-telegram.sh
   afk-contracts/     archived away-posture records: one final record per away window keyed by entry time, plus any superseded mandates from that window
   .afk               durable away/quiet-mode daemon flag on the harnesses that still launch the daemon (never on Pi); present = sub-supervisor may inject escalations, first line `away` (default, set by /afk, cleared on user return) or `quiet` (set by /quiet, cleared only on explicit /quiet off) per the single owner fm_afk_mode() in bin/fm-wake-lib.sh
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
@@ -454,7 +456,7 @@ Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for qui
 Each skill owns its own daemon procedure, which is otherwise identical; these safety facts remain inline for both:
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
-- `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, and the record's clauses are recorded, not executed, in this release.
+- `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, optional Telegram reach is notification-only, and the record's clauses are recorded, not executed, in this release.
 - While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record.
 - A marked message while away or quiet mode is active is internal escalation and does not exit that mode.

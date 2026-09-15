@@ -2,8 +2,9 @@
 # Quota-exhaustion process-event adapter.
 #
 # Usage:
-#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>]
-#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--timeout <secs>]
+#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--scope <scope>] [--inclusive]
+#   fm-procevent-quota.sh arm-afk [--interval <secs>]
+#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--scope <scope>] [--inclusive] [--timeout <secs>]
 #   fm-procevent-quota.sh classify <result-file>
 #   fm-procevent-quota.sh terminal <result-file>
 #   fm-procevent-quota.sh source-id
@@ -11,13 +12,16 @@
 #
 # arm        Register a recurring quota-axi --json poll that wakes firstmate
 #            when the tracked provider's effectivePercentRemaining drops below
-#            <threshold> (default 10%) or when its runway.status becomes
-#            exhausted_now. The condition is deterministic, the action is only
-#            the durable `check: procevent:quota:<seq>` wake, and the watch is
-#            registered through `bin/fm-procevent.sh register`.
+#            <threshold> (default 10%) or, with --inclusive, at or below it.
+#            --scope limits the condition to availability records bounded by
+#            that named window. A runway.status of exhausted_now also fires.
+#            The condition is deterministic and the watch is registered through
+#            `bin/fm-procevent.sh register`.
+# arm-afk    Register the Codex weekly protection watch at or below 70%.
+#            This is the only public shortcut used by the confirmed AFK path.
 # poll       The blocking child the generic runner executes; never run this
 #            directly in a conversational turn. It polls `quota-axi --json`
-#            until quota drops below the threshold or an error stops the watch.
+#            until the selected quota condition is met or an error stops the watch.
 # classify   Print the captured outcome class: low, exhausted, error, or unknown.
 # terminal   Every quota poll is terminal because the source fires at most once.
 # source-id  Print the canonical source id.
@@ -26,7 +30,8 @@
 #
 # The canonical source id is `quota` for the aggregate tracked provider.
 # A provider named with --provider sets the tracked provider and the source id
-# becomes `quota-<provider>`.
+# becomes `quota-<provider>`. The AFK shortcut uses the distinct stable id
+# `afk-codex-weekly` so it can be retired without touching another quota watch.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +57,7 @@ SOURCE_ID_BASE=quota
 
 CANONICAL_SOURCE_ID=
 PROVIDER=
+SOURCE_ID_OVERRIDE=
 
 usage() {
   awk '
@@ -73,6 +79,10 @@ resolve_provider() {
     CANONICAL_SOURCE_ID=$SOURCE_ID_BASE
     PROVIDER=
   fi
+  if [ -n "$SOURCE_ID_OVERRIDE" ]; then
+    fm_procevent_source_id_valid "$SOURCE_ID_OVERRIDE" || die "source id is not path-safe: $SOURCE_ID_OVERRIDE"
+    CANONICAL_SOURCE_ID=$SOURCE_ID_OVERRIDE
+  fi
   fm_procevent_source_id_valid "$CANONICAL_SOURCE_ID" || die "source id is not path-safe: $CANONICAL_SOURCE_ID"
 }
 
@@ -84,6 +94,11 @@ positive_number() {
 }
 
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
+
+valid_scope() {
+  local scope=${1-}
+  [[ "$scope" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]]
+}
 
 valid_percent() {
   local n=${1-}
@@ -107,19 +122,26 @@ quota_json() {
   printf '%s\n' "$output"
 }
 
-# condition_status <json> [provider] [threshold]
+# condition_status <json> [provider] [threshold] [scope] [inclusive]
 # Print healthy, low, exhausted, or error for the tightest known applicable
-# quota scope.
+# quota scope. A named scope is matched against each availability record's
+# boundedBy list, so a five-hour record cannot trigger a weekly protection watch.
 condition_status() {
-  local json=$1 provider=${2:-} threshold=${3:-$DEFAULT_THRESHOLD}
+  local json=$1 provider=${2:-} threshold=${3:-$DEFAULT_THRESHOLD} scope=${4:-} inclusive=${5:-0}
   printf '%s\n' "$json" | fm_quota_json_valid || { printf 'error\n'; return; }
-  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" '
+  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" \
+    --arg scope "$scope" --argjson inclusive "$inclusive" '
+    def scoped($availability):
+      if $scope == "" then $availability
+      else [$availability[] | select((.boundedBy // []) | type == "array" and (index($scope) != null))]
+      end;
     def classify($availability):
-      ($availability | map(select(.status == "known"))) as $known |
-      if ($availability | length) == 0 then "error"
-      elif any($availability[]; (.runway.status // "") == "exhausted_now") then "exhausted"
+      (scoped($availability)) as $applicable |
+      ($applicable | map(select(.status == "known"))) as $known |
+      if ($applicable | length) == 0 then "healthy"
+      elif any($applicable[]; (.runway.status // "") == "exhausted_now") then "exhausted"
       elif ($known | length) == 0 then "healthy"
-      elif any($known[]; .effectivePercentRemaining < ($threshold | tonumber)) then "low"
+      elif any($known[]; if ($inclusive == 1) then .effectivePercentRemaining <= ($threshold | tonumber) else .effectivePercentRemaining < ($threshold | tonumber) end) then "low"
       else "healthy"
       end;
     if (.providers | type) != "array" then "error"
@@ -139,14 +161,19 @@ condition_status() {
   ' 2>/dev/null || printf 'error\n'
 }
 
-# details <json> [provider]
+# details <json> [provider] [scope]
 # Print a one-line summary of the quota state for the result document.
 details() {
-  local json=$1 provider=${2:-}
-  printf '%s\n' "$json" | jq -c --arg provider "$provider" '
+  local json=$1 provider=${2:-} scope=${3:-}
+  printf '%s\n' "$json" | jq -c --arg provider "$provider" --arg scope "$scope" '
+    def scoped($availability):
+      if $scope == "" then $availability
+      else [$availability[] | select((.boundedBy // []) | type == "array" and (index($scope) != null))]
+      end;
     def best_detail($availability):
-      ($availability | map(select(.status == "known"))) as $known |
-      ($availability | map(select((.runway.status // "") == "exhausted_now"))) as $exhausted |
+      (scoped($availability)) as $applicable |
+      ($applicable | map(select(.status == "known"))) as $known |
+      ($applicable | map(select((.runway.status // "") == "exhausted_now"))) as $exhausted |
       if ($exhausted | length) > 0 then ($exhausted | min_by(.effectivePercentRemaining // 101))
       elif ($known | length) > 0 then ($known | min_by(.effectivePercentRemaining))
       else null
@@ -178,38 +205,60 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD scope='' inclusive=0
+  SOURCE_ID_OVERRIDE=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --interval)  positive_number "${2-}" || die "--interval needs a positive number"; interval=$2; shift 2 ;;
       --threshold) valid_percent "${2-}" || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
-      --provider)  [ -n "${2-}" ] || die "--provider needs a value"; resolve_provider "$2"; shift 2 ;;
+      --provider)  [ -n "${2-}" ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
+      --scope)     valid_scope "${2-}" || die "--scope needs a path-safe value"; scope=$2; shift 2 ;;
+      --inclusive) inclusive=1; shift ;;
+      --source-id) [ "${2-}" = afk-codex-weekly ] || die "--source-id is reserved for the AFK Codex weekly watch"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
       *) usage ;;
     esac
   done
   resolve_provider "$PROVIDER"
   fm_quota_axi_compatible 5 >/dev/null 2>&1 || die "quota-axi is missing or below the compatibility floor"
   local timeout
+  local -a optional=()
   timeout=$(perl -e 'print int($ARGV[0] * 0.8 + 0.5)' "$interval") || timeout=30
   [ "$timeout" -ge 5 ] || timeout=5
+  [ -z "$scope" ] || optional+=(--scope "$scope")
+  [ "$inclusive" -eq 0 ] || optional+=(--inclusive)
   "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
-    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" --timeout "$timeout" || exit 1
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" "${optional[@]}" --source-id "$CANONICAL_SOURCE_ID" --timeout "$timeout" || exit 1
   printf 'armed: %s\n' "$CANONICAL_SOURCE_ID"
   printf 'provider: %s\n' "${PROVIDER:-(aggregate)}"
   printf 'threshold: %s%%\n' "$threshold"
+  [ -z "$scope" ] || printf 'scope: %s\n' "$scope"
+  [ "$inclusive" -eq 0 ] || printf 'boundary: inclusive\n'
   printf 'interval: %ss\n' "$interval"
+}
+
+cmd_arm_afk() {
+  local interval=$DEFAULT_INTERVAL
+  [ "$#" -eq 0 ] || {
+    [ "$#" -eq 2 ] && [ "$1" = --interval ] || usage
+    positive_number "$2" || die "--interval needs a positive number"
+    interval=$2
+  }
+  cmd_arm --interval "$interval" --threshold 70 --provider codex --scope weekly --inclusive --source-id afk-codex-weekly
 }
 
 # For use inside the runner: parse the spec argv and run one condition evaluation.
 # This is intentionally not the public `arm` path; the runner calls this command
 # directly, so the argv must match the registration.
 cmd_poll() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout=
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout='' scope='' inclusive=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --interval)  [ "$#" -ge 2 ] || die "--interval needs a positive number"; interval=$2; shift 2 ;;
       --threshold) [ "$#" -ge 2 ] || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
       --provider)  [ "$#" -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
+      --scope)     [ "$#" -ge 2 ] || die "--scope needs a value"; valid_scope "$2" || die "--scope needs a path-safe value"; scope=$2; shift 2 ;;
+      --inclusive) inclusive=1; shift ;;
+      --source-id) [ "$#" -ge 2 ] || die "--source-id needs a value"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
       --timeout)   [ "$#" -ge 2 ] || die "--timeout needs a positive integer"; timeout=$2; shift 2 ;;
       *) usage ;;
     esac
@@ -218,6 +267,7 @@ cmd_poll() {
   valid_percent "$threshold" || die "--threshold needs a percent 0-100"
   [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
   resolve_provider "$PROVIDER"
+  [ -z "$SOURCE_ID_OVERRIDE" ] || [ "$CANONICAL_SOURCE_ID" = "$SOURCE_ID_OVERRIDE" ] || die "poll source id does not match its provider"
   local json detail status polls=0
   while :; do
     polls=$((polls + 1))
@@ -228,13 +278,13 @@ cmd_poll() {
       printf 'condition_polls: %s\n' "$polls"
       exit 0
     fi
-    status=$(condition_status "$json" "$PROVIDER" "$threshold")
+    status=$(condition_status "$json" "$PROVIDER" "$threshold" "$scope" "$inclusive")
     case "$status" in
       healthy) sleep "$interval"; continue ;;
       low|exhausted) : ;;
       *) status=error ;;
     esac
-    detail=$(details "$json" "$PROVIDER")
+    detail=$(details "$json" "$PROVIDER" "$scope")
     printf 'quota: %s\n' "$CANONICAL_SOURCE_ID"
     printf 'status: %s\n' "$status"
     printf 'detail: %s\n' "$detail"
@@ -266,9 +316,11 @@ cmd_terminal() {
 
 cmd_retire() {
   local id provider=
+  SOURCE_ID_OVERRIDE=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --provider) [ -n "${2-}" ] || die "--provider needs a value"; provider=$2; shift 2 ;;
+      --source-id) [ "${2-}" = afk-codex-weekly ] || die "--source-id is reserved for the AFK Codex weekly watch"; SOURCE_ID_OVERRIDE=$2; shift 2 ;;
       -*) usage ;;
       *) [ -z "$provider" ] || usage; provider=$1; shift ;;
     esac
@@ -280,6 +332,7 @@ cmd_retire() {
 
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
+  arm-afk)   shift; cmd_arm_afk "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

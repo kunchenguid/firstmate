@@ -11,7 +11,8 @@
 # into a proposal and prints the read-back (bin/fm-afk-contract.sh owns the
 # clause fields, the never-set, the refusal wording, and the record schema); `confirm` promotes it
 # into state/.afk-contract and prints the entry announcement (hold-for-return
-# only: no phone channel exists). The record is the posture in every harness.
+# only: optional private Telegram notifications add no commands or authority).
+# The record is the posture in every harness.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. Every other harness still runs the daemon
@@ -230,9 +231,34 @@ fm_afk_launch_propose() {
   "$FM_AFK_CONTRACT_CMD" propose "$@"
 }
 
+fm_afk_launch_telegram_ready() {
+  local telegram="$FM_AFK_LAUNCH_DIR/fm-telegram.sh"
+  [ -x "$telegram" ] \
+    && FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$telegram" ready >/dev/null 2>&1
+}
+
+fm_afk_launch_quota_arm() {
+  local quota="$FM_AFK_LAUNCH_DIR/fm-procevent-quota.sh"
+  fm_afk_launch_telegram_ready || return 0
+  [ -x "$quota" ] || return 1
+  "$quota" arm-afk --interval "${FM_TELEGRAM_QUOTA_INTERVAL:-300}" >/dev/null 2>&1
+}
+
+fm_afk_launch_quota_retire() {
+  local quota="$FM_AFK_LAUNCH_DIR/fm-procevent-quota.sh"
+  [ -x "$quota" ] || return 1
+  "$quota" retire --source-id afk-codex-weekly >/dev/null 2>&1
+}
+
 fm_afk_launch_confirm() {
   fm_afk_launch_catchup_pending && return 1
-  "$FM_AFK_CONTRACT_CMD" confirm
+  "$FM_AFK_CONTRACT_CMD" confirm || return $?
+  # A configured channel is recorded at confirmation. Quota registration is
+  # best-effort here so Pi can arm it without a daemon; start/reconcile also
+  # retries it for records confirmed by the lower-level contract command.
+  if ! fm_afk_launch_quota_arm; then
+    fm_afk_launch_log "Telegram is configured, but the Codex weekly quota watch could not be armed; other private notifications remain enabled"
+  fi
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -569,6 +595,7 @@ fm_afk_launch_start() {
       fm_afk_launch_log "failed to refresh away-mode flag"
       return 1
     fi
+    fm_afk_launch_quota_arm || fm_afk_launch_log "could not refresh the Codex weekly quota watch"
     fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
     return 0
   fi
@@ -600,6 +627,9 @@ fm_afk_launch_start() {
     fi
   fi
 
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_quota_arm || fm_afk_launch_log "could not arm the Codex weekly quota watch"
+  fi
   if [ "$result" -eq 0 ]; then
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
@@ -650,6 +680,7 @@ fm_afk_launch_start_native() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
+    fm_afk_launch_quota_arm || fm_afk_launch_log "could not arm the Codex weekly quota watch"
     fm_afk_launch_record_write none - native || result=1
   fi
   if [ "$result" -ne 0 ]; then
@@ -700,6 +731,13 @@ fm_afk_launch_stop() {
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
+  fi
+  # Retire the private quota source before the posture ends, so a late result
+  # cannot be mistaken for an active away session. An unresolved retirement
+  # preserves the posture for a safe retry.
+  if ! fm_afk_launch_quota_retire; then
+    fm_afk_launch_log "could not retire the Codex weekly quota watch; preserving the away posture for retry"
+    return 1
   fi
   # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
   # posture ends only once every daemon-side artifact is down.

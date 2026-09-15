@@ -9,8 +9,8 @@
 # in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
 # Being away changes how the captain is informed and what happens at a
 # captain-owned decision point, never the authority set. Hold-for-return is the
-# only reach profile this release records: there is no phone channel, and the
-# entry announcement says so every time.
+# only reach profile this release records; the optional private Telegram channel
+# adds fixed notifications but never adds commands or authority.
 #
 # RECORD (state/.afk-contract; written only by this script; YAML-shaped so a
 # human can read it, but parsed only here - consumers use the read subcommands):
@@ -18,7 +18,7 @@
 #   entered: <UTC ISO 8601>
 #   entered_epoch: <seconds>
 #   expected_return: <UTC ISO 8601> | -
-#   reach_channels: none
+#   reach_channels: none | telegram
 #   reach_announced: <the one-sentence reach announcement>
 #   spend_max_concurrent_workers: <n>
 #   merge_grants: - |            task ids that may merge while this record exists
@@ -146,6 +146,7 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_CONTRACT_VERSION=1
 FM_AFK_CONTRACT_VERBS="merge land prerelease install rerun dispatch abort-run answer discard wake-me"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
+FM_AFK_CONTRACT_TELEGRAM_REACH_ANNOUNCED='Private Telegram notifications are enabled; decisions and authority still wait for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
 # Generous against the longest legitimate holder, a merge waiting on the forge,
 # so the bound only ever trips on something genuinely wedged.
@@ -349,13 +350,33 @@ fm_afk_contract_validate_iso() {  # <ts>
   fm_utc_iso_to_epoch "$1" >/dev/null 2>&1
 }
 
+fm_afk_contract_reach_channels() {
+  local telegram="$FM_ROOT/bin/fm-telegram.sh"
+  if [ -x "$telegram" ] \
+    && FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_AFK_CONTRACT_STATE" "$telegram" ready >/dev/null 2>&1; then
+    printf 'telegram\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+fm_afk_contract_reach_announcement() {
+  case "$1" in
+    telegram) printf '%s\n' "$FM_AFK_CONTRACT_TELEGRAM_REACH_ANNOUNCED" ;;
+    none) printf '%s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Compile every input into a record body on stdout (everything except the
 # confirmed fields). Inputs: WORDS (verbatim), the parallel clause field arrays
 # CLAUSE_ACTIONS CLAUSE_OBJECTS CLAUSE_WHENS CLAUSE_STOPS, EXPECTED_RETURN,
 # SPEND, MERGE_GRANTS.
 fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
-  local entered=$1 entered_epoch=$2 ordinal=0 i as_given grant
+  local entered=$1 entered_epoch=$2 ordinal=0 i as_given grant reach reach_announced
   local accepted_block="" refused_block=""
+  reach=$(fm_afk_contract_reach_channels)
+  reach_announced=$(fm_afk_contract_reach_announcement "$reach") || return 1
   i=0
   while [ "$i" -lt "${#CLAUSE_ACTIONS[@]}" ]; do
     ordinal=$((ordinal + 1))
@@ -386,8 +407,8 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
   printf 'entered: %s\n' "$entered"
   printf 'entered_epoch: %s\n' "$entered_epoch"
   printf 'expected_return: %s\n' "${EXPECTED_RETURN:--}"
-  printf 'reach_channels: none\n'
-  printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
+  printf 'reach_channels: %s\n' "$reach"
+  printf 'reach_announced: %s\n' "$reach_announced"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   if [ "${#MERGE_GRANTS[@]}" -eq 0 ]; then
     printf 'merge_grants: -\n'
@@ -598,7 +619,10 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   [ "$expected" = - ] || fm_afk_contract_validate_iso "$expected" || { fm_afk_contract_log "record $path has no valid expected_return"; return 1; }
   reach=$(fm_afk_contract_read_field "$path" reach_channels)
-  [ "$reach" = none ] || { fm_afk_contract_log "record $path has no valid reach_channels"; return 1; }
+  case "$reach" in
+    none|telegram) ;;
+    *) fm_afk_contract_log "record $path has no valid reach_channels"; return 1 ;;
+  esac
   announced=$(fm_afk_contract_read_field "$path" reach_announced)
   [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
@@ -670,7 +694,7 @@ EOF
 # --- rendering --------------------------------------------------------------
 
 fm_afk_contract_render_readback() {  # <path> <title>
-  local path=$1 title=$2 words count id action object when stop text missing expected spend flag grants grant_list
+  local path=$1 title=$2 words count id action object when stop text missing expected spend flag grants grant_list reach
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
   grants=$(fm_afk_contract_read_grants "$path") || return 1
@@ -686,7 +710,12 @@ EOF
   printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
   printf '  spend cap: %s concurrent workers\n' "$spend"
   printf '  merge when green (task ids): %s\n' "${grant_list:-(none)}"
-  printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+  reach=$(fm_afk_contract_read_field "$path" reach_channels)
+  if [ "$reach" = telegram ]; then
+    printf '  reach: hold-for-return with private Telegram notifications. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+  else
+    printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+  fi
   words=$(fm_afk_contract_read_words "$path"; printf x)
   words=${words%x}
   if [ -n "$words" ]; then

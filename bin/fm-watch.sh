@@ -1725,6 +1725,13 @@ event_wait_or_sleep() {
   esac
 }
 
+telegram_progress_tick_detached() {
+  local telegram="$SCRIPT_DIR/fm-telegram.sh"
+  [ -f "$STATE/.afk-contract" ] || return 0
+  [ -x "$telegram" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$telegram" notify-progress >/dev/null 2>&1 &
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -1940,6 +1947,9 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  # The notification helper owns the cadence and aggregate redaction; this
+  # one-shot tick makes the 10-15 minute update independent of actionable wakes.
+  telegram_progress_tick_detached
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

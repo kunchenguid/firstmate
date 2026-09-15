@@ -84,9 +84,21 @@ triage_log() {
   fi
 }
 
+# Private Telegram alerts are a one-shot best-effort side effect of an
+# actionable wake. The helper maps the reason to fixed text and re-checks the
+# confirmed away posture; this library never puts the reason in an argv item.
+watch_telegram_notify() {
+  local reason=$1 telegram="$FM_ROOT/bin/fm-telegram.sh"
+  [ -x "$telegram" ] || return 0
+  {
+    printf '%s\n' "$reason" | FM_STATE_OVERRIDE="$STATE" "$telegram" notify-wake
+  } >/dev/null 2>&1 &
+}
+
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
   local output_status=0
+  watch_telegram_notify "$1"
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;

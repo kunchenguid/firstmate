@@ -617,6 +617,12 @@ publish_result() {  # <result-file>
     if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
       status=0
     fi
+    # The quota adapter owns the captured result, while Telegram owns the
+    # private AFK notification. Pass only the trusted result path; the helper
+    # re-checks the posture and emits fixed text without exposing result data.
+    if [ "$adapter" = quota ] && [ -x "$SCRIPT_DIR/fm-telegram.sh" ]; then
+      FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-telegram.sh" notify-result "$result" >/dev/null 2>&1 &
+    fi
   fi
   fm_procevent_source_lock_release "$id"
   return "$status"

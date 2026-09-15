@@ -21,6 +21,10 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
 
+The optional private Telegram wedge notification is separate from these local channel directives.
+It is enabled only by the verified Telegram setup and a confirmed away record, uses fixed text and its own bounded deduplication, and is not disabled by `config/wedge-alarm: off`.
+See [`telegram-notifications.md`](telegram-notifications.md) for its token, private-chat, and away-posture contract.
+
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
 Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.

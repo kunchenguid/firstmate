@@ -925,7 +925,14 @@ wedge_alarm_emit() {  # <channel> <summary>
 # only signal. Every notifier routes through the test-forced recorder seam.
 wedge_alarm_notify() {  # <summary> <marker>
   local summary=$1 marker=$2 ch
+  local state=${marker%/*} telegram="$FM_DAEMON_DIR/fm-telegram.sh"
   local -a channels=()
+  # Telegram is independent of the local wedge-alarm choice. It receives only
+  # the fixed wedge event name; the helper applies the AFK posture and dedupe
+  # checks and performs the bounded API call away from the daemon loop.
+  if [ -x "$telegram" ]; then
+    FM_STATE_OVERRIDE="$state" "$telegram" send wedge >/dev/null 2>&1 &
+  fi
   while IFS= read -r ch; do
     [ -n "$ch" ] || continue
     channels+=("$ch")

@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, optionally sends fixed private Telegram notifications, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -14,7 +14,9 @@ Away mode is a POSTURE of the one supervision session, not a second architecture
 Being away changes exactly two things: how the captain is informed, and what happens at a captain-owned decision point (hold for return, or later a pre-answered clause).
 It never changes the authority set.
 The posture is a file, `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` after the captain confirms a read-back; nothing infers the posture from chat.
-Hold-for-return is the default and the only reach profile this release records: there is no phone channel, and the entry announcement says so aloud every time.
+Hold-for-return is the default and the only authority profile this release records.
+When the private Telegram setup is verified, the record also carries `reach_channels: telegram` for fixed notifications and a redacted aggregate progress update every 10 minutes by default; Telegram adds no commands or authority and decisions still wait for return.
+`docs/telegram-notifications.md` owns its local setup and delivery contract.
 
 ## Entering: `/afk [words]`
 
@@ -35,7 +37,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    Exit 3 only means a clause was refused; the proposal stands.
 3. **Confirm on the captain's go.**
    Run `bin/fm-afk-launch.sh confirm`; it promotes the proposal into the record and prints the entry announcement.
-   Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, anything that needs the captain waits for their return, N clauses recorded and M refused, recorded clauses are held for the return brief and are not executed by this release, and forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text because no recorded clause is authority by itself.
+   Relay that announcement verbatim in spirit: hold-for-return only, either that fixed private Telegram notifications are enabled or that no phone channel is configured, anything that needs the captain waits for their return, N clauses recorded and M refused, recorded clauses are held for the return brief and are not executed by this release, and forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text because no recorded clause is authority by itself.
    With no words, run `propose` and `confirm` back to back; the announcement is the same.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded mandate for the return brief.
 4. **Per harness, after the record exists:**
@@ -49,11 +51,17 @@ Hold-for-return is the default and the only reach profile this release records: 
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
    Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
+   When Telegram is enabled, `bin/fm-telegram.sh` also watches the existing actionable-wake path and Codex quota process-event result, and emits a bounded aggregate progress update every 10 minutes by default.
+   Progress contains counts only, never mandate words, task names, or status text; all notifications remain fixed, deduplicated, best-effort, and active only while the confirmed away record exists.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
    On Pi nothing changes about arming: the supervision session's own cycle continues.
 
 ## While away
 
+- Private Telegram is best-effort and notification-only.
+  It covers captain-facing boundaries, actionable errors, stalled supervision, wedges, Codex weekly quota at or below 70% remaining, and a redacted aggregate progress update every 10 minutes by default.
+  The weekly quota watch is inclusive and scoped by `boundedBy: weekly`, so the current five-hour window may be consumed below 70%.
+  Failed sends retry on later eligible events and successful fixed event classes are deduplicated per away session.
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - Recorded clauses are not executed by this release.
