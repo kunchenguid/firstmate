@@ -1219,11 +1219,13 @@ test_forced_secondmate_child_close_failure_still_refuses() {
   # Forced secondmate cleanup is the ONLY way into the child close path, so
   # --force cannot also be the way past it: honoring force here would delete
   # the refusal rather than override it, and discard a child home whose
-  # endpoint is still live.
+  # endpoint is still live. Reaching that path needs the per-target retire
+  # authority naming this exact home; --force alone refuses before anything
+  # destructive runs.
   set +e
   env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$parent" --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$parent" --retire-secondmate "$parent" --force \
     > "$dir/child.out" 2> "$dir/child.err"
   rc=$?
   set -e
