@@ -97,6 +97,7 @@ The script header owns the exact JSON schema.
 ### Project Cockpit observational projection
 
 Project Cockpit uses `bin/fm-project-cockpit-snapshot.sh` to turn one `fm-fleet-snapshot.v1` input into the bounded, allowlisted `fm-project-cockpit.v1` presentation model.
+`bin/fm-project-cockpit-contract.sh` owns the projector and builder's shared list limits and the model byte ceiling derived from those limits and every bounded presentation field.
 Its live refresh uses the fleet collector's read-only mode, which may consume an existing remote-summary cache but never contacts a remote home or creates or refreshes the cache.
 The projector preserves structured task generations, lifecycle states, captain-hold classifications, blockers, freshness, partial inventory, and validated artifact references without passing raw status events, backlog body text, inbox content, or control commands to the browser.
 `bin/fm-project-cockpit-board.sh` validates that model, injects it into the shipped graphite renderer, verifies the embedded JSON round trip, and atomically publishes the private artifact.

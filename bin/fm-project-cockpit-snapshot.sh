@@ -21,11 +21,11 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-project-cockpit-contract.sh"
 SNAPSHOT="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 FROM_SNAPSHOT=
 OBSERVED_AT=${FM_COCKPIT_NOW:-}
 STALE_AFTER=300
-MAX_BYTES=${FM_COCKPIT_SNAPSHOT_MAX_BYTES:-2097152}
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -34,12 +34,6 @@ usage() {
 fail() {
   printf 'fm-project-cockpit-snapshot: %s\n' "$*" >&2
   exit 1
-}
-
-valid_positive_integer() {
-  case "$1" in
-    ''|*[!0-9]*|0) return 1 ;;
-  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -66,7 +60,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 command -v jq >/dev/null 2>&1 || fail "jq is required"
-valid_positive_integer "$MAX_BYTES" || fail "FM_COCKPIT_SNAPSHOT_MAX_BYTES must be a positive integer"
 
 [ -n "$OBSERVED_AT" ] || OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 printf '%s\n' "$OBSERVED_AT" | jq -R -e 'fromdateiso8601' >/dev/null 2>&1 \
@@ -83,7 +76,7 @@ if [ -z "$FROM_SNAPSHOT" ]; then
     collection_failed=1
   fi
 elif [ "$FROM_SNAPSHOT" = - ]; then
-  head -c "$((MAX_BYTES + 1))" > "$tmp"
+  cat > "$tmp"
 else
   [ -f "$FROM_SNAPSHOT" ] && [ ! -L "$FROM_SNAPSHOT" ] \
     || fail "snapshot fixture must be a regular non-symlink file: $FROM_SNAPSHOT"
@@ -93,7 +86,11 @@ fi
 if [ "$collection_failed" -eq 1 ]; then
   jq -n \
     --arg generated "$OBSERVED_AT" \
-    --argjson stale_after "$STALE_AFTER" '
+    --argjson stale_after "$STALE_AFTER" \
+    --argjson max_projects "$FM_PROJECT_COCKPIT_MAX_PROJECTS" \
+    --argjson max_tasks_per_project "$FM_PROJECT_COCKPIT_MAX_TASKS_PER_PROJECT" \
+    --argjson max_total_tasks "$FM_PROJECT_COCKPIT_MAX_TOTAL_TASKS" \
+    --argjson max_string "$FM_PROJECT_COCKPIT_MAX_STRING" '
     {
       schema:"fm-project-cockpit.v1",
       generated:$generated,
@@ -105,13 +102,11 @@ if [ "$collection_failed" -eq 1 ]; then
       counts:{running:0,waiting:0,blocked:0,attention:0},
       projects:[],
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},
-      limits:{projects:80,tasks_per_project:160,total_tasks:500,strings:500}
+      limits:{projects:$max_projects,tasks_per_project:$max_tasks_per_project,total_tasks:$max_total_tasks,strings:$max_string}
     }'
   exit 0
 fi
 
-bytes=$(wc -c < "$tmp" | tr -d '[:space:]')
-[ "$bytes" -le "$MAX_BYTES" ] || fail "fleet snapshot exceeds the $MAX_BYTES-byte input bound"
 jq empty "$tmp" >/dev/null 2>&1 || fail "fleet snapshot is not valid JSON"
 
 jq -e '
@@ -129,7 +124,14 @@ jq -e '
 
 jq \
   --arg observed_at "$OBSERVED_AT" \
-  --argjson stale_after "$STALE_AFTER" '
+  --argjson stale_after "$STALE_AFTER" \
+  --argjson max_projects "$FM_PROJECT_COCKPIT_MAX_PROJECTS" \
+  --argjson max_tasks_per_project "$FM_PROJECT_COCKPIT_MAX_TASKS_PER_PROJECT" \
+  --argjson max_total_tasks "$FM_PROJECT_COCKPIT_MAX_TOTAL_TASKS" \
+  --argjson max_decisions "$FM_PROJECT_COCKPIT_MAX_DECISIONS" \
+  --argjson max_blockers "$FM_PROJECT_COCKPIT_MAX_BLOCKERS" \
+  --argjson max_partial_reasons "$FM_PROJECT_COCKPIT_MAX_PARTIAL_REASONS" \
+  --argjson max_string "$FM_PROJECT_COCKPIT_MAX_STRING" '
   def text($n):
     if type != "string" then null
     else gsub("[[:cntrl:]]"; " ") | gsub("[[:space:]]+"; " ")
@@ -222,7 +224,7 @@ jq \
           until:(($work.hold_until // null) | date_or_time),
           evidence:"structured backlog hold"
         } end),
-        blockers:(($work.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:20]),
+        blockers:(($work.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:$max_blockers]),
         gate:(if (($work.unresolved_blocker_ids // []) | arr | length) > 0 then
                  {status:"blocked",label:(((($work.unresolved_blocker_ids // []) | arr | map(text(80)) | join(", ")) | text(240)))}
               elif $hold_bucket != null then {status:$hold_bucket,label:(($work.hold_reason // "Captain hold") | text(240))}
@@ -251,7 +253,7 @@ jq \
       attention:((.captain_actionable // false) == true),
       attention_rank:(if (.captain_actionable // false) == true then 0 else 2 end),
       hold:(if .hold_bucket == null then null else {classification:.hold_bucket,actionable:(.captain_actionable // false),question:(.hold_reason | text(240)),age_days:(.hold_age_days // null),until:(.hold_until | date_or_time),evidence:"structured backlog hold"} end),
-      blockers:((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:20]),
+      blockers:((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:$max_blockers]),
       gate:(if ((.unresolved_blocker_ids // []) | arr | length) > 0 then {status:"blocked",label:(((.unresolved_blocker_ids | map(text(80)) | join(", ")) | text(240)))} elif .hold_bucket != null then {status:.hold_bucket,label:((.hold_reason // "Captain hold") | text(240))} else {status:"unavailable",label:"Unavailable"} end),
       artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_path == null then "missing" else "available" end),path:(.report_path | text(500))}},
       runtime_evidence:{endpoint_status:"not_started",target:null,worktree:null,home:null},
@@ -293,7 +295,8 @@ jq \
       },
       endpoint:{status:"unknown",target:null},
       paths:{report:{present:false,path:null},worktree:{path:null},home:{path:$owner.home}},
-      pr:{url:null},kind:($record.kind // "worker"),harness:null,backend:null,started_at:null
+      pr:{url:null},kind:($record.kind // "worker"),harness:null,backend:null,
+      started_at:($record.started_at // null)
     } | task_projection($now));
   def secondmate_queued_projection($owner; $record):
     ($record + {id:scoped_id($owner; $record)} | queued_projection);
@@ -361,7 +364,7 @@ jq \
           | sort_by([.id,(if .hold_bucket != null then 0 else 1 end),(.key // ""),(.verb // ""),(.summary // "")])
           | group_by(.id)[]) as $decision_group
        | $decision_group[0] as $decision
-       | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null))) as $decision_summaries
+       | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null)) | .[:$max_decisions]) as $decision_summaries
        | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
        | ([ $mate.active_children[]? | select(.id == $decision.id) ][0] // null) as $active_record
        | secondmate_decision_projection($mate; $decision; $decision_summaries; $queued_record; $active_record; $now)
@@ -378,7 +381,7 @@ jq \
   | ($combined_tasks | length) as $combined_count
   | ($combined_tasks
       | sort_by([.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end),._identity])
-      | .[:500]
+      | .[:$max_total_tasks]
       | map(del(._identity,._priority))) as $all_tasks
   | ([ $all_tasks[].project_id ] | unique | sort) as $project_ids
   | ([
@@ -390,7 +393,9 @@ jq \
       (($snapshot.secondmate_landed.unreadable // [])[]? | "secondmate inventory unavailable"),
       (($snapshot.secondmate_landed.partial // [])[]? | "secondmate inventory partial"),
       (($snapshot.secondmate_landed.truncated // [])[]? | "secondmate landed inventory truncated")
-    ] | unique) as $partial_reasons
+    ] | unique) as $partial_reasons_all
+  | ($partial_reasons_all | length) as $partial_reason_count
+  | ($partial_reasons_all[:$max_partial_reasons]) as $partial_reasons
   | ([ $project_ids[] as $pid
        | ([ $all_tasks[] | select(.project_id == $pid) ]
           | sort_by([.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end),.id,(.spawn_gen // "")])) as $tasks
@@ -405,11 +410,11 @@ jq \
            rank:(if any($tasks[]; .attention) then 0 elif any($tasks[]; .lane == "running" or .lane == "waiting") then 1 else 2 end),
            _priority:([ $tasks[] | [.attention_rank,(if .lane == "running" then 0 elif .lane == "waiting" then 1 elif .lane == "queued" then 2 else 3 end)] ] | sort | .[0]),
            total_task_count:($tasks | length),
-           truncated:(($tasks | length) > 160),
-           tasks:$tasks[:160]
+           truncated:(($tasks | length) > $max_tasks_per_project),
+           tasks:$tasks[:$max_tasks_per_project]
          }
      ] | sort_by([._priority[0],._priority[1],.id])) as $all_projects
-  | ($all_projects[:80] | map(del(._priority))) as $projects
+  | ($all_projects[:$max_projects] | map(del(._priority))) as $projects
   | ([ $all_tasks[] | select(.lane == "running") ] | length) as $running
   | ([ $all_tasks[] | select(.lane == "waiting") ] | length) as $waiting
   | ([ $all_tasks[] | select(.state == "blocked" or .state == "failed") ] | length) as $blocked
@@ -425,10 +430,10 @@ jq \
       age_seconds:$age,
       stale_after_seconds:$stale_after,
       freshness:(if $age > $stale_after then "stale" else "fresh" end),
-      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > 500 or ($project_ids | length) > 80 or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
+      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},
-      limits:{projects:80,tasks_per_project:160,total_tasks:500,strings:500}
+      limits:{projects:$max_projects,tasks_per_project:$max_tasks_per_project,total_tasks:$max_total_tasks,strings:$max_string}
     }
 ' "$tmp"

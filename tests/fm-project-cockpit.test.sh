@@ -8,9 +8,14 @@ set -u
 
 PROJECTOR="$ROOT/bin/fm-project-cockpit-snapshot.sh"
 BOARD="$ROOT/bin/fm-project-cockpit-board.sh"
+CONTRACT="$ROOT/bin/fm-project-cockpit-contract.sh"
 TEMPLATE="$ROOT/assets/project-cockpit-template.html"
 FIXTURES="$ROOT/tests/fixtures/project-cockpit"
 TMP_ROOT=$(fm_test_tmproot fm-project-cockpit)
+
+# shellcheck source=../bin/fm-project-cockpit-contract.sh
+# shellcheck disable=SC1091
+. "$CONTRACT"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -59,6 +64,7 @@ test_projection_is_deterministic_and_allowlisted() {
 test_stale_partial_invalid_empty_and_replacement_states() {
   local stale=$TMP_ROOT/stale.json partial=$TMP_ROOT/partial.json invalid=$TMP_ROOT/invalid.json
   local empty=$TMP_ROOT/empty.json replacement=$TMP_ROOT/replacement.json truncated=$TMP_ROOT/truncated.json
+  local large_snapshot=$TMP_ROOT/large-snapshot.json large_projection=$TMP_ROOT/large-projection.json bytes
   FM_COCKPIT_STALE_AFTER=999999 "$PROJECTOR" --from-snapshot "$FIXTURES/states.json" --observed-at 2026-09-15T12:10:01Z > "$stale"
   jq -e '.freshness == "stale" and .age_seconds == 601 and .stale_after_seconds == 300' "$stale" >/dev/null \
     || fail "stale age classification is wrong"
@@ -85,6 +91,27 @@ test_stale_partial_invalid_empty_and_replacement_states() {
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$truncated"
   jq -e '.inventory.truncated == true and ([.projects[].tasks[]] | length) == 500' "$truncated" >/dev/null \
     || fail "pre-cap combined population did not disclose its omitted item"
+  jq '.backlog.records=[]
+      | .tasks=[range(0;700) as $i | (.tasks[0]
+          | .id=("large-task-"+($i|tostring))
+          | .spawn_gen=("large-gen-"+($i|tostring))
+          | .project="/work/large"
+          | .backlog={
+              state:"in_flight",title:("n" * 160),repo:"large",captain_actionable:false,
+              hold_bucket:null,unresolved_blocker_ids:[range(0;20) | ("b" * 128)]
+            }
+          | .paths.report.path=("r" * 500)
+          | .paths.worktree.path=("w" * 500)
+          | .paths.home.path=("h" * 500)
+          | .endpoint.target=("t" * 240))]' "$FIXTURES/states.json" > "$large_snapshot"
+  bytes=$(wc -c < "$large_snapshot" | tr -d '[:space:]')
+  [ "$bytes" -gt 2097152 ] || fail "large canonical snapshot did not reproduce the former projector limit"
+  "$PROJECTOR" --from-snapshot "$large_snapshot" --observed-at 2026-09-15T12:01:00Z > "$large_projection"
+  jq -e '.inventory.truncated == true
+      and .limits == {projects:80,tasks_per_project:160,total_tasks:500,strings:500}
+      and .projects[0].total_task_count == 500
+      and (.projects[0].tasks | length) == 160' "$large_projection" >/dev/null \
+    || fail "large canonical snapshot was not projected through the shared bounds"
   pass "projection distinguishes stale, partial, invalid, empty, and replacement-generation states"
 }
 
@@ -95,7 +122,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
           id:"mate-one",home:"/fleet/mates/one",spawn_gen:"mate-gen",provenance:{selected:"structured-home"},
           freshness:{observed_at:"2026-09-15T11:59:30Z"},
           active_children:[
-            {id:"child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",doing:"PRIVATE-REMOTE-DETAIL"},
+            {id:"child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",started_at:"2026-09-15T11:30:00Z",doing:"PRIVATE-REMOTE-DETAIL"},
             {id:"release-call",kind:"ship",state:"working",repo:"omega",name:"Release preparation",source:"structured-home",doing:"PRIVATE-REMOTE-DECISION"},
             {id:"status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"}
           ],
@@ -116,7 +143,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
   jq -e '
     ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 5
     and ([.projects[].tasks[] | select(.id == "mate-one:child-live")][0]
-      | .lane == "running" and .project_id == "omega" and .crew.kind == "ship")
+      | .lane == "running" and .project_id == "omega" and .crew.kind == "ship"
+        and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
     and ([.projects[].tasks[] | select(.id == "mate-one:release-call")][0]
       | .lane == "waiting" and .attention == true and .hold.actionable == true
         and .hold.question == "Pick blue or green")
@@ -234,6 +262,8 @@ test_builder_is_fail_closed_and_atomic() {
               | .project_id=("large-" + ($project_index | tostring))
               | .name=("n" * 160)
               | .gate.label=("g" * 240)
+              | .decisions=[range(0;20) | ("d" * 240)]
+              | .blockers=[range(0;20) | ("b" * 128)]
               | .artifacts.report.path=("r" * 500)
               | .runtime_evidence.target=("t" * 240)
               | .runtime_evidence.worktree=("w" * 500)
@@ -244,9 +274,19 @@ test_builder_is_fail_closed_and_atomic() {
     | .counts={running:500,waiting:0,blocked:0,attention:0}
   ' "$model" > "$large"
   bytes=$(wc -c < "$large" | tr -d '[:space:]')
-  [ "$bytes" -gt 1048576 ] || fail "large bounded fixture did not reproduce the former builder limit"
+  [ "$bytes" -gt 2097152 ] || fail "large bounded fixture did not reproduce the former builder limit"
+  [ "$bytes" -le "$FM_PROJECT_COCKPIT_MODEL_MAX_BYTES" ] \
+    || fail "shared model-size contract does not cover its maximum-list fixture"
   FM_HOME="$home" "$BOARD" build "$large" >/dev/null \
-    || fail "builder rejected a valid bounded payload larger than 1 MiB"
+    || fail "builder rejected a valid bounded payload larger than 2 MiB"
+  for field in decisions blockers; do
+    jq --arg field "$field" '.projects[0].tasks[0][$field]=[range(0;21) | "overflow"]' "$model" > "$altered"
+    set +e
+    out=$(FM_HOME="$home" "$BOARD" build "$altered" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "builder accepted an over-bound $field list"
+  done
   set +e
   out=$(FM_HOME="$home" "$BOARD" path 2>&1)
   rc=$?
@@ -259,7 +299,7 @@ test_build_path_does_not_mutate_fleet_or_invoke_authority() {
   local runtime=$TMP_ROOT/runtime home=$TMP_ROOT/no-mutation-home model=$TMP_ROOT/no-mutation.json
   local fakebin=$TMP_ROOT/serve-bin before=$TMP_ROOT/before.digest after=$TMP_ROOT/after.digest poison=$TMP_ROOT/poison.log name out
   mkdir -p "$runtime/bin" "$runtime/assets" "$fakebin" "$home/data/task" "$home/state" "$home/projects/project"
-  cp "$BOARD" "$PROJECTOR" "$runtime/bin/"
+  cp "$BOARD" "$PROJECTOR" "$CONTRACT" "$runtime/bin/"
   cp "$TEMPLATE" "$runtime/assets/"
   for name in fm-captain-hold.sh fm-procevent-lavish.sh fm-send.sh fm-control.sh; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s" >> "%s"\nexit 97\n' "$name" "$poison" > "$runtime/bin/$name"
@@ -290,7 +330,7 @@ test_build_path_does_not_mutate_fleet_or_invoke_authority() {
 test_live_collection_failure_is_explicitly_unavailable() {
   local runtime=$TMP_ROOT/unavailable-runtime out=$TMP_ROOT/unavailable.json
   mkdir -p "$runtime/bin"
-  cp "$PROJECTOR" "$runtime/bin/"
+  cp "$PROJECTOR" "$CONTRACT" "$runtime/bin/"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$runtime/bin/fm-fleet-snapshot.sh"
   chmod +x "$runtime/bin/fm-fleet-snapshot.sh"
   FM_COCKPIT_NOW=2026-09-15T12:01:00Z "$runtime/bin/fm-project-cockpit-snapshot.sh" > "$out" \
@@ -320,7 +360,7 @@ test_refresh_uses_canonical_snapshot_without_fleet_mutation() {
 test_projection_does_not_call_network_tools() {
   local runtime=$TMP_ROOT/network-runtime fakebin=$TMP_ROOT/network-bin out=$TMP_ROOT/network.json poison=$TMP_ROOT/network.log name
   mkdir -p "$runtime/bin" "$fakebin"
-  cp "$PROJECTOR" "$runtime/bin/"
+  cp "$PROJECTOR" "$CONTRACT" "$runtime/bin/"
   printf '#!/usr/bin/env bash\n[ "$1" = --json-read-only ] || exit 95\nexec jq . "%s"\n' "$FIXTURES/states.json" > "$runtime/bin/fm-fleet-snapshot.sh"
   chmod +x "$runtime/bin/fm-fleet-snapshot.sh"
   for name in curl wget gh gh-axi ssh; do

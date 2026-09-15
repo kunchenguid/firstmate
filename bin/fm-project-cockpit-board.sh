@@ -20,12 +20,13 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-project-cockpit-contract.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 TEMPLATE="${FM_PROJECT_COCKPIT_TEMPLATE:-$SCRIPT_DIR/../assets/project-cockpit-template.html}"
 PLACEHOLDER='__FM_PROJECT_COCKPIT_DATA__'
 BOARD_SCHEMA=fm-project-cockpit.v1
-MAX_BYTES=${FM_PROJECT_COCKPIT_MAX_BYTES:-2097152}
+MAX_BYTES=$FM_PROJECT_COCKPIT_MODEL_MAX_BYTES
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -39,10 +40,19 @@ fail() {
 board_path() { printf '%s/.lavish/project-cockpit.html\n' "$FM_HOME"; }
 
 validate_payload() {  # <data.json>
-  jq -e --arg schema "$BOARD_SCHEMA" '
+  jq -e \
+    --arg schema "$BOARD_SCHEMA" \
+    --argjson max_projects "$FM_PROJECT_COCKPIT_MAX_PROJECTS" \
+    --argjson max_tasks_per_project "$FM_PROJECT_COCKPIT_MAX_TASKS_PER_PROJECT" \
+    --argjson max_total_tasks "$FM_PROJECT_COCKPIT_MAX_TOTAL_TASKS" \
+    --argjson max_decisions "$FM_PROJECT_COCKPIT_MAX_DECISIONS" \
+    --argjson max_blockers "$FM_PROJECT_COCKPIT_MAX_BLOCKERS" \
+    --argjson max_partial_reasons "$FM_PROJECT_COCKPIT_MAX_PARTIAL_REASONS" \
+    --argjson max_string "$FM_PROJECT_COCKPIT_MAX_STRING" '
     def text($n): type == "string" and length <= $n;
     def nullable_text($n): . == null or text($n);
     def stamp: type == "string" and (try fromdateiso8601 catch null) != null;
+    def date_or_stamp: type == "string" and (test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") or (try fromdateiso8601 catch null) != null);
     def nonnegative_integer: type == "number" and . >= 0 and floor == .;
     def https: . == null or (text(500) and test("^https://[^[:space:]<>]+$"));
     def task:
@@ -54,25 +64,49 @@ validate_payload() {  # <data.json>
       and (.lane == "running" or .lane == "waiting" or .lane == "queued" or .lane == "recently_completed")
       and (.state | text(40))
       and (.state_source | text(40))
+      and has("state_detail")
+      and (.state_detail == null)
+      and has("state_detail_status")
+      and (.state_detail_status == "unavailable")
       and (.observed_at == null or (.observed_at | stamp))
+      and ((has("completed_at") | not) or .completed_at == null or (.completed_at | date_or_stamp))
       and (.started_at == null or (.started_at | stamp))
       and (.elapsed_seconds == null or (.elapsed_seconds | nonnegative_integer))
       and (.crew | type == "object")
+      and (.crew.liveness | text(40))
       and (.crew.summary | text(40))
-      and (.decisions | type == "array" and all(.[]; text(240)))
+      and (.crew.kind | text(40))
+      and (.crew.harness | nullable_text(40))
+      and (.crew.backend | nullable_text(40))
+      and (.decisions | type == "array" and length <= $max_decisions and all(.[]; text(240)))
       and (.attention | type == "boolean")
-      and (.hold == null or (.hold | type == "object"))
-      and (.blockers | type == "array" and length <= 20 and all(.[]; text(128)))
+      and (.hold == null or (.hold |
+        type == "object"
+        and (.classification | text(40))
+        and (.actionable | type == "boolean")
+        and (.question | nullable_text(240))
+        and (.age_days == null or (.age_days | nonnegative_integer))
+        and (.until == null or (.until | text(40)))
+        and (.evidence | text(40))))
+      and (.blockers | type == "array" and length <= $max_blockers and all(.[]; text(128)))
       and (.gate | type == "object")
       and (.gate.status | text(40))
       and (.gate.label | text(240))
       and (.artifacts | type == "object")
       and (.artifacts.pr_url | https)
       and (.artifacts.report | type == "object")
+      and (.artifacts.report.status == "available" or .artifacts.report.status == "missing")
       and (.artifacts.report.path | nullable_text(500))
       and (.runtime_evidence | type == "object")
+      and (.runtime_evidence.endpoint_status | text(40))
+      and (.runtime_evidence.target | nullable_text(240))
+      and (.runtime_evidence.worktree | nullable_text(500))
+      and (.runtime_evidence.home | nullable_text(500))
       and (.events.status == "unavailable" or .events.status == "available")
-      and (.terminal.status == "unavailable");
+      and (.events.items | type == "array" and length == 0)
+      and (.events.reason | nullable_text(240))
+      and (.terminal.status == "unavailable")
+      and (.terminal.reason | nullable_text(240));
     type == "object"
     and .schema == $schema
     and (.generated | stamp)
@@ -80,15 +114,19 @@ validate_payload() {  # <data.json>
     and (.age_seconds | nonnegative_integer)
     and (.stale_after_seconds | nonnegative_integer)
     and (.freshness == "fresh" or .freshness == "stale" or .freshness == "unavailable")
+    and (.inventory | type == "object")
+    and (.inventory | has("reason"))
     and (.inventory.status == "valid" or .inventory.status == "partial" or .inventory.status == "invalid" or .inventory.status == "empty" or .inventory.status == "unavailable")
-    and (.inventory.partial_reasons | type == "array" and length <= 20 and all(.[]; text(240)))
+    and (.inventory.reason | nullable_text(240))
+    and (.inventory.partial_reasons | type == "array" and length <= $max_partial_reasons and all(.[]; text(240)))
     and (.inventory.truncated | type == "boolean")
     and (.counts | type == "object")
     and ([.counts.running,.counts.waiting,.counts.blocked,.counts.attention] | all(.[]; nonnegative_integer))
-    and (.projects | type == "array" and length <= 80)
-    and ([(.projects[] | .tasks[])] | length <= 500)
+    and (.projects | type == "array" and length <= $max_projects)
+    and ([(.projects[] | .tasks[])] | length <= $max_total_tasks)
     and all(.projects[];
-      (.id | text(128))
+      type == "object"
+      and (.id | text(128))
       and (.label | text(128))
       and (.rank | nonnegative_integer)
       and (.attention_count | nonnegative_integer)
@@ -100,8 +138,12 @@ validate_payload() {  # <data.json>
       and has("oldest_active_seconds")
       and (.oldest_active_seconds == null or (.oldest_active_seconds | nonnegative_integer))
       and (.total_task_count | nonnegative_integer)
-      and (.tasks | type == "array" and length <= 160 and all(.[]; task)))
+      and has("truncated")
+      and (.truncated | type == "boolean")
+      and (.tasks | type == "array" and length <= $max_tasks_per_project and all(.[]; task)))
     and (.terminal.status == "unavailable")
+    and (.terminal.reason | nullable_text(240))
+    and (.limits == {projects:$max_projects,tasks_per_project:$max_tasks_per_project,total_tasks:$max_total_tasks,strings:$max_string})
   ' "$1" >/dev/null
 }
 

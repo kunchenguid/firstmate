@@ -153,7 +153,7 @@ test_empty_fleet_json() {
 }
 
 test_fixture_snapshot_json() {
-  local home fakebin out ids
+  local home fakebin out ids summary
   home=$(make_home fixture)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -175,6 +175,11 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task") | .started_at == null
   ' >/dev/null || fail "legacy task without started_at did not preserve unavailable timing"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .active_children[] | select(.id == "ship-task")
+    | .started_at == "2026-07-07T12:00:00Z"
+  ' >/dev/null || fail "home summary did not carry canonical child start time"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")
     | .paths.report.present == true
