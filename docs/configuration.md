@@ -25,6 +25,20 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Blocked/parked-state vocabulary
+
+A blocked or parked agent resolves to exactly one of the states below; `AGENTS.md` section 8 owns the compact operating summary and the anti-conflation diagnostic rule.
+
+| State | Meaning |
+| --- | --- |
+| `BLOCKED - PROVIDER QUOTA` | The agent is alive and controllable, its provider account is exhausted, it is waiting on nothing, and recovery is a runtime reroute or a provider reset. |
+| `BLOCKED - WAITING FOR INPUT` | The agent needs a specific piece of information or material and has asked for it. |
+| `BLOCKED - DEPENDENCY` | The agent needs another task, artifact, or upstream deliverable first. |
+| `BLOCKED - HUMAN DECISION` | The agent has reached a genuine captain-reserved choice and is holding for it. |
+| `BLOCKED - ACCESS/PERMISSION` | The agent needs a credential, grant, or access path it does not have. |
+| `BLOCKED - FAILED EXECUTION` | The agent's last attempt errored or failed and it is holding rather than retrying blindly. |
+| `PARKED - NO WORK ASSIGNED` | The agent is idle by design, holding no work, and healthy, including an idle agent whose provider happens to be unavailable but which has no work waiting regardless. |
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
