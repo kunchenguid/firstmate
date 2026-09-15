@@ -131,15 +131,26 @@ rm -f "$home/state/.afk"
 ok "quiet mode does not use the away Telegram channel"
 
 rm -f "$home/state/.telegram-notifications" "$FAIL_ONCE"
-if env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error; then
-  fail "a failed Telegram send unexpectedly succeeded"
-fi
-env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error || fail "failed notification did not retry"
-[ "$(grep -c '^sendMessage$' "$LOG")" -eq 3 ] || fail "failed notification was not retried exactly once"
-[ "$(grep -Fc 'error that needs attention' "$LOG")" -eq 2 ] || fail "fixed error text was not sent on both attempts"
-ok "failed delivery remains eligible and retries without duplicate success"
+env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error || fail "failed notification did not recover with an in-call retry"
+env FM_TELEGRAM_FAIL_ONCE=1 "${send_env[@]}" "$BIN/fm-telegram.sh" send error || fail "duplicate notification handling failed after in-call retry"
+[ "$(grep -c '^sendMessage$' "$LOG")" -eq 3 ] || fail "failed notification was not retried exactly once in-call"
+[ "$(grep -Fc 'error that needs attention' "$LOG")" -eq 2 ] || fail "fixed error text was not sent on both in-call attempts"
+ok "failed delivery retries once in-call without duplicate success"
 
 rm -f "$home/state/.telegram-notifications"
+generic_before=$(grep -c '^sendMessage$' "$LOG")
+for generic_source in quota quota-codex; do
+  cat > "$home/state/quota.result" <<EOF
+quota: $generic_source
+status: low
+detail: generic source must stay outside the AFK channel
+EOF
+  env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-result "$home/state/quota.result" || fail "generic quota result handling failed"
+done
+generic_after=$(grep -c '^sendMessage$' "$LOG")
+[ "$generic_after" -eq "$generic_before" ] || fail "generic quota source produced a private AFK alert"
+ok "generic quota sources do not produce weekly AFK alerts"
+
 cat > "$home/state/quota.result" <<'EOF'
 quota: afk-codex-weekly
 status: low

@@ -42,8 +42,8 @@ The sender accepts only these fixed event classes:
 Watcher reasons are classified internally and are never placed in the Telegram message.
 Routine heartbeats and ordinary progress are suppressed as individual events, while the separate bounded progress cadence reports current aggregate work counts.
 It includes no task names, mandate words, or status-log text.
-API calls use bounded timeouts, do not expose the token in process arguments, and are best-effort.
-A failed call remains eligible for a later attempt.
+API calls use bounded timeouts, do not expose the token in process arguments, and are best-effort with one in-call retry.
+Failures are not persisted in a durable Telegram retry queue.
 Successful event classes are deduplicated per away session in a private, bounded journal.
 
 ## Weekly Codex protection
@@ -52,11 +52,12 @@ The AFK path registers the existing quota process-event adapter as `afk-codex-we
 It polls the structured `quota-axi --json` result with provider `codex`, scope `weekly`, and an inclusive threshold of `70`.
 Only an availability record whose `boundedBy` list contains `weekly` can trigger it, so the current five-hour window may be consumed below 70% without sending this notification.
 Missing or unknown weekly quota data does not trigger a false low-quota message.
+Only `afk-codex-weekly` results can produce this notification; generic quota sources remain unrelated to the private AFK channel.
 The source is retired when the away posture returns.
 
 ## Validation
 
 Tests use `FM_TELEGRAM_TRANSPORT` to replace HTTP.
 The fake transport receives only the method and private request/response file paths, and writes a structured response without receiving the bot token.
-Tests cover setup verification, strict permissions, no command polling, fixed message text, AFK gating, bounded deduplication, failed-send retry, the 10-minute progress cadence and redaction, and the weekly-vs-five-hour quota boundary.
+Tests cover setup verification, strict permissions, no command polling, fixed message text, AFK gating, bounded deduplication, one in-call failed-send retry, generic quota-source rejection, the 10-minute progress cadence and redaction, and the weekly-vs-five-hour quota boundary.
 Use `bin/fm-lint.sh` for shell and documentation validation before delivery.

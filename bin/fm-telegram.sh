@@ -26,9 +26,9 @@
 #
 # The Telegram bot token is placed only in curl's private configuration stdin,
 # never in process arguments, output, logs, tracked files, or notification text.
-# HTTP calls are short and bounded. A failed call is best-effort and leaves its
-# event eligible for a later retry. Successful event keys are recorded privately
-# per away session so repeated watcher wakes do not duplicate notifications.
+# HTTP calls are short and bounded. A failed call gets one in-call retry and
+# remains best-effort without a durable retry queue. Successful event keys are
+# recorded privately per away session so repeated watcher wakes do not duplicate notifications.
 # FM_TELEGRAM_TRANSPORT is a test-only transport seam: its command receives the
 # method, request-file path, and response-file path, never the bot token.
 # FM_TELEGRAM_TEST_NOW is a test-only numeric clock override for progress cadence.
@@ -47,6 +47,7 @@ PROGRESS_NOTIFIED_FILE="$STATE/.telegram-progress-notifications"
 NOTIFY_LOCK="$STATE/.telegram-notifications.lock"
 POSTURE_LOCK="$STATE/.cursor-park-owner.lock"
 TELEGRAM_NOTIFIED_KEEP=64
+TELEGRAM_SEND_ATTEMPTS=2
 
 TELEGRAM_TOKEN=
 export -n TELEGRAM_TOKEN 2>/dev/null || true
@@ -334,7 +335,7 @@ telegram_record_success() {
 # Send one notification text under the shared bounded lock. Callers supply only
 # local aggregate text or fixed text; no caller can supply a watcher reason.
 telegram_send_text() {
-  local key=$1 text=$2 journal=${3:-$NOTIFIED_FILE} request response lock_result
+  local key=$1 text=$2 journal=${3:-$NOTIFIED_FILE} request response lock_result attempt
   mkdir -p "$STATE" || return 1
   if ! fm_lock_acquire_wait_bounded "$NOTIFY_LOCK" 2; then
     # Distinguish contention from a successful no-op so progress does not move
@@ -357,11 +358,16 @@ telegram_send_text() {
     jq -cn --arg chat "$TELEGRAM_CHAT_ID" --arg text "$text" \
       '{chat_id:$chat,text:$text,disable_notification:false}' > "$request" || lock_result=1
   fi
-  if [ "$lock_result" -eq 0 ] && ! telegram_api sendMessage "$request" "$response"; then
-    lock_result=1
-  fi
-  if [ "$lock_result" -eq 0 ] && ! json_ok "$response"; then
-    lock_result=1
+  if [ "$lock_result" -eq 0 ]; then
+    attempt=0
+    while [ "$attempt" -lt "$TELEGRAM_SEND_ATTEMPTS" ]; do
+      attempt=$((attempt + 1))
+      if telegram_api sendMessage "$request" "$response" && json_ok "$response"; then
+        lock_result=0
+        break
+      fi
+      lock_result=1
+    done
   fi
   if [ "$lock_result" -eq 0 ] && ! telegram_record_success "$key" "$journal"; then
     lock_result=1
@@ -495,7 +501,7 @@ telegram_notify_result() {
   local result=$1 source status
   [ -f "$result" ] && [ ! -L "$result" ] || return 0
   source=$(awk -F': ' '$1 == "quota" { print $2; exit }' "$result" 2>/dev/null)
-  case "$source" in quota|quota-codex|afk-codex-weekly) ;; *) return 0 ;; esac
+  case "$source" in afk-codex-weekly) ;; *) return 0 ;; esac
   status=$(awk -F': ' '$1 == "status" { print $2; exit }' "$result" 2>/dev/null)
   case "$status" in
     low|exhausted) telegram_send_kind quota ;;
