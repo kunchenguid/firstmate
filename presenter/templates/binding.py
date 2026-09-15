@@ -11,6 +11,25 @@ template-ingestion and render-engine lanes::
         "placeholders": {...},
         "styles": {...},
     }
+
+PPTX bindings additionally carry a ``masters`` array with one entry per
+slide master in the template (corporate templates may contain several)::
+
+    {
+        "masters": [
+            {
+                "name": str,
+                "layouts": {"<layout name>": {"<placeholder name>": "<role>"}},
+                "theme": {"fonts": {...}, "colors": {...}},
+            },
+            ...
+        ],
+    }
+
+The top-level ``layouts``, ``placeholders``, and ``styles`` keys of a PPTX
+binding retain the first master's view for backward compatibility with
+consumers written before the ``masters`` array existed; consumers needing
+multi-master coverage should read ``masters`` directly.
 """
 
 from __future__ import annotations

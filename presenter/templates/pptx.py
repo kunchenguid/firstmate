@@ -76,32 +76,56 @@ def _theme_styles(master: Any) -> dict[str, Any]:
             if len(entry) == 0:
                 continue
             child = entry[0]
-            value = child.get("val") or child.get("lastClr")
+            value = child.get("lastClr") or child.get("val")
             if value:
                 colors[name] = value
 
     return {"fonts": fonts, "colors": colors}
 
 
-def inventory_pptx_template(path: str | Path) -> dict[str, Any]:
-    """Read a .pptx master template and return a TemplateBinding dict.
-
-    Inventories every slide layout's placeholders (name, type, idx) and
-    the master's theme fonts and colors.
-    """
-    path = Path(path)
-    presentation = Presentation(str(path))
-    master = presentation.slide_masters[0]
-
+def _master_layouts(
+    master: Any,
+) -> tuple[dict[str, dict[str, str]], dict[str, list[dict[str, Any]]]]:
+    """Return a slide master's (layout roles, placeholder inventory) maps."""
     layouts: dict[str, dict[str, str]] = {}
     placeholders: dict[str, list[dict[str, Any]]] = {}
-    for layout in presentation.slide_layouts:
+    for layout in master.slide_layouts:
         roles, inventory = _layout_placeholders(layout)
         layouts[layout.name] = roles
         placeholders[layout.name] = inventory
+    return layouts, placeholders
+
+
+def inventory_pptx_template(path: str | Path) -> dict[str, Any]:
+    """Read a .pptx master template and return a TemplateBinding dict.
+
+    Inventories every slide master in the presentation: for each master, its
+    slide layouts' placeholders (name, type, idx) and its theme fonts and
+    colors, reported in the ``masters`` array. The top-level ``layouts``,
+    ``placeholders``, and ``styles`` keys retain the first master's view for
+    backward compatibility with existing consumers.
+    """
+    path = Path(path)
+    presentation = Presentation(str(path))
+
+    masters: list[dict[str, Any]] = []
+    first_layouts: dict[str, dict[str, str]] = {}
+    first_placeholders: dict[str, list[dict[str, Any]]] = {}
+    first_theme: dict[str, Any] = {"fonts": {}, "colors": {}}
+
+    for index, master in enumerate(presentation.slide_masters):
+        layouts, placeholders = _master_layouts(master)
+        theme = _theme_styles(master)
+        masters.append(
+            {"name": master.name, "layouts": layouts, "theme": theme}
+        )
+        if index == 0:
+            first_layouts = layouts
+            first_placeholders = placeholders
+            first_theme = theme
 
     styles: dict[str, Any] = {
-        "theme": _theme_styles(master),
+        "theme": first_theme,
         "slide_size": {
             "width_emu": int(presentation.slide_width)
             if presentation.slide_width is not None
@@ -116,7 +140,8 @@ def inventory_pptx_template(path: str | Path) -> dict[str, Any]:
         "format": "pptx",
         "template": str(path),
         "name": path.stem,
-        "layouts": layouts,
-        "placeholders": placeholders,
+        "layouts": first_layouts,
+        "placeholders": first_placeholders,
         "styles": styles,
+        "masters": masters,
     }
