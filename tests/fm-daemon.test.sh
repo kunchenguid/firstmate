@@ -2252,6 +2252,85 @@ test_escalate_flush_changed_buffer_resets_the_attempt_bound() {
   pass "escalate_flush: a changed buffer is a new identity and is never blocked by the prior cap"
 }
 
+# --- away-entry watcher retirement (2026-09-10 collision incident) ----------
+# If an extension arm's watcher is already live when /afk is entered, the daemon
+# must retire that home watcher before it forks its own child; otherwise the two
+# collide on the singleton lock and per-wake triage stays down until the old
+# watcher happens to wake. These drive the daemon's home-scoped, identity-matched
+# retire primitive against real live processes.
+write_home_watch_lock() {  # <state> <pid> <home> <watch-path> [identity-override]
+  local state=$1 pid=$2 home=$3 watch=$4 identity=${5:-}
+  [ -n "$identity" ] || identity=$(fm_test_pid_identity "$pid") || return 1
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+run_daemon_retire() {  # <state> <watch-path> <home> [own-child-pid]
+  local state=$1 watch=$2 home=$3 own=${4:-}
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_daemon_retire_pre_existing_watcher "$state" "$watch" "$home" "$own"
+  )
+}
+
+test_daemon_retires_preexisting_identity_matched_home_watcher() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-matched)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  sleep 300 & pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  run_daemon_retire "$state" "$watch" "$home"
+  local rc=$?
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "the retire primitive returned $rc for a matched home watcher"
+  is_live_non_zombie "$pid" && fail "the matched home watcher was not retired"
+  pass "daemon: a live identity-matched home watcher is retired before the daemon forks its own"
+}
+
+test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-unmatched)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+
+  sleep 300 & pid=$!
+  write_home_watch_lock "$state" "$pid" "$dir/other-home" "$watch"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher recorded for another home was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  sleep 300 & pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$dir/other/fm-watch.sh"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher recorded for another watcher path was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  sleep 300 & pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch" "identity-that-cannot-match"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher whose identity does not match the lock was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  pass "daemon: foreign, path-mismatched, and identity-mismatched watchers are never signalled"
+}
+
+test_daemon_retire_never_signals_its_own_watcher_child() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-own-child)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  sleep 300 & pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  run_daemon_retire "$state" "$watch" "$home" "$pid"
+  is_live_non_zombie "$pid" || fail "the daemon's own watcher child was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  pass "daemon: the daemon's own watcher child is never signalled by retirement"
+}
+
 # --- backend-independent active wedge alert ---------------------------------
 # These cover the 2026-07-10 overnight-incident fix: the max-defer wedge alarm's
 # ACTIVE alert channel must reach the captain even when the wedged pane and its
@@ -2953,6 +3032,9 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_escalate_flush_caps_identical_digest_attempts_and_alarms
 test_escalate_flush_suppresses_retype_while_attempt_is_in_flight
 test_escalate_flush_changed_buffer_resets_the_attempt_bound
+test_daemon_retires_preexisting_identity_matched_home_watcher
+test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched
+test_daemon_retire_never_signals_its_own_watcher_child
 test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing

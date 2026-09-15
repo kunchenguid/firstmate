@@ -135,6 +135,10 @@
 #                                   treated as plausibly in flight; the identical
 #                                   digest is not re-typed within this window
 #                                   (default 30; invalid uses the default)
+#          FM_DAEMON_RETIRE_WAIT    tenths of a second the daemon waits for a
+#                                   pre-existing identity-matched home watcher to
+#                                   release the watch lock after TERM before it
+#                                   forks its own child (default 50, i.e. 5s)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -1609,6 +1613,42 @@ trim_log() {
   tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
 }
 
+# fm_daemon_retire_pre_existing_watcher <state> <watch-path> <home> [own-child-pid]
+# Before the away-mode daemon forks its own watcher child, retire a watcher that
+# is ALREADY live in this home so the daemon becomes the home singleton
+# immediately. Without this, an extension arm watcher that was live when /afk
+# was entered keeps the watch lock; the daemon's fork prints the singleton
+# collision line and idles until that watcher happens to wake (its away-mode
+# heartbeat can back off to FM_HEARTBEAT_MAX), so per-wake triage stays down.
+#
+# Scope and safety: only a live pid whose lock names THIS home and THIS watcher
+# path and whose process identity matches the lock (the same
+# fm_watcher_lock_matches_pid discipline the arm's --restart uses) is signalled,
+# so a foreign or unrelated watcher is never touched. The daemon's own current
+# watcher child is never signalled. TERM is graceful and the wait is bounded:
+# after FM_DAEMON_RETIRE_WAIT tenths of a second the daemon proceeds and lets
+# its normal restart path handle an unresponsive holder.
+fm_daemon_retire_pre_existing_watcher() {  # <state> <watch-path> <home> [own-child-pid]
+  local state=$1 watch=$2 home=$3 own_child=${4:-} lock_pid bound waited
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  case "$lock_pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -n "$own_child" ] && [ "$lock_pid" = "$own_child" ]; then
+    return 0
+  fi
+  fm_pid_alive "$lock_pid" || return 0
+  fm_watcher_lock_matches_pid "$state" "$watch" "$lock_pid" "$home" || return 0
+  log "retiring pre-existing home watcher pid=$lock_pid before starting the daemon's watcher"
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  bound=${FM_DAEMON_RETIRE_WAIT:-50}
+  case "$bound" in ''|*[!0-9]*) bound=50 ;; esac
+  waited=0
+  while [ "$waited" -lt "$bound" ] \
+    && fm_watcher_lock_matches_pid "$state" "$watch" "$lock_pid" "$home"; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
@@ -1780,6 +1820,7 @@ fm_super_main() {
   }
 
   start_watcher() {
+    fm_daemon_retire_pre_existing_watcher "$STATE" "$WATCH" "$FM_HOME" "${WATCHER_PID:-}"
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
     "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
