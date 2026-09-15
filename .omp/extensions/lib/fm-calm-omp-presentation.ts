@@ -27,6 +27,24 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
 
   const patches: Patch[] = [];
   const cards = new WeakSet<object>();
+  const isFirstmateMessage = (message: ObjectLike): boolean => {
+    if (!message || (message.role !== "custom" && message.customType === undefined && message.type !== "custom")) return false;
+    const type = String(message.customType ?? "");
+    const content = typeof message.content === "string" ? message.content :
+      typeof message.text === "string" ? message.text : "";
+    return type.startsWith("fm-") || type.startsWith("firstmate-") ||
+      /^\s*FIRSTMATE(?:_OP| WATCHER| SUPERVISION)/.test(content);
+  };
+  const wrapCard = (card: ObjectLike): void => {
+    if (cards.has(card) || typeof card.render !== "function") return;
+    const message = card.message ?? card.entry ?? card.data ?? card;
+    if (!isFirstmateMessage(message)) return;
+    const render = card.render;
+    patch(card, "render", function (this: ObjectLike, width: number) {
+      return isHidden() ? [] : render.call(this, width);
+    });
+    cards.add(card);
+  };
   let active = true;
   const isHidden = (): boolean => active && hidden();
   const patch = (target: ObjectLike, key: string, replacement: Function): void => {
@@ -55,14 +73,17 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
       const container = this.chatContainer;
       const start = container.children.length;
       const result = originalAdd.call(this, message, ...args);
-      if (message?.role === "custom" && message.customType === "advisor") {
+      if (message?.role === "custom" && (message.customType === "advisor" || isFirstmateMessage(message))) {
         for (const card of container.children.slice(start)) {
-          if (cards.has(card) || typeof card.render !== "function") continue;
-          const render = card.render;
-          patch(card, "render", function (this: ObjectLike, width: number) {
-            return isHidden() ? [] : render.call(this, width);
-          });
-          cards.add(card);
+          if (message.customType === "advisor") {
+            const render = card.render;
+            patch(card, "render", function (this: ObjectLike, width: number) {
+              return isHidden() ? [] : render.call(this, width);
+            });
+            cards.add(card);
+          } else {
+            wrapCard(card);
+          }
         }
       }
       return result;
