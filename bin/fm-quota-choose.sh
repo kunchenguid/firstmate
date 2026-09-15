@@ -1,27 +1,54 @@
 #!/usr/bin/env bash
-# Choose the first quota-eligible candidate from a ranked list.
+# Choose the quota-eligible candidate with the highest known spendPriority.
 #
 # Usage:
-#   fm-quota-choose.sh [--snapshot <path>] [--candidate <harness:model>]...
+#   fm-quota-choose.sh [--snapshot <path>] [--ordered] [--candidate <harness:model>]...
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
 # provided file, or from stdin when --snapshot is omitted. For each --candidate
-# in order, it maps <harness> to its primary provider family, then applies the
-# provider-wide scopes and exact model or product scopes for <model>. A candidate
-# is eligible only when no applicable runway is `exhausted_now` and its known
-# effective percent remaining is greater than zero. The first eligible
-# candidate is printed as "<harness> <model>" and the script exits 0.
-# If no candidate is quota-eligible, it prints "none" and exits 1.
+# it maps <harness> to its primary provider family, then applies the
+# provider-wide scopes and exact model or product scopes for <model>. The <model>
+# token is matched exactly against the `model:` and `product:` scope suffixes,
+# so pass the token the snapshot actually uses when quota-axi names a model
+# window differently from the dispatch id - for example claude:fable rather
+# than claude:claude-fable-5-1. A candidate is eligible only when no applicable
+# runway is `exhausted_now` and its known effective percent remaining is
+# greater than zero.
+#
+# Among the eligible candidates the helper ranks by known `spendPriority`, read
+# from the tightest applicable scope: the exact model or product row when one
+# applies, otherwise the provider-wide row. A higher known scalar is better.
+# Where several rows share that tightest scope, the lowest known scalar is used.
+# A candidate whose tightest scope publishes no known scalar - absent, `unknown`,
+# or unmeasurable - stays eligible but ranks below every known value and never
+# breaks a tie. A present-but-unknown model or product row is never backfilled
+# from the provider-wide row, because quota-axi reports that tighter scope as
+# unmeasurable rather than healthy.
+#
+# The single highest-ranked candidate is printed as "<harness> <model>" and the
+# script exits 0. When two or more candidates share the highest known scalar the
+# helper refuses to break the tie: it prints "tie <harness> <model>" for each
+# tied candidate, one per line, and exits 3, and the caller escalates that choice
+# rather than resolving it by order. When two or more candidates are eligible
+# and none has a known scalar there is nothing comparable to rank on, so the
+# helper escalates exactly like an exact tie: "tie <harness> <model>" for every
+# eligible candidate and exit 3, never a pick by argument order. A single
+# eligible candidate is printed as "<harness> <model>" with exit 0 whether or
+# not its scalar is known. If no candidate is quota-eligible, it prints "none"
+# and exits 1.
+#
+# --ordered restores first-eligible selection in argument order, for a caller
+# whose candidate order is a deliberate preference rather than an array to rank.
 #
 # Candidates are accepted as `--candidate <harness:model>` or as positional
-# colon-separated arguments, with earlier candidates preferred.
+# colon-separated arguments.
 # This script is deterministic and safe: it performs no side effects and exits
 # nonzero when the environment would lead to an unsafe dispatch.
 #
 # The helper is the canonical worker-side selection used after the agent has
 # already run `quota-axi` for its model selection. It never replaces the agent's
-# reasoning-class or runway-feasibility gates; it only answers which ordered
-# candidate remains eligible under the captured quota evidence.
+# reasoning-class or runway-feasibility gates; it only answers which candidate
+# the captured quota evidence selects among those the agent already accepted.
 #
 # Multi-provider limitation: this helper maps each harness to ONE primary
 # provider family (see provider_for_harness below) and checks quota for that
@@ -32,8 +59,8 @@
 # optional helper. Authoritative multi-provider routing - including provider
 # discovery from the harness catalog and quota matching by that explicit
 # provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
-# not by this helper. Use this helper only when the brief already fixed the
-# candidate order and every candidate's provider is the harness's primary family.
+# not by this helper. Use this helper only when every candidate's provider is
+# the harness's primary family.
 #
 # omp (Oh My Pi) has no single primary family, so its candidate model prefix
 # selects the family: openai-codex/<id> checks the codex row and
@@ -65,6 +92,7 @@ usage() {
 
 CANDIDATES=()
 SNAPSHOT_SOURCE=
+ORDERED=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -72,6 +100,10 @@ while [ "$#" -gt 0 ]; do
       [ -n "${2-}" ] || die "--snapshot needs a path"
       SNAPSHOT_SOURCE=$2
       shift 2
+      ;;
+    --ordered)
+      ORDERED=1
+      shift
       ;;
     --candidate)
       [ -n "${2-}" ] || die "--candidate needs a value"
@@ -282,7 +314,14 @@ else
                     scope: .[1],
                     status: "known",
                     effectivePercentRemaining: (.[2] | tonumber),
-                    runway: {status: .[4]}
+                    runway: {status: .[4]},
+                    selection: (
+                      .[3] as $spend_priority |
+                      if ($spend_priority | test("^-?[0-9]+(\\.[0-9]+)?$")) then
+                        {status: "known", spendPriority: ($spend_priority | tonumber)}
+                      else {status: "unknown"}
+                      end
+                    )
                   }
                 })) +
                 ($attention_entries | map(. as $entry | {
@@ -377,7 +416,40 @@ for c in "${CANDIDATES[@]}"; do
   esac
 done
 
-chosen="none"
+# spend_priority_for_provider_model <provider> <model>
+# Print the ranking scalar for the tightest applicable scope, or `unknown` when
+# that scope publishes no comparable number. The tightest scope is the exact
+# model or product row when one applies, otherwise the provider-wide row; a
+# present-but-unknown tighter row is never backfilled from the wider one. Where
+# several rows share the tightest scope, the lowest known scalar is printed.
+spend_priority_for_provider_model() {
+  local provider=$1 model=${2:-default}
+  printf '%s\n' "$QUOTA_JSON" | jq -r --arg provider "$provider" --arg model "$model" '
+    ($model | sub("^model:"; "")) as $model_token |
+    ([.providers[]? | select(.provider == $provider)] | first) as $p |
+    if ($p // null) == null then "unknown"
+    else ($p.quotaSemantics.effectiveAvailability // []) |
+    map(select(.scope as $scope |
+      $scope == "all_models" or $scope == "all_products" or
+      ($model_token != "" and $model_token != "default" and
+       (($scope | startswith("model:")) or ($scope | startswith("product:"))) and
+       ($model_token == ($scope | sub("^(model|product):"; ""))))
+    )) as $applicable |
+    ($applicable | map(select(
+      (.scope | startswith("model:")) or (.scope | startswith("product:"))
+    ))) as $named |
+    (if ($named | length) > 0 then $named else $applicable end) as $tightest |
+    ($tightest | map(
+      select(.selection.status == "known" and (.selection.spendPriority | type) == "number") |
+      .selection.spendPriority
+    )) as $known |
+    if ($known | length) == 0 then "unknown" else ($known | min | tostring) end
+    end
+  ' 2>/dev/null
+}
+
+ELIGIBLE_LABEL=()
+ELIGIBLE_PRIORITY=()
 for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
@@ -399,10 +471,51 @@ for c in "${CANDIDATES[@]}"; do
       ((.runway.status // "") != "exhausted_now")
     end
   ' >/dev/null 2>&1; then
-    chosen="$harness $model"
-    break
+    ELIGIBLE_LABEL+=("$harness $model")
+    # --ordered keeps the caller's own preference, so the first eligible
+    # candidate wins and no ranking scalar is read.
+    [ "$ORDERED" = 0 ] || break
+    priority=$(spend_priority_for_provider_model "$provider" "$scope_model")
+    [ -n "$priority" ] || priority=unknown
+    ELIGIBLE_PRIORITY+=("$priority")
   fi
 done
 
-printf '%s\n' "$chosen"
-[ "$chosen" != "none" ]
+if [ "${#ELIGIBLE_LABEL[@]}" -eq 0 ]; then
+  printf 'none\n'
+  exit 1
+fi
+
+if [ "$ORDERED" = 1 ]; then
+  printf '%s\n' "${ELIGIBLE_LABEL[0]}"
+  exit 0
+fi
+
+# Rank the eligible candidates by highest known spendPriority. Candidates whose
+# tightest scope has no known scalar are excluded from the comparison entirely,
+# so they can neither win against a known value nor create a tie.
+best=$(
+  for i in "${!ELIGIBLE_PRIORITY[@]}"; do
+    [ "${ELIGIBLE_PRIORITY[$i]}" = unknown ] ||
+      printf '%s %s\n' "$i" "${ELIGIBLE_PRIORITY[$i]}"
+  done | awk '
+    NR == 1 || $2 > top { top = $2; list = $1; next }
+    $2 == top { list = list " " $1 }
+    END { if (NR > 0) print list }
+  '
+)
+
+# No comparable scalar anywhere: there is nothing to rank on, so every eligible
+# candidate is escalated as a tie rather than picked by argument order.
+[ -n "$best" ] || best="${!ELIGIBLE_LABEL[*]}"
+
+read -r -a BEST_INDEXES <<< "$best"
+if [ "${#BEST_INDEXES[@]}" -gt 1 ]; then
+  for i in "${BEST_INDEXES[@]}"; do
+    printf 'tie %s\n' "${ELIGIBLE_LABEL[$i]}"
+  done
+  exit 3
+fi
+
+printf '%s\n' "${ELIGIBLE_LABEL[${BEST_INDEXES[0]}]}"
+exit 0
