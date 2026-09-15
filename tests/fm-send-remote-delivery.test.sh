@@ -95,6 +95,8 @@ case "${1:-}" in
     # metadata plus the ad-hoc "sess:win" the explicit-target cases use.
     session=""; prev=""
     for a in "$@"; do [ "$prev" = -t ] && session="$a"; prev="$a"; done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
     for win in sess:win; do
       [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
       printf '%s\n' "${win#*:}"

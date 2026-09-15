@@ -65,6 +65,8 @@ case "${1:-}" in
     # outside:window deliberately does not.
     session=""; prev=""
     for a in "$@"; do [ "$prev" = -t ] && session=$a; prev=$a; done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
     case "$session" in
       other) printf 'win\n' ;;
       outside) printf 'window\n' ;;

@@ -47,6 +47,8 @@ case "${1:-}" in
     # display-message refuses) is omitted from the inventory too.
     session=; prev=
     for _a in "$@"; do [ "$prev" = -t ] && session="$_a"; prev="$_a"; done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
     [ -n "$session" ] || exit 0
     for _meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
       [ -f "$_meta" ] || continue

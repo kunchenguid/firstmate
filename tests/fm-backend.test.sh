@@ -709,7 +709,9 @@ test_send_tmux_contract() {
   run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" --key Escape
   rc=$?
   expect_code 0 "$rc" "fm-send --key should succeed against a live fake pane"
-  assert_contains "$(cat "$log")" $'\x1f''list-windows'$'\x1f''-t'$'\x1f''sess'$'\x1f''-F'$'\x1f''#{window_name}' \
+  # The exact-match "=" session modifier is part of the proof, not decoration:
+  # without it tmux would resolve a vanished session by unique prefix or glob.
+  assert_contains "$(cat "$log")" $'\x1f''list-windows'$'\x1f''-t'$'\x1f''=sess'$'\x1f''-F'$'\x1f''#{window_name}' \
     "fm-send --key did not prove the explicit tmux target's recorded window before sending"
   assert_contains "$(cat "$log")" $'\x1f''Escape' "fm-send --key did not send the named key"
   assert_not_contains "$(cat "$log")" $'\x1f''-l'$'\x1f' "fm-send --key must not type literal text"
@@ -1167,7 +1169,8 @@ case "${1:-}" in
     exit 1
     ;;
   list-windows)
-    [ "$target" = live-sess ] || exit 1
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    [ "${target#=}" = live-sess ] || exit 1
     case "$fmt" in
       *#{window_id}*) printf '@7\n@8\n@9\n@10\n'; exit 0 ;;
       *#{window_index}*) printf '0\n1\n2\n3\n'; exit 0 ;;

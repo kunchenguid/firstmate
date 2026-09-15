@@ -148,6 +148,22 @@ tmux display-message -p -t "$SESSION:fm-prefix.0" '#{pane_id}' >/dev/null 2>&1 \
 if fm_backend_target_exists tmux "$SESSION:fm-prefix.0"; then
   fail "an absent dotted window whose live prefix window tmux resolved must not read as a live endpoint"
 fi
+# tmux also resolves a target-session by exact name, then by unique prefix, then
+# by glob, so a session that does not exist can still answer an inventory from a
+# live prefix sibling and make a vanished endpoint read present. The presence
+# proof forces tmux's exact session match, so the same window under a
+# prefix-only session name must read absent while the real session still reads
+# present.
+PREFIX_SESSION="${SESSION%?}"
+[ -n "$PREFIX_SESSION" ] && [ "$PREFIX_SESSION" != "$SESSION" ] \
+  || fail "fixture drifted: the smoke session name must have a strict prefix"
+tmux list-windows -t "$PREFIX_SESSION" -F '#{window_name}' >/dev/null 2>&1 \
+  || fail "fixture drifted: real tmux must resolve the unique session-name prefix '$PREFIX_SESSION'"
+if fm_backend_target_exists tmux "$PREFIX_SESSION:$WINDOW"; then
+  fail "a target whose session exists only as a unique prefix of a live session must not read as a live endpoint"
+fi
+fm_backend_target_exists tmux "$SESSION:$WINDOW" \
+  || fail "the exact session must still read as a live endpoint"
 pass "real tmux: endpoint presence is proved from tmux's own answer, never its silent fallback"
 
 # --- send text + Enter -------------------------------------------------------

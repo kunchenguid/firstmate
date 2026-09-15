@@ -321,7 +321,8 @@ case "\${1:-}" in
     exit 1
     ;;
   list-windows)
-    [ "\$target" = "\$session" ] || exit 1
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    [ "\${target#=}" = "\$session" ] || exit 1
     printf '%s\n' "\$window"
     exit 0
     ;;

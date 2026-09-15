@@ -127,6 +127,8 @@ case "${1:-}" in
       [ "$prev" = -t ] && session=$arg
       prev=$arg
     done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
     [ -n "$session" ] || exit 0
     for meta in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
       [ -f "$meta" ] || continue
