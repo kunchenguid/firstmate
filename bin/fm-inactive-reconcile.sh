@@ -522,6 +522,25 @@ observe_run() { # <task> <incarnation> <state-line>
   fi
   OBSERVED_RUN_LINE=$line
   OBSERVED_RUN_TOKEN=$token
+  OBSERVED_RUN_PREVIOUS=$previous
+}
+
+claim_ledger_report_for_run() { # <task> <incarnation> <state> <observation-token> <previous-observation>
+  local task=$1 incarnation=$2 state=$3 observation_token=$4 previous=$5 record key claim
+  for record in "$OUTCOME_DIR"/*.reported; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(record_value "$record" task_id)" = "$task" ] || continue
+    [ "$(record_value "$record" incarnation)" = "$incarnation" ] || continue
+    [ "$(record_value "$record" state)" = "$state" ] || continue
+    key=$(record_value "$record" outcome_key)
+    case "$key" in child-outcome-*) ;; *) continue ;; esac
+    claim=$(record_value "$record" run_claim)
+    [ "$claim" = "$observation_token" ] && return 0
+    [ -z "$claim" ] && [ -z "$previous" ] || continue
+    record_field_set "$record" run_claim "$observation_token" || return 2
+    return 0
+  done
+  return 1
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
@@ -535,14 +554,14 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   # A ledger that states its own outcome is the ledger-first path's to deliver.
   if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
     [ "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" \
-      "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)" = dead ] || return 0
+      "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)" != alive ] || return 0
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   incarnation=$(meta_incarnation "$meta")
-  OBSERVED_RUN_LINE='' OBSERVED_RUN_TOKEN=''
+  OBSERVED_RUN_LINE='' OBSERVED_RUN_TOKEN='' OBSERVED_RUN_PREVIOUS=''
   observe_run "$id" "$incarnation" "$state_line" || observation_rc=$?
   [ "$observation_rc" -ne 2 ] || return 1
   if [ "$observation_rc" -eq 0 ] \
@@ -562,6 +581,12 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    'state: working '*"validating (background run)"*)
+      [ "$orphan" -eq 1 ] || return 0
+      state=unknown
+      state_line="state: unknown · source: run-observer · attributed validation run has only coarse ledger state; reconcile exact progress"
+      ;;
+    'state: working '*) return 0 ;;
     'state: parked '*) [ "$orphan" -eq 1 ] || return 0; state=parked ;;
     'state: blocked '*) [ "$orphan" -eq 1 ] || return 0; state=blocked ;;
     'state: unknown '*) [ "$orphan" -eq 1 ] || return 0; state=unknown ;;
@@ -581,6 +606,14 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
         return 0
         ;;
     esac
+    if [ -n "$self" ]; then
+      if claim_ledger_report_for_run "$id" "$incarnation" "$state" \
+        "$OBSERVED_RUN_TOKEN" "$OBSERVED_RUN_PREVIOUS"; then
+        return 0
+      elif [ "$?" -eq 2 ]; then
+        return 1
+      fi
+    fi
   fi
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"

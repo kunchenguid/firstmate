@@ -916,8 +916,8 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Rechecks confirmed endpoint
+# death before trusting the inherited classification. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
@@ -926,6 +926,9 @@ clear_write_tracking() {  # <window-key>
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  if ended_worker_stale_check "$win" "$task"; then
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1276,28 +1279,42 @@ captain_call_stale_bound() {  # <window-key> <task>
 # run. Resolve the wait before capture (which a missing endpoint cannot supply)
 # or hash-based wedge bookkeeping. Unread steers and positive busy signals
 # retain their own paths. Authoritative runs retain the inactive run monitor.
-ended_worker_wait_check() {  # <window> <task>
-  local win=$1 task=$2 key line reason
+ended_worker_stale_check() {  # <window> <task>
+  local win=$1 task=$2 key line last reason held=0
   [ -n "$task" ] || return 1
   [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = dead ] || return 1
   fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
   window_is_busy "$win" "" && return 1
-  task_captain_call_open "$task" || return 1
-  key=$(window_key "$win")
-  STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
-  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
-    clear_stale_hash_tracking "$key"
-    return 0
+  last=$(last_status_line "$STATE/$task.status")
+  status_is_paused_or_captain_held "$last" && return 1
+  if task_captain_call_open "$task"; then
+    held=1
+  elif [ "$(status_line_verb "$last")" != working ] && [ -n "$last" ]; then
+    return 1
   fi
+  key=$(window_key "$win")
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
     *"source: run-step"*|'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
     'state: unknown '*|'state: stopped '*) ;;
     *) return 1 ;;
   esac
+  if [ "$held" -eq 1 ]; then
+    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
+  else
+    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
+  fi
+  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
   clear_stale_hash_tracking "$key"
-  afk_record_present && return 0
-  reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
+  if [ "$held" -eq 1 ]; then
+    afk_record_present && return 0
+    reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
+  else
+    reason="stale: $win (worker ended - preserved state needs recovery, rechecked on a long cadence not a wedge)"
+  fi
   fm_wake_append stale "$win" "$reason" || exit 1
   stale_wait_record "$key"
   wake "$reason"
@@ -2275,7 +2292,7 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    if [ "$kind" != secondmate ] && ended_worker_wait_check "$w" "$task"; then
+    if [ "$kind" != secondmate ] && ended_worker_stale_check "$w" "$task"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
