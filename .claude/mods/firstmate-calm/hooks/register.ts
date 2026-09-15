@@ -111,6 +111,18 @@ function ensureLoaded($: EngineInterface): Promise<void> {
   return loading;
 }
 
+async function resetSession($: EngineInterface): Promise<void> {
+  if (loading !== undefined) await loading.catch(() => undefined);
+  calm = false;
+  preferencePath = undefined;
+  loading = undefined;
+  workingNotes.clear();
+  finalReplies.clear();
+  sites.clear();
+  sprite.reset();
+  await ensureLoaded($);
+}
+
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
 async function repaintShip($: EngineInterface): Promise<void> {
   if (!calm || sites.size === 0) return;
@@ -139,9 +151,7 @@ function hiddenRow($: EngineInterface, e: RenderInput): RenderElement {
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
-    // A genuine new session lifetime starts the boat at the normal initial position.
-    sprite.reset();
-    await ensureLoaded($);
+    await resetSession($);
     await $.command.register({
       name: CALM_COMMAND,
       description: "Toggle Firstmate's Calm transcript presentation and working ship.",

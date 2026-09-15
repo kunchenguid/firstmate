@@ -311,6 +311,32 @@ describe("mid-turn working notes", () => {
     expect(isStock(await $.ui.render(assistantMessage("Done.", "later-note")))).toBe(true);
   });
 
+  test("resets final-reply classifications when a new session starts", async ($, on) => {
+    const { journal } = world(on, { preference: "on\n" });
+    const set = stepper(on);
+    await $.session.start(sessionStart);
+    set({
+      chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
+      result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
+    });
+    await runStep($);
+    expect(isStock(await $.ui.render(assistantMessage("Done.", "session-one-final")))).toBe(true);
+
+    await $.session.start(sessionStart);
+    set({
+      chunks: [
+        { kind: "text", index: 0, text: "Done." },
+        { kind: "tool", index: 1, id: "t2", name: "Bash" },
+        { kind: "stop", stopReason: "tool_use", usage: null },
+      ],
+      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+    });
+    await runStep($);
+    expect(journal.fsReads).toHaveLength(2);
+    expect(journal.sessionMessageReads).toBe(2);
+    expect(isHidden(await $.ui.render(assistantMessage("Done.", "session-two-note")))).toBe(true);
+  });
+
   test("treats a response cut off while calling tools as a working note, but not a plain cut-off", async ($, on) => {
     world(on, { preference: "on\n" });
     const set = stepper(on);

@@ -702,9 +702,9 @@ $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mo
 ✔ Validation passed
 
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .claude/mods/firstmate-calm
- 29 pass
+ 30 pass
  0 fail
-Ran 29 tests across 2 files.
+Ran 30 tests across 2 files.
 
 $ bin/fm-test-run.sh tests/fm-calm-claude-mod.test.sh
 ok - the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in
