@@ -38,3 +38,10 @@ commands:
 test:
   evidence:
     store_in_repo: true
+
+# Suppress the generated ## Intent section in published PR bodies. Trusted
+# default-branch-only config (no-mistakes v1.76+): a pushed branch cannot turn it
+# on. Intent extraction stays enabled for internal review; this only stops
+# publishing that section publicly.
+pr:
+  publish_intent: false
