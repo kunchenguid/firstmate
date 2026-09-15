@@ -105,8 +105,8 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
     tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null \
       | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
     FAILED=1
-    printf 'not ok - %s (%s): idle composer never classified empty (last verdict: %s)\n' \
-      "$name" "$version" "${verdict:-unreadable}" >&2
+    printf 'not ok - %s (%s): bounded wait expired after %s readiness polls at 1s waiting for the idle composer to classify empty; last verdict: %s\n' \
+      "$name" "$version" "$budget" "${verdict:-unreadable}" >&2
   else
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
