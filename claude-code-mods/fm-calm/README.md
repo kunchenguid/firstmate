@@ -11,7 +11,7 @@ While Calm is on:
 
 - tool call rows (`ToolUse`) are drawn at zero height.
 - tool result rows (`ToolResult`) are drawn at zero height.
-- firstmate's operational user rows are drawn at zero height, recognised by the invisible-separator prefix `FIRSTMATE_OP: ` that `bin/fm-operational-input.sh` writes.
+- firstmate's operational user rows are drawn at zero height, recognised by every marker `bin/fm-operational-input.sh` writes: the invisible-separator `FIRSTMATE_OP: ` header, the from-firstmate `[fm-from-firstmate]` marker, and the legacy `Supervisor escalate (` prefix.
   A genuine prompt you typed is never hidden.
 - the `Spinner` row is replaced by a small animated two-row boat.
 
