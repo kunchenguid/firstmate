@@ -21,6 +21,8 @@ PROJECT = "11111111-1111-1111-1111-111111111111"
 REPO = "22222222-2222-2222-2222-222222222222"
 MIN_APPROVER_POLICY = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
 MERGE_STRATEGY_POLICY = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab"
+FILE_SIZE_POLICY = "2e26e725-8201-4edd-8bf5-978563c34a80"
+CASE_ENFORCEMENT_POLICY = "7ed39669-655c-494e-b4a0-a08b4da0fcce"
 
 FAKE = r'''#!/usr/bin/env python3
 import json,os,sys
@@ -199,6 +201,18 @@ class AzureContract(unittest.TestCase):
         self.rows("evaluations", [dict(self.policies[0], configuration=dict(self.approval_config, revision=0)), self.policies[1]])
         self.assertIn("outdated", self.run_helper("complete").stderr)
         self.assertFalse((self.dir / "patch").exists())
+
+    def test_push_only_policies_do_not_require_pr_evaluations(self):
+        file_size = dict(id=3, revision=1, isEnabled=True, isBlocking=True,
+                         type=dict(id=FILE_SIZE_POLICY),
+                         settings=dict(maximumGitBlobSizeInBytes=1, useUncompressedSize=False))
+        case_enforcement = dict(id=4, revision=1, isEnabled=True, isBlocking=True,
+                                type=dict(id=CASE_ENFORCEMENT_POLICY),
+                                settings=dict(enforceConsistentCase=True))
+        self.rows("policyConfigurations", self.configs + [file_size, case_enforcement])
+        self.rows("evaluations", self.policies)
+        p = self.run_helper("verify")
+        self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_required_build_exact_revision(self):
         c = dict(self.merge_config, id=3, type=dict(id="0609b952-1397-4640-95ec-e00a01b2c241"))
