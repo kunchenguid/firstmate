@@ -59,8 +59,8 @@ test_projection_is_deterministic_and_allowlisted() {
 test_stale_partial_invalid_empty_and_replacement_states() {
   local stale=$TMP_ROOT/stale.json partial=$TMP_ROOT/partial.json invalid=$TMP_ROOT/invalid.json
   local empty=$TMP_ROOT/empty.json replacement=$TMP_ROOT/replacement.json truncated=$TMP_ROOT/truncated.json
-  "$PROJECTOR" --from-snapshot "$FIXTURES/states.json" --observed-at 2026-09-15T12:10:01Z > "$stale"
-  jq -e '.freshness == "stale" and .age_seconds == 601' "$stale" >/dev/null \
+  FM_COCKPIT_STALE_AFTER=999999 "$PROJECTOR" --from-snapshot "$FIXTURES/states.json" --observed-at 2026-09-15T12:10:01Z > "$stale"
+  jq -e '.freshness == "stale" and .age_seconds == 601 and .stale_after_seconds == 300' "$stale" >/dev/null \
     || fail "stale age classification is wrong"
   jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$partial"
@@ -80,7 +80,47 @@ test_stale_partial_invalid_empty_and_replacement_states() {
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$truncated"
   jq -e '.inventory.truncated == true and ([.projects[].tasks[]] | length) == 160 and .projects[0].total_task_count == 500' "$truncated" >/dev/null \
     || fail "oversized inventory did not disclose and enforce task bounds"
+  jq '.backlog.records=[(.backlog.records[] | select(.id == "queued-work") | .id="overflow-queued")]
+      | .tasks=[range(0;500) as $i | (.tasks[0] | .id=("task-"+($i|tostring)) | .spawn_gen=("gen-"+($i|tostring)) | .project=("/work/project-"+((($i % 5)+1)|tostring)) | .backlog=null)]' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$truncated"
+  jq -e '.inventory.truncated == true and ([.projects[].tasks[]] | length) == 500' "$truncated" >/dev/null \
+    || fail "pre-cap combined population did not disclose its omitted item"
   pass "projection distinguishes stale, partial, invalid, empty, and replacement-generation states"
+}
+
+test_secondmate_structured_surfaces_are_projected_once() {
+  local model=$TMP_ROOT/secondmate.json
+  jq '.secondmate_current = {
+        records:[{
+          id:"mate-one",home:"/fleet/mates/one",spawn_gen:"mate-gen",provenance:{selected:"structured-home"},
+          freshness:{observed_at:"2026-09-15T11:59:30Z"},
+          active_children:[
+            {id:"child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",doing:"PRIVATE-REMOTE-DETAIL"},
+            {id:"release-call",kind:"ship",state:"working",repo:"omega",name:"Release preparation",source:"structured-home",doing:"PRIVATE-REMOTE-DECISION"}
+          ],
+          decisions_open:[{id:"release-call",verb:"captain-hold",summary:"Choose release route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"}],
+          queued:[
+            {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[]},
+            {id:"queued-child",title:"Remote follow-up",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:null,unresolved_blocker_ids:[]}
+          ],
+          landed:[{id:"landed-child",title:"Remote delivery",kind:"ship",completion:{verb:"merged",date:"2026-09-14"},pr_url:"https://github.com/example/omega/pull/9",report_path:null}],
+          omitted:[]
+        }],total:1,shown:1,truncated:0
+      }' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$model"
+  jq -e '
+    ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 4
+    and ([.projects[].tasks[] | select(.id == "mate-one:child-live")][0]
+      | .lane == "running" and .project_id == "omega" and .crew.kind == "ship")
+    and ([.projects[].tasks[] | select(.id == "mate-one:release-call")][0]
+      | .lane == "waiting" and .attention == true and .hold.actionable == true
+        and .hold.question == "Pick blue or green")
+    and ([.projects[].tasks[] | select(.id == "mate-one:queued-child")][0].lane == "queued")
+    and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
+      | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")
+  ' "$model" >/dev/null || fail "bounded secondmate surfaces were not projected with stable identity and deduplication"
+  ! grep -Fq 'PRIVATE-REMOTE-' "$model" || fail "secondmate prose outside the allowlist leaked into the cockpit"
+  pass "secondmate structured surfaces project once through the cockpit allowlist"
 }
 
 test_builder_is_fail_closed_and_atomic() {
@@ -106,6 +146,11 @@ test_builder_is_fail_closed_and_atomic() {
   assert_contains "$out" "does not satisfy fm-project-cockpit.v1" "unsafe URL refusal did not name the schema"
   after=$(sha256sum "$prior" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "failed validation replaced the previous artifact"
+  set +e
+  out=$(FM_HOME="$home" "$BOARD" path 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "removed path command remained publicly callable"
   pass "builder escapes script boundaries and leaves the prior artifact untouched on validation failure"
 }
 
@@ -175,7 +220,7 @@ test_projection_does_not_call_network_tools() {
   local runtime=$TMP_ROOT/network-runtime fakebin=$TMP_ROOT/network-bin out=$TMP_ROOT/network.json poison=$TMP_ROOT/network.log name
   mkdir -p "$runtime/bin" "$fakebin"
   cp "$PROJECTOR" "$runtime/bin/"
-  printf '#!/usr/bin/env bash\nexec jq . "%s"\n' "$FIXTURES/states.json" > "$runtime/bin/fm-fleet-snapshot.sh"
+  printf '#!/usr/bin/env bash\n[ "$1" = --json-read-only ] || exit 95\nexec jq . "%s"\n' "$FIXTURES/states.json" > "$runtime/bin/fm-fleet-snapshot.sh"
   chmod +x "$runtime/bin/fm-fleet-snapshot.sh"
   for name in curl wget gh gh-axi ssh; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s" >> "%s"\nexit 96\n' "$name" "$poison" > "$fakebin/$name"
@@ -188,10 +233,66 @@ test_projection_does_not_call_network_tools() {
   pass "default projection makes no independent external network call"
 }
 
+test_read_only_fleet_collection_uses_but_never_updates_cache() {
+  local home=$TMP_ROOT/read-only-fleet remote=$TMP_ROOT/remote-summary-home fakebin=$TMP_ROOT/remote-summary-bin
+  local cache=$home/state/summary-cache before after output=$TMP_ROOT/read-only-fleet.json
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$remote/state" "$fakebin"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  printf -- '- mate-remote - fixture (host: remote-host; root: /remote/root; home: /remote/home; scope: fixture; projects: omega; added 2026-09-15)\n' > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/mate-remote.meta" \
+    'kind=secondmate' 'mode=secondmate' 'harness=pi' 'remote_host=remote-host' \
+    'remote_root=/remote/root' 'home=/remote/home'
+  jq -n '{
+    schema:"fm-secondmate-home-summary.v1",hold_classifier_schema:"fm-captain-hold-buckets.v1",
+    generated:"2026-09-15T12:00:00Z",generated_epoch:1789473600,home:"/remote/home",
+    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",
+    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
+  }' > "$remote/state/home-summary.json"
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -f "$FM_TEST_REMOTE_SUMMARY" ]; then
+  cat "$FM_TEST_REMOTE_SUMMARY"
+else
+  exit 1
+fi
+SH
+  chmod +x "$fakebin/fake-ssh"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_REMOTE_SUMMARY="$remote/state/home-summary.json" FM_SNAPSHOT_CACHE_DIR="$cache" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json-read-only > "$output" \
+    || fail "read-only fleet collection failed with a healthy remote ledger"
+  [ ! -e "$cache" ] || fail "read-only fleet collection created the remote-summary cache"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_REMOTE_SUMMARY="$remote/state/home-summary.json" FM_SNAPSHOT_CACHE_DIR="$cache" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$output" \
+    || fail "default fleet collection did not seed its remote-summary cache"
+  before=$(find "$cache" -type f -exec sha256sum {} + | sort)
+  jq '.generated="2026-09-15T12:02:00Z" | .generated_epoch=1789473720' "$remote/state/home-summary.json" > "$remote/state/new-summary.json"
+  mv "$remote/state/new-summary.json" "$remote/state/home-summary.json"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_REMOTE_SUMMARY="$remote/state/home-summary.json" FM_SNAPSHOT_CACHE_DIR="$cache" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json-read-only > "$output" \
+    || fail "read-only fleet collection failed while cache data existed"
+  after=$(find "$cache" -type f -exec sha256sum {} + | sort)
+  [ "$before" = "$after" ] || fail "read-only fleet collection refreshed the remote-summary cache"
+  rm -f "$remote/state/home-summary.json"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_REMOTE_SUMMARY="$remote/state/home-summary.json" FM_SNAPSHOT_CACHE_DIR="$cache" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json-read-only > "$output" \
+    || fail "read-only fleet collection failed to consume its existing cache"
+  jq -e '.secondmate_current.records[0].provenance.summary_source == "remote-ledger-cache"' "$output" >/dev/null \
+    || fail "read-only fleet collection did not consume the existing cache"
+  pass "read-only fleet collection consumes cache without creating or refreshing it"
+}
+
 test_projection_is_deterministic_and_allowlisted
 test_stale_partial_invalid_empty_and_replacement_states
+test_secondmate_structured_surfaces_are_projected_once
 test_builder_is_fail_closed_and_atomic
 test_build_path_does_not_mutate_fleet_or_invoke_authority
 test_live_collection_failure_is_explicitly_unavailable
 test_refresh_uses_canonical_snapshot_without_fleet_mutation
 test_projection_does_not_call_network_tools
+test_read_only_fleet_collection_uses_but_never_updates_cache

@@ -5,7 +5,6 @@
 #   fm-project-cockpit-board.sh build <fm-project-cockpit.v1.json>
 #   fm-project-cockpit-board.sh refresh
 #   fm-project-cockpit-board.sh serve <fm-project-cockpit.v1.json>
-#   fm-project-cockpit-board.sh path
 #
 # build validates one bounded fm-project-cockpit.v1 payload, injects it into the
 # shipped template, verifies the embedded JSON round trip, and atomically writes
@@ -190,10 +189,6 @@ case "${1-}" in
   serve)
     [ "$#" -eq 2 ] || { usage >&2; exit 2; }
     command_serve "$2"
-    ;;
-  path)
-    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    board_path
     ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;

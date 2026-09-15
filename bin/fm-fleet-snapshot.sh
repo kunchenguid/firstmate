@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-fleet-snapshot.sh - structured fleet snapshot with observational caching.
 #
-# Output contract: `--json` prints one object with schema
+# Output contract: `--json` and `--json-read-only` print one object with schema
 # `fm-fleet-snapshot.v1`.
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
@@ -224,11 +224,14 @@ esac
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --json-read-only
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
+--json-read-only may consume an existing valid remote-summary cache but never
+creates or refreshes it.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -275,8 +278,10 @@ EOF
 }
 
 OUTPUT_MODE=json
+SNAPSHOT_CACHE_WRITABLE=1
 case "${1:---json}" in
   --json) ;;
+  --json-read-only) SNAPSHOT_CACHE_WRITABLE=0 ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -1313,6 +1318,7 @@ snapshot_cache_prepare() {
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ $((8#$mode & 077)) -eq 0 ] || return 1
   else
+    [ "$SNAPSHOT_CACHE_WRITABLE" -eq 1 ] || return 1
     [ -d "$(dirname "$FM_SNAPSHOT_CACHE_DIR")" ] || return 1
     (umask 077; mkdir "$FM_SNAPSHOT_CACHE_DIR") 2>/dev/null || return 1
   fi
@@ -1337,6 +1343,7 @@ snapshot_route_cache_path() {  # <id> <host> <home>
 
 snapshot_cache_store() {  # <summary-json-file> <destination>
   local summary_file=$1 destination=$2 tmp
+  [ "$SNAPSHOT_CACHE_WRITABLE" -eq 1 ] || return 0
   [ "$SNAPSHOT_CACHE_AVAILABLE" -eq 1 ] || return 1
   case "$destination" in "$FM_SNAPSHOT_CACHE_DIR"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1

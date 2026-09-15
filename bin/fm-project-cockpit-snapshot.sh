@@ -2,10 +2,10 @@
 # fm-project-cockpit-snapshot.sh - project the canonical fleet snapshot for Project Cockpit.
 #
 # Usage:
-#   fm-project-cockpit-snapshot.sh [--from-snapshot <file|->] [--observed-at <UTC>] [--stale-after <seconds>]
+#   fm-project-cockpit-snapshot.sh [--from-snapshot <file|->] [--observed-at <UTC>]
 #
-# With no fixture input, the command invokes fm-fleet-snapshot.sh --json exactly
-# once.
+# With no fixture input, the command invokes fm-fleet-snapshot.sh
+# --json-read-only exactly once.
 # It validates schema fm-fleet-snapshot.v1 and emits the bounded, allowlisted
 # fm-project-cockpit.v1 presentation model.
 # It never follows paths carried by the snapshot, reparses mutable fleet files,
@@ -14,8 +14,7 @@
 # --from-snapshot reads a deterministic fixture instead of collecting live
 # state.
 # --observed-at fixes the projection clock for deterministic age calculations.
-# --stale-after changes the positive stale threshold from its 300-second
-# default.
+# Snapshots older than 300 seconds are stale.
 #
 # If live collection fails, the command emits a valid unavailable cockpit model
 # without retaining possibly misattributed task identity.
@@ -25,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SNAPSHOT="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 FROM_SNAPSHOT=
 OBSERVED_AT=${FM_COCKPIT_NOW:-}
-STALE_AFTER=${FM_COCKPIT_STALE_AFTER:-300}
+STALE_AFTER=300
 MAX_BYTES=${FM_COCKPIT_SNAPSHOT_MAX_BYTES:-2097152}
 
 usage() {
@@ -55,11 +54,6 @@ while [ "$#" -gt 0 ]; do
       OBSERVED_AT=$2
       shift 2
       ;;
-    --stale-after)
-      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-      STALE_AFTER=$2
-      shift 2
-      ;;
     -h|--help|help)
       usage
       exit 0
@@ -72,7 +66,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 command -v jq >/dev/null 2>&1 || fail "jq is required"
-valid_positive_integer "$STALE_AFTER" || fail "--stale-after must be a positive integer"
 valid_positive_integer "$MAX_BYTES" || fail "FM_COCKPIT_SNAPSHOT_MAX_BYTES must be a positive integer"
 
 [ -n "$OBSERVED_AT" ] || OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -86,7 +79,7 @@ trap cleanup EXIT HUP INT TERM
 
 collection_failed=0
 if [ -z "$FROM_SNAPSHOT" ]; then
-  if ! "$SNAPSHOT" --json > "$tmp"; then
+  if ! "$SNAPSHOT" --json-read-only > "$tmp"; then
     collection_failed=1
   fi
 elif [ "$FROM_SNAPSHOT" = - ]; then
@@ -250,14 +243,14 @@ jq \
     {
       id:((.id | ident) // "invalid-queued"),spawn_gen:null,
       name:((.title | text(160)) // ((.id // "Unnamed queued item") | text(128))),
-      project_id:backlog_project_id,lane:"queued",state:"queued",state_source:"backlog",
+      project_id:backlog_project_id,lane:(if (.captain_actionable // false) == true then "waiting" else "queued" end),state:"queued",state_source:"backlog",
       state_detail:null,state_detail_status:"unavailable",observed_at:null,started_at:null,elapsed_seconds:null,
       crew:{liveness:"not_started",summary:"NOT STARTED",kind:((.kind // "work") | text(40)),harness:null,backend:null},
       attention:((.captain_actionable // false) == true),
       attention_rank:(if (.captain_actionable // false) == true then 0 else 2 end),
       hold:(if .hold_bucket == null then null else {classification:.hold_bucket,actionable:(.captain_actionable // false),question:(.hold_reason | text(240)),age_days:(.hold_age_days // null),until:(.hold_until | date_or_time),evidence:"structured backlog hold"} end),
       blockers:((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null)) | .[:20]),
-      gate:(if ((.unresolved_blocker_ids // []) | arr | length) > 0 then {status:"blocked",label:(((.unresolved_blocker_ids | map(text(80)) | join(", ")) | text(240)))} else {status:"unavailable",label:"Unavailable"} end),
+      gate:(if ((.unresolved_blocker_ids // []) | arr | length) > 0 then {status:"blocked",label:(((.unresolved_blocker_ids | map(text(80)) | join(", ")) | text(240)))} elif .hold_bucket != null then {status:.hold_bucket,label:((.hold_reason // "Captain hold") | text(240))} else {status:"unavailable",label:"Unavailable"} end),
       artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_path == null then "missing" else "available" end),path:(.report_path | text(500))}},
       runtime_evidence:{endpoint_status:"not_started",target:null,worktree:null,home:null},
       events:{status:"unavailable",items:[],reason:"No structured event chronology is available for queued work."},
@@ -276,23 +269,93 @@ jq \
       events:{status:"unavailable",items:[],reason:"No structured event chronology is available for completed work."},
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1."}
     };
+  def scoped_id($owner; $record):
+    (($owner.id | ident) // "invalid-secondmate") + ":" + (($record.id | ident) // "invalid-record");
+  def secondmate_active_projection($owner; $record; $now):
+    ($record + {
+      id:scoped_id($owner; $record),
+      spawn_gen:null,
+      project:(($record.repo // null) | text(128)),
+      backlog:{
+        title:(($record.name // null) | text(160)),
+        repo:(($record.repo // null) | text(128)),
+        state:"in_flight",
+        hold_bucket:null,
+        captain_actionable:false,
+        unresolved_blocker_ids:[]
+      },
+      current_state:{
+        state:($record.state // "unknown"),
+        source:($record.source // "structured-home"),
+        observed_at:($owner.freshness.observed_at // null)
+      },
+      endpoint:{status:"unknown",target:null},
+      paths:{report:{present:false,path:null},worktree:{path:null},home:{path:$owner.home}},
+      pr:{url:null},kind:($record.kind // "worker"),harness:null,backend:null,started_at:null
+    } | task_projection($now));
+  def secondmate_queued_projection($owner; $record):
+    ($record + {id:scoped_id($owner; $record)} | queued_projection);
+  def secondmate_decision_projection($owner; $record; $queued):
+    (($queued // {}) + {
+      id:scoped_id($owner; $record),
+      title:($record.summary // $queued.title // $record.id),
+      repo:($queued.repo // null),
+      kind:($queued.kind // "captain"),
+      captain_actionable:true,
+      hold_bucket:($record.hold_bucket // $queued.hold_bucket // null),
+      hold_reason:($record.reason // $queued.hold_reason // $record.summary // null),
+      hold_until:($record.hold_until // $queued.hold_until // null),
+      hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
+      unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
+    } | queued_projection | .lane="waiting" | .state_source="structured-home-decision");
+  def secondmate_completed_projection($owner; $record):
+    ($record + {id:scoped_id($owner; $record),repo:($record.repo // null)} | completed_projection);
   . as $snapshot
   | ($observed_at | fromdateiso8601) as $now
   | ($snapshot.generated | fromdateiso8601) as $generated_epoch
   | (($now - $generated_epoch) | floor | if . < 0 then 0 else . end) as $age
-  | ([ $snapshot.tasks[:500][] | task_projection($now) ]) as $live_tasks
+  | ([ $snapshot.tasks[] | task_projection($now) + {_identity:("main:" + .id),_priority:0} ]) as $live_tasks
   | ([ $snapshot.backlog.records[]?
        | select(.structured == true and .state == "queued")
        | select(.id as $id | [$snapshot.tasks[].id] | index($id) | not)
-       | queued_projection ][0:500]) as $queued
+       | queued_projection + {_identity:("main:" + .id),_priority:2} ]) as $queued
   | ([ $snapshot.backlog.records[]?
        | select(.structured == true and .state == "done")
-       | completed_projection ][0:160]) as $completed
-  | (($live_tasks + $queued + $completed) | unique_by([.id,.spawn_gen,.lane]) | .[:500]) as $all_tasks
+       | completed_projection + {_identity:("main:" + .id),_priority:3} ]) as $completed
+  | ([ ($snapshot.secondmate_current.records // [])[] as $mate
+       | select($mate.provenance.selected == "structured-home")
+       | $mate.active_children[]?
+       | secondmate_active_projection($mate; .; $now)
+       | . + {_identity:("secondmate:" + .id),_priority:1} ]) as $secondmate_active
+  | ([ ($snapshot.secondmate_current.records // [])[] as $mate
+       | select($mate.provenance.selected == "structured-home")
+       | $mate.queued[]?
+       | secondmate_queued_projection($mate; .)
+       | . + {_identity:("secondmate:" + .id),_priority:2} ]) as $secondmate_queued
+  | ([ ($snapshot.secondmate_current.records // [])[] as $mate
+       | select($mate.provenance.selected == "structured-home")
+       | $mate.decisions_open[]? as $decision
+       | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
+       | secondmate_decision_projection($mate; $decision; $queued_record)
+       | . + {_identity:("secondmate:" + .id),_priority:0} ]) as $secondmate_decisions
+  | ([ ($snapshot.secondmate_current.records // [])[] as $mate
+       | select($mate.provenance.selected == "structured-home")
+       | $mate.landed[]?
+       | secondmate_completed_projection($mate; .)
+       | . + {_identity:("secondmate:" + .id),_priority:3} ]) as $secondmate_completed
+  | (($live_tasks + $queued + $completed + $secondmate_active + $secondmate_queued + $secondmate_decisions + $secondmate_completed)
+      | sort_by([._identity,._priority,.id])
+      | group_by(._identity)
+      | map(.[0] | del(._identity,._priority))) as $combined_tasks
+  | ($combined_tasks | length) as $combined_count
+  | ($combined_tasks[:500]) as $all_tasks
   | ([ $all_tasks[].project_id ] | unique | sort) as $project_ids
   | ([
       if $snapshot.main_inventory.valid != true then ($snapshot.main_inventory.reason // "invalid main inventory") | text(240) else empty end,
-      if ($snapshot.secondmate_current.truncated // false) == true then "secondmate inventory truncated" else empty end,
+      if (($snapshot.secondmate_current.truncated // 0) != 0) then "secondmate inventory truncated" else empty end,
+      (($snapshot.secondmate_current.records // [])[]?.omitted[]?
+        | select((.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0)
+        | "secondmate " + .surface + " truncated"),
       (($snapshot.secondmate_landed.unreadable // [])[]? | "secondmate inventory unavailable"),
       (($snapshot.secondmate_landed.partial // [])[]? | "secondmate inventory partial"),
       (($snapshot.secondmate_landed.truncated // [])[]? | "secondmate landed inventory truncated")
@@ -329,7 +392,7 @@ jq \
       age_seconds:$age,
       stale_after_seconds:$stale_after,
       freshness:(if $age > $stale_after then "stale" else "fresh" end),
-      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:(($snapshot.tasks | length) > 500 or ($project_ids | length) > 80 or any($projects[]; .truncated))},
+      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > 500 or ($project_ids | length) > 80 or any($projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},
