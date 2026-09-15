@@ -1,6 +1,6 @@
 # Claude
 
-Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
+Busy hooks verified 2026-07-28 on Claude Code 2.1.220, and their per-task settings placement verified 2026-09-15 on 2.1.272 (`../../../../../docs/verification/runtime-backends.md` "Worker settings placement").
 
 ## Operating facts
 
