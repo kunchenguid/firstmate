@@ -1818,6 +1818,7 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
@@ -1873,8 +1874,23 @@ try {
   other.kill("SIGTERM");
 }
 
+writeFileSync(lock, `${process.ppid}\n`);
+const guardHandlers = new Map();
+const guard = await import(new URL("fm-primary-turnend-guard.ts", pathToFileURL(process.env.PLUGIN)).href);
+guard.default({ on(name, handler) { guardHandlers.set(name, handler); } });
+const guardMarker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+guardHandlers.get("session_start")({ reason: "reload" }, {});
+if (existsSync(guardMarker)) throw new Error("guard marked loaded for enclosing foreign session");
+const ancestor = await callArm();
+if (ancestor.details?.ok !== false || !ancestor.details.message.includes("held by another firstmate session")) {
+  throw new Error(`enclosing process incorrectly treated as Pi owner: ${JSON.stringify(ancestor.details)}`);
+}
+
 if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without lock ownership");
 writeFileSync(lock, `${process.pid}\n`);
+guardHandlers.get("session_start")({ reason: "reload" }, {});
+if (!existsSync(guardMarker)) throw new Error("guard rejected its own Pi session");
+await guardHandlers.get("session_shutdown")();
 const owned = await callArm();
 if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
   throw new Error(`owned lock did not arm: ${JSON.stringify(owned.details)}`);

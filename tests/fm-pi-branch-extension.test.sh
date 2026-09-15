@@ -661,7 +661,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, se
 const { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, entryRenderers, mainEntries, defaultSessionCtx, home, realRoot } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
 
-writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 await fire("session_start", {}, defaultSessionCtx);
 
 // 1. An accepted wake reaches the branch session, never main. Keep the
@@ -696,7 +696,7 @@ if (loader.options.systemPrompt.length < 4096) throw new Error("branch prompt is
 const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
 const hooked = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
 if (hooked.env.FM_SUPERVISION_ACTOR !== "branch") throw new Error("branch bash does not inject the branch actor");
-if (hooked.env.FM_LEASE_HOLDER_PID !== String(process.ppid)) throw new Error("branch bash does not pin the verified session-lock holder pid");
+if (hooked.env.FM_LEASE_HOLDER_PID !== String(process.pid)) throw new Error("branch bash does not pin the verified session-lock holder pid");
 
 // 3. Shared per-home prompt_cache_key: overrides only payloads that already
 // carry one, stable within the home.
@@ -3679,9 +3679,10 @@ test_secondary_session_stays_inert() {
   home="$TMP_ROOT/secondary-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  # The fleet lock is owned by ANOTHER live process that is NOT in the
-  # driver's ancestry (a sibling sleeper), so the driver is a secondary
-  # session: it must accept nothing, write no marker, and release no leases.
+  # The fleet lock is owned by ANOTHER live process: first a sibling sleeper,
+  # then the driver's own live parent. Neither is this Pi process, so the driver
+  # is a secondary session either way: it must accept nothing, write no marker,
+  # and release no leases.
   sleep 60 &
   foreign_pid=$!
   printf 'branch\t%s\t123\n' "$foreign_pid" > "$home/state/.lease-task-x"
@@ -3691,13 +3692,15 @@ const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, home }; })()`);
 const { dispatch, home } = globalThis.__t;
 import { existsSync, writeFileSync } from "node:fs";
-writeFileSync(`${home}/state/.lock`, `${process.env.FM_TEST_LOCK_PID}\n`);
-if (dispatch("signal: secondary probe").accepted) throw new Error("secondary session accepted a wake it does not own");
-if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
-  throw new Error("secondary session wrote the primary's marker");
-}
-if (!existsSync(`${home}/state/.lease-task-x`)) {
-  throw new Error("secondary session released the primary's branch lease");
+for (const [holder, label] of [[process.env.FM_TEST_LOCK_PID, "sibling"], [String(process.ppid), "enclosing"]]) {
+  writeFileSync(`${home}/state/.lock`, `${holder}\n`);
+  if (dispatch(`signal: secondary probe (${label})`).accepted) throw new Error(`secondary session accepted a wake it does not own (${label} holder)`);
+  if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
+    throw new Error(`secondary session wrote the primary's marker (${label} holder)`);
+  }
+  if (!existsSync(`${home}/state/.lease-task-x`)) {
+    throw new Error(`secondary session released the primary's branch lease (${label} holder)`);
+  }
 }
 process.exit(0);
 EOF
@@ -3705,7 +3708,7 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   kill "$foreign_pid" 2>/dev/null || true
   expect_code 0 "$status" "a secondary session must stay inert: $out"
-  pass "a Pi session that does not own the lock accepts nothing and mutates no branch state"
+  pass "a Pi session whose lock is held by a sibling or an enclosing live process accepts nothing and mutates no branch state"
 }
 
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
@@ -4512,26 +4515,29 @@ EOF
 }
 
 test_session_replacement_during_delivery_neither_loses_nor_duplicates() {
-  local repo home fakebin out status real_ps
+  local repo home fakebin out status real_bash
   repo="$TMP_ROOT/delivery-replacement-root"
   home="$TMP_ROOT/delivery-replacement-home"
   fakebin="$home/fakebin"
-  real_ps=$(command -v ps)
+  real_bash=$(command -v bash)
   mkdir -p "$home/state" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
-  cat > "$fakebin/ps" <<'SH'
+  # Holds the first outcome-store call after arming open until released, so a
+  # delivery already in the queue stays in flight while the session is replaced.
+  cat > "$fakebin/bash" <<'SH'
 #!/bin/sh
-if [ -f "$FM_TEST_PS_ARM" ]; then
-  rm -f "$FM_TEST_PS_ARM"
-  : > "$FM_TEST_PS_ENTERED"
-  while [ ! -f "$FM_TEST_PS_RELEASE" ]; do sleep 0.01; done
+if [ -f "$FM_TEST_STORE_ARM" ] && [ "$1" = "$FM_TEST_OUTCOME_SCRIPT" ]; then
+  rm -f "$FM_TEST_STORE_ARM"
+  : > "$FM_TEST_STORE_ENTERED"
+  while [ ! -f "$FM_TEST_STORE_RELEASE" ]; do sleep 0.01; done
 fi
-exec "$FM_TEST_REAL_PS" "$@"
+exec "$FM_TEST_REAL_BASH" "$@"
 SH
-  chmod +x "$fakebin/ps"
+  chmod +x "$fakebin/bash"
   PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_REAL_PS="$real_ps" FM_TEST_PS_ARM="$home/state/ps-arm" \
-    FM_TEST_PS_ENTERED="$home/state/ps-entered" FM_TEST_PS_RELEASE="$home/state/ps-release" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    FM_TEST_STORE_ARM="$home/state/store-arm" FM_TEST_STORE_ENTERED="$home/state/store-entered" \
+    FM_TEST_STORE_RELEASE="$home/state/store-release" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, home }; })()`);
@@ -4547,10 +4553,7 @@ const secondCtx = {
   sessionManager: { getSessionFile: () => `${home}/second.jsonl`, getEntries: () => secondEntries },
 };
 
-// Use the live parent as lock owner so each ownership check must traverse at
-// least one real ps subprocess; a self-owned lock would return before the
-// asynchronous boundary this regression needs to hold open.
-writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 await fire("session_start", {}, firstCtx);
 let finishWakePrompt;
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
@@ -4562,7 +4565,12 @@ const toolGeneration = 1;
 
 // A delivery that is still in flight when the captain replaces the session
 // (/new, /resume, /fork, reload) must stop acting into the replaced session.
-writeFileSync(process.env.FM_TEST_PS_ARM, "");
+// A turn-end reconciliation held open inside its outcome-store call keeps the
+// delivery queue busy, so the report behind it is still in flight, its
+// ownership not yet evaluated, when the replacement happens.
+writeFileSync(process.env.FM_TEST_STORE_ARM, "");
+const heldReconcile = fire("turn_end", {}, firstCtx);
+await settle(() => existsSync(process.env.FM_TEST_STORE_ENTERED), "in-flight outcome-store subprocess");
 const inFlight = report.execute(
   "replaced-mid-delivery",
   { task: "branch-driver", verdict: "captain", summary: "reported as the session was replaced" },
@@ -4570,11 +4578,11 @@ const inFlight = report.execute(
   undefined,
   {},
 );
-await settle(() => existsSync(process.env.FM_TEST_PS_ENTERED), "in-flight ownership subprocess");
 await fire("session_shutdown", {});
 const replacementStart = fire("session_start", {}, secondCtx);
-writeFileSync(process.env.FM_TEST_PS_RELEASE, "");
+writeFileSync(process.env.FM_TEST_STORE_RELEASE, "");
 await replacementStart;
+await heldReconcile;
 const replaced = await inFlight;
 if (!replaced.isError) {
   throw new Error(`a report from the replaced session was accepted: ${JSON.stringify(replaced)}`);
