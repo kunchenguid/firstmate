@@ -1477,7 +1477,7 @@ azure_work_is_landed() {
   fi
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
-    || content_in_commit "$head" || content_in_default
+    || content_in_commit "$head" all || content_in_default
 }
 
 azure_remote_origin_requires_pr() {
@@ -1545,12 +1545,33 @@ ensure_commit_object() {
 }
 
 content_in_commit() {
-  local ref_tree merged_tree ref=$1
-  ref_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$ref_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$ref_tree" ]
+  local ref=$1 mode=${2:-unpushed} commits path paths
+  case "$mode" in
+    all)
+      commits=$(git -C "$WT" rev-list --reverse "$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null)..HEAD" 2>/dev/null) || return 1
+      ;;
+    unpushed)
+      commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- 2>/dev/null) || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$commits" ] || return 1
+  paths=$(
+    while IFS= read -r commit; do
+      [ -n "$commit" ] || continue
+      git -C "$WT" diff-tree --no-commit-id --name-only -r "$commit" -- 2>/dev/null || return 1
+    done <<EOF
+$commits
+EOF
+  ) || return 1
+  paths=$(printf '%s\n' "$paths" | sed '/^$/d' | sort -u)
+  [ -n "$paths" ] || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    git -C "$WT" diff --quiet "$ref" -- "$path" || return 1
+  done <<EOF
+$paths
+EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
@@ -1601,7 +1622,7 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree
+  local name=${BASE_BRANCH:-} ref
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -1611,11 +1632,7 @@ content_in_default() {
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  content_in_commit "$ref" all
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
