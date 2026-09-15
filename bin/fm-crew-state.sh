@@ -64,7 +64,14 @@
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
-#      (nm_daemon_probe_down).
+#      (nm_daemon_probe_down). In a home that opted in with
+#      config/wedge-defer-pipeline, a `working` run-step verdict additionally
+#      carries fm-classify-lib.sh's pipeline-activity marker when the pipeline's
+#      own recency verdict reports an active step currently producing output; a
+#      quiet or unreported step, and any coarse verdict (whose captured output
+#      belongs to some other run), carry no marker, so the marker is positive
+#      evidence only and never a claim that the step has stalled. Without that
+#      flag the marker is never published and this line reads exactly as before.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -97,6 +104,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
@@ -765,6 +773,35 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  # Publish the pipeline's OWN liveness verdict on a working run step, so a reader
+  # can tell a validation step that is currently producing output from a run record
+  # that merely still says `running`. Only positive recency is published; a quiet or
+  # unreported step simply carries no marker. fm-classify-lib.sh owns the token and
+  # crew_pipeline_activity_is_recent is its consumer.
+  # Gated on RUN_SOURCE too, because nm_run_activity_is_recent parses $RUN_OUT and
+  # `coarse` marks exactly the two cases where $RUN_OUT is NOT this crew's
+  # authoritative output: a foreign-branch answer, and a terminal answer displaced
+  # by a live ledger sibling. In both, RUN_STATE/RUN_DETAIL come from this
+  # worktree's ledger row while $RUN_OUT still describes a different run, so an
+  # ungated append would publish another crew's liveness here - letting any other
+  # crew's active validation suppress this crew's wedge escalation, the exact
+  # inversion of the positive-evidence-only invariant. The consumer above is
+  # already shielded because RUN_STATUS is only ever set on the full path.
+  # Gated FIRST on config/wedge-defer-pipeline, the same default-off flag that arms
+  # the watcher's deferral, so the marker exists only where a home asked for the
+  # behavior it feeds. Publishing it unconditionally would be harmless to this
+  # script's own verdict but would still change what every reader of this line sees
+  # in an unconfigured home; keeping both halves behind one flag is what makes
+  # "absent flag, nothing observable changed" exactly true rather than nearly true.
+  if [ -e "$CONFIG/wedge-defer-pipeline" ] \
+    && [ "$RUN_SOURCE" = full ] && [ "$RUN_STATE" = working ] && nm_run_activity_is_recent; then
+    if [ -n "$RUN_DETAIL" ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}$FM_CLASSIFY_PIPELINE_ACTIVE_MARKER"
+    else
+      RUN_DETAIL="$FM_CLASSIFY_PIPELINE_ACTIVE_MARKER"
+    fi
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

@@ -212,6 +212,18 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Pipeline-activity wedge deferral (config/wedge-defer-pipeline)
+
+The optional local, gitignored `config/wedge-defer-pipeline` presence flag opts this home into a default-off fourth liveness input to the watcher's wedge detector, after pane quietness, the run step, and worktree writes (a separate series from the turn-end absorb evidence above).
+With it present, a quiet pane the wedge timer is about to escalate is deferred instead when the validation pipeline's own recency verdict reports one of its steps currently producing output, and `bin/fm-crew-state.sh` publishes that verdict as a `pipeline-activity: recent` marker on a `working` run-step line.
+It exists because a validation round runs in the pipeline's separate checkout, where neither the crew's pane nor the crew's worktree can show it, while a run record alone reads `running` whether or not the step behind it is still alive.
+It stays opt-in because the deferral trades a quieter escalation stream for a longer worst-case delay before a genuinely wedged crew is reported, which is a supervision-noise preference each home should grant deliberately.
+With the flag absent nothing this behavior adds is observable: no deferral is taken, no marker is published, no pipeline read is spent, and a stale pane escalates on exactly the schedule, evidence, and reasons it did before.
+The pre-existing worktree-write deferral is outside the flag and behaves the same whether or not it is set, on the one progress-deferral chain both sources now share; that chain renamed its `state/.writing-*` markers to `state/.progress-*` without changing its cadence.
+A deferral is bounded rather than silent: the pane still re-surfaces once every `FM_PAUSE_RESURFACE_SECS` as a recheck rather than a wedge, so an unproductive run cannot stay invisible.
+The flag is inherited by secondmate homes, because a secondmate runs its own watcher over its own crewmates and meets the same false escalations, so one captain choice covers the fleet.
+[`architecture.md`](architecture.md) owns the triage contract, `bin/fm-watch.sh`'s `wedge_defer_pipeline` owns the deferral, and `bin/fm-classify-lib.sh`'s `crew_pipeline_activity_is_recent` owns the positive-evidence boundary.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.

@@ -38,8 +38,9 @@
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
-# a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# a bounded slice of its worktree instead of a status file, and
+# crew_pipeline_activity_is_recent spends one more bin/fm-crew-state.sh read, so
+# callers run either one only at the moment they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1832,6 +1833,63 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# The token bin/fm-crew-state.sh appends to a `working` run-step detail when the
+# home opted in with config/wedge-defer-pipeline and the validation pipeline's OWN
+# recency verdict says one of its steps is currently producing output. Declared
+# here, next to its only consumer, so the producer and the consumer cannot drift
+# onto two spellings. Nothing else may write it: a `working` run-step detail is
+# composed entirely from pipeline-reported fields, so no crew-authored status prose
+# can forge this marker into that line.
+FM_CLASSIFY_PIPELINE_ACTIVE_MARKER='pipeline-activity: recent'
+
+# 0 when crew <id>'s CURRENT authoritative state is an actively running validation
+# step that the pipeline itself reports as recently active. This is the fourth
+# liveness input the wedge detector has, after pane quietness, the run step, and
+# worktree writes, and it exists for the case none of those can see: a validation
+# step whose agent is demonstrably producing output inside the pipeline's own
+# isolated checkout, so the crew's pane renders nothing and the crew's worktree is
+# never touched, while the run step says only that a run exists - which it also
+# says for a run whose step has silently died.
+#
+# Strictly positive evidence. The pipeline marks a step `quiet` once no step log or
+# native-agent lifecycle event has arrived for longer than its configured quiet
+# warning, and bin/fm-crew-state.sh appends the marker only when no active step is
+# quiet, so a stalled step withdraws the evidence on the pipeline's own schedule
+# rather than on a second threshold invented here. Every other outcome is 1,
+# including an empty id, an unreadable verdict, a daemon that cannot be reached, a
+# state that is not `working`, a source that is not the run step, and a working run
+# with no activity report at all. Absence of evidence therefore always leaves the
+# caller's existing escalation schedule untouched. A home that never opted in with
+# config/wedge-defer-pipeline is one more such absence rather than a special case:
+# the producer publishes the marker only under that flag, so this reports 1 there
+# whatever the pipeline is doing, and the sole caller tests the flag before calling
+# so an unconfigured home does not even spend the read.
+#
+# NOT a pure read, and strictly more expensive than crew_absorb_class's own read is
+# already documented to be: it spends one more bounded fm-crew-state.sh call. Call
+# it only at the moment the caller would otherwise escalate, exactly like
+# crew_worktree_written_since, never on every poll. FM_CREW_STATE_BIN lets tests
+# stub the verdict.
+crew_pipeline_activity_is_recent() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  # Field-parsed exactly as crew_absorb_class does, never matched across the whole
+  # line: a status-log-sourced verdict carries the crew's own note as its detail, so
+  # a substring match would let a crew write "source: run-step" and the marker into
+  # its own status line and defer its own wedge escalation. Taking the FIRST
+  # `source: ` field is what makes that impossible - it is always the real source.
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  case "$line" in
+    *"$FM_CLASSIFY_PIPELINE_ACTIVE_MARKER"*) return 0 ;;
+  esac
+  return 1
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.
