@@ -1,0 +1,9 @@
+{
+  "name": "fm-calm",
+  "version": "0.1.0",
+  "description": "Firstmate Calm for Claude Code: a presentation-only transcript toggle driven by a /calm command.",
+  "author": {
+    "name": "Firstmate"
+  },
+  "hooks": "./hooks/hooks.json"
+}

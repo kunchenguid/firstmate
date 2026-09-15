@@ -1,0 +1,5 @@
+node_modules/
+package-lock.json
+.claude/types/claude-code-mcp.d.ts
+.claude/types/claude-code-plugins.d.ts
+.claude/types/claude-code-plugins/
