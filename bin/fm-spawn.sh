@@ -3900,13 +3900,24 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+# Carry every key this rewrite does not own from the previous incarnation, with
+# the pr= identity block held back to the end. That trailing position is the
+# task record's contract, owned by fm_pr_metadata_identity_parse in
+# bin/fm-pr-lib.sh: a key emitted past it costs the task its armed merge poll.
+#
+# Holding the block back rather than merely placing this rewrite's own keys
+# ahead of it also repairs a record some other writer already appended to, so a
+# poll that was already broken comes back on the next relaunch.
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
       split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
-    !($1 in owned)
+    $1 in owned { next }
+    $1 == "pr" || $1 == "pr_head" { pr_block[++pr_n] = $0; next }
+    { print }
+    END { for (i = 1; i <= pr_n; i++) print pr_block[i] }
   ' "$RELAUNCH_META"
 }
 {
@@ -3951,11 +3962,13 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
+  # Ahead of the preserved keys, so the pr= identity block preserve_relaunch_meta
+  # holds back stays the trailing block of the record.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } > "$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -4137,9 +4150,20 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # Replaces the carrier in one checked pass rather than rewrite-then-append, so
+  # the new traceparent= lands ahead of the pr= identity block this record has to
+  # keep trailing (contract: fm_pr_metadata_identity_parse, bin/fm-pr-lib.sh).
+  # The carrier reaches awk through -v, never as program text.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+     || ! awk -F= -v carrier="$SPAWN_TRACEPARENT" '
+          $1 == "traceparent" { next }
+          $1 == "pr" || $1 == "pr_head" { pr_block[++pr_n] = $0; next }
+          { print }
+          END {
+            print "traceparent=" carrier
+            for (i = 1; i <= pr_n; i++) print pr_block[i]
+          }
+        ' "$meta" > "$SPAWN_META_TMP" \
      || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
