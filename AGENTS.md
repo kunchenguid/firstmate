@@ -293,6 +293,11 @@ Send in-scope work to the fitting secondmate unless it is blocked or the captain
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+Prioritize the shortest robust end-to-end path to the requested outcome; parallelize independent implementation, targeted tests, hardware preparation and required review where safe, with one owner per device or serial interface.
+Make routine reversible engineering decisions under existing authority; triage findings by realistic likelihood and user impact, fix material correctness, safety and reliability defects, and record or defer unrelated polish and speculative low-impact cases without blocking delivery.
+Reuse still-valid evidence on unchanged code and configuration; run focused regressions for edits, avoid duplicate reviews, and do not restart whole pipelines for metadata-only changes or repeatedly inspect intentionally idle workers without new evidence.
+Assign replacement hardware owners early and advance safe relevant device testing once basic checks pass, in parallel with review; never infer hardware readiness from host tests.
+This replaces fix-everything guidance, not required independent review, real brake, stop, watchdog or unintended-motion fixes, device-specific authority, safety gates or explicit merge approval; motor limits are unchanged.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
