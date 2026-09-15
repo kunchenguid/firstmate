@@ -33,6 +33,7 @@ The values it writes are `on` and `off`, each followed by one newline; an absent
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+[`calm.md`](calm.md) owns which Pi transcript rows this preference hides and the supported repaint and export behavior.
 
 ## Pi supervision branch
 

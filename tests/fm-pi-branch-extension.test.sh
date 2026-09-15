@@ -298,6 +298,9 @@ export class Text {
     this.paddingX = paddingX;
     this.paddingY = paddingY;
   }
+  render() {
+    return this.text.split("\n");
+  }
 }
 
 export class Container {
@@ -884,8 +887,9 @@ const assertRenderedNote = (note, glyph) => {
   if (restCalls.length === 0 || restCalls.some((call) => call.color !== "dim")) {
     throw new Error(`note remainder must be dim: ${JSON.stringify(fgCalls)}`);
   }
+  return rendered;
 };
-assertRenderedNote(sentToMain[0].message.content, "⛵");
+const restoredRoutineNote = assertRenderedNote(sentToMain[0].message.content, "⛵");
 const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   captainEntries[0],
   { expanded: false },
@@ -893,6 +897,39 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
 );
 if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
+}
+if (!restoredRoutineNote.render(100).join("\n").includes("worker healthy, no action needed")) {
+  throw new Error("a restored routine note was hidden while Calm was off");
+}
+
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+if (restoredRoutineNote.render(100).length !== 0) {
+  throw new Error("turning Calm on did not repaint a restored routine note to zero height");
+}
+const liveCalmRoutineNote = renderers.get("fm-branch-merge")(
+  { content: "⛵ branch-driver: live routine wait" },
+  { expanded: false },
+  renderTheme,
+);
+if (liveCalmRoutineNote.render(100).length !== 0) {
+  throw new Error("a live routine note remained visible while Calm was on");
+}
+if (!captainRendered.render(100).join("\n").includes("checks green, ready for review")) {
+  throw new Error("Calm hid a captain-facing outcome entry");
+}
+
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
+for (const note of [restoredRoutineNote, liveCalmRoutineNote]) {
+  if (note.render(100).length === 0) {
+    throw new Error("stock export rendering omitted a routine supervision note");
+  }
+}
+
+pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+for (const note of [restoredRoutineNote, liveCalmRoutineNote]) {
+  if (note.render(100).length === 0) {
+    throw new Error("turning Calm off did not restore a routine supervision note");
+  }
 }
 process.exit(0);
 EOF
