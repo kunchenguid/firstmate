@@ -1545,10 +1545,11 @@ ensure_commit_object() {
 }
 
 content_in_commit() {
-  local ref=$1 mode=${2:-unpushed} commits path paths
+  local ref=$1 mode=${2:-unpushed} commits merge_base status path rc=0 paths_file
   case "$mode" in
     all)
-      commits=$(git -C "$WT" rev-list --reverse "$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null)..HEAD" 2>/dev/null) || return 1
+      merge_base=$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null) || return 1
+      commits=$(git -C "$WT" rev-list --reverse "$merge_base..HEAD" 2>/dev/null) || return 1
       ;;
     unpushed)
       commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- 2>/dev/null) || return 1
@@ -1556,22 +1557,39 @@ content_in_commit() {
     *) return 1 ;;
   esac
   [ -n "$commits" ] || return 1
-  paths=$(
-    while IFS= read -r commit; do
-      [ -n "$commit" ] || continue
-      git -C "$WT" diff-tree --no-commit-id --name-only -r "$commit" -- 2>/dev/null || return 1
-    done <<EOF
+  paths_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-paths.XXXXXX") || return 1
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    git -C "$WT" -c core.quotePath=false diff-tree --no-commit-id --name-status -r -z -m "$commit" -- \
+      >> "$paths_file" || {
+        rm -f -- "$paths_file"
+        return 1
+      }
+  done <<EOF
 $commits
 EOF
-  ) || return 1
-  paths=$(printf '%s\n' "$paths" | sed '/^$/d' | sort -u)
-  [ -n "$paths" ] || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    git -C "$WT" diff --quiet "$ref" -- "$path" || return 1
-  done <<EOF
-$paths
-EOF
+  if [ ! -s "$paths_file" ]; then
+    rm -f -- "$paths_file"
+    return 0
+  fi
+  exec 3< "$paths_file"
+  while IFS= read -r -d '' status <&3; do
+    case "$status" in
+      R*|C*)
+        IFS= read -r -d '' path <&3 || { rc=1; break; }
+        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        IFS= read -r -d '' path <&3 || { rc=1; break; }
+        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        ;;
+      *)
+        IFS= read -r -d '' path <&3 || { rc=1; break; }
+        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        ;;
+    esac
+  done
+  exec 3<&-
+  rm -f -- "$paths_file"
+  [ "$rc" -eq 0 ]
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the

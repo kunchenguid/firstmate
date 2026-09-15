@@ -1138,6 +1138,50 @@ test_merged_pr_history_with_reapplied_local_change_refuses() {
   pass "merged PR history does not authorize a reapplied local change absent from final content"
 }
 
+test_merged_pr_refuses_unicode_merge_only_adjustment() {
+  local case_dir rc pr_head local_head tmp file
+  case_dir=$(make_case merged-unicode-merge-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+
+  tmp="$case_dir/_main-move"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "upstream change"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  tmp="$case_dir/_pr-head"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b fm/task-x1
+  printf '%s\n' hello > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  pr_head=$(git -C "$tmp" rev-parse HEAD)
+  git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff --no-commit origin/main >/dev/null \
+    || fail "merged-unicode-merge-only: could not stage merge"
+  file='résumé file.txt'
+  wt_commit_file "$case_dir" "$file" local-only "merge-only unicode adjustment"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-unicode-merge-only: teardown should refuse a merge-only Unicode adjustment absent from the merged PR"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-unicode-merge-only: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-unicode-merge-only "$local_head"
+  pass "merged PR containment preserves Unicode merge-only files absent from final content"
+}
+
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
   local case_dir rc parent_head pr_head
   case_dir=$(make_case squash-replayed-patch)
@@ -1405,6 +1449,93 @@ SH
     fi
   done
   pass "the content-landed fallback checks a task's recorded base branch, not the default branch"
+}
+
+test_content_fallback_contained_merge_history_allows() {
+  local case_dir rc tmp
+  case_dir=$(make_case content-merge-contained)
+  write_meta "$case_dir" no-mistakes ship
+
+  tmp="$case_dir/_base"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+
+  git -C "$case_dir/wt" rm -q shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "remove shared"
+
+  tmp="$case_dir/_landed"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" rm -q shared.txt
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "landed removal"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff origin/main -m "merge landed removal" >/dev/null \
+    || fail "content-merge-contained: could not merge landed history"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-merge-contained: teardown should succeed when a merge history is fully contained in the default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-merge-contained: teardown printed a REFUSED line"
+  pass "content fallback accepts merge histories whose final content is already in default"
+}
+
+test_content_fallback_merge_only_restoration_refuses() {
+  local case_dir rc local_head tmp
+  case_dir=$(make_case content-merge-restore)
+  write_meta "$case_dir" no-mistakes ship
+
+  tmp="$case_dir/_base"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+
+  git -C "$case_dir/wt" rm -q shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "remove shared"
+
+  tmp="$case_dir/_landed"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" rm -q shared.txt
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "landed removal"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff --no-commit origin/main >/dev/null \
+    || fail "content-merge-restore: could not stage merge"
+  printf '%s\n' base > "$case_dir/wt/shared.txt"
+  git -C "$case_dir/wt" add -- shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "restore in merge"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-merge-restore: teardown should refuse a merge-only restoration absent from default"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-merge-restore: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" content-merge-restore "$local_head"
+  pass "content fallback preserves merge-only restorations absent from default"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -4724,6 +4855,7 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_merged_pr_refuses_unicode_merge_only_adjustment
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_merged_pr_history_with_reapplied_local_change_refuses
@@ -4735,6 +4867,8 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
+test_content_fallback_contained_merge_history_allows
+test_content_fallback_merge_only_restoration_refuses
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic
