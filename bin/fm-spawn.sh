@@ -133,7 +133,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|junie)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -282,6 +282,8 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __JUNIEBIN__  resolved, junie-verified executable for a junie launch
+#     __JUNIECONFIG__ firstmate-owned per-task junie configuration file (busy-state hooks)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1400,7 +1402,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|junie)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1721,6 +1723,7 @@ launch_template() {
     # when a supported effort is requested, since a second --config-override
     # would silently discard the first (confirmed live).
     rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
+    junie) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __JUNIEBIN__ -p __WORKTREE__ --config-location __JUNIECONFIG__ --brave __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1774,10 +1777,19 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = junie ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
+
+junie_credential_present() {
+  [ -n "${JUNIE_API_KEY:-}" ] && return 0
+  [ -s "${HOME:-}/.junie/secure_credentials.json" ] && return 0
+  if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    security find-generic-password -s junie-cli >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
 
 # rovo carries the same primary-supervision gap as muse: no turn-end hook, no
 # verified primary integration, so a secondmate (a firstmate instance that must
@@ -1831,6 +1843,16 @@ case "$HARNESS" in
   agy)
     AGY_BIN=$(resolve_pi_executable agy) || {
       echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
+  junie)
+    JUNIE_BIN=$(resolve_pi_executable junie) || {
+      echo "error: junie executable not found on PATH; install Junie CLI or select a different verified harness" >&2
+      exit 1
+    }
+    junie_credential_present || {
+      echo "error: junie credentials not found (checked JUNIE_API_KEY, Keychain service 'junie-cli', and ~/.junie/secure_credentials.json)" >&2
       exit 1
     }
     ;;
@@ -1984,7 +2006,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|junie)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2019,6 +2041,12 @@ effort_flag_for_harness() {
     agy)
       # agy 1.2.0 --effort accepts exactly low|medium|high, so xhigh and max are
       # omitted rather than passed as known-bad values (record-and-omit).
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    junie)
+      # junie CLI --effort accepts low|medium|high.
       case "$effort" in
         low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -3555,6 +3583,17 @@ EOF
 EOF
       fi
       ;;
+    junie)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source junie-hook"
+        j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit >/dev/null 2>&1 || true")
+        j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true")
+        cat > "$STATE_REAL/$ID.junie-config.json" <<EOF
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}]}}
+EOF
+      fi
+      ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
       cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
@@ -4059,10 +4098,14 @@ case "$HARNESS" in
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
   agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+  junie)
+    LAUNCH=${LAUNCH//__JUNIEBIN__/"$(shell_quote "$JUNIE_BIN")"}
+    LAUNCH=${LAUNCH//__JUNIECONFIG__/"$(shell_quote "$STATE_REAL/$ID.junie-config.json")"}
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy|junie)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac

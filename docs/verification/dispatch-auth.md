@@ -193,6 +193,30 @@ These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
 Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
 
+## Standalone Junie discovery probe
+
+Verified 2026-09-14 on `junie 26.9.14`.
+
+```sh
+junie --version
+# Authentication probe:
+# 1. Environment variable JUNIE_API_KEY
+# 2. macOS Keychain: security find-generic-password -s junie-cli
+# 3. File credential: ~/.junie/secure_credentials.json
+```
+
+Observed:
+
+- `junie --version` prints semantic version `26.9.14`.
+- If `JUNIE_API_KEY` is set and non-empty, the session reports `authenticated`.
+- On macOS (`Darwin`), `security find-generic-password -s junie-cli` queries the OS Keychain under the hard timeout bound. If found (exit status `0`), the session reports `authenticated`. If the command hits the timeout bound, the probe reports `timeout`.
+- If `<home>/.junie/secure_credentials.json` exists, the session reports `authenticated`.
+- If none of these credentials exist, the session reports `unauthenticated`.
+- The probe is non-destructive, runs with stdin closed, and never invokes interactive login or vendor sessions.
+
+`bin/fm-vendor-auth-probe.sh` pins verified version `26.9.14`, reports `versionVerified=no` when the running CLI differs, and reports `timeout` if OS credential discovery hits the timeout bound.
+Re-run the commands above and update this section and the pinned version together when the vendor CLI changes.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.

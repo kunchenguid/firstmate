@@ -80,6 +80,43 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/grok"
+
+  cat > "$fakebin/junie" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_JUNIE_LOG"
+if IFS= read -r -t 2 leaked; then
+  printf '%s\n' "$leaked" >> "$FM_FAKE_JUNIE_STDIN"
+fi
+if [ "${1:-}" = --version ]; then
+  printf 'junie %s (fakebuild) [stable]\n' "${FM_FAKE_JUNIE_VERSION:-26.9.14}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/junie"
+
+  cat > "$fakebin/security" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_SECURITY_LOG"
+case "${FM_FAKE_SECURITY_MODE:-notfound}" in
+  found)
+    printf 'password: fake-password\n'
+    exit 0
+    ;;
+  notfound)
+    exit 44
+    ;;
+  hang)
+    sleep 30
+    exit 0
+    ;;
+  *)
+    exit 44
+    ;;
+esac
+SH
+  chmod +x "$fakebin/security"
+
   printf '%s\n' "$fakebin"
 }
 
@@ -91,20 +128,29 @@ RUN_RC=0
 RUN_GROK_LOG=
 RUN_GROK_STDIN=
 RUN_QUOTA_LOG=
+RUN_JUNIE_LOG=
+RUN_JUNIE_STDIN=
+RUN_SECURITY_LOG=
 run_probe() {
   local case_name=$1
   shift
   local case_dir fakebin out rc=0 arg
   local -a script_args=() env_pairs=()
   case_dir="$TMP_ROOT/$case_name"
-  mkdir -p "$case_dir"
+  mkdir -p "$case_dir/home"
   fakebin=$(make_fakebin "$case_dir")
   RUN_GROK_LOG="$case_dir/grok.log"
   RUN_GROK_STDIN="$case_dir/grok.stdin"
   RUN_QUOTA_LOG="$case_dir/quota.log"
+  RUN_JUNIE_LOG="$case_dir/junie.log"
+  RUN_JUNIE_STDIN="$case_dir/junie.stdin"
+  RUN_SECURITY_LOG="$case_dir/security.log"
   : > "$RUN_GROK_LOG"
   : > "$RUN_GROK_STDIN"
   : > "$RUN_QUOTA_LOG"
+  : > "$RUN_JUNIE_LOG"
+  : > "$RUN_JUNIE_STDIN"
+  : > "$RUN_SECURITY_LOG"
   local seen_separator=0
   for arg in "$@"; do
     if [ "$seen_separator" -eq 0 ] && [ "$arg" = -- ]; then
@@ -121,6 +167,11 @@ run_probe() {
     "FM_FAKE_GROK_LOG=$RUN_GROK_LOG" \
     "FM_FAKE_GROK_STDIN=$RUN_GROK_STDIN" \
     "FM_FAKE_QUOTA_LOG=$RUN_QUOTA_LOG" \
+    "FM_FAKE_JUNIE_LOG=$RUN_JUNIE_LOG" \
+    "FM_FAKE_JUNIE_STDIN=$RUN_JUNIE_STDIN" \
+    "FM_FAKE_SECURITY_LOG=$RUN_SECURITY_LOG" \
+    "HOME=$case_dir/home" \
+    "JUNIE_API_KEY=" \
     "${env_pairs[@]+"${env_pairs[@]}"}" \
     "$SCRIPT" "${script_args[@]+"${script_args[@]}"}" \
     <<<"$STDIN_SENTINEL" 2>/dev/null) || rc=$?
@@ -373,7 +424,113 @@ test_help_succeeds_and_names_the_registered_probes() {
   out=$("$SCRIPT" --help 2>&1) || rc=$?
   expect_code 0 "$rc" "--help must succeed"
   assert_contains "$out" "grok" "--help must name the registered probes"
+  assert_contains "$out" "junie" "--help must name the registered probes"
   pass "--help succeeds and names the registered probes"
+}
+
+# --- junie tests -------------------------------------------------------------
+
+assert_junie_argv_safe() {  # <label>
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      --version) : ;;
+      *) fail "$1: unexpected Junie CLI invocation 'junie $line'" ;;
+    esac
+  done < "$RUN_JUNIE_LOG"
+}
+
+assert_junie_never_ran() {  # <label>
+  [ ! -s "$RUN_JUNIE_LOG" ] \
+    || fail "$1: no junie CLI may run, but it was invoked with: $(tr '\n' '|' < "$RUN_JUNIE_LOG")"
+}
+
+test_junie_version_check_and_verified_flag() {
+  run_probe junie-version-pinned junie -- "FM_FAKE_JUNIE_VERSION=26.9.14" "JUNIE_API_KEY=testkey"
+  expect_code 0 "$RUN_RC" "junie version check must succeed"
+  assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+  assert_field "$RUN_LINE" version 26.9.14 "pinned verified version must be recognized"
+  assert_field "$RUN_LINE" versionVerified yes "versionVerified must be yes for 26.9.14"
+  assert_junie_argv_safe "junie-version-pinned"
+
+  run_probe junie-version-drift junie -- "FM_FAKE_JUNIE_VERSION=27.0.0" "JUNIE_API_KEY=testkey"
+  expect_code 0 "$RUN_RC" "junie version drift check must succeed"
+  assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+  assert_field "$RUN_LINE" version 27.0.0 "drifting version must be reported"
+  assert_field "$RUN_LINE" versionVerified no "versionVerified must be no for unverified version"
+  assert_junie_argv_safe "junie-version-drift"
+
+  pass "junie version check and versionVerified flag are correctly reported"
+}
+
+test_junie_authenticated_reporting() {
+  # via JUNIE_API_KEY
+  run_probe junie-auth-env junie -- "JUNIE_API_KEY=test-api-key-value"
+  expect_code 0 "$RUN_RC" "probe must exit 0"
+  assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+  assert_field "$RUN_LINE" status authenticated "JUNIE_API_KEY must authenticate"
+
+  # via Keychain (macOS)
+  if [ "$(uname -s)" = "Darwin" ]; then
+    run_probe junie-auth-keychain junie -- "FM_FAKE_SECURITY_MODE=found"
+    expect_code 0 "$RUN_RC" "probe must exit 0"
+    assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+    assert_field "$RUN_LINE" status authenticated "keychain credential must authenticate"
+  fi
+
+  # via ~/.junie/secure_credentials.json
+  local case_dir="$TMP_ROOT/junie-auth-file"
+  mkdir -p "$case_dir/home/.junie"
+  touch "$case_dir/home/.junie/secure_credentials.json"
+  run_probe junie-auth-file junie -- "HOME=$case_dir/home" "FM_FAKE_SECURITY_MODE=notfound"
+  expect_code 0 "$RUN_RC" "probe must exit 0"
+  assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+  assert_field "$RUN_LINE" status authenticated "secure_credentials.json file must authenticate"
+
+  pass "junie authenticated sessions are reported across env, keychain, and file credentials"
+}
+
+test_junie_unauthenticated_reporting() {
+  run_probe junie-unauth junie -- "FM_FAKE_SECURITY_MODE=notfound"
+  expect_code 0 "$RUN_RC" "unauthenticated probe must exit 0"
+  assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+  assert_field "$RUN_LINE" status unauthenticated "unauthenticated session must be reported"
+  assert_junie_argv_safe "junie-unauth"
+  pass "an unauthenticated junie session is reported as ground truth"
+}
+
+test_junie_timeout_reporting() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    local started finished
+    started=$(date +%s)
+    run_probe junie-timeout junie -- "FM_FAKE_SECURITY_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=2"
+    finished=$(date +%s)
+    expect_code 0 "$RUN_RC" "timed out probe must exit 0"
+    assert_field "$RUN_LINE" probe junie "probe name must be echoed"
+    assert_field "$RUN_LINE" status timeout "a hit bound must be reported as timeout"
+    [ $((finished - started)) -lt 25 ] \
+      || fail "the probe was not bounded: took $((finished - started))s against a 2s bound"
+    pass "a hanging junie credential check is hard-bounded and reported as timeout"
+  else
+    pass "junie timeout test skipped on non-Darwin"
+  fi
+}
+
+test_missing_junie_cli_is_reported() {
+  local case_dir fakebin line rc=0
+  case_dir="$TMP_ROOT/junie-absent"
+  mkdir -p "$case_dir"
+  fakebin=$(make_fakebin "$case_dir")
+  rm -f "$fakebin/junie"
+  line=$(env "PATH=$fakebin:$BASE_PATH" \
+    "FM_FAKE_QUOTA_LOG=$case_dir/quota.log" \
+    "$SCRIPT" junie </dev/null 2>/dev/null) || rc=$?
+  expect_code 0 "$rc" "an absent junie CLI is a fact, not a usage error"
+  assert_field "$line" status unavailable "an absent probe command must be reported"
+  assert_field "$line" version none "an absent CLI has no version to report"
+  assert_field "$line" versionVerified none "an absent CLI cannot be version-verified"
+  pass "an absent junie CLI is reported rather than assumed authenticated"
 }
 
 test_probe_accepts_no_candidate_identity
@@ -393,3 +550,8 @@ test_fact_line_carries_no_vendor_output_or_credential_material
 test_probe_version_change_is_disclosed
 test_probe_version_match_is_recorded
 test_help_succeeds_and_names_the_registered_probes
+test_junie_version_check_and_verified_flag
+test_junie_authenticated_reporting
+test_junie_unauthenticated_reporting
+test_junie_timeout_reporting
+test_missing_junie_cli_is_reported

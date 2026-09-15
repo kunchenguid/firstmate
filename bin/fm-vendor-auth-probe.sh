@@ -32,6 +32,9 @@
 #          0.2.117: the command exits 0 in BOTH the authenticated and the
 #          unauthenticated case, so only the literal first stdout line
 #          discriminates and the exit status is never a verdict.
+#   junie  credential and OS keychain probe for JetBrains Junie CLI. Verified
+#          on junie 26.9.14: checks JUNIE_API_KEY, macOS keychain junie-cli,
+#          or ~/.junie/secure_credentials.json.
 #
 # Output: exactly one sanitized `key=value` line on stdout. No token, refresh
 # token, header, path, length, prefix, hash, or raw vendor output is ever
@@ -64,6 +67,7 @@
 set -u
 
 VERIFIED_GROK_VERSION=0.2.117
+VERIFIED_JUNIE_VERSION=26.9.14
 
 usage() {
   cat <<'EOF'
@@ -77,6 +81,7 @@ Usage:
 
 Registered probes:
   grok   `grok models` on the standalone Grok Build CLI
+  junie  credential probe on JetBrains Junie CLI
 
 Prints one sanitized key=value line: probe, status, version, versionVerified.
 
@@ -103,7 +108,7 @@ EOF
 
 die_usage() {
   printf 'fm-vendor-auth-probe: %s\n' "$1" >&2
-  printf 'usage: fm-vendor-auth-probe.sh <probe>   (registered probes: grok)\n' >&2
+  printf 'usage: fm-vendor-auth-probe.sh <probe>   (registered probes: grok, junie)\n' >&2
   exit 2
 }
 
@@ -172,6 +177,39 @@ probe_grok() {
   esac
 }
 
+junie_version() {
+  local output
+  output=$(fm_run_timed "$TIMEOUT" junie --version 2>/dev/null </dev/null) || { printf 'none\n'; return 0; }
+  printf '%s\n' "$output" | sed -nE 's/(^|.*[^0-9])([0-9]+\.[0-9]+\.[0-9]+).*/\2/p' | head -n 1 | grep . || printf 'none\n'
+}
+
+probe_junie() {
+  if [ -n "${JUNIE_API_KEY:-}" ]; then
+    printf 'authenticated\n'
+    return 0
+  fi
+
+  if [ "$(uname -s)" = "Darwin" ]; then
+    local rc=0
+    fm_run_timed "$TIMEOUT" security find-generic-password -s junie-cli >/dev/null 2>&1 </dev/null || rc=$?
+    if [ "$rc" -eq 124 ]; then
+      printf 'timeout\n'
+      return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
+      printf 'authenticated\n'
+      return 0
+    fi
+  fi
+
+  if [ -n "${HOME:-}" ] && [ -e "$HOME/.junie/secure_credentials.json" ]; then
+    printf 'authenticated\n'
+    return 0
+  fi
+
+  printf 'unauthenticated\n'
+}
+
 case "$PROBE" in
   grok)
     command -v grok >/dev/null 2>&1 || emit
@@ -182,6 +220,17 @@ case "$PROBE" in
       VERSION_VERIFIED=no
     fi
     STATUS=$(probe_grok)
+    emit
+    ;;
+  junie)
+    command -v junie >/dev/null 2>&1 || emit
+    VERSION=$(junie_version)
+    if [ "$VERSION" = "$VERIFIED_JUNIE_VERSION" ]; then
+      VERSION_VERIFIED=yes
+    else
+      VERSION_VERIFIED=no
+    fi
+    STATUS=$(probe_junie)
     emit
     ;;
   *)
