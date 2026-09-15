@@ -9,7 +9,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 |---|---|
 | Version | `Junie version: 26.9.14 (3196.4)` |
 | Verified | 2026-09-14 |
-| Binary | `/Users/izzat-mbp/.local/bin/junie` (system-wide `junie` CLI executable) |
+| Binary | `~/.local/bin/junie` (system-wide `junie` CLI executable) |
 | Platform | macOS arm64 (Darwin 25.6.0) / Linux x64 |
 | Role | Worker harness for crewmate and scout tasks only |
 
