@@ -1702,7 +1702,7 @@ fm_treehouse_slot_owner_release() { # <worktree> <task-id> [home]
 # native lease publication and claim publication leaves a durable reservation;
 # rerunning with the same recorded home/task/path converges on that exact lease.
 fm_treehouse_reserve_record() ( # <task-id>
-  local id=$1 meta=$STATE/$1.meta project slot locked_project locked_slot lock entry name holder native_holder lease output state other field path
+  local id=$1 meta=$STATE/$1.meta project slot locked_project locked_slot lock entry name holder native_holder lease output state other_meta field path
   local n=0
   local -a held
   held=()
@@ -1751,17 +1751,17 @@ fm_treehouse_reserve_record() ( # <task-id>
   # exited or its record is in a different home. Only this exact record is ours.
   fm_treehouse_collect_states "$STATE" || exit 1
   for state in "${TREEHOUSE_OWNER_STATES[@]}"; do
-    for other in "$state"/*.meta; do
-      [ -e "$other" ] || [ -L "$other" ] || continue
-      [ -f "$other" ] && [ ! -L "$other" ] && [ -r "$other" ] || exit 1
-      [ "$(cd "$(dirname "$other")" && pwd -P)/$(basename "$other")" != \
+    for other_meta in "$state"/*.meta; do
+      [ -e "$other_meta" ] || [ -L "$other_meta" ] || continue
+      [ -f "$other_meta" ] && [ ! -L "$other_meta" ] && [ -r "$other_meta" ] || exit 1
+      [ "$(cd "$(dirname "$other_meta")" && pwd -P)/$(basename "$other_meta")" != \
         "$(cd "$(dirname "$meta")" && pwd -P)/$(basename "$meta")" ] || continue
-      [ -z "$(fm_meta_get "$other" remote_host)" ] || continue
+      [ -z "$(fm_meta_get "$other_meta" remote_host)" ] || continue
       for field in worktree home; do
-        path=$(fm_meta_get "$other" "$field")
+        path=$(fm_meta_get "$other_meta" "$field")
         [ -n "$path" ] || continue
         path=$(fm_treehouse_real_dir "$path") || continue
-        [ "$path" != "$slot" ] || { echo "REFUSED: $other also records $slot; no lease was changed" >&2; exit 1; }
+        [ "$path" != "$slot" ] || { echo "REFUSED: $other_meta also records $slot; no lease was changed" >&2; exit 1; }
       done
     done
   done

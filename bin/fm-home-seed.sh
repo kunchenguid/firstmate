@@ -49,6 +49,9 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
@@ -392,8 +395,6 @@ acquire_treehouse_home() (
   local id=$1 home project_lock holder lease_json entry
   # Home seeding uses the same pool: protect retained worker records before
   # native get can reset a slot, under the shared allocation/return lock.
-  # shellcheck source=bin/fm-backend.sh
-  . "$SCRIPT_DIR/fm-backend.sh"
   project_lock=$(fm_treehouse_project_lock_path "$FM_ROOT") || exit 1
   fm_lock_try_acquire "$project_lock" || { echo "REFUSED: Treehouse project is being changed" >&2; exit 1; }
   trap 'fm_lock_release "$project_lock"' EXIT
