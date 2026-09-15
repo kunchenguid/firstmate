@@ -217,6 +217,8 @@ test_hold_buckets_are_total_and_text_blind() {
   Captain hold set: 2026-06-01T00:00:00Z
 - [ ] live-hold - Live call (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
   Captain hold set: 2026-07-20T00:00:00Z
+- [ ] parked-hold - Parked without a live ask (repo: sample) (kind: ship) (hold: do not send) (hold-kind: parked)
+- [ ] standby-hold - Standby without a live ask (repo: sample) (kind: ship) (hold: public-proof standby) (hold-kind: parked)
 - [ ] opposite-word - Opposite wording (repo: sample) (kind: captain) (hold: non-deferred release choice) (hold-kind: captain)
   Captain hold set: 2026-07-20T00:00:00Z
 - [ ] marker-prose - Marker prose (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
@@ -253,6 +255,14 @@ EOF
   printf '%s' "$out" | jq -e '
     ([.backlog.records[] | select(.id == "upstream-work")][0].hold_bucket) == null
   ' >/dev/null || fail "a row that is not a captain hold must carry no bucket: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "parked-hold")][0]) as $parked
+    | ([.backlog.records[] | select(.id == "standby-hold")][0]) as $standby
+    | $parked.hold_kind == "parked" and $parked.hold_bucket == null
+      and $parked.captain_actionable == false
+      and $standby.hold_kind == "parked" and $standby.hold_bucket == null
+      and $standby.captain_actionable == false
+  ' >/dev/null || fail "a parked or standby hold without a live ask was a current human decision: $out"
   pass "captain-hold buckets are total, mutually exclusive, and never decided by prose"
 }
 

@@ -16,6 +16,11 @@ This skill is the single owner of the decision policy for no-mistakes ask-user f
 `AGENTS.md` section 7 points here and does not restate this procedure.
 Finding authority is determined by the criteria below, not by `yolo`.
 Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
+Captain-facing escalation for findings uses the DO IT / DECIDE / REVIEW filter owned by `captain-hold-lifecycle`.
+An unambiguous finding is DO IT: decide it here and do not create a live captain call.
+A genuinely ambiguous, expanding, or destructive finding is DECIDE: escalate it as a live ask.
+REVIEW is for finished artifacts, not ask-user findings.
+A parked or standby item is not a current human decision and is not this skill's finding path.
 
 The implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
@@ -50,8 +55,8 @@ Do not relay reviewer labels or gate output as if they settled the decision.
 
 ## Classification examples
 
-- Fixing a concrete defect that violates an original acceptance criterion is firstmate's to decide, regardless of implementation difficulty.
-- Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the captain.
-- A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction.
-- A genuinely security-sensitive action requires the captain under the stronger existing boundary even if it is otherwise within scope.
-- Complex architecture explicitly requested by the captain stays within scope and does not escalate merely because it is complex.
+- Fixing a concrete defect that violates an original acceptance criterion is DO IT, regardless of implementation difficulty.
+- Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and is DECIDE.
+- A new finding in the same causal theme is DECIDE before another fix round when prior fixes are accreting machinery around a questionable abstraction.
+- A genuinely security-sensitive action is DECIDE under the stronger existing boundary even if it is otherwise within scope.
+- Complex architecture explicitly requested by the captain stays DO IT and does not escalate merely because it is complex.
