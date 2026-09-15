@@ -49,7 +49,7 @@ Hold-for-return is the default and the only reach profile this release records: 
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
    Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
-5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
+5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child, and while it owns supervision (or an away-entry launch is in progress) `bin/fm-watch-arm.sh` yields with `watcher: deferred - away-mode daemon owns supervision` instead of displacing that child.
    On Pi nothing changes about arming: the supervision session's own cycle continues.
 
 ## While away
@@ -118,7 +118,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   It preserves proven idle composers as empty but requires a genuine container around shell glyphs; see `docs/herdr-backend.md` "Composer and injection safety" for the operator contract.
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick, subject to the bounded typed-submit rule under the max-defer escape below.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
@@ -130,6 +130,7 @@ an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (the return brief's health line carries it), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+An identical digest is also not retyped without bound: it is typed at most `FM_ESCALATE_SUBMIT_MAX_ATTEMPTS` times (default 3), is never re-typed while a previous typed attempt may still be in flight (`FM_ESCALATE_SUBMIT_INFLIGHT_SECS`, default 30), and at the cap the daemon raises that same wedge alarm instead of retyping; a changed buffer is a new digest and is never blocked (`docs/configuration.md` owns both knobs).
 
 ### Submit model
 
@@ -203,10 +204,12 @@ the operational prefix lets firstmate distinguish it from a real captain message
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
-- **Verified type-once submit model** - the digest is typed once (`send-keys -l`
-  on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
+- **Verified type-once submit model** - within one flush attempt the digest is
+  typed once (`send-keys -l` on tmux, `pane send-text` on herdr), then submitted
+  with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
+  Across flush attempts the identical digest is bounded by `FM_ESCALATE_SUBMIT_MAX_ATTEMPTS`, and at the cap the max-defer wedge alarm fires instead of another retype.
   For tmux that verdict normally means the shared classifier proved the composer cleared; a baseline-gated idle-to-busy transition may instead prove this Enter started the turn.
   For herdr's idle-baseline path it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
@@ -234,7 +237,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ### Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` and `.attempt` sidecars, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it, and archives the posture record last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
