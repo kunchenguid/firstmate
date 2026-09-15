@@ -117,14 +117,11 @@
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
-#   is published. Under that same lock it writes the slot's owner claim, which is
-#   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
-#   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
-#   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   is published. Slot leasing, legacy-record preflight, and owner binding are
+#   owned by bin/fm-wake-lib.sh. A spawn that aborts while it still holds that
+#   lock, with no surviving record, has launched no worker, so it returns its own
+#   lease and drops its claim; an abort after the lock is released leaves both
+#   reserved until they are reconciled by hand.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -934,6 +931,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_LEASE_HOLDER=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -967,6 +965,27 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_return_aborted_lease() {
+  local pool slots slot rc=0
+  if ! fm_treehouse_require_jq \
+     || ! pool=$(cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) \
+     || ! slots=$(printf '%s\n' "$pool" | jq -r --arg holder "$SPAWN_LEASE_HOLDER" \
+          '.[] | select(.lease_holder == $holder) | .path'); then
+    echo "warning: could not read Treehouse's leases for $PROJ_ABS; any lease task $ID's aborted spawn took stays reserved under holder $SPAWN_LEASE_HOLDER until it is returned by hand" >&2
+    return 1
+  fi
+  while IFS= read -r slot; do
+    [ -n "$slot" ] || continue
+    if ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$SPAWN_LEASE_HOLDER" "$slot") >/dev/null 2>&1; then
+      echo "warning: could not return task $ID's aborted Treehouse lease on $slot; it stays reserved under holder $SPAWN_LEASE_HOLDER until it is returned by hand" >&2
+      rc=1
+    fi
+  done <<EOF
+$slots
+EOF
+  return "$rc"
 }
 
 spawn_abort_cleanup() {
@@ -1065,13 +1084,22 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
-  # read-then-remove, so it runs only while the project lock that wrote the
-  # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
+  # A spawn that aborts after taking its lease but before its record survives
+  # must leave neither a lease nor a claim naming a task no record describes.
+  # While the project lock that allocated the slot is still held no worker has
+  # been launched, so every lease Treehouse itself records under this task's
+  # holder is returned - found from Treehouse's lease record, never the pane's
+  # possibly stale path, and conditioned on that holder so a slot Treehouse has
+  # handed elsewhere is never touched - and the claim, a read-then-remove, is
+  # dropped. A get still running in the pane when the wait times out can take
+  # its lease after this runs, and a later abort has already released the lock;
+  # those leases and claims stay reserved, and nothing reissues such a slot
+  # until it is reconciled by hand. Neither step ever removes another task's
+  # lease or claim.
+  if [ -n "$SPAWN_LEASE_HOLDER" ] && [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ] \
+     && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    spawn_return_aborted_lease || true
+  fi
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
      && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -1079,7 +1107,7 @@ spawn_abort_cleanup() {
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+      echo "warning: leaving task $ID's slot claim and Treehouse lease (holder $SPAWN_LEASE_HOLDER) on $WT in place; the Treehouse project lock is no longer held, so that slot stays reserved and is not reissued until it is reconciled by hand" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3304,7 +3332,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fm_treehouse_require_reserved_records "$PROJ_ABS" || exit 1
+  SPAWN_LEASE_HOLDER=$(fm_treehouse_lease_holder "$ID" "$FM_HOME") || exit 1
+  # Keep acquisition in the task shell so Treehouse uses the same pool config
+  # and environment as before. A durable lease survives this shell's exit.
+  spawn_send_text_line "$WT_TARGET" "fm_slot=\$(treehouse get --lease --lease-holder $(shell_quote "$SPAWN_LEASE_HOLDER")) && [ -n \"\$fm_slot\" ] && cd -- \"\$fm_slot\""
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3365,18 +3397,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 
-  # Claim the pool slot for this task. The interactive `treehouse get` sent to
-  # the pane above records only a process lease (Treehouse's durable
-  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
-  # homes, is not this path), so Treehouse cannot say which task a slot belongs
-  # to once that task's worker exits - and that is exactly when the slot is
-  # handed on and this task's worktree= line goes stale. The claim is what lets
-  # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
-  # a slot that cannot be claimed is refused here, at the cheapest point, rather
-  # than launching a worker whose slot teardown could later release out from
-  # under its successor.
-  # Written under the Treehouse project lock held from before slot allocation
-  # through metadata publication, so no other spawn or return sees a half-claim.
+  # Bind the native lease to this task before refreshing or launching. The
+  # shared project lock covers allocation, claim, and metadata publication.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2

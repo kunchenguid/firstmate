@@ -118,6 +118,12 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    # Model only the shell's lease-acquire command; never execute a worker.
+    for a in "$@"; do
+      case "$a" in
+        'fm_slot=$(treehouse get --lease '* ) bash -c "$a" || true ;;
+      esac
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -258,7 +264,62 @@ fm_test_make_spawn_fakebin() {
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_fake_exit0 "$fakebin" "$@"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = return ]; then
+  shift
+  holder= path=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --if-lease-holder) holder=$2; shift ;;
+      --if-lease-id) shift ;;
+      --*) ;;
+      *) path=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$holder" ] || exit 0
+  state="$(dirname "$(dirname "$path")")/treehouse-state.json"
+  [ -f "$state" ] || exit 1
+  jq -e --arg path "$path" --arg holder "$holder" \
+    'any(.worktrees[]; .path == $path and .lease_holder == $holder)' "$state" >/dev/null || exit 1
+  jq --arg path "$path" '
+    (.worktrees[] | select(.path == $path)) |= del(.leased, .lease_id, .lease_holder)
+  ' "$state" > "$state.tmp"
+  mv "$state.tmp" "$state"
+  exit 0
+fi
+if [ "${1:-}" = status ]; then
+  state="$(dirname "$(dirname "${FM_FAKE_PANE_PATH:-/}")")/treehouse-state.json"
+  if [ -f "$state" ]; then
+    jq '.worktrees' "$state"
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+[ "${1:-}" = get ] || exit 0
+holder=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --lease-holder) holder=$2; shift ;; esac
+  shift
+done
+path=${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
+if [ -n "$path" ]; then
+  state="$(dirname "$(dirname "$path")")/treehouse-state.json"
+  if [ -f "$state" ]; then
+    jq --arg path "$path" --arg holder "$holder" '
+      (.worktrees[] | select(.path == $path)) |=
+      (. + {leased:true, lease_id:"fixture-lease", lease_holder:$holder})
+    ' "$state" > "$state.tmp"
+    mv "$state.tmp" "$state"
+  fi
+fi
+printf '%s\n' "$path"
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 

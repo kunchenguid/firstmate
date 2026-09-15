@@ -834,25 +834,24 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
 # worker exited, its slot was granted to another task, and that task leaves no
 # record this home can enumerate. Nothing in the record scan contradicts the
 # stale worktree= line, so the slot's own owner claim is the only evidence that
-# it was reassigned. The slot is no longer this task's, so teardown finishes the
-# task's own cleanup and leaves the slot - its worker, its copy, its claim -
-# exactly as it found it.
+# it was reassigned. Teardown must preserve both the occupant and the stale
+# task's durable record for reconciliation.
 assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   local dir=$1 id=$2 other=$3 description=$4
-  assert_absent "$dir/home/state/$id.meta" "$description: the stale task's own record was not removed"
+  assert_present "$dir/home/state/$id.meta" "$description: the stale task record was removed"
   assert_present "$dir/pool/1/.fm-slot-owner" "$description: another task's slot claim was removed"
   assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
     "$description: another task's slot claim was rewritten"
   assert_present "$dir/pool/1/project/.git" "$description: the reassigned slot's checkout was removed"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "$description: the reassigned slot was returned to the pool: $(cat "$dir/runtime.log")"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "$description: runtime cleanup ran before refusal: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "$description: the warning should name the task the slot was reassigned to"
   assert_contains "$(cat "$dir/stderr")" "reassigned" \
     "$description: the warning should name the reassignment as the cause"
 }
 
-test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
+test_reassigned_pool_slot_refuses_without_touching_either_task() {
   local dir id=stale-task other=reassigned-task worker rc
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
@@ -875,7 +874,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   rc=$?
   set -e
 
-  [ "$rc" -eq 0 ] || fail "teardown of a task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$rc" -ne 0 ] || fail "teardown accepted a reassigned slot"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
@@ -907,7 +906,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$rc" -ne 0 ] || fail "teardown accepted a clean reassigned slot"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
   kill "$worker" 2>/dev/null || true
@@ -935,7 +934,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
     "unreadable-claim refusal should name the claim file to inspect"
 
-  pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
+  pass "fm-teardown: a reassigned slot refuses and preserves both tasks"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -984,7 +983,7 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
-test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_reassigned_pool_slot_refuses_without_touching_either_task
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
