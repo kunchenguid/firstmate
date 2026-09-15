@@ -266,6 +266,197 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- Cygwin / Git-for-Windows layer ------------------------------------------
+#
+# Both of this platform's departures are reproduced here rather than assumed, so
+# these run identically on Linux and macOS CI: its ps rejects -o outright, and
+# every shell it reports has its parent link severed at 1 because the real parent
+# is a Windows process Cygwin cannot see. The fakebin itself is shared as
+# fm_cygwin_fakebin (tests/lib.sh) with tests/fm-claude-stop-autoarm.test.sh,
+# which drives the same Windows bridge end to end through the real Stop hook.
+
+# WINPID 7204 is the session harness. 4321 is an ordinary desktop process, and
+# 5150 is the path-shaped lookalike that must never read as a harness.
+WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe
+  4199454       0       0       5150  ?              0 22:24:48 C:\tools\claude-notes\helper.exe'
+
+# The same table with a process started more than 24 hours ago, where the real
+# ps prints STIME as a two-field date ("Sep  6") instead of one clock field.
+WIN_TABLE_DATE_STIME='  4201508       0       0       7204  ?              0 Sep  6 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 Sep  6 C:\Windows\explorer.exe'
+
+test_windows_session_is_identified_from_its_published_pid() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-published"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the session was not identified at all on a severed Cygwin parent link"
+  [ "$got" = 'win:7204' ] || fail "expected the tagged Windows session pid win:7204, got '$got'"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a live Windows-side session was classified as a dead lock owner"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the session holding the lock did not recognize itself as the owner"
+  pass "session-lock: a Windows session is identified from its published pid across the severed parent link"
+}
+
+test_windows_published_pid_is_confirmed_before_it_is_trusted() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-unconfirmed"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A published pid is a claim. Each of these shapes must be discarded rather
+  # than bound: a process that is gone, one that is not a harness at all, and a
+  # path that merely contains the harness name inside a longer component.
+  for claimed in 9999 4321 5150; do
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID="$claimed" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "published pid $claimed was bound as this session's harness without confirmation"
+    fi
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" "fm_harness_pid_alive win:$claimed"; then
+      fail "published pid $claimed passed the harness-liveness predicate"
+    fi
+  done
+  pass "session-lock: a published Windows pid is confirmed against the process table before it is trusted"
+}
+
+test_windows_pid_is_never_resolved_as_a_cygwin_pid() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-namespace"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # 700 is a harness in the CYGWIN table and absent from the Windows one. The
+  # two namespaces overlap numerically, so resolving a tagged pid through the
+  # local table would bind a home to whatever unrelated process holds that
+  # number - which is exactly what the tag exists to prevent.
+  FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    || fail "fixture is vacuous: pid 700 must be a live harness in the Cygwin table"
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:700'; then
+    fail "a tagged Windows pid was resolved against the Cygwin process table"
+  fi
+  pass "session-lock: a tagged Windows pid is never resolved against the Cygwin process table"
+}
+
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock() {
+  local dir fakebin identity
+  dir="$TMP_ROOT/win-identity-gates"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # The identity a session writes into the lock is read back by gates spread
+  # across several scripts - startup-completion recording and its clear/compact
+  # validation, the deferred network sweeps, and the Stop auto-arm. Each one
+  # asks only "is this value a usable identity", and each answered that with its
+  # own numeric test, so introducing a second identity shape made every one of
+  # them silently read a valid holder as malformed. The visible cost was a
+  # completion record that was never written, which reads as "startup never
+  # finished" and repeats the whole sequence on every clear or compact. One
+  # predicate owns the question so a third shape can never split them again.
+  identity=$(FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "fixture is vacuous: no identity was published to gate on"
+  lib_eval "$fakebin" "fm_session_pid_valid '$identity'" \
+    || fail "the identity '$identity' this session publishes is rejected by the gates that read it back"
+
+  # A local pid stays equally valid: the Windows shape is additional, not a
+  # replacement, and the same predicate serves both platforms.
+  lib_eval "$fakebin" 'fm_session_pid_valid 700' \
+    || fail "an ordinary local pid was rejected as an invalid lock identity"
+
+  # Still fail closed on the shapes a torn or hand-edited lock produces, and on
+  # a bare tag carrying no pid at all.
+  for bad in '' 'win:' 'win:abc' 'abc' '70 0' '-1' 'win:12abc' 'win:1234x' 'win:12 3'; do
+    if lib_eval "$fakebin" "fm_session_pid_valid '$bad'"; then
+      fail "the malformed lock value '$bad' was accepted as a usable identity"
+    fi
+  done
+  pass "session-lock: a published identity is accepted by every gate that reads the lock"
+}
+
+test_cygwin_ps_without_o_still_resolves_a_local_harness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-local"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # An MSYS-native harness lives in the same process table as this shell, so it
+  # must resolve through the ordinary walk and stay an untagged pid. This is
+  # what proves the walk survives a ps with no -o option at all.
+  got=$(FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a harness in the local process table was not resolved when ps rejected -o"
+  [ "$got" = 700 ] || fail "expected the untagged local harness pid 700, got '$got'"
+  pass "session-lock: a harness in the local process table resolves untagged when ps has no -o option"
+}
+
+test_cygwin_date_form_stime_does_not_truncate_the_command() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-long-running"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A process started more than 24 hours ago gets a two-field date STIME, which
+  # moves COMMAND one whitespace field to the right in every Cygwin row. The
+  # command must still come back whole: reading it from the field number that
+  # only holds while STIME is a single clock field returns the tail of the date
+  # glued to the front of the command instead, and on the Windows side that
+  # truncated path is what decides whether the row names a verified harness.
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_comm 700') \
+    || fail "fm_ps_comm failed on a two-field date STIME"
+  [ "$got" = '/opt/claude/versions/2.1.220' ] \
+    || fail "fm_ps_comm misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_args 700') \
+    || fail "fm_ps_args failed on a two-field date STIME"
+  [ "$got" = '/opt/claude/versions/2.1.220' ] \
+    || fail "fm_ps_args misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_CYG_STIME='Sep  6' lib_eval "$fakebin" 'fm_ps_ppid 700') \
+    || fail "fm_ps_ppid failed on a two-field date STIME"
+  [ "$got" = 1 ] || fail "fm_ps_ppid misread a date-form STIME row as '$got'"
+
+  # The Windows-side table is read through the same column logic.
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE_DATE_STIME" lib_eval "$fakebin" 'fm_win_command 7204') \
+    || fail "fm_win_command failed on a two-field date STIME row"
+  [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
+    || fail "fm_win_command misread a date-form STIME row as '$got'"
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE_DATE_STIME" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the Windows session was not identified behind a date-form STIME"
+  [ "$got" = 'win:7204' ] || fail "expected win:7204 behind a date-form STIME, got '$got'"
+  pass "session-lock: a two-field date STIME does not truncate the command a ps row reports"
+}
+
+test_unreadable_windows_table_does_not_report_a_tagged_holder_dead() {
+  local dir fakebin
+  dir="$TMP_ROOT/cygwin-unreadable"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # Callers (the Stop auto-arm and fm-lock.sh's live-owner refusal) reclaim the
+  # session lock as soon as a tagged holder reads dead. One failed `ps -W` read
+  # must therefore report the holder live, not hand a running session's home to
+  # a second one.
+  FM_TEST_PS_W_FAIL=1 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a failed ps -W read made a tagged holder read as dead"
+  FM_TEST_PS_W_FAIL=1 CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid' \
+    && fail "a failed ps -W read published a tagged session identity"
+
+  # A read that succeeds but returns no output is equally unreadable: it proves
+  # nothing about the holder, so it must fail closed the same way.
+  FM_TEST_PS_W_EMPTY=1 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a successful-but-empty ps -W read made a tagged holder read as dead"
+  FM_TEST_PS_W_EMPTY=1 CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid' \
+    && fail "a successful-but-empty ps -W read published a tagged session identity"
+
+  # The genuinely-absent case still works: a readable table with no row for the
+  # pid proves the holder dead and reclaim may proceed.
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:9999'; then
+    fail "a pid absent from a readable table was reported as a live holder"
+  fi
+  pass "session-lock: an unreadable Windows process table never reports a tagged holder dead"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -409,6 +600,13 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_session_is_identified_from_its_published_pid
+test_windows_published_pid_is_confirmed_before_it_is_trusted
+test_windows_pid_is_never_resolved_as_a_cygwin_pid
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
+test_cygwin_ps_without_o_still_resolves_a_local_harness
+test_cygwin_date_form_stime_does_not_truncate_the_command
+test_unreadable_windows_table_does_not_report_a_tagged_holder_dead
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
