@@ -68,6 +68,9 @@ SH
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
+  # fm-cost-summary-lib.sh: teardown sources it to write the close-out
+  # consumption summary; it in turn sources fm-classify-lib.sh above.
+  ln -s "$ROOT/bin/fm-cost-summary-lib.sh" "$fake/bin/fm-cost-summary-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
@@ -168,6 +171,9 @@ SH
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
+  # fm-cost-summary-lib.sh: teardown sources it to write the close-out
+  # consumption summary; it in turn sources fm-classify-lib.sh above.
+  ln -s "$ROOT/bin/fm-cost-summary-lib.sh" "$fake/bin/fm-cost-summary-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
   ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
