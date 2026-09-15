@@ -38,18 +38,17 @@ test_projection_is_deterministic_and_allowlisted() {
     and .counts == {running:2,waiting:2,blocked:1,attention:2}
     and [.projects[].id] == ["alpha","beta","delta","gamma"]
     and ([.projects[].tasks[] | select(.id == "healthy-work")][0]
-      | .state == "working" and .crew.summary == "1 LIVE" and .elapsed_seconds == 5460)
+      | .state == "working" and .crew.summary == "1 LIVE")
     and ([.projects[].tasks[] | select(.id == "captain-call")][0]
       | .hold.classification == "live" and .hold.actionable == true
-        and .hold.question == "Keep legacy readers or require version 2?"
-        and .elapsed_seconds == null)
+        and .hold.question == "Keep legacy readers or require version 2?")
     and ([.projects[].tasks[] | select(.id == "blocked-work")][0]
       | .state == "blocked" and .blockers == ["upstream-api"] and .artifacts.pr_url == null)
     and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
       | .state == "unknown" and .crew.summary == "UNKNOWN" and .state != "stopped")
     and ([.projects[].tasks[] | select(.id == "done-work")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
-  ' "$one" >/dev/null || fail "projected state semantics, stable ordering, elapsed time, or safe links are wrong"
+  ' "$one" >/dev/null || fail "projected state semantics, stable ordering, or safe links are wrong"
   for unsafe in PRIVATE-INBOX-TEXT-MUST-NOT-LEAK SECRET-STATUS-DETAIL SECRET-RAW-LINE PRIVATE-EVENT-TEXT PRIVATE-DECISION-TEXT FORBIDDEN-CONTROL-TEXT; do
     ! grep -Fq "$unsafe" "$one" || fail "unsafe source text leaked through the allowlist: $unsafe"
   done

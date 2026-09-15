@@ -15,7 +15,6 @@
       "backend": "tmux",
       "project": "/work/alpha",
       "spawn_gen": "gen-healthy-2",
-      "started_at": "2026-09-15T12:04:00Z",
       "backlog": {"structured": true, "id": "healthy-work", "state": "in_flight", "title": "Acceptance tests", "repo": "alpha", "kind": "ship", "hold_bucket": null, "captain_actionable": false, "unresolved_blocker_ids": []},
       "current_state": {"state": "unknown", "source": "none", "detail": "task generation changed during snapshot", "observed_at": "2026-09-15T12:05:00Z"},
       "endpoint": {"status": "unknown", "target": "firstmate:fm-healthy-work"},

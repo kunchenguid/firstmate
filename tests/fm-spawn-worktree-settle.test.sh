@@ -131,6 +131,8 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
+  assert_no_grep '^started_at=' "$HOME_DIR/state/$id.meta" \
+    "spawn added elapsed-time metadata to the operational task record"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 

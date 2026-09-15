@@ -55,8 +55,6 @@ validate_payload() {  # <data.json>
       and (.state | text(40))
       and (.state_source | text(40))
       and (.observed_at == null or (.observed_at | stamp))
-      and (.started_at == null or (.started_at | stamp))
-      and (.elapsed_seconds == null or (.elapsed_seconds | nonnegative_integer))
       and (.crew | type == "object")
       and (.crew.summary | text(40))
       and (.decisions | type == "array" and all(.[]; text(240)))
