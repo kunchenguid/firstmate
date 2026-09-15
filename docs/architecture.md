@@ -219,6 +219,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
+The treehouse pool cap (`max_trees`, default 16) counts every entry in the shared pool directory regardless of which clone created it, so two clones of one repository on one host share one cap, and a worktree bound to another clone still consumes a slot.
+At the cap, `treehouse get` refuses within seconds with a one-line reason on the pane, and the spawn relays that line instead of waiting out its bound; the same header owns that wait.
+The spawn holds the per-project Treehouse lock across that wait, so it waits past the 60-second settle bound only while a foreground reader shows `treehouse get` still running.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

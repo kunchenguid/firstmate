@@ -152,6 +152,46 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# fm_backend_tmux_foreground_processes: every process in <target>'s pane tty
+# foreground process group, one per line as `<name>TAB<cwd>TAB<cmdline>`, or
+# nothing when neither source below can be read. Mirrors Herdr's
+# fm_backend_herdr_foreground_processes for fm-spawn.sh's post-`treehouse get`
+# wait, which needs to know whether treehouse (or a child of it such as
+# `git fetch` or `ssh`) is still running in the pane, because
+# `#{pane_current_path}` reads the project directory for the whole fetch
+# exactly as it does after a refusal.
+#
+# The process table is the primary source: `ps` over the pane tty lists every
+# member of the foreground group with its kernel name and full argv, so a
+# persisting `treehouse get` parent is named even while `git fetch origin` is
+# the process doing the work. tmux exposes no per-process cwd, so that field
+# is left empty here (the caller reads `#{pane_current_path}` itself). When
+# the table cannot be read (no tty, no ps rows), tmux's own
+# `#{pane_current_command}` view of the group leader stands in as a single
+# line.
+fm_backend_tmux_foreground_processes() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args rows name
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  rows=
+  if [ -n "$tty" ]; then
+    rows=$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+      | while read -r pid pgid tpgid comm; do
+          [ -n "$comm" ] || continue
+          [ "$pgid" = "$tpgid" ] || continue
+          args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+          args=${args#"${args%%[![:space:]]*}"}
+          printf '%s\t\t%s\n' "$comm" "$(printf '%s' "$args" | tr '\t\n\r' '   ')"
+        done)
+  fi
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows"
+    return 0
+  fi
+  name=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || name=
+  [ -n "$name" ] || return 0
+  printf '%s\t\t%s\n' "$name" "$name"
+}
+
 # The process-name classifier every liveness signal below feeds
 # (fm_agent_process_classify_name) is owned by bin/fm-agent-process-lib.sh,
 # shared with the Herdr adapter so both backends mean the same thing by
