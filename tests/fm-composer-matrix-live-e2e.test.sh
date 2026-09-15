@@ -115,12 +115,20 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
+# Each harness is launched bare, the shape its composer renders under every
+# posture - except opencode, whose shipped worker launch passes `--auto`
+# (bin/fm-spawn.sh) and whose composer footer reads `Build auto · <model>`
+# there instead of `Build · <model>`. A bare opencode would prove a surface
+# Firstmate no longer runs, so this guard launches the shipped posture.
 for h in claude codex opencode pi grok kimi muse; do
-  if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
-  else
+  if ! command -v "$h" >/dev/null 2>&1; then
     note "harness absent, not verified here: $h"
+    continue
   fi
+  case "$h" in
+    opencode) check_harness_idle_empty "$h" "$h" --auto ;;
+    *) check_harness_idle_empty "$h" "$h" ;;
+  esac
 done
 
 # --- 2. The strict blank-row posture, live ----------------------------------

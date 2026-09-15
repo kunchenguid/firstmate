@@ -482,13 +482,16 @@ Grok was not installed on the verification machine for this 2026-09-14 change, s
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 The 2026-09-15 OpenCode `--auto` worker posture ([OpenCode worker permission posture](#opencode-worker-permission-posture)) renders the mode footer as `Build auto · <model>`, which the leftbar footer tolerance `^(Build|Plan)[[:space:]]+·` no longer matched, so an idle `--auto` worker read `pending` and would have starved steering for every opencode crewmate.
-The footer regex now takes an optional `auto` qualifier (`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT` in `bin/fm-composer-lib.sh`), pinned by the portable regressions in `tests/fm-composer-lib.test.sh`, and re-proven live on 2026-09-15:
+The footer regex now takes an optional `auto` qualifier (`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT` in `bin/fm-composer-lib.sh`), pinned by the portable regressions in `tests/fm-composer-lib.test.sh`.
+The 2026-09-15 matrix run below launched opencode as a bare binary, the posture this guard used for every harness at the time, so its `ok` line proves only that the NON-auto footer still classifies empty on 1.18.31 - it would have printed the same line under the old regex and carries no evidence about the `--auto` footer:
 
 ```text
 ok - opencode (1.18.31): real idle composer classifies empty
 ```
 
 The same matrix run passed claude 2.1.259 and codex-cli 0.154.0, while pi 0.85.1 failed on a new first-launch folder-trust dialog in its worktree - a pre-existing drift the guard correctly reports loudly, unrelated to the footer change.
+The live proof of the `--auto` footer is the 2026-09-15 steering-inbox doorbell rerun ([Steering-inbox doorbell](#steering-inbox-doorbell)), which launched `opencode --auto` on 1.18.31 and reached a proven `empty` verdict on that composer before its doorbell went out (a non-empty verdict there is noted in the run output, as grok's was).
+This guard now launches opencode under the shipped `--auto` posture too (`tests/fm-composer-matrix-live-e2e.test.sh`), departing from its bare-binary convention for the one harness whose shipped launch differs, so matrix refreshes prove the surface Firstmate actually runs directly; the first such run, on 2026-09-15, printed `ok - opencode (1.18.31): real idle composer classifies empty` against a real `opencode --auto` pane.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
