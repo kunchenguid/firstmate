@@ -298,7 +298,6 @@ Make routine reversible engineering decisions under existing authority; triage f
 Reuse still-valid evidence on unchanged code and configuration; run focused regressions for edits, avoid duplicate reviews, and do not restart whole pipelines for metadata-only changes or repeatedly inspect intentionally idle workers without new evidence.
 Assign replacement hardware owners early and advance safe relevant device testing once basic checks pass, in parallel with review; never infer hardware readiness from host tests.
 This replaces fix-everything guidance, not required independent review, real brake, stop, watchdog or unintended-motion fixes, device-specific authority, safety gates or explicit merge approval; motor limits are unchanged.
-Default cap remains 3 review rounds, up to 5 only for a later genuinely major finding; narrower findings are recorded for follow-up, not converted into more blocking rounds.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
