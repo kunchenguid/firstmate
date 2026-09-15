@@ -952,6 +952,10 @@ test_terminal_passed() {
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
+  assert_contains "$out" "run completed" "passed outcome reports only run completion"
+  assert_not_contains "$out" "merged" "run success is not merge evidence"
+  assert_not_contains "$out" "closed" "run success is not closure evidence"
+  assert_contains "$out" "https://github.com/o/r/pull/1" "passed run points at its PR"
   pass "terminal passed run is authoritative"
 }
 
