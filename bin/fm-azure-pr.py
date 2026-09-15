@@ -20,6 +20,12 @@ import tempfile
 from urllib.parse import quote, unquote, urlsplit
 
 
+PUSH_ONLY_POLICY_TYPES = {
+    "2e26e725-8201-4edd-8bf5-978563c34a80",
+    "7ed39669-655c-494e-b4a0-a08b4da0fcce",
+}
+
+
 class Refused(Exception):
     pass
 
@@ -182,7 +188,7 @@ class Azure:
             require(type(c.get("id")) is int and type(c.get("revision")) is int and
                     type(c.get("isEnabled")) is bool and type(c.get("isBlocking")) is bool,
                     "unreadable applicable Azure policy")
-            if c["isEnabled"] and c["isBlocking"]:
+            if c["isEnabled"] and c["isBlocking"] and c.get("type", {}).get("id", "").lower() not in PUSH_ONLY_POLICY_TYPES:
                 matches = [p for p in policies if p.get("configuration", {}).get("id") == c.get("id")]
                 require(len(matches) == 1 and matches[0]["configuration"] == c,
                         "mandatory Azure policy has missing, duplicate or outdated evaluation")
