@@ -211,11 +211,9 @@ lavish_owner_load_locked() {  # <source-id>
   [ -n "$LAVISH_OWNER_STATE" ] && [ -n "$LAVISH_OWNER_TOKEN" ] \
     && [ -n "$LAVISH_OWNER_ARTIFACT" ] || return 2
   case "$LAVISH_OWNER_STATE$LAVISH_OWNER_ARTIFACT" in *$'\n'*) return 2 ;; esac
-  if [ "$LAVISH_OWNER_KIND" = direct ]; then
+  if [ "$LAVISH_OWNER_KIND" = direct ] || [ -n "$LAVISH_OWNER_PID$LAVISH_OWNER_IDENTITY" ]; then
     case "$LAVISH_OWNER_PID" in ''|*[!0-9]*|0) return 2 ;; esac
     [ -n "$LAVISH_OWNER_IDENTITY" ] || return 2
-  else
-    [ -z "$LAVISH_OWNER_PID$LAVISH_OWNER_IDENTITY" ] || return 2
   fi
   return 0
 }
@@ -257,19 +255,32 @@ lavish_direct_owner_state_locked() {
 # claim exists. This lazy check reclaims a reservation left after terminal
 # retirement or removal of its old home without weakening a live generation.
 lavish_registered_owner_active_locked() {  # <source-id>
-  local registration
+  local registration rc
+  if [ -n "$LAVISH_OWNER_PID" ]; then
+    lavish_direct_owner_state_locked; rc=$?
+    [ "$rc" -eq 1 ] || return 0
+  fi
   registration="$(fm_procevent_registry_dir "$LAVISH_OWNER_STATE")/$1.source"
   { [ -f "$registration" ] && [ ! -L "$registration" ]; } \
     || [ -e "$(fm_procevent_claim_path "$1")" ]
 }
 
 lavish_registered_reserve() {  # <source-id> <canonical-artifact>
-  local id=$1 artifact=$2 state owner_rc direct_rc
+  local id=$1 artifact=$2 state owner_rc direct_rc pid identity
+  pid=$$
+  identity=$(fm_pid_identity "$pid") || die "cannot identify the arming process"
   state=$(lavish_state_root) || die "process-event state root is not an existing physical directory: $STATE"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock Lavish feedback owner: $id"
   lavish_owner_load_locked "$id"; owner_rc=$?
   case "$owner_rc" in
     0)
+      if [ "$LAVISH_OWNER_KIND" = process-event ] && [ -n "$LAVISH_OWNER_PID" ]; then
+        lavish_direct_owner_state_locked; direct_rc=$?
+        if [ "$direct_rc" -ne 1 ]; then
+          fm_procevent_source_lock_release "$id"
+          die "canonical artifact is being armed by another process (source $id)"
+        fi
+      fi
       if [ "$LAVISH_OWNER_KIND" = process-event ] \
         && [ "$LAVISH_OWNER_STATE" = "$state" ] \
         && [ "$LAVISH_OWNER_ARTIFACT" = "$artifact" ]; then
@@ -277,9 +288,6 @@ lavish_registered_reserve() {  # <source-id> <canonical-artifact>
       elif [ "$LAVISH_OWNER_KIND" = direct ]; then
         lavish_direct_owner_state_locked; direct_rc=$?
         if [ "$direct_rc" -eq 1 ]; then
-          rm -f -- "$(lavish_owner_path "$id")"
-          lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
-            || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
           LAVISH_RESERVATION_CREATED=1
         else
           fm_procevent_source_lock_release "$id"
@@ -289,15 +297,10 @@ lavish_registered_reserve() {  # <source-id> <canonical-artifact>
         fm_procevent_source_lock_release "$id"
         die "canonical artifact is reserved by another process-event home (source $id); retire that owner before arming this one"
       else
-        rm -f -- "$(lavish_owner_path "$id")"
-        lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
-          || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
         LAVISH_RESERVATION_CREATED=1
       fi
       ;;
     1)
-      lavish_owner_publish_locked "$id" process-event "$state" "$artifact" \
-        || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
       LAVISH_RESERVATION_CREATED=1
       ;;
     *)
@@ -305,6 +308,8 @@ lavish_registered_reserve() {  # <source-id> <canonical-artifact>
       die "Lavish feedback owner record is malformed for source $id; inspect $(lavish_owner_path "$id") before retrying"
       ;;
   esac
+  lavish_owner_publish_locked "$id" process-event "$state" "$artifact" "$pid" "$identity" \
+    || { fm_procevent_source_lock_release "$id"; die "cannot reserve Lavish feedback owner: $id"; }
   fm_procevent_source_lock_release "$id" || die "cannot unlock Lavish feedback owner: $id"
 }
 

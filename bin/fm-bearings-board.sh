@@ -237,7 +237,7 @@ lavish_status_field() {  # <lavish-axi output>
 # `<file>,<status>,"<url>",<pending>`, and only a live session is listed `open`.
 lavish_session_listed_open() {  # <canonical-board-path>
   local listing
-  listing=$(lavish-axi 2>/dev/null) || return 1
+  listing=$(lavish-axi 2>/dev/null) || return 2
   printf '%s\n' "$listing" | awk -v path="$1" '
     { line = $0; sub(/^[[:space:]]+/, "", line) }
     index(line, path ",") == 1 {
@@ -254,14 +254,17 @@ lavish_session_listed_open() {  # <canonical-board-path>
 # command. Every non-live path queries with --no-open first. A user-ended board
 # remains closed unless this exact build carries explicit reopen intent.
 establish_board_session() {  # <board> <reopen-ended: 0|1>
-  local board=$1 reopen_ended=$2 real out status version
+  local board=$1 reopen_ended=$2 real out status version listing_rc
   BOARD_SESSION_ACTIVE=1
   BOARD_SOURCE_RETIRED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
   if lavish_session_listed_open "$real"; then
     printf 'session: live\n'
     return 0
+  else
+    listing_rc=$?
   fi
+  [ "$listing_rc" -eq 1 ] || fail "cannot determine the board Lavish connection state; refusing browser actions"
 
   out=$(lavish-axi "$board" --no-open) || fail "cannot inspect the board Lavish session without opening it"
   printf '%s\n' "$out"

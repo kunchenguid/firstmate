@@ -68,6 +68,7 @@ case "${1-}" in
     exit 0
     ;;
   '')
+    [ ! -e "$state/list-fails" ] || exit 1
     if [ -e "$state/end-before-next-list" ] && [ -s "$state/open" ]; then
       : > "$state/open"
       rm -f "$state/end-before-next-list"
@@ -503,6 +504,15 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   [ "$opens" = 1 ] || fail "a connected rebuild issued $opens browser opens instead of preserving the existing tab"
   [ ! -e "$home/lavish-state/reopen-count" ] \
     || fail "a connected rebuild reopened the existing session"
+  : > "$home/lavish-state/list-fails"
+  if out=$(run_board "$home" build "$data" 2>&1); then
+    fail "a rebuild accepted unknown connection state"
+  fi
+  assert_contains "$out" "refusing browser actions" "listing failure was not reported: $out"
+  [ "$(cat "$home/lavish-state/open-count")" = 1 ] \
+    || fail "a failed listing caused another browser open"
+  [ ! -e "$home/lavish-state/reopen-count" ] \
+    || fail "a failed listing caused a reopen"
   pass "rebuild refreshes the connected board in place without another open or listener"
 }
 
