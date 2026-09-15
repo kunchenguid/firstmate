@@ -8,7 +8,9 @@ set -u
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
+CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
+fm_git_identity fmtest fmtest@example.invalid
 
 set_mtime() { # <epoch> <path>
   local epoch=$1 path=$2 stamp
@@ -648,6 +650,92 @@ test_nonterminal_and_captain_held_states_do_not_report() {
   pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
 }
 
+# A real git repo checked out on <branch>, so bin/fm-crew-state.sh's own branch
+# attribution (git symbolic-ref) resolves like it would for a live crew
+# worktree. Mirrors tests/fm-crew-state.test.sh's helper of the same name.
+make_repo_on_branch() {  # <dir> <branch>
+  local dir=$1 branch=$2
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" commit -q --allow-empty -m init
+  git -C "$dir" checkout -q -b "$branch"
+  # Real worktree HEAD for run head-binding (FM_FAKE_AXI_STATUS's head: field).
+  FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+}
+
+# A fake `no-mistakes` serving FM_FAKE_AXI_STATUS for `axi status`, so the REAL
+# bin/fm-crew-state.sh (not a canned "state: X" stub) drives this scan. Mirrors
+# the relevant slice of tests/fm-crew-state.test.sh's make_fakebin.
+make_real_crew_state_case() {  # <name> -> echoes case dir
+  local name=$1 dir fb
+  dir="$TMP_ROOT/$name"
+  fb="$dir/fakebin"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config-absent" "$dir/root" "$fb"
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi) shift; [ "${1:-}" = status ] && printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+  : > "$dir/forge.log"
+  printf '%s\n' "$dir"
+}
+
+run_real_reconcile() {  # <case-dir> <config-dir>
+  local dir=$1 config=$2
+  PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$config" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_CREW_STATE_BIN="$CREW_STATE" FM_FORGE_LOG="$dir/forge.log" \
+    "$RECON" scan --startup
+}
+
+# kunchenguid/firstmate#3285 shape 4: this scanner already excludes any worker
+# fm-crew-state.sh reports as paused (test_nonterminal_and_captain_held_states_
+# do_not_report above), and bin/fm-crew-state.sh's own
+# config/paused-run-failed-absorb (tests/fm-crew-state.test.sh case (l)) is what
+# makes it report paused instead of failed for a declared pause whose run died
+# underneath it. This is the composition of those two already-owned contracts
+# through the REAL fm-crew-state.sh binary, not a restatement of either: with
+# the flag absent, the failed run-step still wins and this scanner reports it
+# exactly as before; with it present, the absorbed pause never reaches
+# candidacy at all.
+test_paused_run_failed_absorb_composes_with_inactive_reconcile() {
+  local dir
+  dir=$(make_real_crew_state_case shape4-compose)
+  make_repo_on_branch "$dir/wt" fm/shape4
+  fm_write_meta "$dir/home/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$dir/wt" 'kind=ship'
+  printf 'paused: no-mistakes run in progress, clears on its own\n' \
+    > "$dir/home/state/child.status"
+  age "$dir/home/state/child.meta" "$dir/home/state/child.status"
+  export FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/shape4
+  status: completed
+  head: \"${FM_FAKE_RUN_HEAD:-abc1234}\"
+  pr: \"\"
+  findings: none
+outcome: failed"
+
+  run_real_reconcile "$dir" "$dir/home/config-absent"
+  [ "$(outcome_count "$dir/home" pending)" = 1 ] \
+    || fail "flag absent: a declared pause under a failed run should still reach inactive reporting"
+
+  rm -rf "$dir/home/state/terminal-outcomes"
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/paused-run-failed-absorb"
+  run_real_reconcile "$dir" "$dir/home/config"
+  [ "$(outcome_count "$dir/home" pending)" = 0 ] \
+    || fail "flag present: the absorbed pause reached inactive-outcome reporting anyway"
+  unset FM_FAKE_AXI_STATUS
+  pass "the absorbed pause composes through the real fm-crew-state.sh to suppress inactive-outcome reporting"
+}
+
 # The actual watcher poll invokes the helper, while an idle secondmate remains
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
@@ -840,6 +928,7 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
+test_paused_run_failed_absorb_composes_with_inactive_reconcile
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
