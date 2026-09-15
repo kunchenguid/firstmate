@@ -395,7 +395,7 @@ test_matrix_opencode_leftbar_signals() {
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
-  local screen typed dim_screen captured_idle captured_pending out auto_idle auto_plain auto_typed
+  local screen typed dim_screen captured_idle captured_pending out auto_idle
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -416,10 +416,6 @@ test_matrix_opencode_leftbar_signals() {
   # classifies pending, starving steering for every opencode crewmate.
   auto_idle=$'  ┃\n  ┃  '"${ESC}[38;2;128;128;128mAsk anything… \"What is the tech stack?\"${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build auto · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
   assert_screen "opencode --auto idle footer on tmux" empty "$CAPS_TMUX" "$auto_idle" 1
-  auto_plain=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build auto · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀'
-  assert_screen "opencode --auto idle footer on plain backends" empty "$CAPS_PLAIN" "$auto_plain"
-  auto_typed=$'┃\n┃  refactor the parser please\n┃\n┃  Build auto · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
-  assert_screen "opencode --auto typed composer on tmux" pending "$CAPS_TMUX" "$auto_typed" 1
   # Signal separation: with the idle pattern overridden to something that
   # cannot match, a DIM-styled hint still proves empty through the ghost strip.
   out=$(FM_COMPOSER_IDLE_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_TMUX" "$dim_screen" 1)

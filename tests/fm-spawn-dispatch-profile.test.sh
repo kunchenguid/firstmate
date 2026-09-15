@@ -576,9 +576,10 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch
+  local rec id default_id out status launch
   id=profile-opencode-z7
-  rec=$(make_spawn_case profile-opencode opencode "$id")
+  default_id=profile-opencode-z7b
+  rec=$(make_spawn_case profile-opencode opencode "$id" "$default_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
@@ -588,13 +589,18 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --auto --prompt" \
     "opencode launch did not thread model with the auto-approve posture"
-  assert_contains "$launch" "opencode --auto --prompt" \
-    "opencode launch did not use the auto-approve interactive prompt path"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
     "opencode launch must reach full access through --auto, not a forced wildcard-allow config override"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$default_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode spawn without a model should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "opencode --auto --prompt" \
+    "opencode default-model launch did not use the auto-approve interactive prompt path"
   pass "opencode receives --model with --auto and omits the unsupported effort axis"
 }
 
