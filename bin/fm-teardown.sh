@@ -1655,6 +1655,11 @@ teardown_treehouse_return() {
   return 1
 }
 
+report_dirty_tracked_claude_settings() {  # <porcelain-status>
+  printf '%s\n' "$1" | grep -qE '^[^?!][^?!] \.claude/settings\.local\.json$' || return 0
+  echo "the project's git-tracked .claude/settings.local.json changed after the Claude launch; restore it in $WT with: git checkout HEAD -- .claude/settings.local.json" >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1696,7 +1701,10 @@ validate_worktree_teardown_safety() {
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      if [ -n "$dirty" ]; then
+        echo "uncommitted changes present" >&2
+        report_dirty_tracked_claude_settings "$dirty_raw"
+      fi
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -1704,6 +1712,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
+    report_dirty_tracked_claude_settings "$dirty_raw"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
@@ -2241,6 +2250,16 @@ require_owned_task_worktree_slot() {
 
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+}
+
+# Claude hooks now live in state/<id>.claude-settings.json, but a task spawned
+# by an older firstmate wrote them into the worktree's .claude/settings.local.json.
+# Remove that file only while git does not track it: a tracked copy is the
+# project's own settings, and deleting it would dirty the worktree.
+remove_untracked_claude_hook_file() {  # <worktree>
+  local wt=$1
+  git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1 \
+    || rm -f "$wt/.claude/settings.local.json"
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2990,7 +3009,8 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+        remove_untracked_claude_hook_file "$child_wt"
+        rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
@@ -3009,7 +3029,8 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+        remove_untracked_claude_hook_file "$child_wt"
+        rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
@@ -3309,7 +3330,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    remove_untracked_claude_hook_file "$WT"
+    rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
@@ -3325,7 +3347,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+  remove_untracked_claude_hook_file "$WT"
+  rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
@@ -3459,6 +3482,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
+  "$STATE/$ID.claude-settings.json" \
   "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any

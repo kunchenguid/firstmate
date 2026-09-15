@@ -59,7 +59,7 @@ An open run is trusted busy and settled log trusted idle; missing binding or mat
 
 Native children use per-child worktrees only with opt-in `--subagent-worktree-isolation`; capability says default-on while omission stays shared, and verified labs produced no nested copy.
 `../../../bin/fm-teardown.sh` excludes no Muse path.
-It excludes `.claude/settings.local.json` because Firstmate writes it, but Muse scratch is worker output and must refuse cleanup when uncommitted.
+It skips only untracked `.claude/` entries, but Muse scratch is worker output and must refuse cleanup when uncommitted.
 Inspect, never force past, that refusal.
 
 ## Maturity and primary limit
