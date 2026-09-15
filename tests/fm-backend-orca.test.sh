@@ -535,6 +535,8 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
+  assert_not_contains "$(cat "$log")" $'\x1f''--linear-issue'$'\x1f' \
+    "spawn without --linear-issue should preserve the existing Orca create command"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
@@ -543,6 +545,93 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+test_spawn_forwards_linear_issue_to_orca_worktree_create() {
+  local proj wt data state config id linear out log
+  id="orcalinearz2"
+  proj="$TMP_ROOT/linear-spawn-project"
+  wt="$TMP_ROOT/linear-spawn-wt"
+  data="$TMP_ROOT/linear-spawn-data"
+  state="$TMP_ROOT/linear-spawn-state"
+  config="$TMP_ROOT/linear-spawn-config"
+  linear="https://linear.app/acme/issue/ENG-42/link-at-create"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case linear-spawn
+  log="$LOG"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-linear"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-linear","path":"%s"},"terminal":{"handle":"term-linear"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca \
+      --linear-issue "$linear" 2>&1 )
+  expect_code 0 $? "fm-spawn.sh --linear-issue should succeed with fake Orca"$'\n'"$out"
+  assert_contains "$(cat "$log")" $'\x1f''--linear-issue'$'\x1f'"$linear"$'\x1f''--json' \
+    "spawn did not forward the exact Linear issue URL to Orca worktree creation"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --linear-issue: forwards the exact value to Orca worktree creation"
+}
+
+test_spawn_refuses_linear_issue_on_non_orca_backend() {
+  local data state config id out status
+  id="lineartmuxz3"
+  data="$TMP_ROOT/linear-tmux-data"
+  state="$TMP_ROOT/linear-tmux-state"
+  config="$TMP_ROOT/linear-tmux-config"
+  mkdir -p "$data" "$state" "$config"
+  orca_case linear-tmux
+  add_tmux_fake "$FB"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$TMP_ROOT/unused-project" claude \
+      --mode no-mistakes --yolo off --backend tmux --linear-issue ENG-42 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse --linear-issue on backend=tmux"
+  assert_contains "$out" "--linear-issue requires backend=orca; resolved backend is 'tmux'" \
+    "non-Orca refusal should name the option and resolved backend"
+  [ ! -s "$LOG" ] || fail "non-Orca --linear-issue refusal should happen before backend mutation"
+  assert_absent "$state/$id.meta" "non-Orca --linear-issue refusal should not publish metadata"
+  pass "fm-spawn.sh --linear-issue: refuses a resolved non-Orca backend before mutation"
+}
+
+test_spawn_refuses_linear_issue_without_fresh_single_worker_worktree() {
+  local data state config out status
+  data="$TMP_ROOT/linear-shape-data"
+  state="$TMP_ROOT/linear-shape-state"
+  config="$TMP_ROOT/linear-shape-config"
+  mkdir -p "$data" "$state" "$config"
+
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" linearrelaunchz4 --relaunch --linear-issue ENG-42 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "--relaunch should refuse --linear-issue"
+  assert_contains "$out" "--linear-issue applies only when creating a fresh Orca worktree" \
+    "relaunch refusal should explain that it reuses a worktree"
+
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" linearsecondmatez5 --secondmate --backend orca --linear-issue ENG-42 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "--secondmate should refuse --linear-issue"
+  assert_contains "$out" "--linear-issue applies only to Orca ship/scout spawns" \
+    "secondmate refusal should name the supported worker kinds"
+
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" linearbatchz6=projects/none --mode no-mistakes --yolo off \
+      --backend orca --linear-issue ENG-42 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch dispatch should refuse --linear-issue"
+  assert_contains "$out" "batch dispatch does not support --linear-issue" \
+    "batch refusal should require explicit per-task issue linkage"
+  pass "fm-spawn.sh --linear-issue: refuses relaunch, secondmate, and batch paths"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1351,6 +1440,9 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_forwards_linear_issue_to_orca_worktree_create
+test_spawn_refuses_linear_issue_on_non_orca_backend
+test_spawn_refuses_linear_issue_without_fresh_single_worker_worktree
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree

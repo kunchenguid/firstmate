@@ -46,7 +46,9 @@ worktree=<absolute Orca worktree path>
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
-Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
+Because Orca owns worktree creation, a fresh ship or scout worktree can also be linked to one Linear issue as Orca creates it.
+That option is Orca-only and is refused, never silently ignored, wherever it does not apply.
+Exact command flags and response parsing are owned by `bin/backends/orca.sh` and [`fm-spawn.sh --help`](../bin/fm-spawn.sh).
 
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
