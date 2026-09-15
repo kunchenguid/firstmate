@@ -2462,7 +2462,7 @@ HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="${FM_HOLD_CURRENT_COMMAND:-zsh}" \
     FM_FAKE_CREW_STATE="${FM_HOLD_FAKE_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
@@ -2593,14 +2593,14 @@ test_ended_worker_inherited_wedge_becomes_wait() {
 }
 
 test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
-  local dir state out capture key run_state
-  dir=$(make_hold_home ended-unheld-wedge 'working: interrupted by reboot' nohold) \
+  local dir state out capture key run_state pane='Ctrl+c:cancel preserved shell'
+  dir=$(make_hold_home ended-unheld-wedge 'resolved [key=prior]: reboot interrupted recovery' nohold) \
     || fail "could not build stopped worker recovery fixture"
   state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
   key=$(hold_key)
-  printf 'preserved shell\n' > "$capture"
-  printf '%s' "$(hash_text 'preserved shell')" > "$state/.hash-$key"
-  printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+  printf '%s\n' "$pane" > "$capture"
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
   printf '2\n' > "$state/.count-$key"
   printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
   hold_watch_launch "$dir" "$out" "$capture"
@@ -2618,8 +2618,8 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
     fail "stopped unheld worker repeated its recovery alarm"
   fi
   reap "$HOLD_WATCH_PID"
-  for run_state in working parked done; do
-    printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+  for run_state in working parked 'done'; do
+    printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
     printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
     printf '2\n' > "$state/.wedge-escalations-$key"
     export FM_HOLD_FAKE_CREW_STATE="state: $run_state · source: run-step · run: surviving-$run_state"
@@ -2633,18 +2633,19 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
     reap "$HOLD_WATCH_PID"
   done
   unset FM_HOLD_FAKE_CREW_STATE
-  pass "an unheld stopped worker reports recovery once without suppressing a surviving run"
+  pass "a dead worker ignores stale busy and resolved evidence without suppressing a surviving run"
 }
 
 
 
-# The other half of the same bound, and the one that decides whether widening the
-# wait was safe: the identical fixtures with NO hold must keep alarming on every
-# new hash, on both branches.
+# The disconfirming case keeps the same unheld terminal and blocker statuses
+# behind a confirmed live worker.
+# Each new pane hash must retain ordinary stale alarms.
 test_stale_churn_without_a_captain_call_still_alarms() {
   local spec name line dir state out capture round wakes
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
+  export FM_HOLD_CURRENT_COMMAND=grok
   for spec in \
     'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
     'unheld-blocker|blocked: cannot reach the release host'
@@ -2664,7 +2665,8 @@ test_stale_churn_without_a_captain_call_still_alarms() {
       round=$((round + 1))
     done
   done
-  pass "a stale window with no open captain call keeps alarming on every new hash"
+  unset FM_HOLD_CURRENT_COMMAND
+  pass "a live stale worker with no open captain call keeps alarming on every new hash"
 }
 
 
