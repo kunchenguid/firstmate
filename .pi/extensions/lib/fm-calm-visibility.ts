@@ -7,6 +7,7 @@ export const CALM_TRANSCRIPT_CLASSES = [
   "genuine-user-prompt",
   "genuine-agent-response",
   "assistant-working-note",
+  "routine-supervision-note",
   "assistant-thinking",
   "assistant-tool-call",
   "tool-result",
@@ -65,6 +66,24 @@ type FirstmateSyntheticPresentation = {
 
 let calm = false;
 let stockExportRendering = false;
+let currentStep = "";
+const currentStepListeners = new Set<(step: string) => void>();
+
+export function calmCurrentStep(): string {
+  return currentStep;
+}
+
+export function setCalmCurrentStep(step: string | undefined): void {
+  const next = step?.trim().replace(/\s+/g, " ") ?? "";
+  if (next === currentStep) return;
+  currentStep = next;
+  for (const listener of currentStepListeners) listener(currentStep);
+}
+
+export function subscribeCalmCurrentStep(listener: (step: string) => void): () => void {
+  currentStepListeners.add(listener);
+  return () => currentStepListeners.delete(listener);
+}
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
   return CALM_VISIBLE_CLASSES.has(itemClass);

@@ -8,7 +8,10 @@
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmPresentationHides,
+  setCalmCurrentStep,
+} from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -76,6 +79,12 @@ export function installCalmAssistantLayout(): void {
       patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
+    if (hideWorkingNote) {
+      const step = message.content
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join(" ");
+      if (step.trim()) setCalmCurrentStep(step);
+    }
     const presentationMessage =
       hideThinking || hideWorkingNote
         ? {

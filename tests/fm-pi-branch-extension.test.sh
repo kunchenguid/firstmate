@@ -827,6 +827,14 @@ const calmOnResult = outcomesTool.renderResult(stockResult, { expanded: false, i
 if (calmOnCall.constructor.name !== "Container" || calmOnCall.render(100).length !== 0 || calmOnResult.constructor.name !== "Container" || calmOnResult.render(100).length !== 0) {
   throw new Error("fm_branch_outcomes remained visible while Calm was on");
 }
+const calmRoutineNote = renderers.get("fm-branch-merge")(
+  { content: sentToMain[0].message.content },
+  { expanded: false },
+  renderTheme,
+);
+if (calmRoutineNote.render(100).length !== 0) {
+  throw new Error("routine supervision note remained as a Calm transcript row");
+}
 pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
 if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Box" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Container") {
   throw new Error("fm_branch_outcomes did not restore ordinary rendering when Calm was turned off");
@@ -927,7 +935,7 @@ EOF
   if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
     fail "routine note must stay plain rendered text, not typed operational input"
   fi
-  pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine notes stay plain"
+  pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while Calm turns routine notes into the replace-in-place current step and ordinary mode keeps them plain"
 }
 
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {

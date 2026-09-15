@@ -3,7 +3,8 @@
 Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
+When assistant progress narration or a routine supervision note arrives, Calm keeps only the latest high-level step in one replace-in-place `Current step:` status line rather than adding transcript rows.
 The water fills the usable width with low one-cell Unicode bars, using standard ANSI blue for troughs and cyan for crests.
 The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull, with a smaller standard ANSI yellow quarter sail, a larger standard ANSI red right sail, and a blue zero-height interior that keeps the water visible through the boat.
 The boat is deliberately calm: it moves one column every 880ms, while the long smooth wave advances one quarter-cell every 220ms so the surface stays alive between boat steps.
@@ -14,11 +15,12 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, mid-turn assistant working notes, routine supervision notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
-The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
+The narration and routine supervision notes are hidden only from the live transcript presentation, and remain in their messages, model context, session storage, and `/export` artifacts.
+The current-step line is cleared when the main run settles, so the final answer remains the lasting transcript result.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -48,7 +50,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy and current-step value, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns assistant progress extraction, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
 
 Regression entry points:
 

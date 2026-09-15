@@ -94,6 +94,7 @@ import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
+  setCalmCurrentStep,
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
@@ -2223,10 +2224,14 @@ ${context.command}
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
-    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length).trimStart() : note;
+    if (calmHides("routine-supervision-note")) {
+      setCalmCurrentStep(rest);
+      return new Container();
+    }
     const outputPad = 1;
     return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", hasGlyph ? ` ${rest}` : rest)}`,
       outputPad,
       0,
     );
