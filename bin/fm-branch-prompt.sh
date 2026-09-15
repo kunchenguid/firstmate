@@ -75,7 +75,7 @@ Keep an unsolicited routine outcome as verdict routine, including a healthy resu
 Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 On a captain verdict, set action to none only for a display-only finished result whose delivery is already complete: the summary is anchor-ready, any PR URL is included, and any PR poll the operating procedure required is already armed.
-Use action main, or omit action, for decisions, blockers, ask-user findings, credential needs, destructive or security-sensitive work, and anything MAIN must still do.
+Use action main, or omit action, for decisions, blockers, failures, ask-user findings, credential needs, destructive or security-sensitive work, and anything MAIN must still do.
 When genuinely in doubt about action, choose main.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 

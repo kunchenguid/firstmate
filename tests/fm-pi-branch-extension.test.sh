@@ -4943,7 +4943,7 @@ test_captain_outcome_action_none_skips_processing_turn() {
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
-const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
 import { readFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -5003,6 +5003,43 @@ if (requests().length !== 2) throw new Error("action main did not re-present aft
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([mainSeq])) {
   throw new Error("an empty answer closed an action main sequence");
 }
+
+const routineNone = await report.execute("routine-none", {
+  task: "branch-driver",
+  verdict: "routine",
+  summary: "worker picked up the CI fix",
+  action: "none",
+}, undefined, undefined, {});
+if (routineNone.isError) throw new Error(`a routine report carrying action none was refused: ${JSON.stringify(routineNone)}`);
+const routineRow = JSON.parse(outcomeScript(["list", "--recent", "1"]));
+if (routineRow.verdict !== "routine" || routineRow.action !== "main") {
+  throw new Error(`routine action none was not ignored: ${JSON.stringify(routineRow)}`);
+}
+
+const tailResult = await report.execute("none-tail", {
+  task: "branch-driver",
+  verdict: "captain",
+  summary: "PR https://example.com/pr/tail is ready",
+  action: "none",
+}, undefined, undefined, {});
+if (tailResult.isError) throw new Error(`display-only tail report failed: ${JSON.stringify(tailResult)}`);
+const tailSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([mainSeq, tailSeq])) {
+  throw new Error(`the display-only tail closed ahead of the open main sequence: ${unprocessedSeqs()}`);
+}
+const nativeTools = new Map();
+bus.emit("firstmate:native-tools", { register: (tool) => nativeTools.set(tool.name, tool), allowMessageType: () => {} });
+const processed = nativeTools.get("fm_branch_processed");
+const ack = await processed.execute("ack-main", { through: mainSeq }, undefined, undefined, {});
+if (ack.isError) throw new Error(`acknowledging the main sequence failed: ${JSON.stringify(ack)}`);
+const ackText = ack.content.map((item) => item.text).join("");
+if (!ackText.includes("no captain outcome remains unprocessed") || ackText.includes(`seq ${tailSeq}`)) {
+  throw new Error(`the acknowledgement misreported a display-only tail as pending main work: ${ackText}`);
+}
+const beforeTail = requests().length;
+await runOf();
+if (requests().length !== beforeTail) throw new Error("the display-only tail opened a processing request");
+if (unprocessedSeqs().length !== 0) throw new Error(`the display-only tail stayed unprocessed: ${unprocessedSeqs()}`);
 process.exit(0);
 EOF
   status=$?

@@ -1178,7 +1178,7 @@ export default function (pi: ExtensionAPI) {
         })),
         action: Type.Optional(Type.Union([Type.Literal("main"), Type.Literal("none")], {
           description:
-            "Captain-row processing intent. none is only for display-only finished results whose delivery is already complete (anchor entry, PR URL, PR poll already armed); main is required for decisions, blockers, ask-user findings, credentials, destructive or security-sensitive work, and anything main must still do. Omit or use main when in doubt. Ignored on routine rows.",
+            "Captain-row processing intent. none is only for display-only finished results whose delivery is already complete (anchor entry, PR URL, PR poll already armed); main is required for decisions, blockers, failures, ask-user findings, credentials, destructive or security-sensitive work, and anything main must still do. Omit or use main when in doubt. Ignored on routine rows.",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1192,13 +1192,6 @@ export default function (pi: ExtensionAPI) {
         if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        if (action === "none" && verdictRaw !== "captain") {
-          return {
-            content: [{ type: "text", text: "invalid report: action none is only valid on captain outcomes" }],
             details: undefined,
             isError: true,
           };
@@ -2245,7 +2238,8 @@ ${context.command}
             isError: true,
           };
         }
-        const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
+        const unprocessed = await readUnprocessedOutcomes(acknowledgedGeneration);
+        const remaining = unprocessed === null ? null : unprocessed.filter((row) => row.action === "main");
         if (remaining !== null && remaining.length === 0) processing = null;
         const open = remaining === null
           ? "the remaining outcomes could not be read"

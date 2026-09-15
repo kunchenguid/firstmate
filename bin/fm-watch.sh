@@ -763,6 +763,7 @@ signal_turnend_outcome_covered() {  # <file> ...
     [ "$count" -eq 1 ] || return 1
     [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
     branch_outcome_index_covers_status "$task" || return 1
+    ! outcome_covered_window_saw_busy "$key" || return 1
     signal_indexes+=("$task_index")
     covered_keys+=("$key")
   done
@@ -1508,7 +1509,8 @@ captain_call_stale_bound() {  # <window-key> <task>
 # coverage identity. Declaration embeds the covered sequence and status signature
 # so any new event starts a fresh window whose first sight surfaces immediately.
 # First covered sight absorbs and arms the throttle; later sights inside
-# PAUSE_RESURFACE_SECS absorb; a sight after the cadence returns 1 so the caller
+# PAUSE_RESURFACE_SECS absorb; a sight after the cadence, or the first sight
+# after the pane was seen busy under this declaration, returns 1 so the caller
 # alarms once and refreshes the throttle through stale_wait_record.
 outcome_covered_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2 sig throttle
@@ -1518,12 +1520,59 @@ outcome_covered_stale_bound() {  # <window-key> <task>
   sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
   STALE_WAIT_DECLARATION="outcome-covered:${BRANCH_OUTCOME_INDEX_SEQ}:${sig}"
   throttle="$STATE/.paused-resurfaced-$key"
-  if [ "$(cat "$throttle" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]; then
-    stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && return 0
-    return 1
+  case "$(cat "$throttle" 2>/dev/null || true)" in
+    "$STALE_WAIT_DECLARATION") stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" ;;
+    "busy:$STALE_WAIT_DECLARATION") return 1 ;;
+    *) printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle" ;;
+  esac
+}
+
+outcome_covered_throttle_armed() {  # <window-key>
+  local throttle="$STATE/.paused-resurfaced-$1"
+  [ -f "$throttle" ] || return 1
+  case "$(cat "$throttle" 2>/dev/null || true)" in
+    outcome-covered:*|busy:outcome-covered:*) return 0 ;;
+  esac
+  return 1
+}
+
+outcome_covered_window_saw_busy() {  # <window-key>
+  local throttle="$STATE/.paused-resurfaced-$1"
+  [ -f "$throttle" ] || return 1
+  case "$(cat "$throttle" 2>/dev/null || true)" in
+    busy:outcome-covered:*) return 0 ;;
+  esac
+  return 1
+}
+
+note_outcome_covered_busy() {  # <window-key>
+  local throttle="$STATE/.paused-resurfaced-$1" recorded
+  [ -f "$throttle" ] || return 0
+  recorded=$(cat "$throttle" 2>/dev/null || true)
+  case "$recorded" in
+    outcome-covered:*) printf 'busy:%s' "$recorded" > "$throttle" ;;
+  esac
+}
+
+surface_terminal_stale() {  # <window> <window-key> <hash>
+  local w=$1 key=$2 h=$3 stale_status stale_record stale_end stale_rest stale_ident
+  fm_wake_append stale "$w" "stale: $w" || exit 1
+  if [ -n "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_record "$key"
+  elif outcome_covered_throttle_armed "$key"; then
+    rm -f "$STATE/.paused-resurfaced-$key"
   fi
-  printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle"
-  return 0
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
+  clear_write_tracking "$key"
+  stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+  stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+  case $? in
+    0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+    *) stale_end=''; stale_ident='' ;;
+  esac
+  mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
+  wake "stale: $w"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2520,6 +2569,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    [ "$busy_now" -ne 0 ] || note_outcome_covered_busy "$key"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2576,7 +2626,7 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            elif outcome_covered_stale_bound "$key" "$task"; then
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && outcome_covered_stale_bound "$key" "$task"; then
               # A branch outcome already covered this terminal status. Further
               # NEW pane hashes of the same finished state are noise until the
               # long cadence asks for a forgotten-teardown recheck, or a new
@@ -2586,19 +2636,7 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (outcome-covered): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              stale_wait_record "$key"
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
-              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
-              case $? in
-                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
-                *) stale_end=''; stale_ident='' ;;
-              esac
-              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
-              wake "stale: $w"
+              surface_terminal_stale "$w" "$key" "$h"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -2606,6 +2644,9 @@ EOF
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+          elif outcome_covered_throttle_armed "$key" \
+            && ! outcome_covered_stale_bound "$key" "$task"; then
+            surface_terminal_stale "$w" "$key" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,

@@ -2033,9 +2033,10 @@ EOF
 }
 
 # 0 when the task's bounded outcome index covers every byte of its current
-# status log under a matching identity. Absent or empty index is uncovered
-# (return 1); an invalid index is also uncovered. Used by watcher absorb
-# proofs that must fail open to surfacing.
+# status log under a matching identity and no steering-inbox activity is newer
+# than that outcome. Absent or empty index is uncovered (return 1); an invalid
+# index is also uncovered. Used by watcher absorb proofs that must fail open to
+# surfacing.
 branch_outcome_index_covers_status() { # <task>
   local task=$1 f size ident
   load_branch_outcome_index "$task"
@@ -2043,6 +2044,7 @@ branch_outcome_index_covers_status() { # <task>
   [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] \
     && [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
     && [ -n "$BRANCH_OUTCOME_INDEX_IDENT" ] || return 1
+  [ ! "$STATE/$task.inbox" -nt "$STATE/.$task.branch-outcome-index" ] || return 1
   f="$STATE/$task.status"
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then
     [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge 0 ] || return 1

@@ -261,6 +261,9 @@ write_outcome_index() { # <task> <seq> [<endpoint> <identity>]
   record=$(printf '%s\t%s\t%s\t%s\n' "$OUTCOME_INDEX_VERSION" "$seq" \
     "$endpoint" "$ident") || return 1
   [ "${#record}" -le "$OUTCOME_INDEX_MAX_BYTES" ] || return 1
+  if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(cat "$path" 2>/dev/null)" = "$record" ]; then
+    return 0
+  fi
   tmp=$(mktemp "$STATE/.branch-outcome-index.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   printf '%s\n' "$record" > "$tmp" || { rm -f -- "$tmp"; return 1; }
