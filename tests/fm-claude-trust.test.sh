@@ -286,24 +286,21 @@ JSON
   pass "fm-claude-trust.sh: a never-asked default external-imports pair is not treated as a decline"
 }
 
-# The corroboration that makes a decline READABLE, asserted as a divergence so
-# the case cannot go vacuous: two stores differing in exactly one flag must get
-# opposite verdicts. hasClaudeMdExternalIncludesWarningShown===true is the
-# evidence the human was actually shown the dialog they answered, so
-# approved===false beside it is a decline and must be refused, while
-# approved===false with the warning never shown cannot be an answer at all and
-# must fall through to the ordinary undecided path - trust registered on both
-# entries, both import flags left exactly as they were found. A test that only
-# checked "the launch succeeded" would pass against the defect this pins, where
-# the bare false refused every claude spawn in the fleet, so the surviving flag
-# values are asserted too.
+# hasClaudeMdExternalIncludesWarningShown===true is the evidence the human was
+# actually shown the dialog they answered, so approved===false without it cannot
+# be an answer at all and must fall through to the ordinary undecided path -
+# trust registered on both entries, both import flags left exactly as they were
+# found. A test that only checked "the launch succeeded" would pass against the
+# defect this pins, where the bare false refused every claude spawn in the
+# fleet, so the surviving flag values are asserted as exactly false: a cleanup
+# that deleted them is a rewrite of consent state too.
 test_uncorroborated_approved_false_is_not_a_decline() {
-  local rec store out corroborated_rec corroborated_store corroborated_out
+  local rec store out
   rec=$(make_case import-false-uncorroborated)
   read_case "$rec"
   store="$CONFIG/.claude.json"
   cat > "$store" <<JSON
-{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false,"allowedTools":["Read"]}}}
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":false,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false,"allowedTools":["Read"]}}}
 JSON
   out=$(run_trust "$CONFIG" "$WT" "$PROJ")
   expect_code 0 $? "approved=false with the warning never shown is undecided, not a decline: $out"
@@ -320,23 +317,7 @@ JSON
     projects "$WT" hasClaudeMdExternalIncludesApproved
   assert_store_value "$store" '["Read"]' \
     "the project entry's unrelated settings were lost" projects "$PROJ" allowedTools
-
-  # The same registration against a store differing ONLY in warningShown, so
-  # the distinction itself is what is under test rather than either verdict
-  # alone. This half fails if the guard ever stops honoring a real decline.
-  corroborated_rec=$(make_case import-false-corroborated)
-  read_case "$corroborated_rec"
-  corroborated_store="$CONFIG/.claude.json"
-  cat > "$corroborated_store" <<JSON
-{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true,"allowedTools":["Read"]}}}
-JSON
-  corroborated_out=$(run_trust "$CONFIG" "$WT" "$PROJ")
-  expect_code 1 $? "approved=false corroborated by warningShown=true is a decline and must be refused: $corroborated_out"
-  assert_contains "$corroborated_out" "declined external CLAUDE.md imports" \
-    "the corroborated decline was refused for some other reason"
-  assert_not_trusted "$corroborated_store" "$WT" \
-    "the worktree entry was registered despite the corroborated decline"
-  pass "fm-claude-trust.sh: warningShown is what separates a recorded decline from an undecided approved=false"
+  pass "fm-claude-trust.sh: an uncorroborated approved=false survives registration as exactly false"
 }
 
 test_registration_is_idempotent() {
