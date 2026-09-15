@@ -1825,6 +1825,172 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- stale pane, UNCHANGED terminal status with churning hash: suppressed -----
+# Regression for the 2026-08 churn incidents: a finished worker whose pane
+# changes cosmetically (spinner frame, context counter, rotating tip) produced
+# a fresh stale: wake on every repaint because the hash changed each time. The
+# fix anchors the re-surface decision on the status file mtime (same approach
+# as handle_paused_stale) so a genuinely unchanged terminal state is surfaced
+# twice - first sight plus one repeat confirming the state persists - and then
+# suppressed until the status file itself changes. An unheld window keeps
+# alarming while it does; past that, identical repetition wakes on the long
+# cadence only.
+test_terminal_stale_unchanged_hash_churn_suppressed() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-churny"
+  printf 'finished, awaiting review - spinner |' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/churny.meta"
+  printf 'done: PR https://example.test/pr/5\n' > "$state/churny.status"
+  sig=$(seen_sig "$state/churny.status"); printf '%s' "$sig" > "$state/.seen-churny_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review - spinner |")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: first sighting of a terminal status surfaces immediately.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the first sighting of a terminal stale"
+  grep -Fx "stale: $window" "$out" > /dev/null || fail "first sighting did not print the terminal stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the first terminal sighting failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" > /dev/null || fail "first terminal sighting was not queued"
+  [ -s "$state/.terminal-mtime-$key" ] || fail "terminal mtime marker was not recorded on first surface"
+  [ -s "$state/.terminal-resurfaced-$key" ] || fail "terminal resurfaced marker was not recorded on first surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge phase-A watcher stop"
+
+  # Phase B: change the pane hash (a spinner frame) but leave the status file
+  # untouched. The first repeat still surfaces - it confirms the state persists
+  # rather than flickers - and latches the repeat.
+  printf 'finished, awaiting review - spinner /' > "$capture_file"
+  pane_hash=$(hash_text "finished, awaiting review - spinner /")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_PAUSE_RESURFACE_SECS=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the first repeat of an unchanged terminal status"
+  grep -Fx "stale: $window" "$out" > /dev/null || fail "first repeat of an unchanged terminal status did not surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the first terminal repeat failed"
+  [ -e "$state/.terminal-repeat-$key" ] || fail "terminal repeat was not latched on the second sighting"
+  ack_stopped_cycle "$state" || fail "could not acknowledge phase-B watcher stop"
+
+  # Phase B2: churn again with the status file still untouched. The latched
+  # repeat suppresses this one: no wake, no queue entry, suppressor advanced.
+  printf 'finished, awaiting review - spinner +' > "$capture_file"
+  pane_hash=$(hash_text "finished, awaiting review - spinner +")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_PAUSE_RESURFACE_SECS=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a latched repeat on an unchanged terminal status (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "latched repeat on unchanged terminal status printed a wake reason (should be suppressed)"
+  [ ! -s "$state/.wake-queue" ] || fail "latched repeat on unchanged terminal status enqueued a wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on latched absorb"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge phase-B2 watcher stop"
+
+  # Phase C: write a genuinely new status line. The status file mtime changes,
+  # so the next poll must surface the new terminal state immediately.
+  sleep 1  # ensure mtime advances by at least 1 second
+  printf 'blocked: waiting for code owner review\n' >> "$state/churny.status"
+  sig=$(seen_sig "$state/churny.status"); printf '%s' "$sig" > "$state/.seen-churny_status"
+  printf 'finished, awaiting review - spinner -' > "$capture_file"
+  pane_hash=$(hash_text "finished, awaiting review - spinner -")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a genuinely new terminal status after churn suppression"
+  grep -Fx "stale: $window" "$out" > /dev/null || fail "a genuinely new terminal status was not surfaced after churn suppression"
+  pass "an unchanged terminal status surfaces twice then suppresses further churn; a new terminal status surfaces immediately"
+}
+
+# --- stale pane, UNCHANGED terminal status: bounded re-surface cadence --------
+# Safety net: even when suppressed, an unchanged terminal state re-surfaces
+# once the PAUSE_RESURFACE_SECS cadence elapses, so it cannot rot invisibly.
+test_terminal_stale_bounded_resurface_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid old_hash
+  dir=$(make_case terminal-stale-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-cadence"
+  printf 'finished output v2' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/cadence.meta"
+  printf 'done: PR https://example.test/pr/7\n' > "$state/cadence.status"
+  sig=$(seen_sig "$state/cadence.status"); printf '%s' "$sig" > "$state/.seen-cadence_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Simulate a prior surface: set the terminal-mtime to the current status
+  # mtime and backdate the terminal-resurfaced marker past the cadence. The
+  # stale suppressor holds an OLD hash (a prior spinner frame) so the terminal
+  # branch sees a "new" hash to classify, while the pane hash matches the
+  # stored .hash-$key (so pane is already stably stale at count=2).
+  # age_of uses the file's filesystem mtime (not its contents), so backdate
+  # the actual mtime with set_mtime.
+  cur_mtime=$(file_mtime "$state/cadence.status")
+  printf '%s' "$cur_mtime" > "$state/.terminal-mtime-$key"
+  : > "$state/.terminal-resurfaced-$key"
+  set_mtime $(( $(date +%s) - 99999 )) "$state/.terminal-resurfaced-$key"
+  pane_hash=$(hash_text "finished output v2")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  old_hash=$(hash_text "finished output v1")
+  printf '%s' "$old_hash" > "$state/.stale-$key"
+
+  # The pane hash differs from the stale suppressor (a "new" hash to classify)
+  # while the cadence has elapsed - must re-surface.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_PAUSE_RESURFACE_SECS=60 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a terminal stale past the re-surface cadence"
+  grep -Fx "stale: $window" "$out" > /dev/null || fail "terminal stale past the cadence did not print a wake"
+  pass "an unchanged terminal status re-surfaces once the bounded cadence elapses"
+}
+# Settled-hash cadence: once the pane hash stabilises (stops churning) the
+# stale suppressor matches and the new-hash gate is never entered. The
+# settled-hash cadence check must still re-surface past PAUSE_RESURFACE_SECS.
+test_terminal_stale_settled_hash_resurface_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-stale-settled-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-settled"
+  printf 'finished output settled' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/settled.meta"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/settled.status"
+  sig=$(seen_sig "$state/settled.status"); printf '%s' "$sig" > "$state/.seen-settled_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished output settled")
+  # Both .hash-* and .stale-* hold the SAME hash -> the new-hash gate is false.
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  # Set terminal markers: mtime matches, resurface marker is backdated past cadence.
+  cur_mtime=$(file_mtime "$state/settled.status")
+  printf '%s' "$cur_mtime" > "$state/.terminal-mtime-$key"
+  : > "$state/.terminal-resurfaced-$key"
+  set_mtime $(( $(date +%s) - 99999 )) "$state/.terminal-resurfaced-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_PAUSE_RESURFACE_SECS=60 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a settled terminal stale past the cadence"
+  grep -Fx "stale: $window" "$out" > /dev/null || fail "settled terminal stale past the cadence did not print a wake"
+  pass "a settled terminal pane still re-surfaces once the bounded cadence elapses"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -5022,6 +5188,9 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_terminal_stale_unchanged_hash_churn_suppressed
+test_terminal_stale_bounded_resurface_cadence
+test_terminal_stale_settled_hash_resurface_cadence
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
@@ -5086,3 +5255,146 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+
+test_armed_source_with_explicit_owner_is_absorbed() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid armed_wakes
+  dir=$(make_case armed-source-explicit); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/review.status"
+  window="test:fm-review"
+  mkdir -p "$state/procevent"
+
+  # Idle pane with a paused crew - the shape that surfaces WITHOUT an armed
+  # source (proven by the unarmed divergence test and the existing
+  # live-parked-unarmed case). The armed procevent source is what absorbs it.
+  printf 'idle, lavish review armed\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\nworktree=/proj/review\n' "$window" > "$state/review.meta"
+  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, lavish review armed")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  cat << 'SRC' > "$state/procevent/test-id.source"
+adapter=lavish
+owner=review
+argc=3
+argv:
+lavish-axi
+poll
+/proj/other/artifact.html
+SRC
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · hosting the Lavish review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a paused worker with an explicitly owned armed source: $(cat "$out")"
+  fi
+  reap "$pid"
+  armed_wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || printf 0)
+  [ "$armed_wakes" -eq 0 ] \
+    || fail "an explicitly owned armed source raised $armed_wakes stale alarms"
+  [ ! -s "$out" ] || fail "an explicitly owned armed source printed a wake reason: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "the armed source did not apply the declared-pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the armed source started a wedge timer"
+  pass "armed source with explicit owner is absorbed"
+}
+
+test_unarmed_pause_still_surfaces() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid bare_wakes
+  dir=$(make_case unarmed-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/review.status"
+  window="test:fm-review"
+  mkdir -p "$state/procevent"
+
+  # Idle pane with a paused crew - the shape a live worker parked at a gate takes.
+  # A bound procevent source is what absorbs such a pause; with no source bound
+  # the pause still surfaces immediately.
+  printf 'idle, awaiting captain review\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\nworktree=/proj/review\n' "$window" > "$state/review.meta"
+  printf 'paused: waiting for manual captain review\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, awaiting captain review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # No procevent source bound - nothing armed.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting captain review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "watcher did not surface an unarmed pause: $(cat "$out")"; }
+  bare_wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || printf 0)
+  [ "$bare_wakes" -ge 1 ] \
+    || fail "an unarmed pause raised no stale alarm: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "unarmed pause did not print a stale wake: $(cat "$out")"
+  pass "unarmed pause still surfaces immediately (no bound source)"
+}
+
+test_reused_worktree_slot_stale_source_not_absorbed() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid bare_wakes
+  dir=$(make_case reused-worktree-slot); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/review.status"
+  window="test:fm-review"
+  mkdir -p "$state/procevent"
+
+  # Idle pane with a paused crew - same shape as the unarmed divergence test.
+  # A stale procevent source (predating the task) must NOT absorb the pause.
+  printf 'idle, waiting for review\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\nworktree=/proj/review\n' "$window" > "$state/review.meta"
+  # Task created at 01:00
+  touch -t 202601010100 "$state/review.meta"
+  printf 'paused: waiting for review\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, waiting for review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Source created at 00:00 (older than the task!) - no owner= field, and the
+  # worktree path match is guarded by timestamp, so this must be rejected.
+  cat << 'SRC' > "$state/procevent/test-id.source"
+adapter=lavish
+argc=3
+argv:
+lavish-axi
+poll
+/proj/review/artifact.html
+SRC
+  touch -t 202601010000 "$state/procevent/test-id.source"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "watcher did not surface a stale armed source on a reused slot: $(cat "$out")"; }
+  bare_wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || printf 0)
+  [ "$bare_wakes" -ge 1 ] \
+    || fail "a stale source raised no stale alarm: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "stale source did not print a stale wake: $(cat "$out")"
+  pass "reused slot with a stale source is NOT absorbed"
+}
+
+test_armed_source_with_explicit_owner_is_absorbed
+test_unarmed_pause_still_surfaces
+test_reused_worktree_slot_stale_source_not_absorbed

@@ -126,8 +126,7 @@ test_helper_path_backstop_refuses() {
 test_helper_normal_is_noop() {
   local out rc
   out=$(run_guard_lib "$NORMAL_CWD"); rc=$?
-  expect_code 0 "$rc" "helper: a normal session (neither signal) must not refuse"
-  [ -z "$out" ] || fail "helper: normal session printed output: $out"
+  expect_code_out 0 "$rc" "$out" "helper: a normal session (neither signal) must not refuse"
   pass "fm-gate-refuse-lib: no-op for a normal session (neither signal, set -eu clean)"
 }
 

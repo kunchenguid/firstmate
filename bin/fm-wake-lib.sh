@@ -912,6 +912,32 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# Move a stale non-lock file found at a lock path into a sibling quarantine
+# directory, mirroring the invalid-marker quarantine in
+# _fm_recovery_marker_arm_check. Returns 0 when the path is clear of anything
+# but a lock a later acquisition may create. When the moved entry turns out to
+# be a symlink or directory after all (a concurrent locker won the path between
+# the caller's check and this move), it is restored and 1 is returned, so this
+# can never evict a live owner's lock.
+fm_lock_quarantine_stale_file() {
+  local lockdir=$1 quarantine moved
+  quarantine=$(mktemp -d "${lockdir}.invalid.XXXXXX") || return 1
+  if ! mv -- "$lockdir" "$quarantine/lock"; then
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  moved="$quarantine/lock"
+  if [ -L "$moved" ] || [ -d "$moved" ]; then
+    if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+      return 1
+    fi
+    mv -- "$moved" "$lockdir" 2>/dev/null || true
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -946,6 +972,37 @@ fm_lock_try_acquire() {
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+
+  # A lock path that exists but is neither a symlink nor a directory is a stale
+  # non-lock file (for example an empty file left at the lock path): no owner
+  # can hold it, because pid reads and releases both resolve through
+  # "$lockdir/pid", and no steal can evict it, because the recheck and the
+  # removal below both require a symlink or a directory. Left in place it
+  # wedges acquisition forever with an empty holder, which silently disables
+  # turn-end re-arming while a manual --restart (which never touches the owner
+  # lock) still works. Quarantine it aside, publish watcher downtime exactly as
+  # a stale-lock steal would, and treat the path as free. A live owner is
+  # impossible here: no acquisition path in this repo ever creates a bare file,
+  # and a release through one is a no-op.
+  if [ -e "$lockdir" ] && [ ! -L "$lockdir" ] && [ ! -d "$lockdir" ]; then
+    if ! fm_lock_quarantine_stale_file "$lockdir"; then
+      FM_LOCK_HELD_PID=
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+    if [ "$lockdir" = "$STATE/.watch.lock" ] \
+      && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+      FM_LOCK_HELD_PID=
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+    if fm_lock_try_create "$lockdir"; then
+      return 0
+    fi
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
     return 1
   fi
 

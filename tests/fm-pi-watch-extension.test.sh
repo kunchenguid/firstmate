@@ -147,8 +147,7 @@ if (!prompt.includes("watcher: healthy pid=1")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
-  [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi extension must surface an external healthy watcher as an owned-wake failure"
   pass "Pi extension reports external healthy watcher output"
 }
 
@@ -209,8 +208,7 @@ if (result.details?.ok !== true || result.details?.message !== result.content[0]
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi custom tool must expose first-cycle or repair-only metadata and return Pi's AgentToolResult shape"
-  [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi custom tool must expose first-cycle or repair-only metadata and return Pi's AgentToolResult shape"
   pass "Pi custom tool exposes repair-only metadata and returns automatic-continuation guidance"
 }
 
@@ -272,8 +270,7 @@ writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi redundant tool call must remain an ownership-based no-op with repair-only guidance"
-  [ -z "$out" ] || fail "Pi redundant-call test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi redundant tool call must remain an ownership-based no-op with repair-only guidance"
   pass "Pi redundant tool call returns ownership guidance and spawns no second child"
 }
 
@@ -329,8 +326,7 @@ if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.leng
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi scheduled-retry call must not duplicate the extension-owned retry"
-  [ -z "$out" ] || fail "Pi scheduled-retry test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi scheduled-retry call must not duplicate the extension-owned retry"
   pass "Pi scheduled retry remains extension-owned after another tool call"
 }
 
@@ -420,8 +416,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
-  [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi actionable close must start one successor before wake delivery settles"
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
@@ -532,8 +527,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi dispatcher must hand an accepted wake to the branch and fall back to main otherwise"
-  [ -z "$out" ] || fail "Pi branch-offer test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi dispatcher must hand an accepted wake to the branch and fall back to main otherwise"
   pass "Pi dispatcher branch offer owns accepted wakes and falls back to main"
 }
 
@@ -617,8 +611,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi dispatcher must flag a heartbeat offer independent of task scoping"
-  [ -z "$out" ] || fail "Pi branch-heartbeat test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi dispatcher must flag a heartbeat offer independent of task scoping"
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
 }
 
@@ -705,8 +698,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "a heartbeat must not ride a co-present check row into main: $out"
-  [ -z "$out" ] || fail "Pi mixed heartbeat-queue test printed output: $out"
+  expect_code_out 0 "$status" "$out" "a heartbeat must not ride a co-present check row into main: $out"
   pass "a co-present check row neither vetoes nor rides a heartbeat into main"
 }
 
@@ -800,8 +792,7 @@ process.exit(0);
 EOF
     )
     status=$?
-    expect_code 0 "$status" "the $label check class must stay on main: $out"
-    [ -z "$out" ] || fail "Pi main-only check test ($label) printed output: $out"
+    expect_code_out 0 "$status" "$out" "the $label check class must stay on main: $out"
   done <<'CLASSES'
 relay-mention|check: x-mention 1234567890
 credential-failure|check: gh auth check failed; re-authenticate before dispatch
@@ -895,8 +886,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "a captain-held signal trigger must stay on main: $out"
-  [ -z "$out" ] || fail "Pi captain-held signal test printed output: $out"
+  expect_code_out 0 "$status" "$out" "a captain-held signal trigger must stay on main: $out"
   pass "a captain-held signal trigger reaches main with routine rows present"
 }
 
@@ -988,8 +978,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "an unread pending-reply escalation must keep a later stale alias on main: $out"
-  [ -z "$out" ] || fail "Pi unread pending-reply alias test printed output: $out"
+  expect_code_out 0 "$status" "$out" "an unread pending-reply escalation must keep a later stale alias on main: $out"
   pass "an unread pending-reply escalation keeps later stale aliases on main"
 }
 
@@ -1086,8 +1075,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "a distinct-file mixed batch must route wholly to main, not split: $out"
-  [ -z "$out" ] || fail "Pi distinct-file mixed-batch test printed output: $out"
+  expect_code_out 0 "$status" "$out" "a distinct-file mixed batch must route wholly to main, not split: $out"
   pass "a mixed batch of two distinct files - one routine, one needs-decision - routes wholly to main"
 }
 
@@ -1176,8 +1164,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "a heartbeat must not ride a co-present needs-decision row into main: $out"
-  [ -z "$out" ] || fail "Pi heartbeat/needs-decision test printed output: $out"
+  expect_code_out 0 "$status" "$out" "a heartbeat must not ride a co-present needs-decision row into main: $out"
   pass "a co-present needs-decision row neither vetoes nor rides a heartbeat into main"
 }
 
@@ -1253,8 +1240,7 @@ if (!prompt.includes("watcher: FAILED - Pi extension could not restore watcher c
 EOF
   )
   status=$?
-  expect_code 0 "$status" "heartbeat restoration failure must bypass an accepting branch: $out"
-  [ -z "$out" ] || fail "Pi heartbeat restoration-failure test printed output: $out"
+  expect_code_out 0 "$status" "$out" "heartbeat restoration failure must bypass an accepting branch: $out"
   pass "heartbeat restoration failure stays on main"
 }
 
@@ -1323,8 +1309,7 @@ if (offers.length !== 0) {
 EOF
   )
   status=$?
-  expect_code 0 "$status" "watcher-failure repair must never be offered to the branch: $out"
-  [ -z "$out" ] || fail "Pi watcher-failure test printed output: $out"
+  expect_code_out 0 "$status" "$out" "watcher-failure repair must never be offered to the branch: $out"
   pass "watcher-failure repair stays with main even with a live, accepting branch listener"
 }
 
@@ -1396,8 +1381,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must surface a refused handling handshake as one typed failure"
-  [ -z "$out" ] || fail "Pi handling-delivery failure test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi must surface a refused handling handshake as one typed failure"
   pass "Pi refused handling handshake is classified and not swallowed"
 }
 
@@ -1464,9 +1448,111 @@ if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
-  [ -z "$out" ] || fail "Pi hung-successor test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi must deliver the actionable wake after bounded hung-successor recovery"
   pass "Pi hung successor falls back to one typed actionable wake"
+}
+
+test_pi_successor_still_in_login_shell_is_not_a_failed_watcher() {
+  local repo home plugin log gate release out status saved_home
+  repo="$TMP_ROOT/pi-login-start-root"
+  home="$TMP_ROOT/pi-login-start-home"
+  log="$TMP_ROOT/pi-login-start.log"
+  gate="$TMP_ROOT/pi-login-start.gate"
+  release="$TMP_ROOT/pi-login-start.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # The first arm closes on an actionable line, which starts a successor. That
+  # successor is then held inside its login shell until this test releases it,
+  # so when the readiness window expires it provably has not run a single arm
+  # instruction: exactly the state a loaded CI runner puts it in, reached here
+  # by a barrier rather than by racing a duration.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+if [ "$(grep -c '^arm=' "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic actionable close\n'
+  : > "${FM_TEST_LOGIN_SHELL_WHEN:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+# Bounded on purpose: a fixture watcher must not outlive the test that started
+# it. If the driving process dies before its cleanup runs, an unbounded loop
+# here becomes an orphan on whatever machine ran the suite.
+for _ in $(seq 3000); do [ -e "$FM_STOP_FILE" ] && break; sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # Pin the login shell profile so the hold below blocks the successor inside a
+  # shell this test controls rather than timing against the machine's dotfiles.
+  saved_home=$HOME
+  fm_test_pin_login_shell "$TMP_ROOT/pi-login-start-login-home"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_STOP_FILE="$TMP_ROOT/pi-login-start.stop" FM_RELEASE_FILE="$release" \
+    FM_TEST_LOGIN_SHELL_HOLD="$release" FM_TEST_LOGIN_SHELL_WHEN="$gate" \
+    FM_PI_ARM_READY_TIMEOUT_MS=300 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : []);
+
+let tool = null;
+let prompt = "";
+let rowsAtPrompt = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+    rowsAtPrompt = armRows().length;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-login-start", {}, undefined, undefined, {});
+for (let i = 0; i < 800 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+// The actionable line must still reach the session.
+if (!prompt.includes("signal: synthetic actionable close")) throw new Error(`original wake was lost: ${prompt}`);
+// A successor that has not begun arming is not evidence that the watcher failed.
+if (/could not (?:verify a ready successor|restore watcher continuity)/.test(prompt)) {
+  throw new Error(`a successor still inside its login shell was reported as a failed watcher: ${prompt}`);
+}
+if (!prompt.includes("watcher: starting")) throw new Error(`the successor's actual state was not reported: ${prompt}`);
+
+// Non-vacuity: the successor was still held in its login shell when this wake
+// was decided, so the verdict above really is about a successor that had not
+// begun arming - not about one that had already come up.
+if (rowsAtPrompt !== 1) throw new Error(`the successor had already armed, so nothing was pinned: ${rowsAtPrompt} arm rows`);
+
+// And it must have been kept, not retired: released from its login shell it
+// arms, exactly once, with no retry storm behind it.
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 800 && armRows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armRows().length !== 2) {
+  throw new Error(`the successor was retired instead of being left to come up: ${armRows().join(" | ")}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (armRows().length !== 2) throw new Error(`a retry storm followed the successor: ${armRows().join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  HOME=$saved_home; export HOME
+  expect_code_out 0 "$status" "$out" "a successor still inside its login shell must be reported as starting, not as a failed watcher"
+  pass "Pi successor still in its login shell is kept and reported as starting"
 }
 
 test_pi_unretired_successor_falls_back_without_retry() {
@@ -1535,8 +1621,7 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must fall back without overlapping an unretired successor"
-  [ -z "$out" ] || fail "Pi unretired-successor test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi must fall back without overlapping an unretired successor"
   pass "Pi unretired successor falls back without an overlapping retry"
 }
 
@@ -1635,8 +1720,7 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
     status=$?
-    expect_code 0 "$status" "Pi late $kind close must remain supervised after fallback"
-    [ -z "$out" ] || fail "Pi late-$kind test printed output: $out"
+    expect_code_out 0 "$status" "$out" "Pi late $kind close must remain supervised after fallback"
   done
   pass "Pi late unretired closes resume classified supervision"
 }
@@ -1695,8 +1779,7 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi clean empty close must trigger a bounded continuity retry"
-  [ -z "$out" ] || fail "Pi empty-close retry test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi clean empty close must trigger a bounded continuity retry"
   pass "Pi clean empty close triggers a bounded continuity retry"
 }
 
@@ -1746,8 +1829,7 @@ if (!prompt.includes("after 2 retries")) throw new Error(`retry exhaustion was n
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi established clean closes must honor the continuity retry limit"
-  [ -z "$out" ] || fail "Pi established-empty-close retry test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi established clean closes must honor the continuity retry limit"
   pass "Pi established clean closes stop at the configured retry limit"
 }
 
@@ -1886,8 +1968,7 @@ if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("owned lock did not run
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi watcher arm must distinguish owned, live-other, and missing or dead session locks"
-  [ -z "$out" ] || fail "Pi lock-ownership arm test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi watcher arm must distinguish owned, live-other, and missing or dead session locks"
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
@@ -2273,8 +2354,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
-  [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi session replacement must auto-arm and carry an in-flight actionable close"
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
@@ -2381,8 +2461,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement must replay a streaming follow-up before consumption"
-  [ -z "$out" ] || fail "Pi streaming follow-up replacement test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi replacement must replay a streaming follow-up before consumption"
   pass "Pi replacement replays a streaming follow-up before consumption"
 }
 
@@ -2494,8 +2573,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
-  [ -z "$out" ] || fail "Pi streaming-time delivery chain test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
   pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
 }
 
@@ -2592,8 +2670,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery"
-  [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi must retry a verified successor that failed during wake delivery"
   pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
 }
 
@@ -2697,8 +2774,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement must receive an actionable close after retirement timeout"
-  [ -z "$out" ] || fail "Pi late retiring actionable test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi replacement must receive an actionable close after retirement timeout"
   pass "Pi replacement receives actionable closes after retirement timeout"
 }
 
@@ -2785,8 +2861,7 @@ for (const moduleIndex of [1, 2]) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement handoff tokens must stay unique across fresh modules"
-  [ -z "$out" ] || fail "Pi replacement token uniqueness test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi replacement handoff tokens must stay unique across fresh modules"
   pass "Pi replacement handoff tokens stay unique across fresh modules"
 }
 
@@ -2881,8 +2956,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement shutdown must stop its arm after handoff persistence fails"
-  [ -z "$out" ] || fail "Pi replacement persistence-failure cleanup test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi replacement shutdown must stop its arm after handoff persistence fails"
   pass "Pi replacement persistence failure still stops its arm child"
 }
 
@@ -2924,8 +2998,7 @@ if (process.listenerCount("exit") !== before + 1) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi cleanup fallback listener must remain singular across session replacement"
-  [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi cleanup fallback listener must remain singular across session replacement"
   pass "Pi process-exit cleanup listener remains singular across session replacement"
 }
 
@@ -2985,8 +3058,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
-  [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
+  expect_code_out 0 "$status" "$out" "Pi process exit must run the watcher cleanup fallback"
   pid=$(cat "$pid_file")
   i=0
   while [ "$i" -lt 250 ] && ! grep -qx "$pid" "$cleanup_log" 2>/dev/null; do
@@ -3016,8 +3088,7 @@ await import(pathToFileURL(process.env.PLUGIN).href);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode plugin must import beneath an explicit ESM package boundary"
-  [ -z "$out" ] || fail "OpenCode ESM boundary import printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode plugin must import beneath an explicit ESM package boundary"
   pass "OpenCode plugins have an explicit ESM boundary even under a typeless parent package"
 }
 
@@ -3066,8 +3137,7 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
-  [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode watch plugin must use FM_HOME state outside the repo root"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
 
@@ -3115,8 +3185,7 @@ if (!text.includes("poll=7")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"
-  [ -z "$out" ] || fail "OpenCode effective-config test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode watch plugin must source FM_HOME config outside the repo root"
   pass "OpenCode watcher plugin sources the effective config"
 }
 
@@ -3176,8 +3245,7 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock"
-  [ -z "$out" ] || fail "OpenCode session-lock test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode watch plugin must arm only when this session owns the fleet lock"
   pass "OpenCode watcher plugin requires session lock ownership"
 }
 
@@ -3223,8 +3291,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"
-  [ -z "$out" ] || fail "OpenCode coordinator-scope test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"
   pass "OpenCode watcher coordinator respects primary scope"
 }
 
@@ -3399,8 +3466,7 @@ writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must retire the pre-ready arm, not its actionable successor"
-  [ -z "$out" ] || fail "OpenCode pre-ready actionable test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode must retire the pre-ready arm, not its actionable successor"
   pass "OpenCode pre-ready actionable close preserves its successor"
 }
 
@@ -3469,9 +3535,201 @@ if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must deliver the actionable wake after bounded hung-successor recovery"
-  [ -z "$out" ] || fail "OpenCode hung-successor test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode must deliver the actionable wake after bounded hung-successor recovery"
   pass "OpenCode hung successor falls back to one typed actionable wake"
+}
+
+test_opencode_lock_taken_during_in_flight_refusal_still_arms() {
+  local plugin repo home log order fakebin out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-superseded-root"
+  home="$TMP_ROOT/opencode-superseded-home"
+  log="$TMP_ROOT/opencode-superseded.log"
+  order="$TMP_ROOT/opencode-superseded-order.log"
+  fakebin=$(fm_fakebin "$TMP_ROOT/opencode-superseded")
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # A read-only decision reads the lock file and then walks process ancestry
+  # with ps. Bracketing that walk holds the decision open, with its lock read
+  # already taken, across the second idle event - deterministically, instead of
+  # hoping a loaded runner reproduces the same overlap, which is exactly how
+  # this reached CI as a flake rather than as a reproducible failure.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf 'probe-start\n' >> "${FM_ORDER_LOG:?}"
+sleep 0.1
+printf 'probe-end\n' >> "$FM_ORDER_LOG"
+exec /bin/ps "$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_ORDER_LOG="$order" node 2>&1 <<'EOF'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const orderLines = () => (existsSync(process.env.FM_ORDER_LOG)
+  ? readFileSync(process.env.FM_ORDER_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : []);
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+
+// First idle: this session does not hold the fleet lock, so its launch decision
+// is a refusal. Leave that decision in flight.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
+await hooks.event(event);
+
+// Wait on the ancestry walk actually being open - by then the refusal has
+// already read the old lock - rather than on a duration, so the overlap this
+// test needs cannot drift with machine speed.
+for (let i = 0; i < 400 && !orderLines().includes("probe-start"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+}
+if (!orderLines().includes("probe-start")) throw new Error("the first launch decision never opened");
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watch arm ran without owning the session lock");
+
+// Second idle: the session now holds the lock. Its answer must come from the
+// preconditions as they stand now, not from the refusal still in flight.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+appendFileSync(process.env.FM_ORDER_LOG, "second-idle\n");
+await hooks.event(event);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  throw new Error("the session took the lock but never armed: it inherited a superseded read-only refusal");
+}
+
+// Non-vacuity: a decision opened before the second idle must still have been
+// open after it. Without that bracket the two events never overlapped and this
+// test would be pinning nothing.
+const order = orderLines();
+const marker = order.indexOf("second-idle");
+const openedBefore = order.slice(0, marker).lastIndexOf("probe-start");
+const closedAfter = order.slice(marker).indexOf("probe-end");
+if (marker < 0 || openedBefore < 0 || closedAfter < 0) {
+  throw new Error(`the two idle events did not overlap, so the case is vacuous: ${order.join(" | ")}`);
+}
+EOF
+)
+  status=$?
+  expect_code_out 0 "$status" "$out" "a session that takes the fleet lock while a read-only decision is in flight must still arm"
+  pass "OpenCode watcher plugin re-decides a superseded read-only refusal instead of inheriting it"
+}
+
+test_opencode_successor_still_in_login_shell_is_not_a_failed_watcher() {
+  local plugin repo home log gate release out status saved_home
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-login-start-root"
+  home="$TMP_ROOT/opencode-login-start-home"
+  log="$TMP_ROOT/opencode-login-start.log"
+  gate="$TMP_ROOT/opencode-login-start.gate"
+  release="$TMP_ROOT/opencode-login-start.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  # As in the Pi case: the first arm closes on an actionable line, and the
+  # successor is held inside its login shell until this test releases it, so the
+  # readiness window provably expires before the successor runs any arm
+  # instruction at all.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+if [ "$(grep -c '^arm=' "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic wake\n'
+  : > "${FM_TEST_LOGIN_SHELL_WHEN:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+# Bounded on purpose: a fixture watcher must not outlive the test that started
+# it. If the driving process dies before its cleanup runs, an unbounded loop
+# here becomes an orphan on whatever machine ran the suite.
+for _ in $(seq 3000); do [ -e "$FM_STOP_FILE" ] && break; sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # Pin the login shell profile so the hold below blocks the successor inside a
+  # shell this test controls rather than timing against the machine's dotfiles.
+  saved_home=$HOME
+  fm_test_pin_login_shell "$TMP_ROOT/opencode-login-start-login-home"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
+    FM_STOP_FILE="$TMP_ROOT/opencode-login-start.stop" FM_RELEASE_FILE="$release" \
+    FM_TEST_LOGIN_SHELL_HOLD="$release" FM_TEST_LOGIN_SHELL_WHEN="$gate" \
+    FM_OPENCODE_ARM_READY_TIMEOUT_MS=300 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+    node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : []);
+
+let prompt = "";
+let rowsAtPrompt = 0;
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+      rowsAtPrompt = armRows().length;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 800 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("could not restore watcher continuity")) {
+  throw new Error(`a successor still inside its login shell was reported as a failed watcher: ${prompt}`);
+}
+if (!prompt.includes("watcher: starting")) throw new Error(`the successor's actual state was not reported: ${prompt}`);
+
+// Non-vacuity: the successor was still held in its login shell when this wake
+// was decided, so the verdict above really is about a successor that had not
+// begun arming - not about one that had already come up.
+if (rowsAtPrompt !== 1) throw new Error(`the successor had already armed, so nothing was pinned: ${rowsAtPrompt} arm rows`);
+
+// The successor was kept, not retired: released from its login shell it arms,
+// exactly once, with no retry storm behind it.
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 800 && armRows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armRows().length !== 2) {
+  throw new Error(`the successor was retired instead of being left to come up: ${armRows().join(" | ")}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (armRows().length !== 2) throw new Error(`a retry storm followed the successor: ${armRows().join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  HOME=$saved_home; export HOME
+  expect_code_out 0 "$status" "$out" "a successor still inside its login shell must be reported as starting, not as a failed watcher"
+  pass "OpenCode successor still in its login shell is kept and reported as starting"
 }
 
 test_opencode_unretired_successor_falls_back_without_retry() {
@@ -3542,8 +3800,7 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must fall back without overlapping an unretired successor"
-  [ -z "$out" ] || fail "OpenCode unretired-successor test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode must fall back without overlapping an unretired successor"
   pass "OpenCode unretired successor falls back without an overlapping retry"
 }
 
@@ -3640,8 +3897,7 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
     status=$?
-    expect_code 0 "$status" "OpenCode late $kind close must remain supervised after fallback"
-    [ -z "$out" ] || fail "OpenCode late-$kind test printed output: $out"
+    expect_code_out 0 "$status" "$out" "OpenCode late $kind close must remain supervised after fallback"
   done
   pass "OpenCode late unretired closes resume classified supervision"
 }
@@ -3701,8 +3957,7 @@ writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode clean empty close must trigger a bounded continuity retry"
-  [ -z "$out" ] || fail "OpenCode empty-close retry test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode clean empty close must trigger a bounded continuity retry"
   pass "OpenCode clean empty close triggers a bounded continuity retry"
 }
 
@@ -3754,8 +4009,7 @@ if (!prompt.includes("after 2 retries")) throw new Error(`retry exhaustion was n
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode established clean closes must honor the continuity retry limit"
-  [ -z "$out" ] || fail "OpenCode established-empty-close retry test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode established clean closes must honor the continuity retry limit"
   pass "OpenCode established clean closes stop at the configured retry limit"
 }
 
@@ -3819,8 +4073,7 @@ try {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode close handler must verify session-lock ownership before successor launch"
-  [ -z "$out" ] || fail "OpenCode close lock test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode close handler must verify session-lock ownership before successor launch"
   pass "OpenCode close handler verifies session-lock ownership before successor launch"
 }
 
@@ -3892,8 +4145,7 @@ if (promptBody) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"
-  [ -z "$out" ] || fail "OpenCode coordination test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode turn-end guard must let the auto-arm plugin establish supervision first"
   pass "OpenCode watcher plugin coordinates with the turn-end guard"
 }
 
@@ -3969,8 +4221,7 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
-  [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
+  expect_code_out 0 "$status" "$out" "OpenCode watch plugin must not treat external healthy output as an owned arm"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
@@ -3991,6 +4242,7 @@ test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
+test_pi_successor_still_in_login_shell_is_not_a_failed_watcher
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
@@ -4015,6 +4267,8 @@ test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
+test_opencode_lock_taken_during_in_flight_refusal_still_arms
+test_opencode_successor_still_in_login_shell_is_not_a_failed_watcher
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing

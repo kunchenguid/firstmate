@@ -575,6 +575,65 @@ expect_code() {
   [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
 }
 
+# expect_code_out <expected> <actual> <captured> <label>: expect_code that also
+# reports <captured>.
+# Use it wherever the exit code came from a subprocess whose own diagnostic was
+# captured into a variable: fail exits, so a later "[ -z \"$out\" ] || fail" line
+# never runs and the diagnostic is lost exactly when it is needed.
+expect_code_out() {
+  local expected=$1 actual=$2 captured=$3 label=$4
+  [ "$actual" = "$expected" ] && return 0
+  if [ -n "$captured" ]; then
+    fail "$label: expected exit $expected, got $actual"$'\n'"--- output ---"$'\n'"$captured"
+  fi
+  fail "$label: expected exit $expected, got $actual (no output captured)"
+}
+
+# dead_pid: a pid that looks plausible and is provably not running, for tests
+# that must exercise the "this process is gone" path rather than a validation
+# rejection.
+dead_pid() {
+  local p=999999
+  while kill -0 "$p" 2>/dev/null; do
+    p=$((p + 1))
+  done
+  printf '%s\n' "$p"
+}
+
+# fm_test_pin_login_shell <dir>: point HOME at <dir>, carrying a login profile
+# this suite controls, so a login shell the code under test spawns pays only
+# this profile and not whatever the operator or the CI image keeps in theirs.
+# Login-shell initialization is unbounded (nvm, rbenv, conda, /etc/profile.d),
+# and a test that leaves it unpinned is timing its assertions against a cost it
+# does not own.
+#
+# The profile reads three env knobs at login time, so a test can also put that
+# cost back deliberately:
+#   FM_TEST_LOGIN_SHELL_DELAY=<seconds>  sleep before handing off to the command
+#   FM_TEST_LOGIN_SHELL_HOLD=<path>      block until <path> exists
+#   FM_TEST_LOGIN_SHELL_WHEN=<path>      apply either of the above only to the
+#                                        shells that start after <path> exists
+# DELAY reproduces machine latency across a whole suite on demand. HOLD is the
+# deterministic form, and is what an assertion should use: a test that must
+# observe a child while it is still inside its login shell blocks that child
+# outright, rather than racing a duration against it and going quietly vacuous
+# on a loaded runner.
+fm_test_pin_login_shell() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/.bash_profile" <<'FM_LOGIN_PROFILE'
+# Written by fm_test_pin_login_shell; its presence also stops bash from reading
+# ~/.bash_login or ~/.profile.
+if [ -z "${FM_TEST_LOGIN_SHELL_WHEN:-}" ] || [ -e "$FM_TEST_LOGIN_SHELL_WHEN" ]; then
+  [ -n "${FM_TEST_LOGIN_SHELL_DELAY:-}" ] && sleep "$FM_TEST_LOGIN_SHELL_DELAY"
+  if [ -n "${FM_TEST_LOGIN_SHELL_HOLD:-}" ]; then
+    while [ ! -e "$FM_TEST_LOGIN_SHELL_HOLD" ]; do sleep 0.02; done
+  fi
+fi
+FM_LOGIN_PROFILE
+  export HOME=$dir
+}
+
 # assert_grep <pattern> <file> <msg>: fixed-string grep must match in <file>.
 # `--` guards patterns that begin with '-' (e.g. backlog/registry lines).
 assert_grep() {

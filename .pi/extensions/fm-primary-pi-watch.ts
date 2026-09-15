@@ -47,6 +47,11 @@ type ArmResult = {
   message: string;
 };
 
+// "starting" is the arm child that has not begun executing the arm script yet:
+// its login shell is still initializing. That is the machine's cost and is not
+// evidence about the watcher, so it is never reported as a failed successor.
+type ArmReadiness = "ready" | "unready" | "starting" | "failed";
+
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
@@ -133,6 +138,21 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+// The arm child runs through a login shell so it inherits the operator's real
+// PATH. Login-shell initialization is unbounded and belongs to the machine, so
+// the wrapper announces its handoff on fd 3 the moment that initialization is
+// done and immediately before the arm script takes over. waitForReadiness arms
+// its window on that announcement, so the window measures only the arm script's
+// own execution. The announcement is best-effort: a shell that cannot write
+// fd 3 still execs the arm script, and its successor is then reported as still
+// starting rather than as a failure.
+const armHandoffMarker = "fm-arm-exec";
+const armCommand = [
+  'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"',
+  '[ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"',
+  `{ printf '${armHandoffMarker}\\n' >&3; exec 3>&-; } 2>/dev/null`,
+  'exec "$FM_WATCH_ARM_SCRIPT" --restart',
+].join("; ");
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -185,6 +205,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
 }
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armHandoff = new WeakMap<ChildProcess, Promise<void>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
@@ -847,16 +868,34 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  // Expiry never decides that a successor failed, only which interval expired.
+  // Before the arm child announces its handoff it has not run a single arm
+  // instruction, so expiry there means "still starting"; after the handoff the
+  // window measures the arm script itself, which is firstmate's own cost to
+  // bound, and expiry there means a genuinely unready successor.
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("failed");
+    const handoff = armHandoff.get(armChild);
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
-      timer.unref();
-      void readiness.then((ready) => {
-        clearTimeout(timer);
-        resolveReady(ready);
-      });
+      let settled = false;
+      let expiry: ReturnType<typeof setTimeout> | null = null;
+      const settle = (verdict: ArmReadiness): void => {
+        if (settled) return;
+        settled = true;
+        if (expiry) clearTimeout(expiry);
+        resolveReady(verdict);
+      };
+      const openWindow = (onExpiry: ArmReadiness): void => {
+        if (settled) return;
+        if (expiry) clearTimeout(expiry);
+        const timer = setTimeout(() => settle(onExpiry), armReadyTimeoutMs);
+        timer.unref();
+        expiry = timer;
+      };
+      openWindow("starting");
+      void handoff?.then(() => openWindow("unready"));
+      void readiness.then((ready) => settle(ready ? "ready" : "failed"));
     });
   }
 
@@ -885,8 +924,19 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      const readiness = replacement.ok && successorChild
+        ? await waitForReadiness(successorChild)
+        : "failed";
+      if (readiness === "ready" && successorChild) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
+      }
+      if (readiness === "starting") {
+        // The successor has not begun arming, so its shell is still starting up
+        // rather than its watcher failing. Retiring it would only buy another
+        // equally slow start, so keep it and deliver the wake now, saying so.
+        return {
+          failure: `watcher: starting - Pi extension left the successor watcher coming up; it had not begun arming within ${armReadyTimeoutMs}ms`,
+        };
       }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
@@ -963,10 +1013,10 @@ export default function (pi: ExtensionAPI) {
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
     };
-    const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
+    const armChild = spawn("bash", ["-lc", armCommand], {
       cwd: fmRoot,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
     owner.child = armChild;
     let stdout = "";
@@ -980,6 +1030,13 @@ export default function (pi: ExtensionAPI) {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
+    const handoffStream = armChild.stdio[3];
+    armHandoff.set(armChild, new Promise<void>((resolveHandoff) => {
+      if (!handoffStream || !("on" in handoffStream)) return;
+      handoffStream.on("data", (chunk: Buffer) => {
+        if (chunk.toString().includes(armHandoffMarker)) resolveHandoff();
+      });
+    }));
     const closed = new Promise<void>((resolveClosedChild) => {
       resolveClosed = resolveClosedChild;
     });
@@ -1007,14 +1064,25 @@ export default function (pi: ExtensionAPI) {
     const releaseChild = (): void => {
       if (owner.child === armChild) owner.child = null;
     };
-    armChild.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-      observeEstablishedArm();
-    });
-    armChild.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-      observeEstablishedArm();
-    });
+    // Declaring a fourth pipe for the handoff channel widens the spawn's stdio
+    // tuple, so these two are no longer narrowed to non-null by their overload.
+    // Readiness is read entirely from them, so an arm without them can never
+    // report itself established: settle it unready rather than attaching
+    // listeners to nothing and waiting out the window in silence.
+    const armStdout = armChild.stdout;
+    const armStderr = armChild.stderr;
+    if (!armStdout || !armStderr) {
+      settleReadiness(false);
+    } else {
+      armStdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        observeEstablishedArm();
+      });
+      armStderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+        observeEstablishedArm();
+      });
+    }
     armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;

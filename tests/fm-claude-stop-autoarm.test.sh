@@ -1143,6 +1143,26 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
   pass "auto-arm: a superseded owner goes silent - one supersession episode, one translation, no held mutex"
 }
 
+test_stale_owner_lock_file_does_not_silently_disable_rearm() {
+  local dir out status quarantine
+  dir=$(make_primary_dir "$TMP_ROOT/owner-lock-file")
+  # The incident shape: a turn ends with live fleet work and no live watcher,
+  # while a stale bare file sits at the single-flight owner lock path. Without
+  # a quarantine the claim fails with an empty holder and the hook exits 0
+  # without arming, noticing, or rewaking - every turn, indefinitely.
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm.lock"
+  touch -t 200101010000 "$dir/state/.claude-autoarm.lock"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code_out 2 "$status" "$out" "a stale file at the owner lock must not silently skip the arm"
+  [ -e "$dir/state/arm-ran" ] || fail "hook declined to arm with live work and no live watcher"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  quarantine=$(compgen -G "$dir/state/.claude-autoarm.lock.invalid.*" || true)
+  [ -n "$quarantine" ] || fail "stale owner-lock file was not quarantined aside"
+  pass "auto-arm: stale owner-lock file is quarantined and the cycle still arms"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -1235,6 +1255,7 @@ test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
+test_stale_owner_lock_file_does_not_silently_disable_rearm
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper

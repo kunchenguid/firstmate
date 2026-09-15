@@ -71,6 +71,11 @@ Only positive socket refusal or absence is a daemon-down finding; escalate that 
 
 ## Live-endpoint escalation
 
+A stale wake carries the measurement that produced it, and reading that first tells you which shape you are looking at before you spend an inspection.
+`stalled` means the worker's process subtree accumulated no CPU and spawned nothing for the whole span, which is what a worker stopped by a provider session limit or a dead harness looks like - go straight to the pane and expect an empty composer, a limit banner, or a prompt that never started a turn.
+`no-pid-source` means nothing could be measured on that runtime, so the wake is the older idle-timer escalation and proves only that the pane has not changed.
+A wake that reports the pane as measured working is a long-cadence recheck, not a wedge; confirm the work is still the work you want rather than treating it as a stall.
+
 Escalate in order:
 
 1. Peek the pane, and check the task's steering inbox (`state/<id>.inbox/`) for unhandled `*.msg` records - a stale wake naming an unread firstmate instruction means the worker never acknowledged a durable steer, and the record itself shows exactly what was intended.

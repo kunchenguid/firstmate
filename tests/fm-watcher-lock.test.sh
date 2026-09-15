@@ -243,6 +243,30 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_stale_file_is_quarantined_and_reacquired() {
+  local dir state lockdir rc newpid quarantine
+  dir=$(make_case lock-stale-file)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  # A stale bare file at a lock path (no symlink, no directory, no pid): no
+  # owner can hold it and no steal can evict it, so without a quarantine it
+  # wedges acquisition forever with an empty holder.
+  : > "$lockdir"
+  touch -t 200101010000 "$lockdir"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer failed to quarantine a stale lock-path file (rc=$rc)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  [ -L "$lockdir" ] || fail "reclaimed lock is not a symlink singleton"
+  quarantine=$(compgen -G "$lockdir.invalid.*" || true)
+  [ -n "$quarantine" ] || fail "stale lock-path file was not quarantined aside"
+  [ -f "$quarantine/lock" ] || fail "quarantined lock-path file is missing under $quarantine"
+  pass "stale lock-path file is quarantined and the lock is reacquired"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-concurrency)
@@ -1119,6 +1143,7 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_stale_file_is_quarantined_and_reacquired
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
