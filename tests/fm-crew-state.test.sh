@@ -331,6 +331,61 @@ gate: review
 EOF
 }
 
+# The 2026-09-08 dependency-free-worktree shape, twice in one day. The pipeline
+# validates in a worktree it creates per run, which carries no installed project
+# dependencies, so the gate agent could not run the repository's own checks and
+# raised that as an ask-user WARNING - indistinguishable, in the state line, from
+# a real product decision. Descriptions are the verbatim text those two runs
+# recorded, so a phrasing change in the detector is caught against real evidence
+# rather than against wording invented for the test.
+run_parked_unrunnable_checks_absent_deps() {  # <branch>
+  cat <<EOF
+run:
+  id: "01M1Z60TC7SRFT0TQGH45ZPCNA"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    L1,warning,,,ask-user,"ESLint and Prettier checks could not run because worktree dependencies are absent. Install the project dependencies and rerun changed-file checks. Whitespace and generated agent-configuration drift checks passed."
+gate: document
+EOF
+}
+
+run_parked_unrunnable_checks_command_not_found() {  # <branch>
+  cat <<EOF
+run:
+  id: "01M201A5K6A9QMZDBBGJDF6QF3"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 1m4s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    lint-tools-unavailable,warning,,,ask-user,"ESLint and Prettier checks could not run because worktree dependencies are absent; both commands returned Command not found. Restore dependencies and rerun these checks. Syntax, whitespace and configured secret checks passed."
+gate: document
+EOF
+}
+
+# An unrunnable check hiding BEHIND a genuine finding: the gate has real work to
+# decide, and the environment fault must still be named rather than absorbed into
+# the finding count.
+run_parked_unrunnable_check_beside_real_finding() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+    r2,warning,,,ask-user,"Vitest could not run: this worktree has no node_modules."
+gate: review
+EOF
+}
+
 run_parked_scalar_gate_running() {  # <branch>
   cat <<EOF
 run:
@@ -2569,5 +2624,136 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+
+test_parked_unrunnable_check_named_as_environment_fault() {
+  local fixture branch id
+  local FM_NM_UNRUNNABLE_CHECK_RE='^$'
+  export FM_NM_UNRUNNABLE_CHECK_RE
+  for fixture in run_parked_unrunnable_checks_absent_deps run_parked_unrunnable_checks_command_not_found; do
+    reset_fakes
+    id="feat-${fixture#run_parked_unrunnable_checks_}"
+    id=${id//_/-}
+    branch="fm/$id"
+    local d; d=$(new_case "$fixture")
+    make_repo_on_branch "$d/wt" "$branch"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship"
+    printf 'needs-decision: document gate\n' > "$d/state/$id.status"
+    FM_FAKE_AXI_STATUS="$($fixture "$branch")"
+    local out; out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: parked" "$fixture: an unrunnable-check gate is still parked"
+    assert_contains "$out" "environment fault" \
+      "$fixture: a check that could not run was not named as an environment fault"
+    assert_contains "$out" "a configured check did not run - validation is incomplete" \
+      "$fixture: the state line did not report incomplete validation"
+    assert_not_contains "$out" "NOTHING WAS CHECKED" \
+      "$fixture: the state line denied checks that passed"
+    assert_contains "$out" "not approvable" \
+      "$fixture: the state line left the environment fault answerable by approval"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# %s -> %s\n' "$fixture" "$out"
+    fi
+    pass "$fixture: an unrunnable check reads as an environment fault, not a decision"
+  done
+}
+
+test_parked_unrunnable_check_beside_real_finding_still_named() {
+  reset_fakes
+  local d; d=$(new_case parked-unrunnable-mixed)
+  make_repo_on_branch "$d/wt" fm/feat-mixed-env
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mixed-env.meta" "window=fm:fm-feat-mixed-env" \
+    "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-mixed-env.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_unrunnable_check_beside_real_finding fm/feat-mixed-env)"
+  local out; out=$(run_crew_state "$d" feat-mixed-env)
+  assert_contains "$out" "2 finding(s)" "the mixed gate lost its finding count"
+  assert_contains "$out" "ask-user: authority decision" "the mixed gate lost its real decision"
+  assert_contains "$out" "environment fault" \
+    "an unrunnable check beside a real finding was absorbed into the finding count"
+  pass "an unrunnable check beside a real finding is still named"
+}
+
+test_parked_ordinary_finding_is_not_an_environment_fault() {
+  reset_fakes
+  local d; d=$(new_case parked-ordinary-not-env)
+  make_repo_on_branch "$d/wt" fm/feat-ordinary-env
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ordinary-env.meta" "window=fm:fm-feat-ordinary-env" \
+    "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-ordinary-env.status"
+  local description out
+  local FM_NM_UNRUNNABLE_CHECK_RE=
+  export FM_NM_UNRUNNABLE_CHECK_RE
+  for description in \
+    "Administrators cannot run exports" \
+    "Contestants cannot run exports" \
+    "Administrators cannot run the export command" \
+    "Users cannot run the optional plugin install" \
+    "The export format cannot be run by administrators" \
+    "The customer test did not run after submitting the form" \
+    "Search is unavailable to administrators" \
+    "Search is not available to administrators" \
+    "The optional plugin is not installed" \
+    "The dependency view omits missing dependencies"; do
+    FM_FAKE_AXI_STATUS="$(run_parked fm/feat-ordinary-env)"
+    FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/changes product behavior/$description}
+    out=$(run_crew_state "$d" feat-ordinary-env)
+    assert_contains "$out" "ask-user: authority decision" "an ordinary parked gate lost its decision"
+    assert_not_contains "$out" "environment fault" \
+      "$description: an ordinary product decision was misread as an environment fault"
+  done
+  pass "an ordinary ask-user finding is not flagged as an environment fault"
+}
+
+test_finding_metadata_does_not_supply_tool_context() {
+  reset_fakes
+  local d; d=$(new_case parked-metadata-not-env)
+  make_repo_on_branch "$d/wt" fm/feat-metadata-env
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-metadata-env.meta" "window=fm:fm-feat-metadata-env" \
+    "worktree=$d/wt" "kind=ship"
+  local row out
+  for row in \
+    'format,warning,b.go,,ask-user,Administrators cannot run exports' \
+    'r1,warning,src/test/exports.go,,ask-user,Administrators cannot run exports' \
+    'install,warning,"src/exports,legacy.go",,ask-user,Administrators cannot run exports' \
+    '"r1,\"test\"",warning,b.go,,ask-user,Administrators cannot run exports' \
+    'r1,warning,b.go,,ask-user,"Administrators cannot run exports, including archived records"'; do
+    FM_FAKE_AXI_STATUS="$(run_parked fm/feat-metadata-env)"
+    FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/r2,error,b.go,,ask-user,changes product behavior/$row}
+    out=$(run_crew_state "$d" feat-metadata-env)
+    assert_contains "$out" "ask-user: authority decision" "metadata case lost its decision"
+    assert_not_contains "$out" "environment fault" \
+      "$row: metadata classified a product decision as an environment fault"
+  done
+  pass "finding metadata does not supply tool context"
+
+  # The description column is selected by its header, including when a quoted
+  # metadata field contains commas or escaped quotes before it.
+  local header
+  for header in 'id,severity,file,line,action,description' 'id,description,severity,file,line,action'; do
+    if [ "$header" = 'id,severity,file,line,action,description' ]; then
+      row='"r1,\"legacy\"",warning,"src/a,b.go",,ask-user,"Checks could not run, because dependencies are absent"'
+    else
+      row='"r1,\"legacy\"","Checks could not run, because dependencies are absent",warning,b.go,,ask-user'
+    fi
+    FM_FAKE_AXI_STATUS="$(run_parked fm/feat-metadata-env)"
+    FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/id,severity,file,line,action,description/$header}
+    FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/r2,error,b.go,,ask-user,changes product behavior/$row}
+    out=$(run_crew_state "$d" feat-metadata-env)
+    assert_contains "$out" "environment fault" "a quoted finding description lost its tool context"
+  done
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-metadata-env)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/changes product behavior/command not found}
+  out=$(run_crew_state "$d" feat-metadata-env)
+  assert_contains "$out" "environment fault" "a bare command-not-found diagnostic was missed"
+  pass "finding descriptions retain tool context with quoted fields and reordered columns"
+}
+
+test_finding_metadata_does_not_supply_tool_context
+test_parked_unrunnable_check_named_as_environment_fault
+test_parked_unrunnable_check_beside_real_finding_still_named
+test_parked_ordinary_finding_is_not_an_environment_fault
 
 echo "all fm-crew-state tests passed"
