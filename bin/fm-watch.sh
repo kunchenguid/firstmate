@@ -933,9 +933,6 @@ clear_write_tracking() {  # <window-key>
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
-  if ended_worker_stale_check "$win" "$task"; then
-    return 0
-  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1286,17 +1283,35 @@ captain_call_stale_bound() {  # <window-key> <task>
 # verb from its last active run.
 # Once the endpoint is confirmed dead, only unread steers, declared waits, and
 # the authoritative run may override bounded recovery.
-ended_worker_stale_check() {  # <window> <task>
-  local win=$1 task=$2 key line last reason held=0
+ended_worker_reconcile_ready() {  # <window> <task>
+  local win=$1 task=$2
   [ -n "$task" ] || return 1
   [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = dead ] || return 1
-  fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
+  ! fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null
+}
+
+ended_worker_stale_check() {  # <window> <task>
+  local win=$1 task=$2 key line last reason held=0
+  ended_worker_reconcile_ready "$win" "$task" || return 1
   last=$(last_status_line "$STATE/$task.status")
   status_is_paused_or_captain_held "$last" && return 1
   if task_captain_call_open "$task"; then
     held=1
   fi
   key=$(window_key "$win")
+  if [ "$held" -eq 1 ]; then
+    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
+  else
+    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
+  fi
+  if [ "$held" -eq 1 ] && afk_record_present; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
+  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
     *"source: run-step"*) clear_stale_hash_tracking "$key"; return 0 ;;
@@ -1304,18 +1319,8 @@ ended_worker_stale_check() {  # <window> <task>
     'state: unknown '*|'state: stopped '*) ;;
     *) return 1 ;;
   esac
-  if [ "$held" -eq 1 ]; then
-    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
-  else
-    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
-  fi
-  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
-    clear_stale_hash_tracking "$key"
-    return 0
-  fi
   clear_stale_hash_tracking "$key"
   if [ "$held" -eq 1 ]; then
-    afk_record_present && return 0
     reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
   else
     reason="stale: $win (worker ended - preserved state needs recovery, rechecked on a long cadence not a wedge)"
@@ -2297,8 +2302,9 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    if [ "$kind" != secondmate ] && ended_worker_stale_check "$w" "$task"; then
-      continue
+    ended_worker_ready=1
+    if [ "$kind" != secondmate ] && ended_worker_reconcile_ready "$w" "$task"; then
+      ended_worker_ready=0
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
@@ -2314,14 +2320,22 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$ended_worker_ready" -eq 0 ]; then
+      busy_now=1
+    elif window_is_busy "$w" "$tail40"; then
+      busy_now=0
+    else
+      busy_now=1
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ "$ended_worker_ready" -eq 0 ] && ended_worker_stale_check "$w" "$task"; then
+          continue
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
