@@ -360,6 +360,26 @@ SH
   done
 }
 
+# fm_fake_pi <fakebin> <tool...>
+# Drops an exit-0 Pi-family stub that also answers `--help` with the
+# project-trust flag `bin/fm-spawn.sh` probes for. A bare `fm_fake_exit0` stub
+# prints nothing, and the spawn's fail-safe trust guard then refuses to launch,
+# so any fixture standing in for pi or pi-signed must use this helper.
+fm_fake_pi() {
+  local fakebin=$1 tool
+  shift
+  for tool in "$@"; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Options: --tui-mode <mode> --approve, -a'
+fi
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only
