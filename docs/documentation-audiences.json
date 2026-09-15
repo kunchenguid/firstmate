@@ -157,10 +157,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/grep-loop-review-workflow/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/goal-kanban/SKILL.md",
       "audience": "agent-runtime"
     },

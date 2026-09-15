@@ -22,7 +22,6 @@ Use `step-by-step` mode when the caller supplies only a short or ambiguous idea.
 Use `full-description` mode when the caller supplies a complete specification and only extraction is needed.
 In every mode, ask one question at a time when a material gap remains.
 Extract facts already supplied by the caller and ask for only the next missing fact that materially affects the goal.
-Ask one question at a time.
 Do not present a batch of unresolved questions or invent an answer to avoid asking.
 When the current task record already contains an answer, do not ask for it again.
 Keep the conversation in the user's language while preserving commands, file paths, identifiers, and section names exactly.
@@ -135,8 +134,9 @@ Score the draft against these ten checks before returning it.
 - Every stop condition is mechanically detectable.
 - The artifact is at most 4,000 characters and contains no token-budget directive.
 
-Treat seven of ten as the minimum acceptable score.
-If the score is lower, ask the next highest-value clarification question rather than presenting a weak goal.
+All ten checks are mandatory preconditions for rendering the goal, and a score cannot override a failed check.
+Render only when all ten checks pass and report the resulting score as 10/10.
+If any check fails, ask the next highest-value clarification question rather than presenting a weak goal.
 If a deterministic validator is already supplied by the current task, use it as an additional check, but do not add or install a validator as part of this skill.
 
 ## Handoff boundary
