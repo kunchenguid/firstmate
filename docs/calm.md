@@ -74,11 +74,14 @@ The boat follows command, shortcut, and settings changes during a run, and start
 It stays through tool continuations and disappears when the run finishes, aborts, or fails.
 Hidden time does not advance the boat, and a fresh session or extension reload resets its position.
 The stock working indicator remains alongside the boat because OMP's public extension API cannot hide it.
-Thinking, assistant narration, and Firstmate operational messages retain OMP's normal presentation.
+Advisor cards, TODO displays, and canonically classified text-only Firstmate operational user messages, including watcher wakes, are also concealed while calm is enabled.
+Their stored content and model delivery are unchanged; toggling calm off restores them.
+Thinking, assistant narration, ordinary captain messages, attachments, and Firstmate outcome cards retain OMP's normal presentation.
 
 OMP does not expose a public extension API setter for tool visibility.
 The extension briefly uses a zero-height widget factory to obtain the live TUI, removes the widget, then calls the focused editor's existing native visibility action.
-It checks that capability on every command and neither patches components nor caches editor instances.
+It checks that capability on every command and does not cache editor instances.
+A session-scoped adapter wraps live OMP presentation components for advisor, TODO, and operational input hiding.
 If the editor action is unavailable, it reports a warning directing the operator to OMP's native controls.
 This bridge depends on OMP's editor callback and needs the live regression rerun after OMP upgrades.
 The boat reads the live OMP namespace's native display preference and uses the public widget API, with one animation timer running only during an agent run.

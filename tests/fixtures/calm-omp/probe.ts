@@ -1,10 +1,12 @@
 // Token-free provider and inspection commands for the real installed OMP TUI.
 import { AssistantMessageEventStream } from '@oh-my-pi/pi-ai';
 import { writeFileSync } from 'node:fs';
+import { encodeFirstmateOperationalInput } from './.pi/extensions/lib/fm-operational-input.ts';
 export default function (pi: any) {
   let request = 0;
   let cachedMode: any;
   const advisorRows = new Set<any>();
+  const operationalRows = new Set<any>();
   function getMode(ctx: any) {
     let mode: any;
     ctx.ui.setWidget('calm-fixture-mode', (tui: any) => {
@@ -32,6 +34,18 @@ export default function (pi: any) {
     await new Promise(resolve => setTimeout(resolve, 100));
     for (const row of mode.chatContainer.children) if (!before.has(row)) advisorRows.add(row);
     ctx.ui.notify(`ADVISOR_SAVED_${args}`);
+  }});
+  pi.registerCommand('calm-operational', {description: 'Append native operational user fixture', handler: async (args: string, ctx: any) => {
+    const mode = getMode(ctx);
+    const content = encodeFirstmateOperationalInput('watcher', `FIRSTMATE WATCHER WAKE: WAKE_${args}`);
+    const message = {role: 'user', content: [{type: 'text', text: content}], timestamp: Date.now()};
+    mode.session.sessionManager.appendMessage(message);
+    const before = new Set(mode.chatContainer.children);
+    mode.addMessageToChat(message);
+    for (const row of mode.chatContainer.children) if (!before.has(row)) operationalRows.add(row);
+    mode.addMessageToChat({role: 'user', content: `CAPTAIN_${args} asks about FIRSTMATE_OP: v1 watcher:`, timestamp: Date.now()});
+    mode.addMessageToChat({role: 'custom', customType: 'fm-main-mirror', content: `OUTCOME_${args}`, display: true});
+    ctx.ui.notify(`OPERATIONAL_SAVED_${args}`);
   }});
   pi.registerCommand('calm-todo', {description: 'Seed native session todo fixture', handler: async (_args: string, ctx: any) => {
     const mode = getMode(ctx);
@@ -86,7 +100,7 @@ export default function (pi: any) {
     });
     ctx.ui.setWidget('calm-test-probe', undefined);
     const mode = getMode(ctx);
-    const presentation = {advisors: [...advisorRows].map(row => row.render(100)), todo: mode.todoContainer.render(100), compact: mode.renderCompactStatusLine(100, ['WORKING_SENTINEL']), phases: mode.todoPhases, storedPhases: mode.session.getTodoPhases(), chat: mode.chatContainer.render(100), compactMode: mode.isCompactTodoMode()};
+    const presentation = {operational: [...operationalRows].map(row => row.render(100)), advisors: [...advisorRows].map(row => row.render(100)), todo: mode.todoContainer.render(100), compact: mode.renderCompactStatusLine(100, ['WORKING_SENTINEL']), phases: mode.todoPhases, storedPhases: mode.session.getTodoPhases(), chat: mode.chatContainer.render(100), compactMode: mode.isCompactTodoMode()};
     writeFileSync(`${process.env.CALM_LAB}/${args}.json`, JSON.stringify({components, presentation, entries:ctx.sessionManager.getEntries(), tools:pi.getAllTools(), active:pi.getActiveTools()}));
     ctx.ui.notify(`PROBE_SAVED_${args}`);
   }});

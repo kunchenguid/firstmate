@@ -15,6 +15,9 @@ cp "$ROOT/.omp/extensions/lib/fm-calm-omp-presentation.ts" "$TMP_ROOT/project/.o
 cp "$ROOT/.omp/extensions/lib/fm-calm-omp-working-ship.ts" "$TMP_ROOT/project/.omp/extensions/lib/"
 cp "$ROOT/.omp/extensions/fm-calm-omp.ts" "$TMP_ROOT/project/.omp/extensions/calm.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/project/.pi/extensions/lib/"
+cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/project/.pi/extensions/lib/"
+mkdir -p "$TMP_ROOT/project/bin"
+cp "$ROOT/bin/fm-operational-input.sh" "$TMP_ROOT/project/bin/"
 cp "$ROOT/tests/fixtures/calm-omp/probe.ts" "$TMP_ROOT/project/probe.ts"
 OMP_BIN=$(command -v omp)
 OMP_PACKAGE=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$OMP_BIN")
@@ -71,6 +74,31 @@ try {
  live.hasUI=false;emit('agent_start');assert.equal(clocks.size,0);emit('session_shutdown');
  console.log('ok - single animation timer, continuation continuity, native preference sync, frozen resume, terminal/shutdown cleanup and unsupported settings');
 } finally {globalThis.setInterval=originalSetInterval;globalThis.clearInterval=originalClearInterval;}
+
+const {installCalmOmpPresentation}=await import(new URL('./lib/fm-calm-omp-presentation.ts', `file://${process.env.EXT}`));
+const {encodeFirstmateOperationalInput}=await import(new URL('../../.pi/extensions/lib/fm-operational-input.ts', `file://${process.env.EXT}`));
+let quiet=true;
+const existing={role:'user',content:encodeFirstmateOperationalInput('watcher','existing wake')};
+const existingCard={render:()=>['existing wake']};
+const presMode={hideToolActivity:true,chatContainer:{children:[existingCard]},todoContainer:{render:()=>['todo']},renderCompactStatusLine:(_,lines)=>[...lines,'todo'],viewSession:{messages:[existing]},transcriptMessageComponents:new WeakMap([[existing,existingCard]]),addMessageToChat(message){this.chatContainer.children.push({render:()=>[JSON.stringify(message)]});return [];}};
+presMode.todoContainer.mode=presMode;
+const tui={children:[presMode.todoContainer],resetDisplay(){}};
+const originalAdd=presMode.addMessageToChat;
+const dispose=installCalmOmpPresentation(tui,()=>quiet);
+assert.deepEqual(existingCard.render(),[]);
+const wake=encodeFirstmateOperationalInput('watcher','new wake');
+const check=(message,hide)=>{presMode.addMessageToChat(message);assert.equal(presMode.chatContainer.children.at(-1).render(80).length===0,hide);};
+check({role:'user',content:[{type:'text',text:wake}]},true);
+check({role:'user',content:'FIRSTMATE_OP: v1 watcher: quoted prose'},false);
+check({role:'user',content:`Please explain ${wake}`},false);
+check({role:'assistant',content:wake},false);
+check({role:'custom',customType:'fm-main-mirror',content:wake},false);
+check({role:'user',content:[{type:'text',text:wake},{type:'image',data:'x'}]},false);
+check({role:'custom',customType:'advisor',content:'note'},true);
+quiet=false;assert.deepEqual(existingCard.render(),['existing wake']);
+quiet=true;dispose();dispose();assert.equal(presMode.addMessageToChat,originalAdd);assert.deepEqual(existingCard.render(),['existing wake']);
+assert.equal(existing.content,encodeFirstmateOperationalInput('watcher','existing wake'));
+console.log('ok - existing and new operational user rows hide, preserve captain prose/outcomes/attachments, and restore on disposal');
 
 JS
 cat > "$TMP_ROOT/start.sh" <<EOF2
@@ -170,6 +198,8 @@ send '/calm-setting false'
 wait_text SETTING_false
 send '/calm-advisor EXISTING'
 wait_text ADVISOR_SAVED_EXISTING
+send '/calm-operational EXISTING'
+wait_text OPERATIONAL_SAVED_EXISTING
 send /calm-todo
 wait_text TODO_SAVED
 probe extras-visible
@@ -178,6 +208,8 @@ wait_text SETTING_true
 probe extras-hidden
 send '/calm-advisor NEW'
 wait_text ADVISOR_SAVED_NEW
+send '/calm-operational NEW'
+wait_text OPERATIONAL_SAVED_NEW
 probe extras-newhidden
 tmux -L "$SOCKET" resize-window -t calm -x 100 -y 20
 sleep .3
@@ -193,17 +225,21 @@ p=os.environ['LAB']
 def load(n): return json.load(open(f'{p}/extras-{n}.json'))
 v,h,n,ch,r=[load(n) for n in ['visible','hidden','newhidden','compact-hidden','restored']]
 def flat(lines): return '\n'.join(lines)
+assert 'WAKE_EXISTING' in flat(v['presentation']['chat'])
 assert 'ADVISOR_EXISTING' in flat(v['presentation']['chat'])
 assert 'CALM_TODO_TASK' in flat(v['presentation']['todo'])
 for x in [h,n,ch]:
     view=x['presentation']
     assert view['advisors'] and all(not lines for lines in view['advisors']), view
+    assert view['operational'] and all(not lines for lines in view['operational']), view
+    assert 'WAKE_EXISTING' not in flat(view['chat']) and 'WAKE_NEW' not in flat(view['chat'])
+    assert 'CAPTAIN_EXISTING' in flat(view['chat']) and 'OUTCOME_EXISTING' in flat(view['chat'])
     assert view['todo']==[],view
     assert view['compact']==['WORKING_SENTINEL'],view
     assert 'ADVISOR_EXISTING' not in flat(view['chat']) and 'ADVISOR_NEW' not in flat(view['chat'])
     assert 'CALM_FIXTURE_COMPLETE' in flat(view['chat'])
 assert len(n['presentation']['advisors'])>len(h['presentation']['advisors'])
-assert ch['presentation']['compactMode']
+assert 'WAKE_EXISTING' in flat(r['presentation']['chat']) and 'WAKE_NEW' in flat(r['presentation']['chat'])
 assert 'ADVISOR_NEW' in flat(r['presentation']['chat'])
 assert 'CALM_TODO_TASK' in flat(r['presentation']['todo'])
 for x in [h,n,ch,r]:
@@ -211,7 +247,7 @@ for x in [h,n,ch,r]:
     assert x['presentation']['storedPhases']==v['presentation']['storedPhases']
 def messages(x): return [e for e in x['entries'] if e.get('type')=='message']
 assert messages(v)==messages(h)
-assert messages(n)==messages(ch)==messages(cv)==messages(r)
+assert messages(n)==messages(ch)==messages(r)
 print('ok - existing/new advisor cards and full/compact TODO hide, restore, preserve answers, working content and session state')
 PYEXTRA
 send 'run the abort fixture'

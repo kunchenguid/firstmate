@@ -126,25 +126,35 @@ export default function calmOmp(omp: ExtensionAPI): void {
       return component;
     });
   };
-  omp.on?.("session_start", () => {
+  const ensurePresentation = (ctx: Context): void => {
+    if (presentationDispose || !ctx.hasUI || !ctx.ui.setWidget) return;
+    let probing = true;
+    try {
+      ctx.ui.setWidget("fm-calm-omp-presentation-probe", (tui) => {
+        if (!probing) return { render: () => [], invalidate: () => {} };
+        try { presentationDispose = installCalmOmpPresentation(tui, () => nativeHidden(ctx) === true); }
+        catch (error) {
+          if (!warned) { warned = true; ctx.ui.notify(`/calm-omp: presentation hiding unavailable (${error instanceof Error ? error.message : String(error)}).`, "warning"); }
+        }
+        return { render: () => [], invalidate: () => {} };
+      });
+    } catch { /* native hiding remains available if the probe fails */ } finally {
+      probing = false;
+      try { ctx.ui.setWidget("fm-calm-omp-presentation-probe", undefined); } catch { /* best effort cleanup */ }
+    }
+  };
+  omp.on?.("session_start", (_event, ctx) => {
+    presentationDispose?.();
+    presentationDispose = undefined;
     stop();
     animation.reset();
+    ensurePresentation(ctx);
   });
   omp.on?.("agent_start", (_event, ctx) => {
     // Repeated starts in a continuing logical run must not duplicate the clock.
     if (timer !== undefined) return;
     context = ctx;
-    try {
-      ctx.ui.setWidget?.("fm-calm-omp-presentation-probe", (tui) => {
-        try { presentationDispose = installCalmOmpPresentation(tui, () => {
-          return nativeHidden(ctx) === true;
-        }); } catch (error) {
-          if (!warned) { warned = true; ctx.ui.notify(`/calm-omp: advisor/TODO hiding unavailable (${error instanceof Error ? error.message : String(error)}).`, "warning"); }
-        }
-        return { render: () => [], invalidate: () => {} };
-      });
-      ctx.ui.setWidget?.("fm-calm-omp-presentation-probe", undefined);
-    } catch { /* base native hiding remains fully functional */ }
+    ensurePresentation(ctx);
     if (!ctx.hasUI || !ctx.ui.setWidget) return;
     syncBoat();
     timer = setInterval(() => {
@@ -179,6 +189,7 @@ export default function calmOmp(omp: ExtensionAPI): void {
         return;
       }
 
+      ensurePresentation(ctx);
       let toggle: (() => void) | undefined;
       let probing = true;
       try {

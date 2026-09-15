@@ -1,5 +1,7 @@
 // OMP 18.2 renders advisor cards and TODO chrome outside native tool activity.
 // Adapt only the live mode instance; never modify messages or shared prototypes.
+import { classifyFirstmateCurrentOperationalText } from "../../../.pi/extensions/lib/fm-operational-input.ts";
+
 type ObjectLike = Record<string, any>;
 type Patch = { target: WeakRef<ObjectLike>; key: string; original?: PropertyDescriptor; replacement: Function };
 export function findCalmOmpMode(tui: unknown): ObjectLike | undefined {
@@ -27,20 +29,20 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
 
   const patches: Patch[] = [];
   const cards = new WeakSet<object>();
-  const isFirstmateMessage = (message: ObjectLike): boolean => {
-    if (!message) return false;
-    const type = String(message.customType ?? "");
-    const content = typeof message.content === "string" ? message.content :
-      Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n") :
-      typeof message.text === "string" ? message.text : "";
-    const operational = /^\s*\u2063?FIRSTMATE(?:_OP:| WATCHER| SUPERVISION)/.test(content);
-    return operational || (message.role === "custom" &&
-      (type === "firstmate-sessionstart-nudge" || type === "fm-main-mirror"));
+  const shouldHideMessage = (message: ObjectLike): boolean => {
+    if (message?.role === "custom") return message.customType === "advisor";
+    if (message?.role !== "user") return false;
+    // Attachments and ordinary captain prose stay visible. The shared protocol
+    // owner decides provenance; renderer code never guesses from body wording.
+    const parts = message.content;
+    if (Array.isArray(parts) && parts.some((part: ObjectLike) => part?.type !== "text" || typeof part.text !== "string")) return false;
+    const text = typeof parts === "string" ? parts :
+      Array.isArray(parts) ? parts.map((part: ObjectLike) => part.text).join("") : "";
+    if (!text.includes("\u2063")) return false;
+    return classifyFirstmateCurrentOperationalText(text) !== undefined;
   };
   const wrapCard = (card: ObjectLike): void => {
-    if (cards.has(card) || typeof card.render !== "function") return;
-    const message = card.message ?? card.entry ?? card.data ?? card;
-    if (!isFirstmateMessage(message)) return;
+    if (!card || cards.has(card) || typeof card.render !== "function") return;
     const render = card.render;
     patch(card, "render", function (this: ObjectLike, width: number) {
       return isHidden() ? [] : render.call(this, width);
@@ -75,18 +77,8 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
       const container = this.chatContainer;
       const start = container.children.length;
       const result = originalAdd.call(this, message, ...args);
-      if ((message?.role === "custom" && message.customType === "advisor") || isFirstmateMessage(message)) {
-        for (const card of container.children.slice(start)) {
-          if (message.customType === "advisor") {
-            const render = card.render;
-            patch(card, "render", function (this: ObjectLike, width: number) {
-              return isHidden() ? [] : render.call(this, width);
-            });
-            cards.add(card);
-          } else {
-            wrapCard(card);
-          }
-        }
+      if (shouldHideMessage(message)) {
+        for (const card of container.children.slice(start)) wrapCard(card);
       }
       return result;
     });
@@ -98,19 +90,13 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
     patch(mode, "renderCompactStatusLine", function (this: ObjectLike, width: number, childLines: readonly string[]) {
       return isHidden() ? childLines : renderCompact.call(this, width, childLines);
     });
-    // Cover cards already restored into the live chat tree. This only inspects
-    // card metadata; it does not rebuild history or mutate stored messages.
+    // OMP keeps user rows in this identity map, not on the component itself.
+    // Inspect existing rows without rebuilding or changing persisted messages.
+    for (const message of mode.viewSession?.messages ?? []) {
+      if (shouldHideMessage(message)) wrapCard(mode.transcriptMessageComponents?.get(message));
+    }
     for (const card of mode.chatContainer.children) {
-      const message = (card as ObjectLike).message ?? (card as ObjectLike).entry ?? (card as ObjectLike).data ?? card;
-      if (message?.customType === "advisor" && typeof (card as ObjectLike).render === "function") {
-        const render = (card as ObjectLike).render;
-        patch(card as ObjectLike, "render", function (this: ObjectLike, width: number) {
-          return isHidden() ? [] : render.call(this, width);
-        });
-        cards.add(card as object);
-      } else {
-        wrapCard(card as ObjectLike);
-      }
+      if (shouldHideMessage(card.message ?? {})) wrapCard(card);
     }
     live.resetDisplay();
     return dispose;
