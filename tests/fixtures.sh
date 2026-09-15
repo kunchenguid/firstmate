@@ -100,6 +100,19 @@ fm_test_fake_gh_axi() {
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+# Two launch logs, because a suite asks one of two different questions.
+#
+# FM_FAKE_LAUNCH_LOG answers "what command was launched". A launch command past
+# the terminal's canonical-mode line cap is staged on disk and the pane is sent a
+# short line that sources it (bin/fm-spawn.sh, spawn_send_launch), so this log
+# follows that indirection and records the command itself. Every suite asserting
+# launch SHAPE wants this one and reads the same text whether or not the command
+# was long enough to be staged.
+#
+# FM_FAKE_LAUNCH_RAW_LOG answers "what was typed at the pane", with no
+# dereferencing. Only a suite asserting the TRANSPORT wants this one -
+# tests/fm-spawn-launch-line-limit.test.sh, which exists to prove the typed line
+# stays under the cap.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -118,11 +131,14 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] || [ -n "${FM_FAKE_LAUNCH_RAW_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          [ -n "${FM_FAKE_LAUNCH_RAW_LOG:-}" ] && printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_RAW_LOG"
+          if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+            "$FM_TEST_LAUNCH_PAYLOAD" "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          fi
         fi
         prev=$a
       done
