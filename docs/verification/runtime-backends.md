@@ -892,6 +892,34 @@ A second `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg` started pid 45574,
 This proves that `herdr server` remains in the foreground as the launchd job, so the guard's final `exec` supplies the intended supervision and the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
 
 `bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the resulting decision table against real marker-carrying processes, and `tests/fm-remote-doctor.test.sh` pins the doctor's verdicts on the same markers.
+The guard now execs `bin/fm-remote-herdr-supervisor.pl` in that foreground position, and the next section holds the dated evidence for that shape.
+
+### Session-leader fm-remote server under launchd
+
+Measured 2026-09-15 on macOS 15.7.3 (Darwin 24.6.0) aarch64 with Herdr 0.9.0 and `/usr/bin/perl` 5.34.1, the guarantee behind `bin/fm-remote-herdr-supervisor.pl`: a launchd-supervised server can lead its own POSIX session, which `herdr machine add` requires, without leaving the Aqua login session or launchd's supervision.
+
+Herdr advertises `detached_server_daemon` only for a server whose `getsid(0)` equals its own pid (`src/platform/mod.rs:157-159`, computed once at API start in `src/api/server.rs:70`), and `herdr machine add` refuses a saved SSH machine whose server lacks it.
+launchd starts every job as a process-group leader inside launchd's own session, where `setsid()` fails with `EPERM`, so a job can never take that shape in place.
+
+Each run used `bin/fm-herdr-lab.sh launchagent provision <session> <code root>`, which renders the fm-remote launch agent contract (login shell `-l -c 'exec <guard> <herdr> <session>'`, `LimitLoadToSessionType=Aqua`, `RunAtLoad`, `KeepAlive={SuccessfulExit=false}`, `ThrottleInterval=10`) under a lab-only label in `gui/501`, where `launchctl print` reported `exit timeout = 5`.
+
+| Launch shape | launchd job | herdr server | `detached_server_daemon` |
+| --- | --- | --- | --- |
+| guard before this change | pid 19086, ppid 1, pgid 19086, STAT `S` | the job itself | not read in this run; the server does not lead its own session, which is the property the predicate tests |
+| guard through the supervisor | pid 42902 running `/usr/bin/perl .../fm-remote-herdr-supervisor.pl`, ppid 1, STAT `S` | pid 42980, ppid 42902, pgid 42980, STAT `Ss` | `true` |
+
+- A pane of the supervised server reported `launchctl managername` `Aqua`, audit session `asid 100016 flags 0x6030`, and exit 0 reading a temporary probe item from the login keychain, all identical to a terminal in the Aqua login session and to a pane of the pre-change shape, so leading its own session costs the server nothing in the login session.
+- `bin/fm-remote-herdr-owner-lib.sh` classified the supervised server `launchd` because `launchctl print gui/501/<label>` named its parent, the job, as `pid`, and `fm_remote_herdr_process_leads_session` reported that the server leads its own session.
+- macOS sets `XPC_SERVICE_NAME=0` in every forked child, observed for `perl`, `bash`, and `zsh` forks alike, while `exec` without a fork keeps the value: a supervisor that did not restore it left its server classified `unknown`, and after the supervisor restores it the server's environment carried `XPC_SERVICE_NAME=<the agent's label>` on every generation.
+- A foreground client attached with `bin/fm-herdr-lab.sh viewer start` and detached again with no change to the server pid, the job pid, or the capability.
+- A guarded `herdr session stop` left `state = not running` with `last exit code = 0`, no respawn through 15 seconds, and no process of that session, its panes included.
+- `launchctl kickstart -k` on a running job delivered SIGTERM, which the supervisor forwarded, and the server exited 0 before the next generation started after launchd's 10-second throttle.
+- `launchctl kill SIGKILL` of the job left the supervisor's watcher to kill the server's process group at once; launchd recorded `last terminating signal = Killed: 9` and respawned a guard that found no server to take over.
+- SIGKILL of the server made the supervisor exit 137, recorded as `last exit code = 137`, so `KeepAlive={SuccessfulExit=false}` still tells a clean stop from a crash.
+- `launchctl bootout` delivered the same forwarded SIGTERM and clean exit, and every run ended with the label unloaded, no process of the lab session left, the lab session deleted, and the `default` session's server pid unchanged.
+
+`bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the supervised start, its session leadership, the preserved launchd label, exit-status and signal propagation, process-group cleanup, and the fallback without a usable perl; `tests/fm-remote-doctor.test.sh` pins the doctor's session-leader evidence; `tests/fm-herdr-lab.test.sh` pins the launch agent lab's confinement to its own label.
+Refresh this record by rerunning `bin/fm-herdr-lab.sh launchagent provision` on a Mac with a GUI login whenever the launch agent contract or the supervisor changes.
 
 ### Client selection
 
