@@ -23,6 +23,8 @@ from urllib.parse import quote, unquote, urlsplit
 PUSH_ONLY_POLICY_TYPES = {
     "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8",
     "2e26e725-8201-4edd-8bf5-978563c34a80",
+    "51c78909-e838-41a2-9496-c647091e3c61",
+    "77ed4bd3-b063-4689-934a-175e4d0a78d7",
     "7ed39669-655c-494e-b4a0-a08b4da0fcce",
     "db2b9b4c-180d-4529-9701-01541d19f36b",
 }
