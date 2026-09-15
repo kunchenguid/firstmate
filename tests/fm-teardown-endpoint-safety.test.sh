@@ -913,6 +913,33 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
+  # A reassigned slot may still be named by another finished task record in
+  # this home. The positive owner proof must run first so that record scan is
+  # skipped and only the stale task's own records are removed.
+  dir=$(make_case slot-reassigned-with-record)
+  mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of a stale record with a reassigned slot collision failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" \
+    "reassigned-slot cleanup left the stale task record behind"
+  assert_present "$dir/home/state/$other.meta" \
+    "reassigned-slot cleanup removed the claimant's record"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "reassigned-slot cleanup removed the claimant's slot claim"
+  assert_present "$dir/pool/1/project/.git" \
+    "reassigned-slot cleanup touched the claimant's copy"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "reassigned-slot cleanup returned the claimant's slot: $(cat "$dir/runtime.log")"
+
   # A claim that exists but cannot be read as a claim proves nothing either way,
   # so it refuses rather than guessing the slot is still this task's.
   dir=$(make_case slot-claim-unreadable)
