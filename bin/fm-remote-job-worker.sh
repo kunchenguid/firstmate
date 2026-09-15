@@ -34,12 +34,21 @@
 # between immediate failures up to
 # FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS and gives up after
 # FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children in total, since a
-# restart loop only burns CPU and grows its log without bound. A child that
-# stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# restart loop only burns CPU and grows its log without bound. Interrupted
+# quarantine publication is recovered only when the lock contains one exact,
+# completed publisher staging file plus either no owner records or one complete
+# owner identity. The worker verifies account ownership, restrictive modes,
+# nonsymlink object identity, exact sentinel bytes, legacy and current worker
+# liveness, and the existing running-job quarantine checks before reclaiming;
+# every ambiguous or additional entry remains untouched.
+#
+# A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, but not that total restart guard, so a child
 # that dies just past the healthy threshold cannot restart without bound
 # either. fm-on's ensure path restarts a worker that gave up.
 set -u
+unset GLOBIGNORE
+shopt -u dotglob failglob nocaseglob nocasematch nullglob
 
 # A non-numeric override falls back to the default rather than crashing the
 # arithmetic that bounds these loops.
@@ -68,8 +77,62 @@ WORKER_LANE_HOMES=()
 WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
+WORKER_STAGED_QUARANTINE=
+WORKER_STAGED_OWNER_FIELDS=0
+WORKER_QUARANTINE_SENTINEL='active execution could not be confirmed stopped'
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
+
+worker_path_stat() { # <path>; uid mode device inode
+  local value uid mode device inode extra
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    value=$(stat -f '%u %OMp%OLp %d %i' "$1" 2>/dev/null) || return 1
+  else
+    value=$(stat -c '%u %a %d %i' -- "$1" 2>/dev/null) || return 1
+  fi
+  read -r uid mode device inode extra <<< "$value"
+  case "$uid:$device:$inode" in *[!0-9:]*) return 1 ;; esac
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ -n "$uid" ] && [ -n "$device" ] && [ -n "$inode" ] || return 1
+  [ -z "${extra:-}" ] || return 1
+  while [ "${mode#0}" != "$mode" ]; do mode=${mode#0}; done
+  [ -n "$mode" ] || mode=0
+  printf '%s %s %s %s\n' "$uid" "$mode" "$device" "$inode"
+}
+
+worker_owned_mode_stat() { # <path> file|dir <mode> <uid>
+  local path=$1 kind=$2 expected_mode=$3 expected_uid=$4 value uid mode device inode extra
+  case "$kind" in
+    file) [ -f "$path" ] && [ ! -L "$path" ] || return 1 ;;
+    dir) [ -d "$path" ] && [ ! -L "$path" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  value=$(worker_path_stat "$path") || return 1
+  read -r uid mode device inode extra <<< "$value"
+  case "$uid:$mode:$device:$inode" in *[!0-9:]*) return 1 ;; esac
+  [ -n "$uid" ] && [ -n "$mode" ] && [ -n "$device" ] && [ -n "$inode" ] || return 1
+  [ -z "${extra:-}" ] || return 1
+  [ "$uid" = "$expected_uid" ] && [ "$mode" = "$expected_mode" ] || return 1
+  printf '%s\n' "$value"
+}
+
+worker_path_object_identity() { # <path>; account uid, device, and inode
+  local value uid mode device inode extra
+  value=$(worker_path_stat "$1") || return 1
+  read -r uid mode device inode extra <<< "$value"
+  case "$uid:$mode:$device:$inode" in *[!0-9:]*) return 1 ;; esac
+  [ -n "$uid" ] && [ -n "$mode" ] && [ -n "$device" ] && [ -n "$inode" ] || return 1
+  [ -z "${extra:-}" ] || return 1
+  printf '%s %s %s\n' "$uid" "$device" "$inode"
+}
+
+worker_remove_publisher_temp() { # <path> <object-identity>
+  local path=$1 expected=$2 actual
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  actual=$(worker_path_object_identity "$path") || return 1
+  [ "$actual" = "$expected" ] || return 1
+  rm -f -- "$path"
+}
 
 worker_account_home() {
   local home=${HOME:-}
@@ -157,8 +220,124 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# Return 0 for one exact staging candidate, 1 when none exists, and 2 for an
+# unsafe or conflicting shape. Ordinary locks with no staging candidate retain
+# the established acquisition path below.
+worker_staged_quarantine_inventory() {
+  local LC_ALL=C
+  local entry base staged_count=0 owner_fields=0 official=0 unsafe=0 status
+  WORKER_STAGED_QUARANTINE=
+  WORKER_STAGED_OWNER_FIELDS=0
+  for entry in "$WORKER_LOCK"/* "$WORKER_LOCK"/.[!.]* "$WORKER_LOCK"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base=${entry##*/}
+    case "$base" in
+      pid) owner_fields=$((owner_fields | 1)) ;;
+      start) owner_fields=$((owner_fields | 2)) ;;
+      command) owner_fields=$((owner_fields | 4)) ;;
+      quarantine) official=1 ;;
+      .quarantine.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9])
+        staged_count=$((staged_count + 1))
+        WORKER_STAGED_QUARANTINE=$entry
+        ;;
+      *) unsafe=1 ;;
+    esac
+  done
+  if [ "$staged_count" -eq 0 ]; then
+    if [ "$unsafe" -eq 0 ]; then status=1; else status=2; fi
+  elif [ "$staged_count" -ne 1 ] || [ "$official" -ne 0 ] || [ "$unsafe" -ne 0 ]; then
+    status=2
+  else
+    case "$owner_fields" in 0|7) status=0 ;; *) status=2 ;; esac
+  fi
+  if [ "$status" -eq 0 ]; then WORKER_STAGED_OWNER_FIELDS=$owner_fields; fi
+  return "$status"
+}
+
+# Return 0 for the exact live owner, 1 for a definitively stale or reused pid,
+# and 2 when the complete modern identity cannot be interpreted safely.
+worker_staged_lock_owner_status() { # <account-home> <uid>
+  local account_home=$1 uid=$2 pid recorded_start actual_start recorded_command actual_command
+  worker_owned_mode_stat "$WORKER_LOCK/pid" file 600 "$uid" >/dev/null || return 2
+  worker_owned_mode_stat "$WORKER_LOCK/start" file 600 "$uid" >/dev/null || return 2
+  worker_owned_mode_stat "$WORKER_LOCK/command" file 600 "$uid" >/dev/null || return 2
+  if fm_remote_job_lock_owner_matches_process "$account_home"; then return 0; fi
+  pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null) || return 2
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$pid" -gt 1 ] || return 2
+  recorded_start=$(fm_remote_job_read_single_line "$WORKER_LOCK/start" 256 2>/dev/null) || return 2
+  recorded_command=$(fm_remote_job_read_single_line "$WORKER_LOCK/command" 8192 2>/dev/null) || return 2
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+    kill -0 "$pid" 2>/dev/null && return 2
+    return 1
+  }
+  [ "$recorded_start" = "$actual_start" ] || return 1
+  actual_command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || {
+    kill -0 "$pid" 2>/dev/null && return 2
+    return 1
+  }
+  [ "$recorded_command" = "$actual_command" ] && return 0
+  return 2
+}
+
+# Legacy locks had no pid/start/command children. Their account-level pid file
+# remains enough to refuse a live worker, while a different live command proves
+# pid reuse and a dead pid is stale.
+worker_staged_legacy_owner_status() { # <uid>
+  local uid=$1 pid_file pid command
+  pid_file=$(fm_remote_job_worker_pid_path)
+  [ -e "$pid_file" ] || [ -L "$pid_file" ] || return 1
+  worker_owned_mode_stat "$pid_file" file 600 "$uid" >/dev/null || return 2
+  pid=$(fm_remote_job_read_single_line "$pid_file" 64 2>/dev/null) || return 2
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$pid" -gt 1 ] || return 2
+  command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || {
+    kill -0 "$pid" 2>/dev/null && return 2
+    return 1
+  }
+  case "$command" in *fm-remote-job-worker.sh*) return 0 ;; *) return 1 ;; esac
+}
+
+# Promote only the worker publisher's one completed staging artifact. The final
+# quarantine name then enters worker_recover_quarantine, so live job and owner
+# checks stay owned by the established quarantine path.
+worker_promote_staged_quarantine() { # <account-home>
+  local account_home=$1 uid lock_stat staged_stat staged owner_status legacy_status
+  worker_staged_quarantine_inventory
+  case "$?" in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+  staged=$WORKER_STAGED_QUARANTINE
+  uid=$(id -u 2>/dev/null) || return 2
+  case "$uid" in ''|*[!0-9]*) return 2 ;; esac
+  lock_stat=$(worker_owned_mode_stat "$WORKER_LOCK" dir 700 "$uid") || return 2
+  staged_stat=$(worker_owned_mode_stat "$staged" file 600 "$uid") || return 2
+  cmp -s "$staged" <(printf '%s\n' "$WORKER_QUARANTINE_SENTINEL") || return 2
+
+  owner_status=1
+  if [ "$WORKER_STAGED_OWNER_FIELDS" -eq 7 ]; then
+    worker_staged_lock_owner_status "$account_home" "$uid"
+    owner_status=$?
+    case "$owner_status" in 1) ;; *) return 2 ;; esac
+  fi
+  worker_staged_legacy_owner_status "$uid"
+  legacy_status=$?
+  case "$legacy_status" in
+    1) ;;
+    *) return 2 ;;
+  esac
+
+  worker_staged_quarantine_inventory || return 2
+  [ "$WORKER_STAGED_QUARANTINE" = "$staged" ] || return 2
+  [ "$(worker_owned_mode_stat "$WORKER_LOCK" dir 700 "$uid" 2>/dev/null || true)" = "$lock_stat" ] || return 2
+  [ "$(worker_owned_mode_stat "$staged" file 600 "$uid" 2>/dev/null || true)" = "$staged_stat" ] || return 2
+  [ ! -e "$WORKER_LOCK/quarantine" ] && [ ! -L "$WORKER_LOCK/quarantine" ] || return 2
+  mv -n -- "$staged" "$WORKER_LOCK/quarantine" || return 2
+  [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 2
+  [ "$(worker_owned_mode_stat "$WORKER_LOCK/quarantine" file 600 "$uid" 2>/dev/null || true)" = "$staged_stat" ] || return 2
+  cmp -s "$WORKER_LOCK/quarantine" <(printf '%s\n' "$WORKER_QUARANTINE_SENTINEL") || return 2
+}
+
 worker_acquire_lock() {
-  local account_home=$1 attempt=0
+  local account_home=$1 attempt=0 staged_status
   while [ "$attempt" -lt 150 ]; do
     if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
       WORKER_LOCK_HELD=1
@@ -166,6 +345,16 @@ worker_acquire_lock() {
       return 0
     fi
     [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+    worker_promote_staged_quarantine "$account_home"
+    staged_status=$?
+    case "$staged_status" in
+      0)
+        worker_recover_quarantine "$account_home" || return 3
+        continue
+        ;;
+      1) ;;
+      *) return 1 ;;
+    esac
     if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then
       worker_recover_quarantine "$account_home" || return 3
       continue
@@ -184,12 +373,22 @@ worker_acquire_lock() {
 }
 
 worker_publish_quarantine() {
-  local tmp
+  local tmp tmp_identity
   [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
   tmp=$(umask 077; mktemp "$WORKER_LOCK/.quarantine.XXXXXX") || return 1
-  printf 'active execution could not be confirmed stopped\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$WORKER_LOCK/quarantine"
+  tmp_identity=$(worker_path_object_identity "$tmp") || return 1
+  printf '%s\n' "$WORKER_QUARANTINE_SENTINEL" > "$tmp" || {
+    worker_remove_publisher_temp "$tmp" "$tmp_identity" || true
+    return 1
+  }
+  chmod 600 "$tmp" || {
+    worker_remove_publisher_temp "$tmp" "$tmp_identity" || true
+    return 1
+  }
+  if ! mv -f -- "$tmp" "$WORKER_LOCK/quarantine"; then
+    worker_remove_publisher_temp "$tmp" "$tmp_identity" || true
+    return 1
+  fi
 }
 
 worker_clear_quarantine() {
