@@ -102,6 +102,8 @@ command_name=$(perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]);
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name" in
   *:fm-remote-secondmate-control.sh)
     printf '%s\n' "$command_name" >> "$FM_FAKE_REMOTE_WAKE_LOG"
+    perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]); $d=~tr/\0\n/  /; print "$d\n"' "$argv_b64" \
+      >> "$FM_FAKE_REMOTE_WAKE_LOG.argv"
     [ "${FM_FAKE_REMOTE_WAKE_RC:-0}" -eq 0 ] || printf 'remote receiver wake failed\n' >&2
     exit "${FM_FAKE_REMOTE_WAKE_RC:-0}"
     ;;
@@ -446,6 +448,11 @@ assert_absent "$PARENT/data/handoff/ios.outbox.md" "permanently lost wake retain
   || fail "later handoff did not retain the same pending wake correlation"
 [ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -gt "$wakes_after_resume" ] \
   || fail "later handoff did not retry the separately pending wake"
+reused_wake=$(tail -n 1 "$WAKE_LOG.argv")
+assert_contains "$reused_wake" 'wake-permanent-a' \
+  "reused pending wake dropped the earlier batch's item"
+assert_contains "$reused_wake" 'wake-permanent-b' \
+  "reused pending wake did not name the later batch's item"
 pass "a permanently unconfirmable wake never jams later durable handoffs"
 
 RM_FAKEBIN="$TMP_ROOT/rm-fakebin"

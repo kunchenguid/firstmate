@@ -204,6 +204,68 @@ test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   pass "unsafe shared captain artifacts are rejected and failure restores read-only mode"
 }
 
+test_header_validation_tolerates_reflow_but_rejects_missing_phrase() {
+  local rec primary second reflowed err rc
+
+  reflowed=$(mktemp "$TMP_ROOT/reflowed-header.XXXXXX")
+  cat > "$reflowed" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main
+firstmate home.
+In secondmate homes it is read-only in secondmate
+homes and must not be edited there.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+EOF
+  shared_captain_header_valid "$reflowed" \
+    || fail "a header reflowed mid-phrase should still validate when every phrase's words are intact"
+
+  rec=$(new_home_pair header-reflow)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  write_shared "$primary/data/captain-shared.md" "reflow-carrying shared body"
+  sed -i.bak 's/^This file is main-authoritative in the main firstmate home\.$/This file is main-authoritative in the main\nfirstmate home./' \
+    "$primary/data/captain-shared.md"
+  rm -f "$primary/data/captain-shared.md.bak"
+
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$TMP_ROOT/header-reflow.err" \
+    || fail "reflowed but semantically intact header should still propagate"
+  cmp -s "$primary/data/captain-shared.md" "$second/data/captain-shared.md" \
+    || fail "reflowed header propagation did not converge secondmate shared preferences"
+
+  rm -f "$reflowed"
+  reflowed=$(mktemp "$TMP_ROOT/missing-phrase-header.XXXXXX")
+  cat > "$reflowed" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main firstmate home.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+EOF
+  if shared_captain_header_valid "$reflowed"; then
+    fail "a header genuinely missing a required phrase must still be rejected"
+  fi
+
+  rec=$(new_home_pair header-missing)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  cat > "$primary/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main firstmate home.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+
+missing-phrase shared body
+EOF
+  err="$TMP_ROOT/header-missing.err"
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "header genuinely missing a required phrase should be rejected"
+  assert_grep "primary source header missing required main-authoritative warning" "$err" \
+    "missing-phrase rejection error should be explicit"
+  assert_absent "$second/data/captain-shared.md" "rejected header should not propagate to the secondmate"
+
+  pass "shared captain header validation tolerates mid-phrase reflow but still rejects a genuinely missing phrase"
+}
+
 make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -396,6 +458,7 @@ test_first_copy_readonly_and_local_files_preserved
 test_drift_quarantine_collision_and_repeated_convergence
 test_missing_source_mirrors_absence_without_losing_local_bytes
 test_unsafe_artifacts_and_failure_restore_readonly_mode
+test_header_validation_tolerates_reflow_but_rejects_missing_phrase
 test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
