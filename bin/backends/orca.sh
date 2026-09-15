@@ -177,6 +177,53 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
 }
 
+# fm_backend_orca_worktree_id_valid: the Orca-owned record-integrity check for
+# a recorded `orca_worktree_id=` value. Orca issues the id and firstmate stores
+# it verbatim and hands it straight back as `--worktree "id:<value>"`, so the
+# id is an OPAQUE selector: this predicate proves one metadata line still holds
+# exactly one intact, inert value, it never reconstructs an id or infers one
+# from ambient Orca state.
+#
+# Two shapes are accepted, and firstmate must keep accepting both because
+# records outlive Orca releases:
+#   - the atom form ("wt-7", a bare uuid), which older records carry;
+#   - the current compound form "<repo-atom>::<absolute-worktree-path>", whose
+#     path half routinely contains spaces (an Orca workspace path).
+#
+# Refused: empty, leading or trailing whitespace, any control character (so a
+# line break, carriage return, or tab can never smuggle a second value onto one
+# record line), a second "::" (which would make the split ambiguous), a
+# non-atom repo half, and a relative or bare path half. The path half is
+# otherwise whatever the filesystem allows on one line: it is Orca's workspace
+# path, and teardown binds it to the path Orca reports before acting on it.
+# The atom halves reuse fm_backend_endpoint_atom_valid, the shared endpoint
+# character contract owned by bin/fm-backend.sh, which is the dispatcher that
+# sources this adapter; the compound SHAPE stays here because it is Orca's,
+# not the fleet-wide endpoint contract's.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local value=${1-} repo path
+  case "$value" in
+    '') return 1 ;;
+    *[[:cntrl:]]*) return 1 ;;
+    ' '*|*' ') return 1 ;;
+  esac
+  case "$value" in
+    *::*)
+      repo=${value%%::*}
+      path=${value#*::}
+      case "$path" in
+        *::*) return 1 ;;
+        /?*) ;;
+        *) return 1 ;;
+      esac
+      fm_backend_endpoint_atom_valid "$repo"
+      ;;
+    *)
+      fm_backend_endpoint_atom_valid "$value"
+      ;;
+  esac
+}
+
 fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
