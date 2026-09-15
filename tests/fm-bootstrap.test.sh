@@ -1137,6 +1137,9 @@ muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 agy model profile is accepted^{"rules":[{"when":"agy work","use":{"harness":"agy","model":"gemini-3.8-flash-high"}}]}^empty^
 agy low medium high efforts are accepted^{"rules":[{"when":"agy low","use":{"harness":"agy","effort":"low"}},{"when":"agy medium","use":{"harness":"agy","effort":"medium"}},{"when":"agy high","use":{"harness":"agy","effort":"high"}}]}^empty^
+junie model profile is accepted^{"rules":[{"when":"junie work","use":{"harness":"junie","model":"claude-sonnet-4"}}]}^empty^
+junie low medium high efforts are accepted^{"rules":[{"when":"junie low","use":{"harness":"junie","effort":"low"}},{"when":"junie medium","use":{"harness":"junie","effort":"medium"}},{"when":"junie high","use":{"harness":"junie","effort":"high"}}]}^empty^
+unsupported junie xhigh effort is flagged^{"rules":[{"when":"junie xhigh","use":{"harness":"junie","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: junie:xhigh
 unsupported agy xhigh effort is flagged^{"rules":[{"when":"agy xhigh","use":{"harness":"agy","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:xhigh
 unsupported agy max effort is flagged^{"rules":[{"when":"agy max","use":{"harness":"agy","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:max
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high

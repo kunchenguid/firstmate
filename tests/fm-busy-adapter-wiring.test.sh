@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini junie)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -392,6 +392,39 @@ test_raw_gemini_launch_has_no_semantic_wiring() {
   pass "raw gemini launch remains unwired and classifies unknown"
 }
 
+run_junie_hook() {  # <config.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_junie_hooks_semantic_lifecycle() {
+  local rec id=busy-jn-1 out state settings
+  rec=$(make_spawn_case junie-lifecycle junie "$id")
+  read_case_record "$rec"
+  out=$(JUNIE_API_KEY=test run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "junie spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.junie-config.json"
+  assert_present "$settings" "junie spawn did not write hook configuration"
+  jq -e . "$settings" >/dev/null || fail "junie hook configuration is not valid JSON"
+
+  out=$(classify junie "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  run_junie_hook "$settings" Stop >/dev/null || fail "Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Stop no longer touches the notification marker"
+  out=$(classify junie "$id" "$state")
+  [ "$out" = "idle junie-hook" ] || fail "Stop must classify 'idle junie-hook', got '$out'"
+
+  run_junie_hook "$settings" UserPromptSubmit >/dev/null || fail "UserPromptSubmit hook command failed"
+  out=$(classify junie "$id" "$state")
+  [ "$out" = "busy junie-hook" ] || fail "UserPromptSubmit must classify 'busy junie-hook', got '$out'"
+  pass "junie hooks open on UserPromptSubmit and close on Stop"
+}
+
 test_gemini_is_refused_as_a_secondmate() {
   local rec id=busy-gm-3 out
   rec=$(make_spawn_case gemini-secondmate gemini "$id")
@@ -432,6 +465,7 @@ test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
+test_junie_hooks_semantic_lifecycle
 test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists
 

@@ -8,9 +8,10 @@
 #      fragment (e.g. junie-helper, fakejunie).
 #   3. A structural junie ancestor outranks an inherited CLAUDECODE.
 #   4. Junie is a crewmate/scout adapter only: secondmate launch is refused.
-#   5. Control plane mappings: Escape interrupt key, /exit exit command,
-#      wiring path is state/<id>.junie-config.json.
-#   6. Process classifier recognizes `junie` as an agent process and rejects decoys.
+#   5. Control plane mappings: Escape interrupt key, single press, /exit exit
+#      command, wiring path is state/<id>.junie-config.json.
+#   6. Busy-state trusts Junie's per-task hook source.
+#   7. Process classifier recognizes `junie` as an agent process and rejects decoys.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,6 +24,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-agent-process-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-junie-harness)
@@ -102,6 +105,8 @@ test_junie_control_table_contract() {
   fi
   [ "$(fm_control_interrupt_key junie)" = Escape ] \
     || fail "junie interrupt key must be Escape"
+  [ "$(fm_control_interrupt_repeat junie)" = 1 ] \
+    || fail "junie interrupt must use a single Escape press"
   [ "$(fm_control_exit_command junie)" = "/exit" ] \
     || fail "junie exit command must be /exit"
 
@@ -111,6 +116,16 @@ test_junie_control_table_contract() {
     || fail "junie wiring path must be state/id.junie-config.json, got '$wiring'"
 
   pass "fm-control-lib.sh: junie control table entries behave as expected"
+}
+
+test_junie_busy_source_contract() {
+  local sources
+  sources=$(fm_busy_sources_for_harness junie)
+  case " $sources " in
+    *" junie-hook "*) ;;
+    *) fail "junie busy-state sources must trust junie-hook, got '$sources'" ;;
+  esac
+  pass "fm-busy-lib.sh: junie hook events are trusted busy-state sources"
 }
 
 test_junie_process_classification() {
@@ -130,6 +145,7 @@ run_suite() {
   test_junie_ancestry_rejects_unrelated_mentions
   test_junie_structural_ancestry_outranks_inherited_claudecode
   test_junie_control_table_contract
+  test_junie_busy_source_contract
   test_junie_process_classification
 }
 
