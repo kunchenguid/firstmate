@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared durable wake queue and portable lock helpers.
+# Shared durable wake queue, portable lock, and Treehouse reservation helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
