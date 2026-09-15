@@ -34,21 +34,31 @@ pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
 LAB=''
+# The guard's board build arms a real listener on the lab board. Ending the
+# session is this file's own business; retiring that listener and removing the
+# lab belong to tests/lib.sh, which is why the lab is a registered fixture root
+# and why every exit path - a passing run, a failed assertion, and a terminating
+# signal - lands here rather than only the happy path.
 cleanup() {
-  [ -z "$LAB" ] || {
-    [ ! -f "$LAB/.lavish/bearings-board.html" ] \
-      || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
-    rm -rf "$LAB"
-  }
+  [ -z "$LAB" ] || [ ! -f "$LAB/.lavish/bearings-board.html" ] \
+    || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
+  fm_test_cleanup
 }
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 131' QUIT
 
 VERSION=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
 note "lavish-axi ${VERSION:-version-unknown}"
 
-LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-lavish-live.XXXXXX") || fail "cannot create the guard lab"
-LAB=$(cd -P -- "$LAB" && pwd -P)
+LAB=$(fm_test_tmproot fm-bearings-lavish-live) || fail "cannot create the guard lab"
+# Declared with the exact claim root run_board uses, so teardown retires the
+# listener the board arms even on the paths where the board never reached the
+# point of taking a claim.
+fm_test_track_procevent_home "$LAB" "$LAB/procevent-claims"
 mkdir -p "$LAB/state" "$LAB/data"
 
 cat > "$LAB/payload.json" <<'JSON'
