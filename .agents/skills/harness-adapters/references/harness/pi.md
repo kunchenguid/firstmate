@@ -30,13 +30,14 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
+A project trust dialog can appear on an interactive Pi run in any not-yet-trusted directory, including a clean worktree.
+Canonical `fm-spawn.sh` launches for Pi and Pi-signed ships, scouts, and persistent secondmates pass `--approve`, Pi's per-run override for trusting project-local files, so they begin processing without changing persisted interactive trust decisions.
+Raw launch commands and normal interactive Pi retain their existing trust behavior.
+Do not answer this dialog with keys when it appears outside that managed launch path.
 
 ## Worker turn-end extension
 
-`../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
+`../../../bin/fm-spawn.sh` owns the worker turn-end extension's placement and cleanup rationale beside its generator.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
