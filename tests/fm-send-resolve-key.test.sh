@@ -13,8 +13,8 @@
 # text:
 #   1. An answer send closes the open decision, including the answer-starts-work
 #      scenario where the worker never writes a matching resolved line.
-#   2. A routine steer without the flag never closes anything, and a working:/
-#      done: line still cannot clear a captain decision.
+#   2. A routine steer without the flag never closes anything, and a working:
+#      line still cannot clear a captain decision.
 #   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
 #   4. The close happens at enqueue: a failed doorbell ring still closes the
 #      answered key (the record is durably sent), while a failed ENQUEUE - the
@@ -243,15 +243,18 @@ test_routine_steer_never_closes() {
   run_send "$fb" "$home" "$log" t3 "unrelated nudge, keep going"; rc=$?
   expect_code 0 "$rc" "a routine steer should still succeed"
   printf 'working: resumed\n' >> "$home/state/t3.status"
-  printf 'done: unrelated milestone\n' >> "$home/state/t3.status"
 
   if grep -F 'resolved' "$home/state/t3.status" >/dev/null; then
     fail "a routine steer wrote a resolved line: $(cat "$home/state/t3.status")"
   fi
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
-    || fail "a routine steer (or later working/done lines) cleared an unanswered captain decision: $out"
-  pass "fm-send: a send without --resolve-key never closes a decision, and working/done still cannot"
+    || fail "a routine steer or later working line cleared an unanswered captain decision: $out"
+  printf 'done: task complete\nnote: cleanup complete\n' >> "$home/state/t3.status"
+  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer to a stale decision" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
+  expect_code 1 "$rc" "an answer to a terminally superseded decision must refuse"
+  [ ! -e "$home/state/t3.inbox/002.msg" ] || fail "a stale decision answer was delivered"
+  pass "fm-send preserves decisions through routine work and refuses superseded terminal decisions"
 }
 
 test_not_open_key_refuses_before_send() {
