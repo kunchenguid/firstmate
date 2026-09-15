@@ -395,6 +395,21 @@ test_no_origin_skipped() {
   pass "no-origin clone is skipped (benign), not flagged STUCK"
 }
 
+test_unknown_origin_is_skipped_even_when_invoked_directly() {
+  local home project out
+  home="$TMP_ROOT/unknown-origin"
+  mkdir -p "$home/projects"
+  project="$home/projects/unknown"
+  mkdir -p "$project"
+  git init -q "$project"
+  git -C "$project" remote add origin https://code.example/team/project.git
+
+  out=$(run_sync "$home")
+
+  [ -z "$out" ] || fail "direct fleet-sync must silently skip an unsupported origin, got: $out"
+  pass "direct fleet-sync fails closed for unsupported forge origins"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -703,6 +718,7 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
+test_unknown_origin_is_skipped_even_when_invoked_directly
 test_local_only_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
