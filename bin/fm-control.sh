@@ -7,6 +7,10 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#                                         [--objective|--completed|--decisions|
+#                                          --findings|--unresolved|--tests|
+#                                          --refs|--next <text>]
+#                                         (each also accepts a -file variant)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -52,6 +56,22 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#
+#              Every relaunch also writes or updates state/<id>.continuation,
+#              the harness-neutral cross-harness continuation record
+#              (bin/fm-continuation-lib.sh owns its schema): the objective,
+#              completed work, decisions, findings, unresolved questions, exact
+#              next action, test status, and durable-record references the
+#              caller explicitly supplies via the flags above, merged onto
+#              whatever the previous relaunch already recorded, alongside the
+#              branch/revision/worktree-dirty facts safe_checkpoint just
+#              proved. It is delivered to the replacement alongside its
+#              existing durable instructions - appended into a ship/scout's
+#              brief the same way the progress note is, or rendered into a
+#              secondmate's launch-only instructions overlay by
+#              bin/fm-spawn.sh without ever rewriting the charter - and is
+#              never itself a substitute for --note or the conversation a
+#              relaunch cannot carry forward.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -134,6 +154,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-continuation-lib.sh
+. "$SCRIPT_DIR/fm-continuation-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -199,6 +221,41 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+# Continuation-record narrative fields (bin/fm-continuation-lib.sh owns the
+# record shape these feed). Each is optional and independent of --note: --note
+# is the free-text handoff message appended to a ship/scout's instructions,
+# while these are the structured fields of the durable continuation record
+# delivered to the replacement alongside it. All default to empty, which the
+# record renders as "(none recorded)" rather than inventing content.
+OBJECTIVE=
+OBJECTIVE_SET=0
+COMPLETED=
+COMPLETED_SET=0
+DECISIONS=
+DECISIONS_SET=0
+FINDINGS=
+FINDINGS_SET=0
+UNRESOLVED=
+UNRESOLVED_SET=0
+TESTS_STATUS_ARG=
+TESTS_STATUS_SET=0
+DURABLE_REFS_ARG=
+DURABLE_REFS_SET=0
+NEXT_ACTION=
+NEXT_ACTION_SET=0
+set_narrative_field() {  # <field> <value>
+  case "$1" in
+    objective) OBJECTIVE=$2; OBJECTIVE_SET=1 ;;
+    completed) COMPLETED=$2; COMPLETED_SET=1 ;;
+    decisions) DECISIONS=$2; DECISIONS_SET=1 ;;
+    findings) FINDINGS=$2; FINDINGS_SET=1 ;;
+    unresolved) UNRESOLVED=$2; UNRESOLVED_SET=1 ;;
+    tests) TESTS_STATUS_ARG=$2; TESTS_STATUS_SET=1 ;;
+    refs) DURABLE_REFS_ARG=$2; DURABLE_REFS_SET=1 ;;
+    next) NEXT_ACTION=$2; NEXT_ACTION_SET=1 ;;
+    *) die "internal: unknown narrative field '$1'" ;;
+  esac
+}
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -214,6 +271,13 @@ for control_arg in "$@"; do
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
+        ;;
+      objective|completed|decisions|findings|unresolved|tests|refs|next)
+        set_narrative_field "$control_want_value" "$control_arg"
+        ;;
+      objective_file|completed_file|decisions_file|findings_file|unresolved_file|tests_file|refs_file|next_file)
+        [ -f "$control_arg" ] || die "--${control_want_value%_file}-file '$control_arg' is not a readable file"
+        set_narrative_field "${control_want_value%_file}" "$(cat "$control_arg")"
         ;;
     esac
     control_want_value=
@@ -234,17 +298,42 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --objective|--completed|--decisions|--findings|--unresolved|--tests|--refs|--next)
+      control_want_value=${control_arg#--}
+      ;;
+    --objective=*|--completed=*|--decisions=*|--findings=*|--unresolved=*|--tests=*|--refs=*|--next=*)
+      narrative_field=${control_arg%%=*}
+      narrative_field=${narrative_field#--}
+      set_narrative_field "$narrative_field" "${control_arg#*=}"
+      ;;
+    --objective-file|--completed-file|--decisions-file|--findings-file|--unresolved-file|--tests-file|--refs-file|--next-file)
+      control_want_value=${control_arg#--}
+      control_want_value=${control_want_value%-file}_file
+      ;;
+    --objective-file=*|--completed-file=*|--decisions-file=*|--findings-file=*|--unresolved-file=*|--tests-file=*|--refs-file=*|--next-file=*)
+      narrative_field=${control_arg%%=*}
+      narrative_field=${narrative_field#--}
+      narrative_field=${narrative_field%-file}
+      narrative_value=${control_arg#*=}
+      [ -f "$narrative_value" ] || die "--${narrative_field}-file '$narrative_value' is not a readable file"
+      set_narrative_field "$narrative_field" "$(cat "$narrative_value")"
+      ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
 if [ -n "$control_want_value" ]; then
-  [ "$control_want_value" = note_file ] && die "--note-file requires a value"
-  die "--$control_want_value requires a value"
+  case "$control_want_value" in
+    *_file) die "--${control_want_value%_file}-file requires a value" ;;
+    *) die "--$control_want_value requires a value" ;;
+  esac
 fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$OBJECTIVE_SET" = 0 ] && [ "$COMPLETED_SET" = 0 ] && [ "$DECISIONS_SET" = 0 ] \
+    && [ "$FINDINGS_SET" = 0 ] && [ "$UNRESOLVED_SET" = 0 ] && [ "$TESTS_STATUS_SET" = 0 ] \
+    && [ "$DURABLE_REFS_SET" = 0 ] && [ "$NEXT_ACTION_SET" = 0 ] \
+    || die "--harness, --model, --effort, --note, --objective, --completed, --decisions, --findings, --unresolved, --tests, --refs, and --next apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -522,6 +611,9 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+CONTINUATION_PATH=$(fm_continuation_path "$STATE" "$ID")
+CONTINUATION_PRIOR="$JOURNAL.continuation-prior"
+CONTINUATION_PRIOR_EXISTS=0
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -566,6 +658,19 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+# restore_continuation_prior: undo continuation_publish's write when a
+# relaunch is refused or fails while the old agent is still running, so the
+# durable record is left byte-identical to its pre-relaunch state - exactly
+# the same "nothing changed" invariant BRIEF_PRIOR restoration already gives
+# the instructions.
+restore_continuation_prior() {
+  if [ "$CONTINUATION_PRIOR_EXISTS" = 1 ]; then
+    [ -f "$CONTINUATION_PRIOR" ] && cp -p "$CONTINUATION_PRIOR" "$CONTINUATION_PATH" 2>/dev/null || true
+  else
+    rm -f "$CONTINUATION_PATH" 2>/dev/null || true
+  fi
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -578,6 +683,7 @@ relaunch_rollback() {
       if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
+      restore_continuation_prior
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
@@ -588,6 +694,7 @@ relaunch_rollback() {
           if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
           fi
+          restore_continuation_prior
           journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
           echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
@@ -702,11 +809,19 @@ resolve_relaunch_profile() {
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
-# CHECKPOINT_LINES with the journal lines describing what it proved, and
-# refuses outright when any of it cannot be established.
+# CHECKPOINT_LINES with the journal lines describing what it proved, and also
+# fills CONT_HEAD/CONT_BRANCH/CONT_DIRTY/CONT_MODIFIED_FILES with the same
+# facts for the continuation record (continuation_validate_and_snapshot, below)
+# so they are read from the git state exactly once. Refuses outright when any
+# of it cannot be established.
 CHECKPOINT_LINES=()
+CONT_HEAD=
+CONT_BRANCH=
+CONT_DIRTY=
+CONT_MODIFIED_FILES=
+CONT_CHILDREN=
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta branch
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -737,7 +852,12 @@ safe_checkpoint() {
   else
     dirty=no
   fi
+  branch=$(git -C "$WT" symbolic-ref --short -q HEAD 2>/dev/null) || branch=
   CHECKPOINT_LINES+=("worktree_head=$head" "worktree_dirty=$dirty")
+  CONT_HEAD=$head
+  CONT_BRANCH=$branch
+  CONT_DIRTY=$dirty
+  CONT_MODIFIED_FILES=$status_output
   if [ "$KIND" = secondmate ]; then
     # A secondmate's own crewmates outlive its relaunch: they run in their own
     # endpoints, and the relaunched secondmate reconciles them from its home's
@@ -763,7 +883,83 @@ safe_checkpoint() {
       children=$((children + 1))
     done
     CHECKPOINT_LINES+=("children=$children")
+    CONT_CHILDREN=$children
   fi
+}
+
+# continuation_validate_and_snapshot: prove, before anything is touched, that
+# task $ID's continuation record (if one already exists) is usable, back it up
+# for rollback, and fold its narrative fields with any explicit override from
+# this relaunch's flags into the CONT_*_FINAL globals continuation_publish
+# writes below. An existing record that fails validation - wrong schema, or a
+# task field naming a different task - refuses the whole relaunch here, before
+# anything changes, exactly like safe_checkpoint's own refusals.
+CONT_TESTS_FINAL=
+CONT_REFS_FINAL=
+CONT_OBJECTIVE_FINAL=
+CONT_COMPLETED_FINAL=
+CONT_DECISIONS_FINAL=
+CONT_FINDINGS_FINAL=
+CONT_UNRESOLVED_FINAL=
+CONT_NEXT_FINAL=
+continuation_validate_and_snapshot() {
+  local err refs
+  local prior_tests='' prior_refs='' prior_objective='' prior_completed=''
+  local prior_decisions='' prior_findings='' prior_unresolved='' prior_next=''
+  CONTINUATION_PRIOR_EXISTS=0
+  if [ -e "$CONTINUATION_PATH" ]; then
+    err=$(fm_continuation_validate "$CONTINUATION_PATH" "$ID") \
+      || die "task $ID's continuation record cannot be reused: $err"
+    cp -p "$CONTINUATION_PATH" "$CONTINUATION_PRIOR" \
+      || die "could not preserve task $ID's continuation record before relaunching"
+    CONTINUATION_PRIOR_EXISTS=1
+    prior_tests=$(fm_continuation_read_block "$CONTINUATION_PATH" tests_status)
+    prior_refs=$(fm_continuation_read_block "$CONTINUATION_PATH" durable_refs)
+    prior_objective=$(fm_continuation_read_block "$CONTINUATION_PATH" objective)
+    prior_completed=$(fm_continuation_read_block "$CONTINUATION_PATH" completed)
+    prior_decisions=$(fm_continuation_read_block "$CONTINUATION_PATH" decisions)
+    prior_findings=$(fm_continuation_read_block "$CONTINUATION_PATH" findings)
+    prior_unresolved=$(fm_continuation_read_block "$CONTINUATION_PATH" unresolved)
+    prior_next=$(fm_continuation_read_block "$CONTINUATION_PATH" next_action)
+  else
+    rm -f "$CONTINUATION_PRIOR" 2>/dev/null || true
+  fi
+
+  [ "$TESTS_STATUS_SET" = 1 ] && CONT_TESTS_FINAL=$TESTS_STATUS_ARG || CONT_TESTS_FINAL=$prior_tests
+  refs=$prior_refs
+  [ "$DURABLE_REFS_SET" = 1 ] && refs=$DURABLE_REFS_ARG
+  if [ "$KIND" = secondmate ]; then
+    if [ -n "$refs" ]; then
+      refs="$refs
+children=$CONT_CHILDREN (own child records under $WT/state)"
+    else
+      refs="children=$CONT_CHILDREN (own child records under $WT/state)"
+    fi
+  fi
+  CONT_REFS_FINAL=$refs
+  [ "$OBJECTIVE_SET" = 1 ] && CONT_OBJECTIVE_FINAL=$OBJECTIVE || CONT_OBJECTIVE_FINAL=$prior_objective
+  [ "$COMPLETED_SET" = 1 ] && CONT_COMPLETED_FINAL=$COMPLETED || CONT_COMPLETED_FINAL=$prior_completed
+  [ "$DECISIONS_SET" = 1 ] && CONT_DECISIONS_FINAL=$DECISIONS || CONT_DECISIONS_FINAL=$prior_decisions
+  [ "$FINDINGS_SET" = 1 ] && CONT_FINDINGS_FINAL=$FINDINGS || CONT_FINDINGS_FINAL=$prior_findings
+  [ "$UNRESOLVED_SET" = 1 ] && CONT_UNRESOLVED_FINAL=$UNRESOLVED || CONT_UNRESOLVED_FINAL=$prior_unresolved
+  [ "$NEXT_ACTION_SET" = 1 ] && CONT_NEXT_FINAL=$NEXT_ACTION || CONT_NEXT_FINAL=$prior_next
+}
+
+# continuation_publish: atomically write the merged record
+# continuation_validate_and_snapshot prepared. Runs after RELAUNCH_ACTIVE=1 is
+# set, so a failure here rolls back through restore_continuation_prior exactly
+# like a failed brief update does through BRIEF_PRIOR.
+continuation_publish() {
+  local role provenance
+  role="$KIND task $ID"
+  provenance="fm-control:relaunch harness=$PRIOR_RECORDED_HARNESS->$TARGET_HARNESS"
+  fm_continuation_write "$ID" "$KIND" "$role" "$provenance" \
+    "$CONT_BRANCH" "$CONT_HEAD" "$WT" "$CONT_DIRTY" \
+    "$CONT_MODIFIED_FILES" "$CONT_TESTS_FINAL" "$CONT_REFS_FINAL" \
+    "$CONT_OBJECTIVE_FINAL" "$CONT_COMPLETED_FINAL" "$CONT_DECISIONS_FINAL" \
+    "$CONT_FINDINGS_FINAL" "$CONT_UNRESOLVED_FINAL" "$CONT_NEXT_FINAL" \
+    | fm_continuation_write_atomic "$CONTINUATION_PATH" \
+    || die "could not publish task $ID's continuation record"
 }
 
 # record_note: put the required progress note somewhere durable, and - for a
@@ -793,6 +989,10 @@ record_note() {
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
+        echo
+        echo "## Continuation record"
+        echo
+        fm_continuation_render_markdown "$CONTINUATION_PATH"
       } >> "$RELAUNCH_BRIEF" \
         || die "could not append the progress note to task $ID's instructions"
       ;;
@@ -800,7 +1000,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line cont_line
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -830,21 +1030,24 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  continuation_validate_and_snapshot
+  cont_line="continuation=$CONTINUATION_PATH"
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
-  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line"
 
+  continuation_publish
   record_note
-  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line"
   exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
@@ -862,7 +1065,7 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "$cont_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
