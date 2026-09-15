@@ -765,6 +765,94 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and survives abort plus retry"
 }
 
+# The acquisition receipt is written in the selected state directory, so its
+# completion must look there too; otherwise an overridden state directory keeps
+# a spent receipt that refuses every later acquisition for that task id.
+test_acquisition_receipt_follows_state_override() {
+  local rec id='pool-state-override-r1' state out status
+  rec=$(make_case state-override "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  state="$CASE_DIR/override-state"
+  mkdir -p "$state" "$HOME_DIR/user-home"
+  touch "$state/.last-watcher-beat"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$POOL_DIR" TMUX="${TMUX:-fake,1,0}" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT_DIR" --scout 2>&1); status=$?
+  expect_code 0 "$status" "spawn with an overridden state directory should launch"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$state/$id.meta" \
+    "spawn did not publish its record in the overridden state directory"
+  [ ! -e "$state/$id.treehouse-acquisition" ] \
+    || fail "published spawn retained its acquisition receipt in the overridden state directory"
+  [ ! -e "$HOME_DIR/state/$id.treehouse-acquisition" ] \
+    || fail "spawn wrote an acquisition receipt outside its selected state directory"
+  pass "a published acquisition clears its receipt from the overridden state directory"
+}
+
+# A retained record whose managed copy vanished cannot prove its pool, so
+# allocation still refuses; the refusal must name the record, the recorded
+# copy, the resolver's reason and the guarded route rather than only the error.
+test_unprovable_retained_record_names_its_record_and_route() (
+  set -u
+  local rec id='pool-unprovable-r1' fakebin root pool out status before
+  rec=$(make_case unprovable "$id")
+  read_case_record "$rec"
+  fakebin=$(fm_fakebin "$CASE_DIR/native")
+  fm_test_fake_treehouse "$fakebin"
+  root="$CASE_DIR/root"
+  export TREEHOUSE_ROOT="$root"
+  pool=$(python3 "$ROOT/bin/fm-treehouse-identity.py" "$PROJECT_DIR" | jq -er '.pool') \
+    || fail "the real resolver could not name the fixture pool"
+  mkdir -p "$pool/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$pool/1/project"
+  POOL_DIR="$pool/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$POOL_DIR" > "$pool/treehouse-state.json"
+  fm_write_meta "$HOME_DIR/state/vanished.meta" \
+    "window=isolated:fm-vanished" "endpoint_task_id=vanished" "harness=codex" \
+    "kind=ship" "project=$PROJECT_DIR" "worktree=$pool/2/project"
+  before=$(cat "$pool/treehouse-state.json")
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$fakebin:$PATH" bash -c '
+      . "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-backend.sh"; . "$1/bin/fm-wake-lib.sh"
+      fm_treehouse_acquire_preflight "$2" "$3"' _ "$ROOT" "$PROJECT_DIR" "$id" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "preflight offered the pool while a retained record could not be proven"
+  assert_contains "$out" "$HOME_DIR/state/vanished.meta" "refusal did not name the unprovable record"
+  assert_contains "$out" "$pool/2/project" "refusal did not name the recorded copy"
+  assert_contains "$out" "recorded native copy is unavailable" "refusal did not carry the resolver reason"
+  assert_contains "$out" "fm-teardown.sh vanished" "refusal did not name the guarded reconciliation route"
+  assert_contains "$out" "do not delete ownership records" "refusal did not warn against deleting the record"
+  [ "$(cat "$pool/treehouse-state.json")" = "$before" ] || fail "refusal changed native pool state"
+  pass "an unprovable retained record refuses allocation and names its record, copy, reason and route"
+)
+
+# reserve is an operator repair verb; records it cannot adopt must say why.
+test_reserve_explains_remote_and_orca_records() {
+  local rec id='pool-reserve-unsupported-r1' out status
+  rec=$(make_case reserve-unsupported "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" "harness=codex" "kind=ship" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "remote_host=other-host"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "reserve adopted a copy recorded on another host"
+  assert_contains "$out" "remote host other-host" "reserve did not explain the remote-record refusal"
+  [ ! -e "$SLOT_CLAIM" ] || fail "remote-record refusal published a claim"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "harness=codex" "kind=ship" \
+    "backend=orca" "terminal=orca-terminal" "orca_worktree_id=orca-worktree" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR"
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-control.sh" "$id" reserve 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "reserve adopted an Orca-provided worktree"
+  assert_contains "$out" "orca backend" "reserve did not explain the Orca refusal"
+  [ ! -e "$SLOT_CLAIM" ] || fail "Orca refusal published a claim"
+  pass "reserve names the remote-host and Orca conditions it refuses"
+}
+
 # Wait for the external child to start before asking it to exit. An immediate
 # TERM can hit Bash before exec and run the parent's inherited EXIT cleanup.
 # The FIFO protocol proves the child occupied the copy and exited normally.
@@ -1259,6 +1347,9 @@ if [ "${FM_TREEHOUSE_REPAIR_ONLY:-0}" = 1 ]; then
 fi
 
 test_retained_records_and_interrupted_acquisitions
+test_acquisition_receipt_follows_state_override
+test_unprovable_retained_record_names_its_record_and_route
+test_reserve_explains_remote_and_orca_records
 test_native_process_exit_vs_durable_reservation || exit $?
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome

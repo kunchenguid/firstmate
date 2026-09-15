@@ -1364,8 +1364,21 @@ fm_treehouse_selected_slot() {
   [ "$(printf '%s\n' "$entry" | jq -r '.name')" = "$(basename "$(dirname "$slot")")" ]
 }
 
+# The receipt lives in the state directory the acquiring process used: the
+# selected STATE for this home, and <home>/state for any other local home.
+fm_treehouse_acquisition_receipt() { # <task-id> [home]
+  local id=$1 home=${2:-$FM_HOME} own
+  own=$(fm_treehouse_real_dir "$FM_HOME") || own=
+  if [ -n "$own" ] && [ "$(fm_treehouse_real_dir "$home")" = "$own" ]; then
+    printf '%s/%s.treehouse-acquisition\n' "$STATE" "$id"
+  else
+    printf '%s/state/%s.treehouse-acquisition\n' "$home" "$id"
+  fi
+}
+
 fm_treehouse_acquisition_begin() {
-  local id=$1 receipt="$STATE/$1.treehouse-acquisition" tmp
+  local id=$1 receipt tmp
+  receipt=$(fm_treehouse_acquisition_receipt "$id") || return 1
   if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $receipt; inspect its exact pool and lease before retrying, even with a changed root" >&2
     return 1
@@ -1378,7 +1391,7 @@ fm_treehouse_acquisition_begin() {
 
 fm_treehouse_acquisition_complete() {
   local slot=$1 id=$2 home=${3:-$FM_HOME} receipt holder
-  receipt="$home/state/$id.treehouse-acquisition"
+  receipt=$(fm_treehouse_acquisition_receipt "$id" "$home") || return 1
   [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
   fm_pr_regular_destination_or_absent "$receipt" || return 1
   holder=$(fm_treehouse_lease_holder "$id" "$home") || return 1
@@ -1426,14 +1439,15 @@ fm_treehouse_slot_entry() { # <worktree>
 # any prior acquisition by this task. The caller holds the project lock through
 # publication; native leases keep exclusion after that lock or process exits.
 fm_treehouse_acquire_preflight() { # <project> <task-id>
-  local project=$1 id=$2 holder state meta field path slot entry leased marker selection other_pool recorded_project
+  local project=$1 id=$2 holder state meta field path slot entry leased marker selection other_pool recorded_project receipt
   fm_treehouse_supports_reservations || {
     echo "REFUSED: Treehouse requires lease JSON, status JSON and conditional lease-id return support" >&2
     return 1
   }
   fm_treehouse_select_pool "$project" || return 1
-  if [ -e "$STATE/$id.treehouse-acquisition" ] || [ -L "$STATE/$id.treehouse-acquisition" ]; then
-    echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $STATE/$id.treehouse-acquisition; inspect it before retrying, even with a changed root" >&2
+  receipt=$(fm_treehouse_acquisition_receipt "$id") || return 1
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    echo "REFUSED: task $id has a retained Treehouse acquisition receipt at $receipt; inspect it before retrying, even with a changed root" >&2
     return 1
   fi
   fm_treehouse_pool_status "$project" || return 1
@@ -1468,7 +1482,10 @@ fm_treehouse_acquire_preflight() { # <project> <task-id>
              || [ "$(basename "$(dirname "$(dirname "$(dirname "$slot")")")")" = .treehouse ]; then
             recorded_project=$(fm_meta_get "$meta" project)
             [ -n "$recorded_project" ] || recorded_project=$project
-            selection=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-identity.py" "$recorded_project" "$slot") || return 1
+            selection=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-identity.py" "$recorded_project" "$slot" 2>&1) || {
+              echo "REFUSED: $meta records $field=$slot for project $recorded_project, whose native pool cannot be proven (${selection#REFUSED: }); restore that copy and project at their recorded paths, or inspect the exact record in $(dirname "$state") and reconcile it through guarded fm-teardown.sh $(basename "$meta" .meta) before spawning; do not delete ownership records to bypass this refusal" >&2
+              return 1
+            }
             other_pool=$(printf '%s\n' "$selection" | jq -er '.pool') || return 1
             [ "$other_pool" = "$FM_TREEHOUSE_POOL_DIR" ] || continue
             echo "REFUSED: retained pool copy $slot is missing from Treehouse status" >&2
@@ -1644,8 +1661,8 @@ fm_treehouse_guarded_return() {
     if [ -n "$before" ]; then
       after=$(fm_treehouse_return_snapshot "$slot" "$id" "$home") || return 1
       jq -en --argjson a "$before" --argjson b "$after" \
-        '[$a,$b] | map(del(.entry.leased,.entry.lease_id,.entry.lease_holder,.entry.leased_at,
-          .entry.owner_pid,.entry.owner_started_at)) | .[0] == .[1]' >/dev/null || return 1
+        '[$a,$b] | map({slot,task,home,slot_identity,git_identity,claim_hash,
+          name:.entry.name,path:.entry.path}) | .[0] == .[1]' >/dev/null || return 1
       printf '%s\n' "$after" | jq -e '.entry | (.leased // false) == false and
         (.lease_id // "") == "" and (.lease_holder // "") == "" and
         (.owner_pid // 0) == 0 and (.destroying // false) == false' >/dev/null || return 1
@@ -1681,7 +1698,8 @@ fm_treehouse_reserve_record() ( # <task-id>
   held+=("$lock")
   fm_backend_validate_task_endpoint "$meta" "$id" || exit 1
   case "$(fm_meta_get "$meta" kind)" in ''|ship|scout) ;; *) echo "REFUSED: reserve is for a recorded ship/scout copy only" >&2; exit 1 ;; esac
-  [ "$(fm_meta_get "$meta" backend)" != orca ] && [ -z "$(fm_meta_get "$meta" remote_host)" ] || exit 1
+  [ "$(fm_meta_get "$meta" backend)" != orca ] || { echo "REFUSED: task $id uses the orca backend, which owns its own worktree; reserve manages Treehouse copies only" >&2; exit 1; }
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || { echo "REFUSED: task $id is recorded on remote host $(fm_meta_get "$meta" remote_host); run reserve in its owning home on that host" >&2; exit 1; }
   project=$(fm_meta_get "$meta" project)
   slot=$(fm_treehouse_real_dir "$(fm_meta_get "$meta" worktree)") || exit 1
   lock=$(fm_treehouse_project_lock_path "$project") || exit 1

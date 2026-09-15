@@ -31,10 +31,19 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 if [[ " $* " == *' --if-lease-id '* ]]; then
   path=${!#}
-  state="$(dirname "$(dirname "$(cd "$path" && pwd -P)")")/treehouse-state.json"
+  real=$(cd "$path" && pwd -P)
+  state="$(dirname "$(dirname "$real")")/treehouse-state.json"
   tmp=$(mktemp "$state.XXXXXX")
   jq '(.worktrees[]) |= del(.leased,.lease_id,.lease_holder)' "$state" > "$tmp"
   mv "$tmp" "$state"
+  # Like upstream ReleaseConditional: a recorded base that no longer exists
+  # parks the slot on the default branch and clears base_branch on success.
+  base=$(jq -r --arg p "$real" '.worktrees[] | select(.path == $p) | .base_branch // ""' "$state")
+  if [ -n "$base" ] && ! git -C "$real" rev-parse --verify --quiet "refs/heads/$base" >/dev/null; then
+    tmp=$(mktemp "$state.XXXXXX")
+    jq --arg p "$real" '(.worktrees[] | select(.path == $p)) |= del(.base_branch)' "$state" > "$tmp"
+    mv "$tmp" "$state"
+  fi
 fi
 exit 0
 SH
@@ -1055,8 +1064,43 @@ test_reserved_slot_cleanup_keeps_existing_work_guards() {
   pass "leased dirty and unlanded work refuse cleanup; safely landed own work returns with exact lease identity"
 }
 
+# A successful native return may rewrite more than the lease: when the slot's
+# recorded base branch was deleted after merge, upstream parks the slot on the
+# default branch and clears base_branch. Success evidence is bound to the exact
+# slot identity, so that rewrite must not turn a completed return into an
+# unrecoverable refusal.
+test_returned_slot_with_stale_base_branch_completes_cleanup() {
+  local dir id=base-fallback holder lease=fixture-base-lease out rc
+  dir=$(make_case base-fallback)
+  mark_case_as_treehouse_pool "$dir"
+  holder="firstmate:$dir/home:$id"
+  jq --arg h "$holder" --arg l "$lease" \
+    '.worktrees[0] += {leased:true,lease_id:$l,lease_holder:$h,base_branch:"merged-feature"}' \
+    "$dir/pool/treehouse-state.json" > "$dir/pool/next.json"
+  mv "$dir/pool/next.json" "$dir/pool/treehouse-state.json"
+  ! git -C "$dir/project" rev-parse --verify --quiet refs/heads/merged-feature >/dev/null \
+    || fail "fixture base branch must not exist"
+  claim_pool_slot "$dir" "$id"
+  printf 'lease_id=%s\n' "$lease" >> "$dir/pool/1/.fm-slot-owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  out=$(run_case "$dir" "$id" 2>&1); rc=$?
+  expect_code 0 "$rc" "a successful return that cleared base_branch was rejected: $out"
+  assert_contains "$(cat "$dir/runtime.log")" "<--if-lease-id> <$lease>" \
+    "cleanup did not condition return on its exact native lease"
+  jq -e '.worktrees[0] | (.leased // false) == false and has("base_branch") == false' \
+    "$dir/pool/treehouse-state.json" >/dev/null \
+    || fail "fixture return did not clear the lease and stale base branch: $(cat "$dir/pool/treehouse-state.json")"
+  assert_absent "$dir/home/state/$id.meta" "completed cleanup retained its task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "completed cleanup retained its spent claim"
+  assert_absent "$dir/pool/1/.fm-slot-owner.returned" "completed cleanup retained its return receipt"
+  pass "fm-teardown: a native return that parks on the default branch and clears base_branch is still exact-slot success"
+}
 
 test_reserved_slot_cleanup_keeps_existing_work_guards
+test_returned_slot_with_stale_base_branch_completes_cleanup
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
