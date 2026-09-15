@@ -63,7 +63,7 @@
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
-# notice_emitted, plus optional status_head and ledger_claim fields. The
+# notice_emitted, plus optional status_head, ledger_claim, and run_id fields. The
 # inactive-path fingerprint binds the spawn incarnation, task id, terminal
 # state, PR text, and sanitized last status; the ledger-path fingerprint instead
 # binds the incarnation, task id, terminal state, literal `ledger` origin, and
@@ -71,6 +71,8 @@
 # When a terminal ledger append races just after the inactive path's final read,
 # ledger_claim binds that one ledger fingerprint to the already-delivered
 # inactive receipt so the two publishers cannot report one completion twice.
+# A ledger receipt records the exact run id only when a prior authoritative
+# observation already bound that delivery to a run.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -408,7 +410,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line run_id recorded_run_id
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -429,6 +431,10 @@ report_child_ledger_locked() { # <id> <meta>
   elif [ "$?" -eq 2 ]; then
     return 1
   fi
+  run_id=$(observation_run_id "$id" "$incarnation" 2>/dev/null || true)
+  recorded_run_id=$(record_value "$RECORD_PENDING" run_id)
+  [ -n "$recorded_run_id" ] || [ -z "$run_id" ] \
+    || record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
   note=$(clean_field "$(status_line_note "$last")")
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
@@ -522,11 +528,25 @@ observe_run() { # <task> <incarnation> <state-line>
   fi
   OBSERVED_RUN_LINE=$line
   OBSERVED_RUN_TOKEN=$token
-  OBSERVED_RUN_PREVIOUS=$previous
 }
 
-claim_ledger_report_for_run() { # <task> <incarnation> <state> <observation-token> <previous-observation>
-  local task=$1 incarnation=$2 state=$3 observation_token=$4 previous=$5 record key claim
+observation_run_id() { # <task> <incarnation>
+  local task=$1 incarnation=$2 file line run_id
+  file="$OUTCOME_DIR/$task.run-observation"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(record_value "$file" incarnation)" = "$incarnation" ] || return 1
+  line=$(record_value "$file" observation)
+  case "$line" in *" · source: run-step"*) ;; *) return 1 ;; esac
+  case "$line" in *" · run: "*) ;; *) return 1 ;; esac
+  run_id=${line##*" · run: "}
+  run_id=${run_id%%" · "*}
+  valid_id "$run_id" || return 1
+  printf '%s\n' "$run_id"
+}
+
+claim_ledger_report_for_run() { # <task> <incarnation> <state> <run-id>
+  local task=$1 incarnation=$2 state=$3 run_id=$4 record key
+  [ -n "$run_id" ] || return 1
   for record in "$OUTCOME_DIR"/*.reported; do
     [ -f "$record" ] && [ ! -L "$record" ] || continue
     [ "$(record_value "$record" task_id)" = "$task" ] || continue
@@ -534,11 +554,7 @@ claim_ledger_report_for_run() { # <task> <incarnation> <state> <observation-toke
     [ "$(record_value "$record" state)" = "$state" ] || continue
     key=$(record_value "$record" outcome_key)
     case "$key" in child-outcome-*) ;; *) continue ;; esac
-    claim=$(record_value "$record" run_claim)
-    [ "$claim" = "$observation_token" ] && return 0
-    [ -z "$claim" ] && [ -z "$previous" ] || continue
-    record_field_set "$record" run_claim "$observation_token" || return 2
-    return 0
+    [ "$(record_value "$record" run_id)" = "$run_id" ] && return 0
   done
   return 1
 }
@@ -561,7 +577,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   incarnation=$(meta_incarnation "$meta")
-  OBSERVED_RUN_LINE='' OBSERVED_RUN_TOKEN='' OBSERVED_RUN_PREVIOUS=''
+  OBSERVED_RUN_LINE='' OBSERVED_RUN_TOKEN=''
   observe_run "$id" "$incarnation" "$state_line" || observation_rc=$?
   [ "$observation_rc" -ne 2 ] || return 1
   if [ "$observation_rc" -eq 0 ] \
@@ -608,10 +624,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     esac
     if [ -n "$self" ]; then
       if claim_ledger_report_for_run "$id" "$incarnation" "$state" \
-        "$OBSERVED_RUN_TOKEN" "$OBSERVED_RUN_PREVIOUS"; then
+        "$(observation_run_id "$id" "$incarnation" 2>/dev/null || true)"; then
         return 0
-      elif [ "$?" -eq 2 ]; then
-        return 1
       fi
     fi
   fi

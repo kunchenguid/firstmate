@@ -948,7 +948,7 @@ SH
   out=$(run_real_reconcile "$MATE")
   [ -n "$out" ] || fail "unknown secondmate endpoint blocked authoritative gate reconciliation"
 
-  write_child "$MATE" duplicate 'done: completed delivery'
+  write_child "$MATE" duplicate 'working: validation active'
   printf 'backend=zellij\n' >> "$MATE/state/duplicate.meta"
   age "$MATE/state/duplicate.meta"
   mkdir -p "$MATE/projects/duplicate"
@@ -956,12 +956,16 @@ SH
   git -C "$MATE/projects/duplicate" checkout -q -b fm/duplicate
   git -C "$MATE/projects/duplicate" commit -q --allow-empty -m initial
   head=$(git -C "$MATE/projects/duplicate" rev-parse HEAD)
+  printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  printf 'done: completed delivery\n' >> "$MATE/state/duplicate.status"
+  age "$MATE/state/duplicate.meta" "$MATE/state/duplicate.status" "$MATE/state/duplicate.turn-ended"
   printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
   run_real_reconcile "$MATE" >/dev/null
   [ "$(grep -c 'child duplicate done:' "$MAIN/state/mate.status")" = 1 ] \
     || fail "the ledger and completed run published one delivery twice: $(cat "$MAIN/state/mate.status")"
-  printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
-  run_real_reconcile "$MATE" >/dev/null
+  [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status" || true)" = 0 ] \
+    || fail "the run outcome duplicated its exact ledger delivery: $(cat "$MAIN/state/mate.status")"
   printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
   run_real_reconcile "$MATE" >/dev/null
   [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status")" = 1 ] \
