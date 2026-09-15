@@ -1482,12 +1482,12 @@ EOF
 }
 
 test_opencode_primary_watch_plugin_rearms_after_wake() {
-  local plugin repo home log stop out status
+  local plugin repo home log stop out status confirmation=${1:-0}
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  repo="$TMP_ROOT/opencode-rearm-root"
-  home="$TMP_ROOT/opencode-rearm-home"
-  log="$TMP_ROOT/opencode-rearm.log"
-  stop="$TMP_ROOT/opencode-rearm.stop"
+  repo="$TMP_ROOT/opencode-rearm-$confirmation-root"
+  home="$TMP_ROOT/opencode-rearm-$confirmation-home"
+  log="$TMP_ROOT/opencode-rearm-$confirmation.log"
+  stop="$TMP_ROOT/opencode-rearm-$confirmation.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
@@ -1496,7 +1496,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
   printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
-  exit 0
+  exit "${FM_CONFIRM_STATUS:?}"
 fi
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
@@ -1510,11 +1510,12 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_CONFIRM_STATUS="$confirmation" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const expectedPrompts = process.env.FM_CONFIRM_STATUS === "4" ? 0 : 1;
 let prompts = 0;
 let rowsAtPrompt = 0;
 let releasePrompt = () => {};
@@ -1544,14 +1545,14 @@ for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
     : [];
-  if (rows.length >= 2 && prompts >= 1) break;
+  if (rows.some(row => row.startsWith("confirmed ")) && prompts >= expectedPrompts) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 const armRows = rows.filter((row) => row.startsWith("arm="));
 if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
-if (prompts !== 1) throw new Error(`expected one blocked wake prompt, got ${prompts}`);
-if (rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor establishment (${rowsAtPrompt} arm rows)`);
+if (prompts !== expectedPrompts) throw new Error(`expected ${expectedPrompts} wake prompts, got ${prompts}`);
+if (expectedPrompts && rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor establishment (${rowsAtPrompt} arm rows)`);
 if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
 if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
   throw new Error(`handling delivery was not confirmed before the follow-up: ${rows.join(" | ")}`);
@@ -1562,8 +1563,9 @@ if (stableRows.filter((row) => row.startsWith("arm=")).length !== 2) {
   throw new Error(`blocked follow-up started extra arm work: ${stableRows.join(" | ")}`);
 }
 if (stableRows.filter((row) => row.startsWith("confirmed ")).length !== 1) {
-  throw new Error(`successful prompt delivery was not confirmed exactly once: ${stableRows.join(" | ")}`);
+  throw new Error(`prompt disposition was not confirmed exactly once: ${stableRows.join(" | ")}`);
 }
+if (prompts !== expectedPrompts) throw new Error(`late delivery violated confirmation: ${prompts}`);
 releasePrompt();
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
@@ -1571,7 +1573,7 @@ EOF
   status=$?
   [ "$status" -eq 0 ] || fail "OpenCode watch plugin must start one successor before wake prompt delivery settles: $out"
   [ -z "$out" ] || fail "OpenCode rearm test printed output: $out"
-  pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
+  pass "OpenCode starts one successor and skips only confirmed already-handled delivery"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -2247,6 +2249,7 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_primary_watch_plugin_rearms_after_wake 4
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

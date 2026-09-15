@@ -51,6 +51,12 @@
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
+# --handling-delivered GENERATION --watcher-pid PID: confirm a live, identity-
+# matched handling successor. Exit 0 means handling is still required; exit 4
+# means this exact generation was acknowledged and its queue is empty. The
+# latter is a terminal delivery no-op, not a retryable failure. Missing, invalid
+# or superseded evidence remains an error; an empty queue alone is not proof.
+#
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
 # wins the singleton while the duplicate child stands down. It
@@ -376,8 +382,8 @@ handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
   case "$FM_RECOVERY_MARKER_TOKEN" in
-    pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
-    acked:*|'') ;;
+    pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*|acked:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
+    '') ;;
     *) return 1 ;;
   esac
 }
@@ -403,8 +409,22 @@ esac
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
-    && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
-  exit $?
+    || exit 1
+  # Use the acknowledgement owner's queue -> marker lock order. A drain can
+  # finish after readiness but before this RPC; distinguish that terminal race
+  # from missing evidence without hiding a concurrent, higher-sequence wake.
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  handling_status=0
+  fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation" || handling_status=$?
+  if [ "$handling_status" -ne 0 ] \
+    && [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] && [ ! -s "$FM_WAKE_QUEUE" ] \
+    && fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      "acked:handling:$handling_generation"|"acked:downtime:$handling_generation") handling_status=4 ;;
+    esac
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  exit "$handling_status"
 fi
 
 if [ "$mode" = restart ]; then

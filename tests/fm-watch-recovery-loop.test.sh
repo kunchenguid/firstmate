@@ -220,5 +220,135 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: handling can finish between successor readiness and the delivery RPC.
+# Keep the real arm, watcher, queue and acknowledgement owner; the wrapper only
+# schedules that race deterministically, before forwarding the real RPC.
+test_pi_acknowledged_wake_is_not_delivered_again() {
+  local scenario repo home fakebin out status
+  for scenario in acked early-acked pending empty-pending newer malformed missing; do
+    repo="$TMP_ROOT/t3-$scenario-root"
+    home="$TMP_ROOT/t3-$scenario-home"
+    fakebin="$TMP_ROOT/t3-$scenario-fakebin"
+    mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+    install_pi_watch_extension_fixture "$repo"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+    chmod +x "$fakebin/tmux"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+export FM_ROOT_OVERRIDE="$FM_REAL_ROOT"
+export PATH="$FM_FIXTURE_BIN:$PATH"
+if [ "$FM_RACE" = early-acked ] && [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] && [ ! -e "$FM_HOME/raced" ]; then
+  "$FM_REAL_ROOT/bin/fm-wake-drain.sh" --ack-through 1 --recovery-generation seed.1.aaa > "$FM_HOME/ack.out" 2>&1 || exit 99
+  touch "$FM_HOME/raced"
+fi
+if [ "${1:-}" = --handling-delivered ]; then
+  if [ ! -e "$FM_HOME/raced" ]; then
+    touch "$FM_HOME/raced"
+    case "$FM_RACE" in
+      acked|newer)
+        "$FM_REAL_ROOT/bin/fm-wake-drain.sh" --ack-through 1 --recovery-generation "$2" > "$FM_HOME/ack.out" 2>&1 || exit 99
+        if [ "$FM_RACE" = newer ]; then
+          bash -c '. "$FM_REAL_ROOT/bin/fm-wake-lib.sh"; fm_wake_append check newer "check: newer work"' || exit 99
+        fi
+        ;;
+      empty-pending) : > "$FM_HOME/state/.wake-queue" ;;
+      malformed) printf 'invalid\n' > "$FM_HOME/state/.watcher-down" ;;
+      missing) rm "$FM_HOME/state/.watcher-down" ;;
+    esac
+  fi
+  "$FM_REAL_ROOT/bin/fm-watch-arm.sh" "$@"
+  rc=$?
+  printf '%s\n' "$rc" >> "$FM_HOME/confirm.log"
+  exit "$rc"
+fi
+exec "$FM_REAL_ROOT/bin/fm-watch-arm.sh" "$@"
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    : > "$home/state/seed.meta"
+    printf 'pending:downtime:seed.1.aaa\n' > "$home/state/.watcher-down"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_REAL_ROOT="$ROOT" \
+      bash -c '. "$FM_REAL_ROOT/bin/fm-wake-lib.sh"; fm_wake_append check unfinished-execution "check: unfinished-execution"' \
+      || fail "could not seed real wake queue"
+    out=$(
+      PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" \
+        FM_ROOT_OVERRIDE="$repo" FM_REAL_ROOT="$ROOT" FM_FIXTURE_BIN="$fakebin" FM_RACE="$scenario" \
+        FM_STATE_OVERRIDE="$home/state" PATH="$fakebin:$PATH" \
+        FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const prompts = [];
+const handlers = new Map();
+let tool;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+};
+const pause = () => new Promise(resolve => setTimeout(resolve, 50));
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 300; i++) {
+    if (predicate()) return;
+    await pause();
+  }
+  throw new Error(`timeout: ${label}`);
+}
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+try {
+  await tool.execute();
+  await waitFor(() => existsSync(`${home}/confirm.log`), "real handshake");
+  // Allow both rejected-confirmation retries and prompt dispatch to settle.
+  for (let i = 0; i < 10; i++) await pause();
+  const results = readFileSync(`${home}/confirm.log`, "utf8").trim().split("\n");
+  if (["acked", "early-acked"].includes(process.env.FM_RACE)) {
+    assert.equal(readFileSync(`${home}/state/.wake-queue`, "utf8"), "");
+    assert.match(readFileSync(`${home}/state/.watcher-down`, "utf8"), /^acked:/);
+    assert.equal(prompts.length, 0, `handled wake was re-delivered (RPC ${results}): ${prompts.join(" | ")}`);
+    assert.deepEqual(results, ["4"], "already handled is terminal, not retried");
+    const watcherPid = readFileSync(`${home}/state/.watch.lock/pid`, "utf8").trim();
+    const confirm = (generation, pid) => spawnSync("bash", [
+      `${process.env.FM_REAL_ROOT}/bin/fm-watch-arm.sh`, "--handling-delivered", generation, "--watcher-pid", pid,
+    ], { env: process.env, encoding: "utf8" }).status;
+    assert.equal(confirm("wrong-generation", watcherPid), 3, "retirement requires exact generation");
+    assert.equal(confirm("seed.1.aaa", String(process.pid)), 1, "retirement requires the actual successor");
+    for (let i = 0; i < 3; i++) {
+      assert.equal(confirm("seed.1.aaa", watcherPid), 4, "repeated stale confirmations stay terminal");
+    }
+    // The live successor must still deliver newly arriving work after skipping.
+    writeFileSync(`${home}/state/seed.status`, "done: fresh work after acknowledgement\n");
+    await waitFor(() => prompts.length > 0, "fresh actionable wake after retired delivery");
+    assert.match(prompts[0], /signal:.*seed.status/);
+    assert.match(readFileSync(`${home}/state/.wake-queue`, "utf8"), /\tsignal\tseed.status\t/);
+  } else {
+    assert.equal(prompts.length, 1, `outstanding or uncertain work was silenced: ${results}`);
+    assert.match(prompts[0], /Run bin\/fm-wake-drain.sh first/);
+    if (["newer", "malformed", "missing"].includes(process.env.FM_RACE)) {
+      assert.match(prompts[0], /handling delivery confirmation was rejected/);
+    }
+    if (process.env.FM_RACE === "newer") {
+      assert.match(readFileSync(`${home}/state/.wake-queue`, "utf8"), /check: newer work/);
+    }
+  }
+  const pid = readFileSync(`${home}/state/.watch.lock/pid`, "utf8").trim();
+  process.kill(Number(pid), 0);
+} finally {
+  await handlers.get("session_shutdown")?.();
+}
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "Pi real acknowledgement race ($scenario): $out"
+    [ -z "$out" ] || fail "Pi acknowledgement race printed output: $out"
+  done
+  pass "Pi skips an acknowledged wake but preserves pending, uncertain and newly arriving work"
+}
+
+test_pi_acknowledged_wake_is_not_delivered_again
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation

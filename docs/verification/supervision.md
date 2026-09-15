@@ -483,6 +483,26 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+Acknowledgement-before-delivery was verified on 2026-09-15 with Node v25.9.0, Bash 5.3.9, the tracked Pi extension and real arm/watcher/drain processes in isolated homes.
+This is protocol integration coverage, not a new live Pi or OpenCode vendor-session pass.
+Both acknowledgement orderings (before successor readiness and before confirmation), pending and empty-pending episodes, newer queued work, missing/malformed evidence, generation mismatch, wrong successor identity, and fresh signal delivery after suppression are covered.
+OpenCode's shared confirmation consumer is covered by its executable plugin fixture.
+
+```sh
+bash tests/fm-watch-recovery-loop.test.sh
+bash tests/fm-pi-watch-extension.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - Pi skips an acknowledged wake but preserves pending, uncertain and newly arriving work
+ok - OpenCode starts one successor and skips only confirmed already-handled delivery
+```
+
+Only Pi (including pi-signed) and OpenCode consume the handling-confirmation RPC; other harness integrations do not enter the changed branch.
+No runtime-backend lifecycle or transport behavior is changed.
+
 Deterministic entry points:
 
 ```sh

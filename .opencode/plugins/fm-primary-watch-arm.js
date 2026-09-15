@@ -206,6 +206,7 @@ function confirmHandlingDelivery(paths, recovery) {
       },
     );
     if (result.status === 0) return { ok: true, detail: "" };
+    if (result.status === 4) return { ok: true, handled: true, detail: "" };
     const stderr = String(result.stderr || "").trim();
     return {
       ok: false,
@@ -229,6 +230,7 @@ function confirmHandlingDeliveryWithRetry(paths, recovery) {
 async function deliverActionableWake(paths, client, sessionID, message, recovery) {
   if (recovery) {
     const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
+    if (confirmed.handled) return;
     if (!confirmed.ok) {
       if (recovery.watcherPid) {
         try {
