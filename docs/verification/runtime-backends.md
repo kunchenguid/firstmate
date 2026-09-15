@@ -874,7 +874,7 @@ SSH-born herdr server (child of `herdr --session fm-remote remote-client-bridge`
 ```
 
 `XPC_SERVICE_NAME` identifies a launchd label but does not identify its domain, because the Background `user/501` job also carried that variable while lacking keychain access.
-The owner classifier therefore accepts that label only when `launchctl print gui/<uid>/<label>` identifies the owner pid or the label is loaded in `gui/<uid>` but not `user/<uid>`.
+The owner classifier therefore accepts that label only when `launchctl print gui/<uid>/<label>` identifies the owner pid or the owner's parent pid, or the label is loaded in `gui/<uid>` but not `user/<uid>`.
 `XPC_SERVICE_NAME=0`, including a value inherited by a herdr live-handoff child, remains unknown.
 `FM_REMOTE_JOB_ACTIVE=1` proves the Aqua worker only when `dev.firstmate.remote-job` is loaded in `gui/<uid>` but not `user/<uid>`.
 

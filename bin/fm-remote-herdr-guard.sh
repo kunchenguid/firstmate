@@ -13,20 +13,26 @@
 # Aqua audit session and login-keychain access; the login shell only gives the
 # server the account's own environment.
 # `herdr server` stays in the foreground under launchd, as verified in
-# docs/verification/runtime-backends.md under "fm-remote server birth and login-keychain access", so the final exec provides the complete supervision lifecycle.
+# docs/verification/runtime-backends.md under "fm-remote server birth and login-keychain access".
+# The guard's final exec runs it through bin/fm-remote-herdr-supervisor.pl,
+# which stays that launchd-supervised foreground process while the server leads
+# its own POSIX session, the shape Herdr saved SSH machines require; that
+# script's header owns the supervision contract. When no perl on the launch
+# agent's PATH can compile the supervisor, the guard execs the server directly
+# and logs that Herdr saved SSH machines will refuse it.
 #
 # Decision, made once per launch (exit codes matter under SuccessfulExit=false:
 # 0 tells launchd the job is done until something restarts it, non-zero asks
 # for a retry after the throttle interval):
-#   no server owns the session socket  -> exec `herdr server --session <s>`
-#                                          (foreground, launchd-supervised)
+#   no server owns the session socket  -> start `herdr server --session <s>`
+#                                          (supervised, launchd-owned)
 #   the owner was born in the Aqua session (launchd or the Aqua remote-job
 #   worker)                            -> exit 0, leave it alone
 #   the owner was born anywhere else (an SSH remote attach, a shell over
 #   ssh/mosh, or a birth it cannot prove) -> `herdr server stop`, wait until the
-#                                          socket is released, then exec
-#                                          `herdr server --session <s>` at once
-#                                          so the socket is rebound before a
+#                                          socket is released, then start the
+#                                          server the same way at once so the
+#                                          socket is rebound before a
 #                                          reconnecting SSH attach can start
 #                                          another foreign server
 #   the foreign server does not release the socket in time -> exit 1
@@ -65,7 +71,12 @@ status_running() { # <status-json>
 }
 
 start_server() {
-  log "starting the herdr server for session $SESSION inside this launch agent (pid $$)"
+  local perl_bin supervisor="$SCRIPT_DIR/fm-remote-herdr-supervisor.pl"
+  if perl_bin=$(command -v perl 2>/dev/null) && "$perl_bin" -c "$supervisor" >/dev/null 2>&1; then
+    log "starting the herdr server for session $SESSION as the leader of its own session under this launch agent (pid $$)"
+    exec "$perl_bin" "$supervisor" "$HERDR_BIN" server --session "$SESSION"
+  fi
+  log "no perl on this PATH can compile $supervisor, so the herdr server for session $SESSION runs in the foreground of this launch agent (pid $$) without its own session; Herdr saved SSH machines will refuse it"
   exec "$HERDR_BIN" server --session "$SESSION"
 }
 

@@ -15,6 +15,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
+command -v perl >/dev/null 2>&1 || { echo "skip: perl not found (a holder runs under the launch agent's perl supervisor)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-doctor)
 LABEL=dev.firstmate.herdr.fm-remote
@@ -60,6 +61,24 @@ hold FM_REMOTE_JOB_ACTIVE=1
 WORKER_HOLDER_PID=$HOLDER_PID
 hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
 SSH_HOLDER_PID=$HOLDER_PID
+# The launchd marker again, on a holder bin/fm-remote-herdr-supervisor.pl
+# started as the leader of its own session, the shape the launch agent gives
+# the server.
+SUPERVISED_FIFO="$TMP_ROOT/holder-$HOLDER_FD.fifo"
+mkfifo "$SUPERVISED_FIFO"
+eval "exec ${HOLDER_FD}<>\"\$SUPERVISED_FIFO\""
+HOLDER_FD=$((HOLDER_FD + 1))
+perl "$ROOT/bin/fm-remote-herdr-supervisor.pl" env -i XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote "$JQ" . "$SUPERVISED_FIFO" 2>> "$TMP_ROOT/supervisor.log" &
+SUPERVISOR_PID=$!
+HOLDER_PIDS+=("$SUPERVISOR_PID")
+SESSION_LEADER_HOLDER_PID=
+for _ in $(seq 1 100); do
+  SESSION_LEADER_HOLDER_PID=$(ps -A -o pid=,ppid=,command= | awk -v parent="$SUPERVISOR_PID" -v jq="$JQ" '$2 == parent && $3 == jq { print $1; exit }')
+  [ -z "$SESSION_LEADER_HOLDER_PID" ] || break
+  sleep 0.05
+done
+[ -n "$SESSION_LEADER_HOLDER_PID" ] || fail "the supervisor did not start its holder"
+HOLDER_PIDS+=("$SESSION_LEADER_HOLDER_PID")
 
 # new_case <Darwin|Linux> [with-herdr] [gui] [login-shell]
 # Builds one isolated account fixture and points the module-level CASE_*
@@ -616,6 +635,15 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
   "a launchd-born owner was not reported with its pid and birth"
+assert_contains "$DOCTOR_OUT" "(pid $AQUA_HOLDER_PID, launchd); it does not lead its own session, so Herdr saved SSH machines refuse it" \
+  "an owner that does not lead its own session was not reported as one Herdr saved SSH machines refuse"
+
+printf '%s\n' "$SESSION_LEADER_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 0 "$DOCTOR_RC" "an Aqua-born owner that leads its own session was not reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $SESSION_LEADER_HOLDER_PID, launchd); it leads its own session, as Herdr saved SSH machines require" \
+  "an Aqua-born owner that leads its own session was not reported as Herdr saved SSH machines require"
+pass "session leadership is reported on an Aqua-born owner without changing its readiness"
 
 printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
 printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"

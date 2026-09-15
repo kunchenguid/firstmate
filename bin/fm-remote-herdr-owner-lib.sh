@@ -40,7 +40,8 @@
 #                an ancestor that is sshd or herdr's remote-client-bridge
 #                (matched on argv[0] and whole arguments only)
 #       launchd  XPC_SERVICE_NAME=<label>, with launchctl proving that job is
-#                the owner in gui/<uid> or is loaded only in that domain
+#                the owner, or the owner's parent (the guard's supervisor), in
+#                gui/<uid>, or that the label is loaded only in that domain
 #       worker   FM_REMOTE_JOB_ACTIVE=1, with launchctl proving that
 #                dev.firstmate.remote-job is loaded only in gui/<uid>
 #       unknown  none of the above; XPC_SERVICE_NAME alone, including value 0,
@@ -49,6 +50,10 @@
 #     Succeeds only for launchd and worker. `unknown` is deliberately not
 #     Aqua: a server that cannot prove its birth is treated like a foreign one,
 #     because leaving it in place silently reproduces the keychain failure.
+#   fm_remote_herdr_process_leads_session <pid>
+#     Succeeds when <pid> leads its own POSIX session, read from the `s` flag
+#     of `ps -o stat=` on both darwin and Linux. Herdr requires that of a
+#     server before `herdr machine add` accepts it as a saved SSH machine.
 
 fm_remote_herdr_socket_owner() { # <socket-path>
   local socket=$1 real pid='' line candidates='' candidate cmd
@@ -103,11 +108,14 @@ fm_remote_herdr_process_ancestry() { # <pid>
 }
 
 fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
-  local uid=$1 label=$2 pid=$3 job
+  local uid=$1 label=$2 pid=$3 job parent
   [ -n "$label" ] && [ "$label" != 0 ] || return 1
   job=$(launchctl print "gui/$uid/$label" 2>/dev/null) || return 1
-  if printf '%s\n' "$job" | awk -v expected="$pid" '
-    $1 == "pid" && $2 == "=" && $3 == expected { found = 1 }
+  # The guard's supervisor stays the job process while the server it started
+  # is its child, so the job pid may be the owner's parent.
+  parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  if printf '%s\n' "$job" | awk -v owner="$pid" -v parent="${parent:-none}" '
+    $1 == "pid" && $2 == "=" && ($3 == owner || $3 == parent) { found = 1 }
     END { exit found ? 0 : 1 }
   '; then
     return 0
@@ -172,5 +180,13 @@ fm_remote_herdr_ancestry_has_ssh_origin() {
 
 fm_remote_herdr_birth_is_aqua() { # <birth>
   case "$1" in launchd|worker) return 0 ;; esac
+  return 1
+}
+
+fm_remote_herdr_process_leads_session() { # <pid>
+  local pid=$1 stat
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  case "$stat" in *s*) return 0 ;; esac
   return 1
 }
