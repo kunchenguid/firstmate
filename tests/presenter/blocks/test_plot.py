@@ -293,6 +293,62 @@ def test_build_plot_from_csv_no_y_columns_raises(tmp_path: Path) -> None:
         build_plot_from_csv(single_col)
 
 
+def test_build_waveform_plot_requires_data() -> None:
+    """Verify plotting with no data fails instead of rendering a blank image."""
+    with pytest.raises(ValueError, match="No plot data"):
+        build_waveform_plot()
+
+    with pytest.raises(ValueError, match="No plot data"):
+        build_waveform_plot(x=[1.0, 2.0, 3.0])
+
+
+def test_build_plot_from_csv_trailing_newline_content(tmp_path: Path) -> None:
+    """Verify single-line payloads with a trailing newline parse as content."""
+    with pytest.raises(ValueError, match="no numeric data"):
+        build_plot_from_csv("time,voltage\n")
+
+    out_png = tmp_path / "one_point.png"
+    block = build_plot_from_csv("0.0,1.0\n", has_header=False, output_path=out_png)
+    assert block["type"] == "plot"
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+
+def test_build_plot_from_csv_all_nan_y_raises(tmp_path: Path) -> None:
+    """Verify all-NaN y data fails loudly while partial gaps still plot."""
+    with pytest.raises(ValueError, match="no finite y"):
+        build_plot_from_csv("t,V\n0,foo\n1,bar\n")
+
+    text_col = tmp_path / "text_col.csv"
+    text_col.write_text("time,note\n0.0,hello\n1.0,world\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no finite y"):
+        build_plot_from_csv(text_col, y_cols=["note"])
+
+    out_png = tmp_path / "gaps.png"
+    block = build_plot_from_csv("t,V\n0,\n1,2.0\n", output_path=out_png)
+    assert block["type"] == "plot"
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+
+def test_build_plot_from_csv_column_index_handling(tmp_path: Path) -> None:
+    """Verify negative x_col wraps and out-of-range column indices fail loudly."""
+    csv_file = tmp_path / "two.csv"
+    csv_file.write_text("a,b\n0.0,1.0\n1.0,2.0\n", encoding="utf-8")
+    out_png = tmp_path / "neg_x.png"
+
+    block = build_plot_from_csv(csv_file, x_col=-1, output_path=out_png)
+    assert block["type"] == "plot"
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+    with pytest.raises(ValueError, match="x_col index 5 out of range"):
+        build_plot_from_csv(csv_file, x_col=5)
+
+    with pytest.raises(ValueError, match="y_col index 7 out of range"):
+        build_plot_from_csv(csv_file, y_cols=[7])
+
+
 def test_build_plot_from_csv_invalid_columns(tmp_path: Path) -> None:
     """Verify error handling when column names in CSV do not match."""
     csv_file = tmp_path / "bad.csv"

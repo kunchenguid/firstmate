@@ -169,6 +169,9 @@ def build_waveform_plot(
         else:
             plot_traces.append(PlotTrace(x=x, y=y))  # type: ignore[arg-type]
 
+    if not plot_traces:
+        raise ValueError("No plot data provided: pass traces or x and y data")
+
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
     try:
@@ -282,10 +285,9 @@ def build_plot_from_arrays(
 
 def _looks_like_csv_content(text: str) -> bool:
     """Return True when a string reads as CSV data rather than a file path."""
-    s = text.strip()
-    if not s:
+    if not text.strip():
         return False
-    return "\n" in s or "\r" in s
+    return "\n" in text or "\r" in text
 
 
 def build_plot_from_csv(
@@ -349,6 +351,10 @@ def build_plot_from_csv(
         x_idx = header_names.index(x_col)
     else:
         x_idx = int(x_col)
+        if x_idx < 0:
+            x_idx += len(header_names)
+        if not 0 <= x_idx < len(header_names):
+            raise ValueError(f"x_col index {x_col} out of range for {len(header_names)} CSV columns")
 
     # Resolve y column indices
     y_indices: list[int] = []
@@ -362,8 +368,13 @@ def build_plot_from_csv(
                 y_indices.append(header_names.index(col))
                 y_labels.append(col)
             else:
-                y_indices.append(int(col))
-                y_labels.append(header_names[int(col)] if int(col) < len(header_names) else f"Col{col}")
+                idx = int(col)
+                if idx < 0:
+                    idx += len(header_names)
+                if not 0 <= idx < len(header_names):
+                    raise ValueError(f"y_col index {col} out of range for {len(header_names)} CSV columns")
+                y_indices.append(idx)
+                y_labels.append(header_names[idx])
     else:
         # All columns except x_idx
         for i in range(len(rows[0])):
@@ -398,6 +409,8 @@ def build_plot_from_csv(
         raise ValueError("CSV source contains no numeric data rows")
     if not y_vals:
         raise ValueError("CSV source contains no y columns to plot")
+    if not any(np.isfinite(v) for series in y_vals for v in series):
+        raise ValueError("CSV source contains no finite y values to plot")
 
     traces = [
         PlotTrace(x=x_vals, y=y_vals[s_idx], label=y_labels[s_idx])
