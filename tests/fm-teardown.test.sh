@@ -885,6 +885,60 @@ SH
   pass "Azure cleanup requires completed PR and contained clean local work, even after push"
 }
 
+test_azure_origin_classification_failures_preserve_work() {
+  local case_dir rc path_without_python
+
+  case_dir=$(make_case azure-no-python)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+  path_without_python=$(make_path_without_lsof "$case_dir")
+  set +e
+  FM_TEARDOWN_TEST_PATH="$path_without_python" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-no-python: teardown should refuse when classification cannot run"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-no-python: missing python did not preserve work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-no-python: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-no-python: lost local work"
+
+  case_dir=$(make_case azure-classifier-failed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'git@ssh.dev.azure.com:v3/example/Project/repo'
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$case_dir/fakebin/python3"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-classifier-failed: teardown should refuse when classification errors"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-classifier-failed: classifier failure did not preserve work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-classifier-failed: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-classifier-failed: lost local work"
+
+  case_dir=$(make_case non-azure-origin)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://github.com/example/repo'
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "non-azure-origin: teardown should still use ordinary remote reachability"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "non-azure-origin: teardown unexpectedly refused"
+
+  pass "Azure origin classification failures preserve work and non-Azure still allows"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -3737,6 +3791,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_azure_requires_completed_pr_and_local_containment
+test_azure_origin_classification_failures_preserve_work
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses

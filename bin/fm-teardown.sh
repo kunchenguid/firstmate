@@ -1262,9 +1262,9 @@ azure_work_is_landed() {
 }
 
 azure_remote_origin_requires_pr() {
-  local origin_url=${1-}
+  local origin_url=${1-} rc
   [ -n "$origin_url" ] || return 1
-  python3 - "$origin_url" <<'PY'
+  if python3 - "$origin_url" <<'PY'
 import sys
 from urllib.parse import urlsplit
 
@@ -1275,7 +1275,7 @@ if not lower.startswith("ssh:") and ("vs-ssh.visualstudio.com" in lower or "ssh.
 parts = urlsplit(lower)
 host = (parts.hostname or "").lower()
 path = parts.path or ""
-if parts.scheme in ("http", "https") and host in ("dev.azure.com",) and "/_git/" in path:
+if parts.scheme in ("http", "https") and host == "dev.azure.com" and "/_git/" in path:
     sys.exit(0)
 if parts.scheme in ("http", "https") and host.endswith(".visualstudio.com") and "/_git/" in path:
     sys.exit(0)
@@ -1283,6 +1283,15 @@ if parts.scheme == "ssh" and host in ("ssh.dev.azure.com", "vs-ssh.visualstudio.
     sys.exit(0)
 sys.exit(1)
 PY
+  then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *) return 2 ;;
+  esac
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -1700,7 +1709,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url azure_origin_rc
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -1710,10 +1719,23 @@ validate_worktree_teardown_safety() {
   # remote-reachability shortcut. SSH clone URLs identify Azure here as well.
   if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
+    azure_origin_rc=1
     if azure_remote_origin_requires_pr "$origin_url"; then
-      echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
-      return 1
+      azure_origin_rc=0
+    else
+      azure_origin_rc=$?
     fi
+    case "$azure_origin_rc" in
+      0)
+        echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
+        return 1
+        ;;
+      1) ;;
+      *)
+        echo "REFUSED: Azure-origin classification could not be completed; preserving work." >&2
+        return 1
+        ;;
+    esac
   fi
   case "$PR_URL" in
     https://dev.azure.com/*|https://*.visualstudio.com/*)
