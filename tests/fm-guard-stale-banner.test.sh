@@ -169,6 +169,22 @@ test_first_stale_call_prints_full_banner() {
   pass "fm-guard stale banner: first stale call prints the full actionable banner"
 }
 
+test_full_banner_names_quiet_mode_when_active() {
+  # kunchenguid/firstmate#2356: the banner's repair line must not misdirect a
+  # captain in quiet mode to /afk - fm-guard.sh threads the flag's declared
+  # mode through to fm-supervision-instructions.sh's --afk-mode.
+  local dir home out
+  dir=$(make_guard_case quiet-mode-banner)
+  home=$(case_home "$dir")
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" \
+    "full banner did not name /quiet for an active quiet-mode flag"
+  assert_not_contains "$out" "Away mode owns watcher supervision" \
+    "full banner misdirected a quiet-mode captain to /afk"
+  pass "fm-guard stale banner: repair line is quiet-mode-aware, not hardcoded to away mode"
+}
+
 test_repeated_same_episode_prints_reminder_only() {
   local dir out1 out2 marker lines
   dir=$(make_guard_case repeated-stale)
@@ -841,11 +857,15 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
 # The cases above pin the model. This one takes the end-user path instead: no
 # FM_SUPERVISION_MODEL at all, so bin/fm-harness.sh must route a Pi primary to the
 # extension model on its own. Without that routing the tolerance would never reach
-# a real Pi home. The foreign markers are cleared because fm-harness.sh tests them
-# ahead of Pi, and the host running this suite may carry one.
+# a real Pi home. Pinning Pi takes both halves of the evidence: the foreign markers
+# are cleared because the host running this suite may carry one, and the ancestry
+# walk is blinded because a structural ancestor of a different harness outranks the
+# Pi marker, so the harness this suite was launched from would otherwise answer.
 test_pi_harness_routes_itself_to_the_extension_model() {
-  local dir home out pid harness
+  local dir home out pid harness blind
   local -a pi_env
+  blind=$(fm_fakebin "$TMP_ROOT/pi-routing-blind")
+  fm_fake_blind_ancestry "$blind"
   for harness in pi pi-signed; do
     pi_env=(PI_CODING_AGENT=true)
     [ "$harness" = pi ] || pi_env+=(FM_PI_HARNESS=pi-signed)
@@ -857,6 +877,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
     touch "$home/state/.last-watcher-beat"
     out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
       "${pi_env[@]}" \
+      PATH="$blind:$PATH" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \
       FM_GUARD_GRACE=999 \
@@ -870,6 +891,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
 }
 
 test_first_stale_call_prints_full_banner
+test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy

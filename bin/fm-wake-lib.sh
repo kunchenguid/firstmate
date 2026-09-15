@@ -327,6 +327,28 @@ fm_afk_daemon_owns_supervision() {
   [ "$current" = "$recorded" ]
 }
 
+# fm_afk_mode <state>
+# The single owner of reading state/.afk's declared mode. Always prints
+# exactly one of "away" or "quiet" and always succeeds - every caller gets a
+# definitive answer, never an error to handle. Presence/liveness stays owned
+# by fm_afk_daemon_owns_supervision and the raw `-e "$state/.afk"` checks
+# throughout the tree; this is the mode of an ALREADY-present flag.
+# "away" (today's return-on-any-unmarked-message behavior) is the safe
+# default: missing, empty, unreadable, or unrecognized content, and the
+# legacy bare-epoch-timestamp content written before mode existed, all read
+# as "away". Only an exact first-line "quiet" ever reads as "quiet" -
+# kunchenguid/firstmate#2356's standing captain-present quiet mode, entered
+# only through /quiet and exited only through an explicit /quiet off
+# (AGENTS.md section 8's away-mode stub).
+fm_afk_mode() {
+  local state=$1 mode
+  mode=$(head -n 1 "$state/.afk" 2>/dev/null) || { printf '%s\n' away; return 0; }
+  case "$mode" in
+    quiet) printf '%s\n' quiet ;;
+    *) printf '%s\n' away ;;
+  esac
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:

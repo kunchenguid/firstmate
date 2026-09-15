@@ -160,17 +160,19 @@ Pi emits `agent_settled` from a `finally` block once a run will not continue aut
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the complete hull: a two-cell mainsail centered over a symmetric `\__/` hull that replaces water on its row rather than adding a third row.
-The sail is directional because a mainsail extends aft of the mast, so it renders `<|` while travelling right and `|>` while travelling left.
-Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already shows the new heading and no frame at or after a bounce shows the previous sail.
+The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
+The sail is the same in both travel directions, and its one-cell quarter triangle keeps the left sail visibly smaller than the full right sail.
+The hull's three inner cells are zero-height water glyphs, so the swell reads as continuous beneath the boat instead of being interrupted by it.
+Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already carries the new heading and the trough follows the next boat movement without a discontinuity.
 The water row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row.
 
-One scheduler drives two logically independent clocks.
-Every tick advances a bounded fixed-cell water phase, and only every fourth tick moves the boat, so at a 220ms tick the water ripples several times between boat steps and the boat travels one column every 880ms.
-Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both clocks together.
-Water phases are single-column ASCII, so advancing them never changes visible width, adds a row, or moves the hull column.
+One scheduler drives two linked cadences.
+Every tick advances the wave by one quarter-cell, and only every fourth tick moves the boat one whole cell, so at a 220ms tick the swell advances one cell per 880ms boat step and the boat stays phase-locked inside the same trough.
+Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both cadences together.
+The water is the lower half of the bottom-aligned one-cell bars that Pi Dictation uses for its level history, `▁▂▃▄`, so advancing the phase never changes visible width, adds a row, or moves the hull column.
+The swell is a deterministic field of smoothstep half-waves whose lengths vary between nine and thirteen cells from a fixed hash, surrounding a broad zero-height trough five cells either side of the hull center, so the boat never rides a crest and the surface still avoids a mechanical fixed period.
 
-Colors are standard ANSI foreground codes rather than theme lookups: blue for every water cell and yellow for the complete boat, with no bright variant, 256-color, or RGB escape.
+Colors are standard ANSI foreground codes rather than theme lookups: blue for troughs and low water, cyan for crests, yellow for the left sail, mast, and hull edges, red for the right sail, and blue for the hull's interior water, with no bright variant, 256-color, or RGB escape.
 Each colored run is closed with a default-foreground reset so styling cannot bleed into the sail row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
 
 The presentation is TUI-only and visual-only.

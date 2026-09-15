@@ -221,6 +221,7 @@ if [ "$watcher_healthy" = false ]; then
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \
+      --afk-mode "$(fm_afk_mode "$STATE")" \
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')

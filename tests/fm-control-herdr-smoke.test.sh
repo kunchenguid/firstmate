@@ -260,9 +260,6 @@ pass "real herdr: no control verb removed the endpoint or the task's local copy"
 # keeps the registration, which is exactly the shape a Pi crew leaves behind
 # when it exits under a nested shell. Before the fix this read `alive` forever:
 # exit waited out its timeout and refused, and relaunch was refused for good.
-# This runs BEFORE the fail-closed exit case below, whose typed exit command
-# stays buffered in the pane's tty while the stand-in ignores it and would be
-# replayed into the shell the moment the stand-in died.
 AGENT_PID=$(herdr pane process-info --pane "$PANE_ID" --session "$SESSION" 2>/dev/null \
   | jq -r '.result.process_info.foreground_processes[0].pid // empty')
 [ -n "$AGENT_PID" ] || fail "could not read the agent-named process pid from pane process-info"
@@ -310,21 +307,21 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
 
-# Last, because it deliberately types a harness command into a foreground
-# process that ignores it: the registered agent cannot actually be stopped
-# that way, and the control plane must say so rather than report a stop it
-# did not achieve.
+# Last: the foreground process is a plain `sleep`, so the pane never draws any
+# recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)
+# therefore refuses before ever typing the exit command, rather than typing it
+# into a live agent that ignores it and reporting a stop that did not happen.
 start_agent_process
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not re-register the live agent on the task pane"
 if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent does not stop: $OUT"
+  fail "exit should fail closed when the agent's composer is not proven empty: $OUT"
 fi
 case "$OUT" in
-  *"did not stop"*) : ;;
-  *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
+  *"not proven empty"*) : ;;
+  *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
 esac
-pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

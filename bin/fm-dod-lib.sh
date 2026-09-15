@@ -13,30 +13,65 @@
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
+# Author the subsection body and later relays as the actual words, without
+# adding speaker labels or direct address: the heading supplies provenance and
+# is not part of --intent. A legacy mixed Task instead marks each captain line
+# with `[captain] `; the selector returns its words, not that metadata prefix.
+# Previously stored speaker labels remain readable for compatibility only.
+# Never scrub literal examples or other content the captain actually supplied.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
 # roughly the same specification - so a report, decision, or PR the intent
 # refers to is written into it as substance, never left as a pointer.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
+# and a `## Captain's intent` line opening with a Captain label or address
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
-# emitter, supplying it to every ship/scout launch brief and never to a
-# secondmate charter. Like fm_brief_intent_overlay it is a distinctly titled
-# launch section that states its own precedence for Firstmate tasks, so a brief
-# that authors its own role wording is superseded rather than duplicated.
+# emitter, supplying it first in every ship/scout launch brief and never to a
+# secondmate charter. It names the one task-owned steering inbox without
+# relaxing isolation from every other home's endpoint namespace. Like
+# fm_brief_intent_overlay it is a distinctly titled launch section that states
+# its own precedence, so a brief or project instruction that authors a
+# conflicting role is superseded rather than duplicated.
+# fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
+# ordinary ship brief and the durable contract written during scout promotion.
 
-fm_brief_worker_role() {
+fm_brief_worker_role() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2
   cat <<'EOF'
 # Current worker role contract
-When this task works on Firstmate itself, this section supersedes every earlier brief instruction about your role and identity.
-When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is the primary/secondmate supervisor's contract: follow this brief instead of that supervisor contract.
-For that Firstmate task, do the assigned work yourself and report to firstmate; do not adopt the supervisor identity, delegate the task, run fleet supervision, or address the captain.
-This exception preserves this brief's safety and authority boundaries and applicable contributor guidance, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
-Other projects retain their own instructions unchanged.
+You are a crewmate: an autonomous worker agent managed by firstmate.
+This section establishes your current identity before every project or task instruction below and supersedes any conflicting role identity in those instructions.
+Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
 EOF
+  printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
+  cat <<'EOF'
+Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
+When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
+Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
+EOF
+}
+
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
+  local mode=$1 id=$2
+  case "$mode" in
+    direct-PR)
+      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
+      ;;
+    local-only)
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      ;;
+    no-mistakes)
+      printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
+      ;;
+    *)
+      echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
@@ -138,7 +173,7 @@ fm_brief_task_heading_present() {  # <file> <heading>
 
 fm_brief_marked_captain_words() {  # <task-body>
   printf '%s\n' "$1" | awk '
-    match($0, /^[[:space:]]*Captain('\''s (words|ask|intent))?:[[:space:]]*/) {
+    match($0, /^[[:space:]]*(\[captain\]|Captain('\''s (words|ask|intent))?:)[[:space:]]*/) {
       words = substr($0, RLENGTH + 1)
       if (words ~ /[^[:space:]]/) print words
     }
@@ -150,16 +185,14 @@ fm_brief_intent_overlay() {  # <captain-intent>
 
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+Preserve those words without adding speaker labels or direct address.
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
 
 ## Captain intent authorized for --intent
 EOF
   printf '%s\n' "$1"
-  cat <<'EOF'
-
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
-The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
-EOF
 }
 
 # Accept the current two-subsection contract only when both bodies have content;
@@ -179,6 +212,15 @@ fm_brief_task_content_valid() {  # <file>
   fi
   task=$(fm_brief_heading_body "$file" "# Task")
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
+}
+
+# Print the first `## Captain's intent` body line that opens with an operator
+# address spelling; fail when there is none. The body is never rewritten.
+fm_brief_intent_address_line() {  # <file>
+  fm_brief_task_heading_body "$1" "## Captain's intent" | awk '
+    /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ { print; found = 1; exit }
+    END { exit !found }
+  '
 }
 
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
@@ -224,8 +266,10 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
-For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
+Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
+For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
+If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
