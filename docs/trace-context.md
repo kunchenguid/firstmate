@@ -104,7 +104,9 @@ This is a deliberate, source-owned choice:
   If the backend reports that failed trace input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
   If recording the carrier fails after export, Firstmate unsets `TRACEPARENT` in the launch command and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
-  The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.
+  The value lives in the ephemeral pane shell and in `state/<id>.meta`, with no schema migration.
+  Teardown copies that meta whole, `traceparent=` included, into the task's retained record under `data/<id>/record/` before removing state.
+  `bin/fm-task-record-lib.sh` owns that retention, and `data/` is local and gitignored, so the retained carrier never leaves the home.
 
 ## Relationship to OpenTelemetry and later increments
 

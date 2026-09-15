@@ -1296,6 +1296,10 @@ if ! wait "$teardown_pid"; then
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
+assert_present "$PARENT/data/ios/record/meta" \
+  "remote retirement removed the record of what ran without retaining it first"
+assert_grep 'remote_host=' "$PARENT/data/ios/record/meta" \
+  "the retained remote record lost which host the second mate ran on"
 assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "remote retirement left receiver wake state that could poison a replacement route"
 assert_absent "$retired_wake_rec" "remote retirement left the retired receiver wake correlation"
