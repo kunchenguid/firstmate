@@ -117,6 +117,13 @@ case "${1:-}" in
     exit 0
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  capture-pane)
+    # Codex startup readiness uses its verified working row; the generic
+    # spawn-world fake represents an already-trusted pane for launch-shape
+    # tests, while the Codex trust suite supplies the dialog transitions.
+    printf '• Working (1s • esc to interrupt)\n'
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

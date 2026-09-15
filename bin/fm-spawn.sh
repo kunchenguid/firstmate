@@ -482,6 +482,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -3210,6 +3212,70 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# Codex carries its brief on the launch command, but a fresh git root can park
+# the TUI on the exact directory-trust dialog before Codex reads that brief.
+# Unlike the general approval and sandbox controls, this gate answers only the
+# documented preselected `1. Yes, continue` option for the isolated worktree
+# Firstmate just created, then requires positive proof that the brief is being
+# processed - the same codex busy signature the supervisor reads, through the
+# shared fm_busy_lines_match - before the spawn reports success. A trust
+# surface that is not the complete verified menu is never answered, so a
+# changed or ambiguous one is refused by the readiness deadline rather than
+# guessed at. The gate runs on the fresh-worktree launch Firstmate creates the
+# directory for; a relaunch onto codex or a codex secondmate is out of its
+# scope, so a first-run dialog on those paths is still the captain's to answer.
+# The poll budget covers the whole envelope the live guard was written against
+# (tests/fm-codex-trust-live-e2e.test.sh: up to 30s for the menu on a cold
+# start plus a further 60s for the first working turn), because a budget that
+# expires kills the endpoint.
+CODEX_TRUST_DIALOG='Do you trust the contents of this directory?'
+CODEX_TRUST_ANSWERED=0
+
+codex_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+# The brief travels on the launch command and Codex echoes it into the pane, so
+# the dialog is recognized by the menu SHAPE on its own row - the preselected
+# safe option, exactly once - not by counting how often its prose appears in
+# the scrollback.
+codex_pane_shows_trust_dialog() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | awk -v dialog="$CODEX_TRUST_DIALOG" '
+    index($0, dialog) { dialog_count++ }
+    /^[[:space:]]*›[[:space:]]*1[.][[:space:]]*Yes, continue[[:space:]]*$/ { option_count++ }
+    END { exit !(dialog_count >= 1 && option_count == 1) }
+  '
+}
+
+codex_pane_is_working() {  # <plain-pane-capture>
+  printf '%s' "$1" | fm_busy_lines_match codex
+}
+
+# The choice is offered once. After it is answered the dialog matcher is never
+# consulted again, so an echo of the menu in the brief Codex is processing
+# cannot starve the working check that proves the turn is running.
+codex_wait_for_working() {
+  local pane i=0 max=${FM_CODEX_READY_POLLS:-180} interval=${FM_CODEX_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(codex_capture)
+    if [ "$CODEX_TRUST_ANSWERED" -eq 0 ] && codex_pane_shows_trust_dialog "$pane"; then
+      spawn_send_key "$T" Enter
+      CODEX_TRUST_ANSWERED=1
+    elif codex_pane_is_working "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+codex_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 # agy carries its brief on the launch command, so it needs no delivery gate,
 # but a worktree agy does not trust parks the TUI on the folder-trust dialog
 # and an unanswered dialog sends the turn into agy's scratch directory instead
@@ -4250,6 +4316,16 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = codex ] && [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ]; then
+  if ! codex_wait_for_working; then
+    if [ "$CODEX_TRUST_ANSWERED" -eq 1 ]; then
+      codex_spawn_fail "Codex did not start processing its brief after the directory-trust choice was accepted in window $T"
+    else
+      codex_spawn_fail "Codex did not show a verified ready turn for the supplied brief in window $T"
+    fi
     exit 1
   fi
 fi
