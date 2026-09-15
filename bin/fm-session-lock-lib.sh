@@ -64,6 +64,9 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  # Prime Agent is an exact executable identity; do not let a helper such as
+  # prime-agent-helper satisfy the verified-harness match.
+  case "$base" in prime-agent) return 0 ;; esac
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0

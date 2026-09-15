@@ -1945,3 +1945,14 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+## Prime Agent (prime-agent)
+
+The Prime Agent adapter was verified on 2026-09-14 with prime-agent 0.9.4 on Linux x86_64.
+The shared process classifier recognizes the exact `prime-agent` executable and rejects similarly named helpers.
+Firstmate launch resolves the concrete executable path, sets `FM_PI_HARNESS=prime-agent`, clears inherited foreign markers, and loads the task extension.
+The launch path preserves provider, model, and effort options.
+The generated task extension reports semantic busy and idle state from the verified `agent_start` and settled `agent_end` paths and keeps `turn_end` as a notification.
+Prime Agent is verified for crewmate and scout launches only; secondmate launches remain refused until primary supervision is wired and verified.
+The complete dated evidence is [`docs/verification/prime-agent.md`](prime-agent.md).
+`tests/fm-prime-agent-harness.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, `tests/fm-spawn-dispatch-profile.test.sh`, and `tests/fm-backend-herdr.test.sh` are the deterministic verification entry points.
+`FM_PRIME_AGENT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-prime-agent-signals-live-e2e.test.sh` refreshes the real Prime Agent and Herdr evidence.

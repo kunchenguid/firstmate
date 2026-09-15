@@ -679,6 +679,29 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_same_harness_relaunch_preserves_recorded_provider() {
+  local dir out rc id=rl-provider
+  dir=$(new_case provider "$id")
+  add_ship_task "$dir" "$id" prime-agent
+  printf prime-agent > "$dir/fake/command"
+  printf prime-agent > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash
+exit 0
+' > "$dir/fakebin/prime-agent"
+  chmod +x "$dir/fakebin/prime-agent"
+  sed '/^model=/i provider=openai-codex' \
+    "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+  mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+
+  out=$(run_control "$dir" "$id" relaunch --note "preserve provider"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should preserve the recorded provider"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" provider)" = openai-codex ] \
+    || fail "the provider should carry across a same-harness relaunch"
+  assert_contains "$(cat "$dir/fake/literal")" "--provider 'openai-codex'" \
+    "relaunch lost the recorded provider flag"
+  pass "fm-control relaunch: a same-harness relaunch preserves its recorded provider"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -1033,6 +1056,28 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch did not receive the actual ship delivery mode"
   done
   pass "fm-promote/fm-spawn --relaunch: the current ship contract supersedes stale scout delivery text"
+}
+
+test_spawn_relaunch_without_provider_reuses_the_recorded_one() {
+  local dir out id=rl-spawn-provider
+  dir=$(new_case spawnprovider "$id")
+  add_ship_task "$dir" "$id" prime-agent
+  printf zsh > "$dir/fake/command"
+  printf prime-agent > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash
+exit 0
+' > "$dir/fakebin/prime-agent"
+  chmod +x "$dir/fakebin/prime-agent"
+  sed '/^model=/i provider=openai-codex' \
+    "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+  mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+
+  out=$(run_spawn "$dir" "$id" --relaunch)
+  [ "$(meta_field "$dir" "$id" provider)" = openai-codex ] \
+    || fail "direct fm-spawn --relaunch should preserve the recorded provider"
+  assert_contains "$(cat "$dir/fake/literal")" "--provider 'openai-codex'" \
+    "direct fm-spawn --relaunch lost the recorded provider flag"
+  pass "fm-spawn --relaunch: without an override it preserves the recorded provider"
 }
 
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
@@ -1695,6 +1740,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_harness_relaunch_preserves_recorded_provider
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
@@ -1708,6 +1754,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
+test_spawn_relaunch_without_provider_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

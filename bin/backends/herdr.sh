@@ -2059,10 +2059,23 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 presence
+  local session=$1 pane_id=$2 presence attempt=0
+  local max_attempts=${FM_BACKEND_HERDR_CLOSE_VERIFY_POLLS:-10}
+  case "$max_attempts" in
+    ''|*[!0-9]*) max_attempts=10 ;;
+  esac
   fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
-  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
-  [ "$presence" = dead ]
+  # Herdr acknowledges pane.close before the pane registry necessarily reflects
+  # the removal.  Poll only this close's structured disappearance, preserving
+  # the fail-safe refusal when it never becomes pane_not_found.
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    [ "$presence" = dead ] && return 0
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep 0.05
+  done
+  return 1
 }
 
 # fm_backend_herdr_pane_process_state: what the operating system says is
@@ -2250,7 +2263,7 @@ EOF
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status agent fg_rc live_rc
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2266,10 +2279,31 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
     *) printf 'unknown'; return 0 ;;
   esac
+  # Prime Agent keeps its registration after /quit, so its dedicated process
+  # probes distinguish a shell-only pane from a live or inconclusive pane.
+  if [ "$agent" = prime-agent ]; then
+    fm_backend_herdr_pane_prime_agent_foreground "$session" "$pane_id"
+    fg_rc=$?
+    case "$fg_rc" in
+      0) printf 'live'; return 0 ;;
+      1)
+        fm_backend_herdr_pane_prime_agent_in_subtree "$session" "$pane_id"
+        live_rc=$?
+        case "$live_rc" in
+          0) printf 'live' ;;
+          1) printf 'no-agent' ;;
+          *) printf 'unknown' ;;
+        esac
+        return 0
+        ;;
+      *) printf 'unknown'; return 0 ;;
+    esac
+  fi
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
     agent|other) printf 'live' ;;
     shell) printf 'stale-agent' ;;
@@ -3026,6 +3060,10 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# prime-agent uses a shell-style `>` composer glyph. It remains untrusted until
+# native identity and the current foreground process both identify Prime Agent.
+FM_BACKEND_HERDR_PRIME_PROMPT_RE=${FM_BACKEND_HERDR_PRIME_PROMPT_RE:-'^>( |$)'}
+
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
@@ -3047,6 +3085,63 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
 # backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.
+fm_backend_herdr_pane_prime_agent_foreground() {  # <session> <pane-id>
+  local session=$1 pane=$2 info
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.foreground_processes | type) == "array"
+  ' >/dev/null 2>&1 || return 2
+  printf '%s' "$info" | jq -e '
+    .result.process_info.foreground_processes
+    | any(
+        ((.name // "") | split("/") | last) == "prime-agent"
+        or (((.argv0 // .argv[0]) // "") | ltrimstr("-") | split("/") | last) == "prime-agent"
+      )
+  ' >/dev/null 2>&1 || return 1
+  return 0
+}
+
+fm_backend_herdr_pane_prime_agent_in_subtree() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid ps_bin rows rc
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
+  shell_pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 2
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 2
+  rows=$("$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 2
+  [ -n "$rows" ] || return 2
+  printf '%s\n' "$rows" | awk -v root="$shell_pid" '
+    { pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3; n = NR; known[$1] = 1 }
+    END {
+      if (!known[root]) exit 2
+      inpane[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          if (!inpane[pid[i]] && inpane[ppid[i]]) { inpane[pid[i]] = 1; changed = 1 }
+        }
+      }
+      for (i = 1; i <= n; i++) {
+        if (!inpane[pid[i]] || pid[i] == root) continue
+        name = comm[i]
+        sub(/^-/, "", name)
+        sub(/.*\//, "", name)
+        if (name == "prime-agent") exit 0
+      }
+      exit 1
+    }
+  '
+  rc=$?
+  case "$rc" in 0|1) return "$rc" ;; *) return 2 ;; esac
+}
+
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
@@ -3061,7 +3156,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+  local target=$1 cap caps verdict identity plain line trimmed prime_row=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -3070,6 +3165,22 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   else
     printf 'unknown'
     return 0
+  fi
+  # Only ask Herdr for the extra process fact when the capture contains the
+  # shell-style glyph that could be prime-agent's composer.
+  plain=$(printf '%s\n' "$cap" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_PRIME_PROMPT_RE"; then
+      prime_row=1
+    fi
+  done <<EOF
+$plain
+EOF
+  if [ "$prime_row" = 1 ] \
+     && fm_backend_herdr_pane_prime_agent_foreground "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+    caps=$(printf '%s\nprime=1' "$caps")
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then

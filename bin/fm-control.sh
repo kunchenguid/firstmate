@@ -4,8 +4,8 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
-#        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#        fm-control.sh <task-id> relaunch [--harness <name>] [--provider <name>]
+#                                         [--model <name>] [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -192,9 +192,11 @@ if ! fm_control_verb_allowed "$VERB"; then
 fi
 
 NEW_HARNESS=
+NEW_PROVIDER=
 NEW_MODEL=
 NEW_EFFORT=
 HARNESS_SET=0
+PROVIDER_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 NOTE=
@@ -207,6 +209,7 @@ for control_arg in "$@"; do
     esac
     case "$control_want_value" in
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
+      provider) NEW_PROVIDER=$control_arg; PROVIDER_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
@@ -222,6 +225,8 @@ for control_arg in "$@"; do
   case "$control_arg" in
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
+    --provider) control_want_value=provider ;;
+    --provider=*) NEW_PROVIDER=${control_arg#--provider=}; PROVIDER_SET=1 ;;
     --model) control_want_value=model ;;
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
@@ -243,10 +248,11 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$PROVIDER_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --provider, --model, --effort, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
+[ "$PROVIDER_SET" = 0 ] || [ -n "$NEW_PROVIDER" ] || die "--provider requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
@@ -531,9 +537,11 @@ PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
 CONFIG_HARNESS=
 CONFIG_MODEL=
 CONFIG_EFFORT=
+PRIOR_PROVIDER=
 PRIOR_MODEL=
 PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
+TARGET_PROVIDER=
 TARGET_MODEL=
 TARGET_EFFORT=
 
@@ -550,9 +558,11 @@ journal_write() {  # <phase> [extra-line]...
     echo "worktree=$WT"
     echo "kind=$KIND"
     echo "from_harness=$PRIOR_RECORDED_HARNESS"
+    echo "from_provider=$PRIOR_PROVIDER"
     echo "from_model=$PRIOR_MODEL"
     echo "from_effort=$PRIOR_EFFORT"
     echo "to_harness=$TARGET_HARNESS"
+    echo "to_provider=$TARGET_PROVIDER"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
     local line
@@ -627,8 +637,10 @@ relaunch_rollback() {
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
+  PRIOR_PROVIDER=$(fm_meta_get "$META" provider)
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  [ -n "$PRIOR_PROVIDER" ] || PRIOR_PROVIDER=default
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -674,6 +686,13 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  if [ "$PROVIDER_SET" = 1 ]; then
+    TARGET_PROVIDER=$NEW_PROVIDER
+  elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_PROVIDER=$PRIOR_PROVIDER
+  else
+    TARGET_PROVIDER=default
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.
@@ -846,6 +865,7 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$TARGET_PROVIDER" = default ] || spawn_args+=(--provider "$TARGET_PROVIDER")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -864,7 +884,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS provider=$TARGET_PROVIDER model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
 # --- verbs ------------------------------------------------------------------

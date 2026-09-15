@@ -40,10 +40,13 @@
 # claude-bridge/<id> checks the claude row, each against the bare <id> for
 # model: and product: scopes. Any other or absent prefix is refused up front,
 # the same shape as an unknown harness, because no quota-axi row measures it.
-# quota-axi reports Codex quota unavailable on this host because omp carries
-# its own Codex login, so an openai-codex candidate reads as unknown quota here
-# and is never selected on this host; its runway is disclosed uncertainty for
-# the agent-side gates, not measured headroom.
+# Prime Agent records the launch provider separately from its model; the
+# candidate must preserve that identity here. Only openai-codex/<id> is mapped
+# to the codex quota family. Bare, anthropic/, and other provider prefixes are
+# refused rather than silently reading an unrelated quota row.
+# Live quota-axi data may report Codex quota as unknown when a harness carries
+# its own Codex login; an openai-codex candidate then remains eligible only with
+# disclosed uncertainty for the agent-side gates, not measured headroom.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -309,7 +312,8 @@ fi
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
 # provider_for_harness <harness> [<model>]
-# Map a firstmate harness name to its primary quota-axi provider family.
+# Map a firstmate harness name and its provider-qualified model to a quota-axi
+# provider family.
 # Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
 # the header limitation note. omp is keyed on the candidate model prefix instead
 # and has no family for any other prefix (see the header). Authoritative
@@ -328,6 +332,12 @@ provider_for_harness() {
     codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;
     pi|pi-signed) printf 'pi\n' ;;
+    prime-agent)
+      case "${2:-}" in
+        openai-codex/*) printf 'codex\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
     grok)         printf 'grok\n' ;;
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
@@ -373,6 +383,7 @@ for c in "${CANDIDATES[@]}"; do
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
+    prime-agent) die "prime-agent quota mapping requires the openai-codex/<model> prefix; bare and non-Codex providers are refused: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
 done
@@ -384,7 +395,9 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   provider=$(provider_for_harness "$harness" "$model")
   scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
+  case "$harness" in
+    omp|prime-agent) scope_model=${model#*/} ;;
+  esac
   effective=$(effective_for_provider_model "$provider" "$scope_model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue

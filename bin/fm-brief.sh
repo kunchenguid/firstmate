@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--prime-agent]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--prime-agent]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -34,6 +34,9 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
+#   --prime-agent adds the Prime Agent root-session and persistent-kernel contract.
+#   It is explicit because the caller-supplied repo string cannot reliably identify
+#   the worker harness, so firstmate keys it from its resolved harness.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
@@ -123,6 +126,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+PRIME_AGENT=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -144,6 +148,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --prime-agent) PRIME_AGENT=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -178,6 +183,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ "$PRIME_AGENT" -eq 1 ]; then
+  echo "error: --prime-agent applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -358,6 +368,21 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+if [ "$PRIME_AGENT" -eq 1 ]; then
+IFS= read -r -d '' PRIME_SECTION <<'EOF' || true
+# Prime Agent runtime
+You are a root session with no parent, so report through your status file, not `agent_message`.
+Children created with `rlm(...)` reply to their parent through `agent_message`; the root worker reports through its status file as normal.
+You work inside a persistent IPython kernel whose Python state survives compaction, so hold working state in variables rather than re-deriving it.
+Run commands from `%%bash` cells - each cell is a temporary subshell, while Python state and `%cd` persist.
+`rlm(...)` children are legitimate for genuinely parallel work, and firstmate's cleanup retires everything bound to this worktree.
+Compaction is not a signal to wrap up.
+EOF
+PRIME_SECTION=${PRIME_SECTION%$'\n'}
+else
+PRIME_SECTION=
+fi
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -370,6 +395,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$PRIME_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -454,6 +481,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$PRIME_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

@@ -53,6 +53,8 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/prime-agent"
+ln -s "$SLEEP_BIN" "$LAB/bin/prime-agent-helper"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
@@ -159,6 +161,22 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# --- Prime Agent's exact executable identity -------------------------------
+# Prime Agent shares Pi's PI_CODING_AGENT marker, but tmux liveness sees the
+# executable name. Keep the positive match exact so a helper or wrapper with a
+# prime-agent prefix cannot make an unrelated pane look live.
+new_window prime-agent "$LAB/bin/prime-agent" 900
+wait_for_state "$SESSION:prime-agent" alive \
+  || fail "an exact prime-agent executable name must classify alive"
+pass "tmux liveness: an exact prime-agent executable name classifies alive"
+
+new_window prime-agent-helper "$LAB/bin/prime-agent-helper" 900
+[ "$(fm_agent_process_classify_name prime-agent-helper)" = other ] \
+  || fail "prime-agent-helper must stay outside the exact Prime Agent identity"
+wait_for_state "$SESSION:prime-agent-helper" ambiguous \
+  || fail "prime-agent-helper must not classify as a live Prime Agent pane"
+pass "tmux liveness: prime-agent helper decoys stay ambiguous"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi prime-agent opencode claude codex gemini)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -177,6 +177,129 @@ oc_status() {  # <sessionID> <type>
 
 oc_idle() {  # <sessionID>
   printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
+}
+
+drive_prime_ext() {
+  EXT_PATH="$1" MODE="$2" HERDR_PI_RETRY_GRACE_MS=50 HERDR_PI_IDLE_DEBOUNCE_MS=50 node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+switch (process.env.MODE) {
+  case "agent-start": await handlers["agent_start"]({}, {}); break;
+  case "agent-end":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({}, {});
+    break;
+  case "turn-end": await handlers["turn_end"]({}, {}); break;
+  case "error-held":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({ messages: [{ role: "assistant", stopReason: "error" }] }, { hasPendingMessages: () => false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    break;
+  case "error-expired":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({ messages: [{ role: "assistant", stopReason: "error" }] }, { hasPendingMessages: () => false });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    break;
+  case "error-retry":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({ messages: [{ role: "assistant", stopReason: "error" }] }, { hasPendingMessages: () => false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await handlers["agent_start"]({}, {});
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    break;
+  case "pending-held":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({}, { hasPendingMessages: () => true });
+    break;
+  case "pending-expired":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({}, { hasPendingMessages: () => true });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    break;
+  case "pending-retry":
+    await handlers["agent_start"]({}, {});
+    await handlers["agent_end"]({}, { hasPendingMessages: () => true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await handlers["agent_start"]({}, {});
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    break;
+  case "session-bound": {
+    const parent = {};
+    const child = {};
+    await handlers["agent_start"]({}, { sessionManager: parent });
+    await handlers["agent_end"]({}, { sessionManager: child, hasPendingMessages: () => false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    break;
+  }
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+if (process.env.MODE === "turn-end") await new Promise((resolve) => setTimeout(resolve, 200));
+EOF
+}
+
+test_prime_agent_extension_semantic_lifecycle() {
+  local rec id=busy-prime-1 out state ext
+  rec=$(make_spawn_case prime-lifecycle prime-agent "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "prime-agent spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.prime-ext.ts"
+  assert_present "$ext" "prime-agent spawn did not write the per-task extension"
+
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "prime-agent spawn seed must be busy fm-spawn, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_prime_ext "$ext" turn-end) || fail "prime-agent turn-end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "prime-agent turn_end no longer touches the notification marker"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "prime-agent turn_end must stay a notification, got '$out'"
+
+  out=$(drive_prime_ext "$ext" agent-start) || fail "prime-agent agent_start drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "prime-agent agent_start must classify busy prime-ext, got '$out'"
+
+  out=$(drive_prime_ext "$ext" agent-end) || fail "prime-agent agent_end drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "idle prime-ext" ] || fail "prime-agent agent_end must classify idle prime-ext, got '$out'"
+
+  out=$(drive_prime_ext "$ext" error-held) || fail "prime-agent error-end drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "prime-agent error-end must hold busy during retry grace, got '$out'"
+
+  out=$(drive_prime_ext "$ext" error-expired) || fail "prime-agent error expiry drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "idle prime-ext" ] || fail "prime-agent terminal error did not settle idle after grace, got '$out'"
+
+  out=$(drive_prime_ext "$ext" error-retry) || fail "prime-agent retry drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "a retrying prime-agent run must remain busy after a stale error timer, got '$out'"
+
+  out=$(drive_prime_ext "$ext" pending-held) || fail "prime-agent pending-message drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "prime-agent pending messages must hold busy, got '$out'"
+
+  out=$(drive_prime_ext "$ext" pending-expired) || fail "prime-agent pending expiry drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "idle prime-ext" ] || fail "prime-agent pending messages did not debounce to idle, got '$out'"
+
+  out=$(drive_prime_ext "$ext" pending-retry) || fail "prime-agent pending retry drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "prime-agent pending retry did not cancel debounced idle, got '$out'"
+
+  out=$(drive_prime_ext "$ext" session-bound) || fail "prime-agent session binding drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "prime-agent child session event changed parent state, got '$out'"
+
+  out=$(drive_prime_ext "$ext" agent-start) || fail "prime-agent second agent_start drive failed: $out"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  out=$(drive_prime_ext "$ext" agent-end) || fail "prime-agent stale agent_end drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale prime-agent extension event must not change state, got '$out'"
+  pass "prime-agent extension binds sessions, holds retries, debounces queued messages, and keeps turn_end as notification"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -426,6 +549,7 @@ test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
+test_prime_agent_extension_semantic_lifecycle
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless

@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed prime-agent grok kimi cursor muse omp"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -48,6 +48,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     opencode) printf '/exit\tEscape\t2\t\n' ;;
     pi) printf '/quit\tEscape\t1\t\n' ;;
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
+    prime-agent) printf '/quit\tEscape\t1\t\n' ;;
     omp) printf '/quit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
@@ -385,6 +386,8 @@ test_harness_kind_capability() {
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
   done
+  fm_control_harness_supports_kind prime-agent secondmate \
+    && fail "prime-agent has no verified primary supervision protocol and must not claim a secondmate"
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
