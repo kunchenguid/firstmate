@@ -2401,6 +2401,64 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+# A pull request with no checks at all is the case this guard exists to catch:
+# an empty rollup yields no non-green names, so a guard that only collects names
+# has nothing to refuse and reports every required check green. The count of
+# rollup entries is therefore a condition of its own, waivable only by an
+# --allow-red naming the no-checks sentinel rather than by any check name.
+test_empty_check_rollup_refuses() {
+  local case_dir rc head
+  head=dededededededededededededededededededede
+
+  case_dir=$(make_case github-no-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/120 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-no-checks: a pull request with no checks must refuse"
+  assert_grep 'the pull request has no checks at all' "$case_dir/stderr" \
+    "github-no-checks: the refusal did not name the empty rollup"
+  assert_no_grep 'every required check green' "$case_dir/stderr" \
+    "github-no-checks: an empty rollup was reported as every required check green"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-no-checks: gh pr merge ran on a pull request with no checks"
+
+  # A waiver for some other check name is not a waiver for having no checks.
+  case_dir=$(make_case github-no-checks-wrong-waiver)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/121 \
+    --allow-red lint > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-no-checks-wrong-waiver: an unrelated waiver must not merge"
+  assert_grep 'the pull request has no checks at all' "$case_dir/stderr" \
+    "github-no-checks-wrong-waiver: the refusal did not name the empty rollup"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-no-checks-wrong-waiver: gh pr merge ran for an unrelated waiver"
+
+  # The attended waiver that names the sentinel is the one way through.
+  case_dir=$(make_case github-no-checks-waived)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/122 \
+    --allow-red '(no checks)' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-no-checks-waived: the sentinel waiver should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 122 example/repo --squash
+  pass "fm-pr-merge refuses a pull request with no checks unless --allow-red names the sentinel"
+}
+
 # When the base branch advances, GitHub cancels a pull request's in-flight run
 # and re-triggers it, leaving the cancelled run in the rollup beside the passing
 # re-run while reporting the pull request itself CLEAN. The merge must follow the
@@ -3087,6 +3145,7 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_empty_check_rollup_refuses
 test_superseded_failed_check_run_no_longer_refuses
 test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses
