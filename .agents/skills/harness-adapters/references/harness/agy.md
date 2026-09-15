@@ -49,7 +49,8 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary integration
-
+ 
 Unsupported and unverified.
 `../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
+When running inside Antigravity as the primary supervisor environment, never invoke AGY's built-in `invoke_subagent` tool; all worker delegation must strictly spawn through `bin/fm-spawn.sh` into real backend panes.
 `references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
