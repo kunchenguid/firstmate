@@ -1657,7 +1657,7 @@ teardown_treehouse_return() {
 
 report_dirty_tracked_claude_settings() {  # <porcelain-status>
   printf '%s\n' "$1" | grep -qE '^[^?!][^?!] \.claude/settings\.local\.json$' || return 0
-  echo "the project's git-tracked .claude/settings.local.json changed after the Claude launch; restore it in $WT with: git checkout -- .claude/settings.local.json" >&2
+  echo "the project's git-tracked .claude/settings.local.json changed after the Claude launch; restore it in $WT with: git checkout HEAD -- .claude/settings.local.json" >&2
 }
 
 validate_worktree_teardown_safety() {
