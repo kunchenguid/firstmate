@@ -477,7 +477,10 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
+# fm-wake-lib.sh is a canonical lint root in its own right. Keep it an
+# analysis boundary here: following its graph from this large runtime exceeds
+# the bounded CI lint worker while adding no uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -503,19 +506,26 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-agy-ladder-lib.sh"
 if ! declare -f fm_agy_pin_task >/dev/null 2>&1; then
   # The per-task ladder pin this file records below; guarded like every other
-  # shared source here.
-  # shellcheck source=bin/fm-agy-descent-lib.sh
+  # shared source here. The descent library is a canonical lint root in its
+  # own right: keep it an analysis boundary for the same reason as the wake
+  # and PR owners above and below.
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-agy-descent-lib.sh"
 fi
 # shellcheck source=bin/fm-opencode-ladder-lib.sh
 . "$SCRIPT_DIR/fm-opencode-ladder-lib.sh"
 if ! declare -f fm_opencode_pin_task >/dev/null 2>&1; then
   # The per-task ladder pin this file records below; guarded like every other
-  # shared source here.
-  # shellcheck source=bin/fm-opencode-descent-lib.sh
+  # shared source here. The descent library is a canonical lint root in its
+  # own right: keep it an analysis boundary for the same reason as the wake
+  # and PR owners above and below.
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-opencode-descent-lib.sh"
 fi
-# shellcheck source=bin/fm-pr-lib.sh
+# fm-pr-lib.sh is a canonical lint root in its own right. Keep it an analysis
+# boundary here: following its graph from this large runtime exceeds the
+# bounded CI lint worker while adding no uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"

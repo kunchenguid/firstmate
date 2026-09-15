@@ -165,14 +165,22 @@ mkdir -p "$STATE"
 # watcher consumes only its identity-bound record after a poll observes landing.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
-# shellcheck source=bin/fm-x-lib.sh
+# The Relay library is a canonical lint root in its own right. Keep it an
+# analysis boundary here for the same reason as the owners above and below:
+# following its graph from this large runtime exceeds the bounded CI lint
+# worker while adding no uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# This library is a canonical lint root in its own right and reaches the
+# wake-queue graph. Keep it an analysis boundary here: following its graph
+# from this large runtime exceeds the bounded CI lint worker while adding no
+# uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
@@ -187,7 +195,10 @@ mkdir -p "$STATE"
 # started; this is what moves one that is ALREADY RUNNING off a rung it has
 # spent, so the captain's reserved quarter of rung 1 survives the run and not
 # just the dispatch.
-# shellcheck source=bin/fm-agy-descent-lib.sh
+# This library is a canonical lint root in its own right. Keep it an analysis
+# boundary here: following its graph from this large runtime exceeds the
+# bounded CI lint worker while adding no uncovered file.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-agy-descent-lib.sh"
 # Live opencode ladder enforcement. The dispatch gate only routes the next
 # spawn; this is what moves a lane that is ALREADY RUNNING off a free tier it

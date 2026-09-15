@@ -159,6 +159,7 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "--shard-index" "fm-lint.sh --help omitted --shard-index"
   assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
   assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
   assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
@@ -561,6 +562,111 @@ test_changed_mode_invokes_shellcheck_once_per_root() {
     || fail "changed-mode lint used $invocation_count ShellCheck calls for two roots"
   fm_lint_assert_flag_log "$flag_log" no "SC1091,SC2034,SC2153,SC2329"
   pass "fm-lint.sh changed mode invokes ShellCheck once per root"
+}
+
+test_source_following_invokes_shellcheck_once_per_root() {
+  local tmp fakebin log flag_log out fixture first second third invocation_count
+  tmp=$(fm_test_tmproot fm-lint-follow-per-root)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  first="$tmp/first.sh"
+  second="$tmp/second.sh"
+  third="$tmp/third.sh"
+  for fixture in "$first" "$second" "$third"; do
+    cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  done
+
+  # Three roots over two shards guarantees one shard holds two roots, so the
+  # old one-invocation-per-shard code answers 2 here and this test fails
+  # against pre-fix code. The per-file fix answers one invocation per root.
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" "$first" "$second" "$third" 2>&1) \
+    || fail "source-following per-root lint failed"$'\n'"$out"
+  [ "$(LC_ALL=C sort "$log")" = "$first"$'\n'"$second"$'\n'"$third" ] \
+    || fail "source-following lint did not analyze all three roots"$'\n'"logged: $(cat "$log")"
+  invocation_count=$(grep -c '^external-sources=' "$flag_log" || true)
+  [ "$invocation_count" -eq 3 ] \
+    || fail "source-following lint used $invocation_count ShellCheck calls for three roots; per-file isolation requires 3"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh source following invokes ShellCheck once per root"
+}
+
+test_shard_index_partitions_roots_without_loss_or_overlap() {
+  local tmp fakebin log flag_log out fixture first second third
+  local full shard0 shard1 overlap union
+  tmp=$(fm_test_tmproot fm-lint-shard-partition)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  full="$tmp/full.log"
+  shard0="$tmp/shard0.log"
+  shard1="$tmp/shard1.log"
+  overlap="$tmp/overlap.log"
+  union="$tmp/union.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  first="$tmp/first.sh"
+  second="$tmp/second.sh"
+  third="$tmp/third.sh"
+  for fixture in "$first" "$second" "$third"; do
+    cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  done
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" "$first" "$second" "$third" 2>&1) \
+    || fail "full per-root lint failed"$'\n'"$out"
+  LC_ALL=C sort -u "$log" > "$full"
+
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" --shard-index 0 "$first" "$second" "$third" 2>&1) \
+    || fail "shard 0 lint failed"$'\n'"$out"
+  LC_ALL=C sort -u "$log" > "$shard0"
+
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" --shard-index 1 "$first" "$second" "$third" 2>&1) \
+    || fail "shard 1 lint failed"$'\n'"$out"
+  LC_ALL=C sort -u "$log" > "$shard1"
+
+  [ -s "$shard0" ] && [ -s "$shard1" ] \
+    || fail "one shard analyzed nothing; the partition test would pass vacuously"
+  comm -12 "$shard0" "$shard1" > "$overlap"
+  [ ! -s "$overlap" ] || fail "shards overlap"$'\n'"$(cat "$overlap")"
+  LC_ALL=C sort -u "$shard0" "$shard1" > "$union"
+  [ "$(cat "$union")" = "$(cat "$full")" ] \
+    || fail "shard union does not equal the full run"$'\n'"full: $(cat "$full")"$'\n'"union: $(cat "$union")"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh --shard-index partitions roots without loss or overlap"
+}
+
+test_shard_index_rejects_out_of_range() {
+  local tmp fakebin log fixture out rc bad
+  tmp=$(fm_test_tmproot fm-lint-shard-range)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  fixture="$tmp/fixture.sh"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+
+  for bad in 2 -1 nope; do
+    rc=0
+    out=$(PATH="$fakebin:$PATH" "$LINT" --shard-index "$bad" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] \
+      || fail "--shard-index $bad exited $rc instead of 2"$'\n'"$out"
+  done
+  [ ! -s "$log" ] || fail "an out-of-range shard index still invoked ShellCheck"
+  pass "fm-lint.sh --shard-index rejects out-of-range indexes"
 }
 
 test_ci_keeps_external_sources_without_local_exclusions() {
@@ -1393,6 +1499,9 @@ test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
 test_changed_mode_drops_external_sources_and_excludes_cross_file_codes
 test_changed_mode_invokes_shellcheck_once_per_root
+test_source_following_invokes_shellcheck_once_per_root
+test_shard_index_partitions_roots_without_loss_or_overlap
+test_shard_index_rejects_out_of_range
 test_ci_keeps_external_sources_without_local_exclusions
 test_main_branch_keeps_external_sources
 test_merge_base_less_keeps_external_sources

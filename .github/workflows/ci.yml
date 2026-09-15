@@ -24,11 +24,21 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint
+    name: Lint (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Hang tripwire only: lint executions measured at 14-16 minutes in the
-    # September 12 starvation report, so this leaves deliberate margin.
+    # Each shard runs on its own 16 GiB runner with its own ShellCheck stream,
+    # so one job's peak RSS is bounded to its shard's worst single file
+    # (bin/fm-teardown.sh peaks near 8 GiB alone; two concurrent workers on
+    # one runner could exceed the machine). The shard partition belongs to
+    # bin/fm-lint.sh --shard-index; the union of both jobs is the full lint.
+    # Hang tripwire only: a shard is roughly half the 14-16 minute full lint
+    # measured in the September 12 starvation report, so this leaves margin.
     timeout-minutes: 25
+    strategy:
+      # Every shard reports so one failure never hides another shard's result.
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -45,7 +55,7 @@ jobs:
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
-      - run: bin/fm-lint.sh
+      - run: bin/fm-lint.sh --shard-index ${{ matrix.shard }}
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,

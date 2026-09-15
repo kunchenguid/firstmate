@@ -42,9 +42,21 @@
 # backlog backend follows the same tasks-axi lifecycle path.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Each worker runs ShellCheck one file at a time to bound peak RSS to the worst
+# single file rather than the sum of every file in the shard.  The parent
+# replays per-file outputs in deterministic shard and manifest order after every
+# worker finishes.  FM_LINT_JOBS=1 runs the same shards serially with
+# byte-identical diagnostics and exit selection.
+#
+# --shard-index <0|1> runs one stable shard only so CI can put each shard on
+# its own 16 GiB runner: one job's peak RSS is then bounded to its shard's
+# worst single file, and the two jobs' finding sets union to the full run.
+# --list-files always reports the full context-selected set, not one shard.
+#
+# On Linux, each ShellCheck invocation inherits a virtual-memory ceiling
+# (FM_LINT_RSS_LIMIT_KIB, default 8 GiB) so a pathological source graph fails
+# the lint rather than starving the machine.  macOS ignores ulimit -v, so the
+# per-file isolation is the primary protection there.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -54,6 +66,7 @@
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --shard-index <0|1> ...  lint one stable shard only (CI matrix)
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -103,23 +116,16 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
       shellcheck_args+=(--extended-analysis=false)
     fi
     : > "$output.out"
-    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
-      "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" >> "$output.out" 2>&1 &
+    for path in "${roots[@]}"; do
+      invocation_rc=0
+      "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output.out" 2>&1 &
       FM_LINT_WORKER_SHELLCHECK_PID=$!
-      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
+      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
       FM_LINT_WORKER_SHELLCHECK_PID=
-    else
-      for path in "${roots[@]}"; do
-        invocation_rc=0
-        "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output.out" 2>&1 &
-        FM_LINT_WORKER_SHELLCHECK_PID=$!
-        wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
-        FM_LINT_WORKER_SHELLCHECK_PID=
-        if [ "$rc" -eq 0 ] && [ "$invocation_rc" -ne 0 ]; then
-          rc=$invocation_rc
-        fi
-      done
-    fi
+      if [ "$rc" -eq 0 ] && [ "$invocation_rc" -ne 0 ]; then
+        rc=$invocation_rc
+      fi
+    done
     trap - HUP INT TERM
   else
     : > "$output.out"
@@ -135,6 +141,12 @@ if [ "${1:-}" = "--internal-worker" ]; then
     exit 2
   }
   [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  # On Linux, apply a virtual-memory ceiling so a pathological source graph
+  # kills the lint rather than the machine.  macOS ignores ulimit -v.
+  if [ "$(uname)" != Darwin ] && [ -n "${FM_LINT_RSS_LIMIT_KIB:-}" ] \
+    && [ "${FM_LINT_RSS_LIMIT_KIB:-0}" -ne 0 ] 2>/dev/null; then
+    ulimit -v "$FM_LINT_RSS_LIMIT_KIB" 2>/dev/null || true
+  fi
   fm_lint_worker "$2" "$3" "$4"
   exit $?
 fi
@@ -394,9 +406,17 @@ fm_lint_run_backend_purity() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+# Default 8 GiB virtual-memory ceiling per ShellCheck process (Linux only).
+# Virtual address space can be significantly larger than RSS, so the ceiling
+# is generous; per-file execution is the primary bound on peak memory.
+# Override with FM_LINT_RSS_LIMIT_KIB=0 to disable, or a custom value in KiB.
+FM_LINT_RSS_LIMIT_KIB=${FM_LINT_RSS_LIMIT_KIB:-8388608}
+export FM_LINT_RSS_LIMIT_KIB
 FAST=0
 ANALYSIS_MODE=full
 LIST_FILES=0
+SHARD_COUNT=2
+SHARD_INDEX=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs)
@@ -406,6 +426,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --jobs=*)
       JOBS=${1#*=}
+      shift
+      ;;
+    --shard-index)
+      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --shard-index requires 0 or 1.\n' >&2; exit 2; }
+      SHARD_INDEX=$2
+      shift 2
+      ;;
+    --shard-index=*)
+      SHARD_INDEX=${1#*=}
       shift
       ;;
     --telemetry)
@@ -442,6 +471,23 @@ case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
+
+if [ -n "$SHARD_INDEX" ]; then
+  case "$SHARD_INDEX" in
+    ''|*[!0-9]*) printf 'fm-lint.sh: shard index must be 0 or 1, got %s.\n' "$SHARD_INDEX" >&2; exit 2 ;;
+  esac
+  { [ "$SHARD_INDEX" -ge 0 ] && [ "$SHARD_INDEX" -lt "$SHARD_COUNT" ]; } 2>/dev/null || {
+    printf 'fm-lint.sh: shard index must be 0 or 1, got %s.\n' "$SHARD_INDEX" >&2
+    exit 2
+  }
+fi
+
+# fm_lint_shard_selected <worker-index>: true when no --shard-index was given
+# or when the index names this worker's shard. CI runs one job per shard so
+# each runner analyzes a bounded serial stream with its own 16 GiB.
+fm_lint_shard_selected() {
+  [ -z "$SHARD_INDEX" ] || [ "$1" = "$SHARD_INDEX" ]
+}
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -601,7 +647,6 @@ TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
-SHARD_COUNT=2
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   : > "$TMP_ROOT/manifest.$worker"
@@ -690,6 +735,7 @@ fm_lint_run_worker() {  # <worker-index>
         /usr/bin/time -lp -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+        FM_LINT_RSS_LIMIT_KIB="$FM_LINT_RSS_LIMIT_KIB" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
@@ -697,6 +743,7 @@ fm_lint_run_worker() {  # <worker-index>
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+        FM_LINT_RSS_LIMIT_KIB="$FM_LINT_RSS_LIMIT_KIB" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
@@ -705,6 +752,7 @@ fm_lint_run_worker() {  # <worker-index>
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
       env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
       FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+      FM_LINT_RSS_LIMIT_KIB="$FM_LINT_RSS_LIMIT_KIB" \
       FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
@@ -727,35 +775,42 @@ fm_lint_wait_workers() {
 if [ "$JOBS" -eq 1 ]; then
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    fm_lint_wait_workers
+    if fm_lint_shard_selected "$worker"; then
+      fm_lint_start_worker "$worker"
+      fm_lint_wait_workers
+    fi
     worker=$((worker + 1))
   done
 else
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
+    if fm_lint_shard_selected "$worker"; then
+      fm_lint_start_worker "$worker"
+    fi
     worker=$((worker + 1))
   done
   fm_lint_wait_workers
 fi
 
-# Replay both stable shards in deterministic order and select the first nonzero
-# shard status. ShellCheck processes every root in a shard after earlier findings.
+# Replay the selected stable shards in deterministic order and select the
+# first nonzero shard status. ShellCheck processes every root in a shard
+# after earlier findings.
 overall_rc=0
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  output="$OUTPUT_DIR/shard.$worker"
-  [ ! -f "$output.out" ] || cat "$output.out"
-  if [ -f "$output.rc" ]; then
-    rc=$(cat "$output.rc" 2>/dev/null || printf '2')
-    case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
-  else
-    printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
-    rc=2
-  fi
-  if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
-    overall_rc=$rc
+  if fm_lint_shard_selected "$worker"; then
+    output="$OUTPUT_DIR/shard.$worker"
+    [ ! -f "$output.out" ] || cat "$output.out"
+    if [ -f "$output.rc" ]; then
+      rc=$(cat "$output.rc" 2>/dev/null || printf '2')
+      case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+    else
+      printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
+      rc=2
+    fi
+    if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
+      overall_rc=$rc
+    fi
   fi
   worker=$((worker + 1))
 done
