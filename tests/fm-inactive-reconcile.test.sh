@@ -32,7 +32,20 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+SH
+  cat > "$fake/fm-captain-hold.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "$#" -eq 2 ] || exit 2
+[ "${1:-}" = open ] || exit 1
+id=${2:-}
+[ -z "${FM_FAKE_CAPTAIN_HOLD_LOG:-}" ] || printf '%s\n' "$id" >> "$FM_FAKE_CAPTAIN_HOLD_LOG"
+case ",${FM_FAKE_CAPTAIN_HELD_TASKS:-}," in
+  *,"$id",*) printf 'captain-hold:%s:test-incarnation\n' "$id" ;;
+  *) exit 1 ;;
+esac
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -101,6 +114,7 @@ run_reconcile() { # <home> [--startup]
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_CAPTAIN_HOLD_BIN="$WORLD/fakebin/fm-captain-hold.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
@@ -111,6 +125,7 @@ run_report() { # <home> <child>
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_CAPTAIN_HOLD_BIN="$WORLD/fakebin/fm-captain-hold.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
 
@@ -622,6 +637,63 @@ test_heartbeat_cap_does_not_delay_reconciliation() {
   pass "terminal reconciliation ignores heartbeat backoff state"
 }
 
+# A task already held for the captain is its own terminal reconciliation class.
+# The exact live incident had resolved completion, an absent endpoint, and
+# uncommitted preservation work; repeated scans must not read current state,
+# queue another alert, or touch any durable or git evidence.
+test_resolved_dirty_absent_worker_is_hold_for_captain() {
+  local id=firstmate-dirty-audit before_meta before_status before_head before_dirty i
+  make_world hold-dirty-absent
+  write_child "$MAIN" "$id" $'done: stopped with source untouched\nresolved: no source commit is required or authorized'
+  fm_git_init_commit "$MAIN/projects/$id"
+  printf 'preserved reconstruction\n' > "$MAIN/projects/$id/preserved-unlanded.txt"
+  before_meta=$(sha256sum "$MAIN/state/$id.meta")
+  before_status=$(sha256sum "$MAIN/state/$id.status")
+  before_head=$(git -C "$MAIN/projects/$id" rev-parse HEAD)
+  before_dirty=$(git -C "$MAIN/projects/$id" status --porcelain)
+  : > "$WORLD/crew-state.log"
+  for i in 1 2 3; do
+    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE='done' \
+      FM_FAKE_CREW_STATE_LOG="$WORLD/crew-state.log" run_reconcile "$MAIN" --startup
+  done
+  [ ! -s "$WORLD/crew-state.log" ] || fail "HOLD_FOR_CAPTAIN dirty task reached endpoint/current-state classification"
+  [ -z "$(wake_count "$MAIN" 'inactive-outcome:')" ] || fail "HOLD_FOR_CAPTAIN dirty task emitted a repeated inactive alert"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "HOLD_FOR_CAPTAIN dirty task minted a terminal outcome"
+  [ "$(sha256sum "$MAIN/state/$id.meta")" = "$before_meta" ] || fail "HOLD_FOR_CAPTAIN dirty task metadata changed"
+  [ "$(sha256sum "$MAIN/state/$id.status")" = "$before_status" ] || fail "HOLD_FOR_CAPTAIN dirty task status evidence changed"
+  [ "$(git -C "$MAIN/projects/$id" rev-parse HEAD)" = "$before_head" ] || fail "HOLD_FOR_CAPTAIN dirty task branch moved"
+  [ "$(git -C "$MAIN/projects/$id" status --porcelain)" = "$before_dirty" ] || fail "HOLD_FOR_CAPTAIN dirty task unlanded work changed"
+  pass "resolved absent worker with preserved unlanded work remains HOLD_FOR_CAPTAIN without repeated alerts"
+}
+
+# The clean local-only counterpart is equally intentional: stopped means
+# awaiting the captain's landing approval, not abandoned. Its clean branch and
+# record remain untouched, and the open hold prevents autonomous relaunch or
+# reconciliation just as it does for dirty preservation work.
+test_clean_local_only_absent_worker_is_hold_for_captain() {
+  local id=golconda-first-engine-slice-v4 before_meta before_status before_head i
+  make_world hold-clean-local-only
+  write_child "$MAIN" "$id" $'done: local branch ready\nresolved: independent review complete'
+  fm_git_init_commit "$MAIN/projects/$id"
+  printf 'mode=local-only\n' >> "$MAIN/state/$id.meta"
+  before_meta=$(sha256sum "$MAIN/state/$id.meta")
+  before_status=$(sha256sum "$MAIN/state/$id.status")
+  before_head=$(git -C "$MAIN/projects/$id" rev-parse HEAD)
+  : > "$WORLD/crew-state.log"
+  for i in 1 2 3; do
+    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE='done' \
+      FM_FAKE_CREW_STATE_LOG="$WORLD/crew-state.log" run_reconcile "$MAIN" --startup
+  done
+  [ ! -s "$WORLD/crew-state.log" ] || fail "clean HOLD_FOR_CAPTAIN task reached endpoint/current-state classification"
+  [ -z "$(wake_count "$MAIN" 'inactive-outcome:')" ] || fail "clean HOLD_FOR_CAPTAIN task emitted a repeated inactive alert"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "clean HOLD_FOR_CAPTAIN task minted a terminal outcome"
+  [ "$(sha256sum "$MAIN/state/$id.meta")" = "$before_meta" ] || fail "clean HOLD_FOR_CAPTAIN metadata changed"
+  [ "$(sha256sum "$MAIN/state/$id.status")" = "$before_status" ] || fail "clean HOLD_FOR_CAPTAIN status evidence changed"
+  [ "$(git -C "$MAIN/projects/$id" rev-parse HEAD)" = "$before_head" ] || fail "clean HOLD_FOR_CAPTAIN branch moved"
+  [ -z "$(git -C "$MAIN/projects/$id" status --porcelain)" ] || fail "clean HOLD_FOR_CAPTAIN branch became dirty"
+  pass "stopped clean local-only worker remains HOLD_FOR_CAPTAIN pending landing approval"
+}
+
 # Only authoritative terminal states qualify. A captain-held item is excluded too.
 test_scan_marker_replaces_symlink_safely() {
   make_world marker; write_child "$MAIN" child 'done: green'
@@ -645,7 +717,12 @@ test_nonterminal_and_captain_held_states_do_not_report() {
   make_world captain-held; write_child "$MAIN" child 'captain-held: awaiting captain'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "captain-held item was reconciled"
-  pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
+  make_world recent; write_child "$MAIN" child 'working: still active'
+  touch "$MAIN/state/child.meta" "$MAIN/state/child.status" "$MAIN/state/child.turn-ended"
+  : > "$WORLD/captain-hold.log"
+  FM_FAKE_CAPTAIN_HOLD_LOG="$WORLD/captain-hold.log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ ! -s "$WORLD/captain-hold.log" ] || fail "recently active item reached captain-hold lookup"
+  pass "nonterminal, recent, and captain-held workers remain outside inactive terminal reporting"
 }
 
 # The actual watcher poll invokes the helper, while an idle secondmate remains
@@ -840,6 +917,8 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
+test_resolved_dirty_absent_worker_is_hold_for_captain
+test_clean_local_only_absent_worker_is_hold_for_captain
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
