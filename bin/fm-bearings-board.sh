@@ -16,10 +16,8 @@
 #            reconcile choice, and inject the result into a fresh copy of the
 #            shipped template at the stable board path. A connected session is
 #            updated in place and verified through the non-opening session list;
-#            build never opens or reopens that existing surface. A missing or
-#            disconnected session receives at most one plain open because this
-#            command is reached only after explicit `/bearings lavish` resume
-#            intent. A user-ended session remains closed unless `--reopen`
+#            build never opens or reopens that existing surface.
+#            A user-ended session remains closed unless `--reopen`
 #            records explicit further-review intent, in which case build edits
 #            first and performs exactly one reopen. Every post-open verification
 #            is the non-opening session list, never a browser open/new-page call.
@@ -49,9 +47,7 @@
 # `status: user-ended`, so exit status alone cannot tell a live board from a dead
 # one. build first checks the server's fresh non-opening session list. If that
 # exact canonical board is already open it never invokes a file-opening command.
-# Otherwise it queries with `--no-open`, then uses at most one plain open for a
-# missing/disconnected review or exactly one authorized `--reopen` for an ended
-# review. The same non-opening list verifies the result; browser verification
+# The same non-opening list verifies the result; browser verification
 # never opens a second page. An ended build without `--reopen` retires its stale
 # listener reservation and returns with the revised file still closed. After an
 # open/reopen it retires the prior source generation before the browser action,
@@ -254,7 +250,7 @@ lavish_session_listed_open() {  # <canonical-board-path>
 # command. Every non-live path queries with --no-open first. A user-ended board
 # remains closed unless this exact build carries explicit reopen intent.
 establish_board_session() {  # <board> <reopen-ended: 0|1>
-  local board=$1 reopen_ended=$2 real out status version listing_rc
+  local board=$1 reopen_ended=$2 initial=$3 real out status version listing_rc
   BOARD_SESSION_ACTIVE=1
   BOARD_SOURCE_RETIRED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
@@ -275,6 +271,12 @@ establish_board_session() {  # <board> <reopen-ended: 0|1>
     BOARD_SESSION_ACTIVE=0
     BOARD_SOURCE_RETIRED=1
     printf 'session: user-ended\n'
+    return 0
+  fi
+
+  if [ "$initial" != 1 ] && [ "$reopen_ended" != 1 ]; then
+    BOARD_SESSION_ACTIVE=0
+    printf 'session: disconnected\n'
     return 0
   fi
 
@@ -393,7 +395,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local reopen_ended=0 data board json tmp sid extracted effective owner version
+  local reopen_ended=0 initial=0 data board json tmp sid extracted effective owner version
   if [ "${1-}" = --reopen ]; then
     reopen_ended=1
     shift
@@ -421,6 +423,7 @@ command_build() {
   json=${json//</\\u003c}
 
   board=$(board_path)
+  [ -e "$board" ] || initial=1
   (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
   tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
   if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
@@ -448,7 +451,7 @@ command_build() {
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
-  establish_board_session "$board" "$reopen_ended"
+  establish_board_session "$board" "$reopen_ended" "$initial"
   if [ "$BOARD_SESSION_ACTIVE" != 1 ]; then
     printf 'updated-closed: %s\n' "$board"
     return 0

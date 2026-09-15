@@ -375,6 +375,15 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "Lavish feedback owner changed while retiring source $id; direct polling remains refused"
       fi
+      if [ -n "$LAVISH_OWNER_PID" ]; then
+        if lavish_direct_owner_state_locked; then
+          fm_procevent_source_lock_release "$id"
+          die "Lavish source $id is still being armed; direct polling remains refused"
+        elif [ "$?" -ne 1 ]; then
+          fm_procevent_source_lock_release "$id"
+          die "cannot determine whether Lavish source $id is being armed; direct polling remains refused"
+        fi
+      fi
       rm -f -- "$(lavish_owner_path "$id")" \
         || { fm_procevent_source_lock_release "$id"; die "cannot release Lavish feedback owner: $id"; }
       ;;

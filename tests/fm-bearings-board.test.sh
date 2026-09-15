@@ -524,7 +524,14 @@ test_build_resumes_a_disconnected_session_with_one_plain_open() {
   run_board "$home" build "$data" >/dev/null || fail "the first build failed"
   : > "$home/lavish-state/open"
 
-  out=$(run_board "$home" build "$data") || fail "the disconnected resume failed: $out"
+  jq '.generated = "2026-08-19T02:00Z"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data") || fail "the disconnected rebuild failed: $out"
+  assert_contains "$out" "session: disconnected" "the rebuild did not preserve the disconnected session: $out"
+  [ "$(cat "$home/lavish-state/open-count")" = 1 ] \
+    || fail "a disconnected feedback rebuild opened another tab"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '.generated == "2026-08-19T02:00Z"' >/dev/null \
+    || fail "the disconnected rebuild did not update the canonical artifact"
+  out=$(run_board "$home" build --reopen "$data") || fail "the disconnected resume failed: $out"
   assert_contains "$out" "session: opened" \
     "the disconnected resume did not use its one plain open: $out"
   [ "$(cat "$home/lavish-state/open-count")" = 2 ] \
