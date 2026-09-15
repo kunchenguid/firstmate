@@ -2,10 +2,10 @@
 # Behavior tests for the no-mistakes GATE-agent fleet-lifecycle refusal.
 #
 # A confused no-mistakes gate agent runs inside a firstmate checkout, adopts the
-# captain identity from AGENTS.md, and reaches for fm-spawn/fm-send/fm-teardown.
-# bin/fm-gate-refuse-lib.sh is the firstmate capability-removal half: sourced at
-# the top of those three entrypoints and called before any fleet mutation, it
-# fails closed on either of two independent signals:
+# captain identity from AGENTS.md, and reaches for fm-spawn/fm-send/fm-teardown
+# or a merge entrypoint. bin/fm-gate-refuse-lib.sh is the firstmate
+# capability-removal half: sourced at the top of those entrypoints and called
+# before any fleet mutation, it fails closed on either of two independent signals:
 #   1. NO_MISTAKES_GATE set in the environment (the marker no-mistakes stamps);
 #   2. the current worktree's git-common-dir resolves under a no-mistakes gate
 #      repo (.../.no-mistakes/repos/*.git) - the unspoofable backstop, which
@@ -34,6 +34,8 @@ GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 
 TMP=$(fm_test_tmproot fm-gate-refuse)
 fm_git_identity fmtest fmtest@example.invalid
@@ -348,6 +350,134 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
+# --- fm-pr-merge ------------------------------------------------------------
+
+# make_pr_merge_case <name> -> case dir holding a task's state meta with no
+# recorded pr=, so a refused merge leaves it untouched and a normal run reaches
+# the merge script's own checks.
+make_pr_merge_case() {
+  local name=$1 case_dir
+  case_dir="$TMP/$name"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "spawn_gen=spawn-gate-refuse-task-x1"
+  printf '%s\n' "$case_dir"
+}
+
+# run_pr_merge <cwd> <case_dir> [ASSIGN...] -> combined output
+run_pr_merge() {
+  local cwd=$1 case_dir=$2; shift 2
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" "$@" \
+      "$PR_MERGE" task-x1 "https://github.com/o/r/pull/1" ) 2>&1
+}
+
+test_pr_merge_refuses_and_admits() {
+  local case_dir out rc
+
+  # env-marker refuse: valid request is still refused; no pr= is recorded.
+  case_dir=$(make_pr_merge_case pr-merge-envmark)
+  out=$(run_pr_merge "$NORMAL_CWD" "$case_dir" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "pr-merge: NO_MISTAKES_GATE must refuse"
+  assert_contains "$out" "$ENV_MSG" "pr-merge: env-marker refusal message"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "pr-merge: refused env-marker merge must not record pr"
+
+  # path-backstop refuse (marker UNSET).
+  case_dir=$(make_pr_merge_case pr-merge-backstop)
+  out=$(run_pr_merge "$GATE_WT" "$case_dir"); rc=$?
+  expect_code 3 "$rc" "pr-merge: gate-worktree cwd must refuse with the marker unset"
+  assert_contains "$out" "$PATH_MSG" "pr-merge: path-backstop refusal message"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "pr-merge: refused backstop merge must not record pr"
+
+  # no-regression: the guard is bypassed and the script reaches its own metadata
+  # check. State exists but no meta does, so it fails there rather than at the gate.
+  case_dir="$TMP/pr-merge-normal"; mkdir -p "$case_dir/state"
+  out=$(run_pr_merge "$NORMAL_CWD" "$case_dir"); rc=$?
+  expect_code 1 "$rc" "pr-merge: a normal session must proceed past the guard"
+  assert_contains "$out" "task metadata is unavailable" \
+    "pr-merge: normal session should reach its own metadata check"
+  assert_not_contains "$out" "$ENV_MSG" "pr-merge: normal session must not print the gate refusal"
+  assert_not_contains "$out" "$PATH_MSG" "pr-merge: normal session must not print the backstop refusal"
+  pass "fm-pr-merge: refuses on marker and gate-worktree backstop; a normal session passes the guard"
+}
+
+# --- fm-merge-local ---------------------------------------------------------
+
+# make_local_merge_case <name> -> case dir holding a local-only task whose
+# fm/<id> branch is a clean fast-forward of the project's default branch, so a
+# normal landing genuinely succeeds and a refused one leaves the branch unmerged.
+make_local_merge_case() {
+  local name=$1 case_dir
+  case_dir="$TMP/$name"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config"
+  cp "$ROOT/.tasks.toml" "$case_dir/.tasks.toml"
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  git -C "$case_dir/_seed" commit -q --allow-empty -m "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  git -C "$case_dir/wt" commit -q --allow-empty -m "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=local-only" "spawn_gen=spawn-gate-refuse-task-x1"
+  printf '%s\n' "$case_dir"
+}
+
+# run_merge_local <cwd> <case_dir> [ASSIGN...] -> combined output
+run_merge_local() {
+  local cwd=$1 case_dir=$2; shift 2
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      "$@" "$MERGE_LOCAL" task-x1 ) 2>&1
+}
+
+test_merge_local_refuses_and_admits() {
+  local case_dir out rc
+
+  # env-marker refuse: the branch is not fast-forwarded.
+  case_dir=$(make_local_merge_case merge-local-envmark)
+  out=$(run_merge_local "$NORMAL_CWD" "$case_dir" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "merge-local: NO_MISTAKES_GATE must refuse"
+  assert_contains "$out" "$ENV_MSG" "merge-local: env-marker refusal message"
+  assert_not_equals "$(git -C "$case_dir/project" rev-parse main)" \
+    "$(git -C "$case_dir/project" rev-parse fm/task-x1)" \
+    "merge-local: refused env-marker landing must not fast-forward the default branch"
+
+  # path-backstop refuse (marker UNSET).
+  case_dir=$(make_local_merge_case merge-local-backstop)
+  out=$(run_merge_local "$GATE_WT" "$case_dir"); rc=$?
+  expect_code 3 "$rc" "merge-local: gate-worktree cwd must refuse with the marker unset"
+  assert_contains "$out" "$PATH_MSG" "merge-local: path-backstop refusal message"
+  assert_not_equals "$(git -C "$case_dir/project" rev-parse main)" \
+    "$(git -C "$case_dir/project" rev-parse fm/task-x1)" \
+    "merge-local: refused backstop landing must not fast-forward the default branch"
+
+  # no-regression: a normal session fast-forwards the local-only branch.
+  case_dir=$(make_local_merge_case merge-local-ok)
+  out=$(run_merge_local "$NORMAL_CWD" "$case_dir"); rc=$?
+  expect_code 0 "$rc" "merge-local: a normal session must still land local-only work"
+  assert_contains "$out" "merged fm/task-x1 into local main" \
+    "merge-local: normal landing should report the fast-forward"
+  assert_not_contains "$out" "$ENV_MSG" "merge-local: normal landing must not print the gate refusal"
+  assert_not_contains "$out" "$PATH_MSG" "merge-local: normal landing must not print the backstop refusal"
+  assert_equals "$(git -C "$case_dir/project" rev-parse main)" \
+    "$(git -C "$case_dir/project" rev-parse fm/task-x1)" \
+    "merge-local: a normal landing should fast-forward the default branch"
+  pass "fm-merge-local: refuses on marker and gate-worktree backstop; a normal landing is unaffected"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -355,3 +485,5 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_pr_merge_refuses_and_admits
+test_merge_local_refuses_and_admits
