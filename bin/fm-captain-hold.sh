@@ -281,6 +281,17 @@ acquire_task_control_lock() {  # <task-id>
   CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
   fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
   CAPTAIN_CONTROL_LOCK_HELD=1
+  # Every record mutation below (the hold's `tasks-axi hold`, the answer's
+  # resolution record plus `tasks-axi done` close) must also hold the
+  # per-task record lock (state/.meta-<id>.lock) - the lock the stale sweep's
+  # reclaim and teardown's completion serialize on, in the same control-then-
+  # meta order. Without it, a hold or close landing between the sweep's final
+  # in-flight proof and its separate reopen lets the sweep resurrect a
+  # finished or newly held row as Queued.
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$STATE/$1.meta") \
+    || fail "could not resolve task metadata lock"
+  fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=1
 }
 
 release_task_control_lock() {

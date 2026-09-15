@@ -42,6 +42,10 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+# Pin the no-mistakes data root the bootstrap mirror check resolves, so the
+# fixture firstmate roots below - which no-mistakes never gated - are read
+# against an empty hermetic root instead of the operator's real one.
+export NM_HOME="$TMP_ROOT/nm-root"
 export FM_BACKEND=tmux
 
 # --- world builders --------------------------------------------------------

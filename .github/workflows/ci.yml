@@ -203,6 +203,16 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
+      # The stale-sweep suite drives a real scratch Beads graph through the
+      # real bd 1.2.x CLI; without bd every fixture row fails to create and
+      # the suite fails fast, so the binary is a required serial-lane tool.
+      # @beads/bd's postinstall skips the binary download whenever CI is set,
+      # so unset it for the install (GitHub Actions always exports CI=true).
+      - name: Install beads (bd) for the stale-sweep suite
+        run: |
+          set -eu
+          env -u CI npm install -g @beads/bd
+          bd version
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix

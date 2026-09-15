@@ -64,6 +64,9 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  # fm-capacity-lib.sh: teardown sources it for the worktree-pool capacity hold
+  # release scan (the fake root has no capacity state, so the scan is a no-op).
+  ln -s "$ROOT/bin/fm-capacity-lib.sh" "$fake/bin/fm-capacity-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -166,6 +169,9 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  # fm-capacity-lib.sh: teardown sources it for the worktree-pool capacity hold
+  # release scan (the fake root has no capacity state, so the scan is a no-op).
+  ln -s "$ROOT/bin/fm-capacity-lib.sh" "$fake/bin/fm-capacity-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
