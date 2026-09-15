@@ -2,7 +2,7 @@
 
 The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, and exit on 2026-07-19 with 0.2.103.
-Launch shape: `grok --always-approve "$(cat <brief>)"`.
+Launch shape: `grok --trust --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
 
@@ -12,7 +12,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
 | Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
-| Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
+| Autonomy | `--trust` suppresses the folder-trust dialog on each fresh worktree path (hidden from `--help`, accepted - verified `grok --trust --version` exits 0 on 1.0.30); `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
 | Resume | `grok --resume <session-id>`, or `grok -c` / `--continue` for cwd latest; `--fork-session` creates a new id. |
 | Model | `--model <model>`; discover current account models with `grok models`. |
