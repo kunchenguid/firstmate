@@ -3460,6 +3460,16 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/.$ID.branch-outcome-index"
+# D5: retire the pipeline-state watch. Idempotent, and safe when it was never
+# armed (fm-procevent-when.sh retire is a no-op for an unknown name). Guarded
+# on STATE still existing: a secondmate's own state lives inside the home
+# remove_firstmate_home above may have just deleted, and fm-procevent-when.sh
+# sources fm-wake-lib.sh, which unconditionally mkdir -p's STATE on load -
+# calling it after that removal would resurrect the retired home.
+if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+  "$SCRIPT_DIR/fm-procevent-when.sh" retire "nm-state-$ID" >/dev/null 2>&1 || true
+  rm -f -- "$STATE/$ID.nm-state"
+fi
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

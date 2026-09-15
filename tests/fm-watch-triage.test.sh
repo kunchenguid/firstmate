@@ -2039,6 +2039,70 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# A paused: line claiming a no-mistakes run is a DIFFERENT declared-wait shape from
+# an ordinary paused: line: pause_state_class answers `contradicted` (not `paused`)
+# whenever authoritative crew state does not confirm the claimed run (fm-crew-state.sh
+# owns the confirmation - see bin/fm-nm-watch.sh and the 2026-09-12 stalled-lane
+# incident this class exists for), and that must surface immediately through
+# surface_nm_claim_contradiction rather than wait out the long pause cadence a
+# genuine declared wait would earn.
+test_nonterminal_stale_nm_claim_contradiction_surfaces() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case nm-claim-contradiction); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-nmclaim"
+  printf 'idle, awaiting nm claim' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/nmclaim.meta"
+  statusf="$state/nmclaim.status"
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-nmclaim_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, awaiting nm claim")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Counterfactual: a confirmed-working run behind the same claim is not a
+  # contradiction - absorbed like any other provably-working crew, no wake.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a confirmed-working claimed run (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "confirmed-working claimed run printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "confirmed-working claimed run enqueued a wake: $(cat "$state/.wake-queue")"
+  reap "$pid"
+
+  # Fresh case: crew state contradicts the paused claim (a failed run) -> surface
+  # immediately, on the first stale sighting, never the long pause cadence.
+  dir=$(make_case nm-claim-contradiction-2); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-nmclaim2"
+  printf 'idle, awaiting nm claim' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/nmclaim2.meta"
+  statusf="$state/nmclaim2.status"
+  printf 'paused: no-mistakes run in progress, clears on its own\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-nmclaim2_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, awaiting nm claim")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface a paused claim contradicted by a failed run: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "no stale wake for the contradicted claim: $(cat "$out")"
+  grep -F "paused line claims a no-mistakes run that crew state does not confirm" "$state/.wake-queue" >/dev/null \
+    || fail "queued wake did not name the contradiction: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "possible wedge" "$state/.wake-queue" >/dev/null && fail "a contradicted claim was mislabeled a wedge: $(cat "$state/.wake-queue")"
+  pass "a paused claim contradicted by crew state surfaces immediately, never the declared-pause cadence"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -4860,6 +4924,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_nonterminal_stale_nm_claim_contradiction_surfaces
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
