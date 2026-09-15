@@ -181,7 +181,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
           active_children:[
             {id:"child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",started_at:"2026-09-15T11:30:00Z",doing:"PRIVATE-REMOTE-DETAIL"},
             {id:"release-call",kind:"ship",state:"working",repo:"omega",name:"Release preparation",source:"structured-home",doing:"PRIVATE-REMOTE-DECISION"},
-            {id:"status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"}
+            {id:"status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"},
+            {id:"dated-hold",kind:"ship",state:"working",repo:"omega",name:"Scheduled deployment",source:"structured-home",started_at:"2026-09-15T11:45:00Z",doing:"PRIVATE-HOLD-DETAIL"}
           ],
           decisions_open:[
             {id:"release-call",verb:"captain-hold",summary:"Choose release route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"},
@@ -190,7 +191,9 @@ test_secondmate_structured_surfaces_are_projected_once() {
           ],
           queued:[
             {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[]},
-            {id:"queued-child",title:"Remote follow-up",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:null,unresolved_blocker_ids:[]}
+            {id:"queued-child",title:"Remote follow-up",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:null,unresolved_blocker_ids:[]},
+            {id:"dated-hold",title:"Scheduled deployment",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:"dated",hold_reason:"Wait for the maintenance window",hold_until:"2026-09-20",hold_age_days:2,unresolved_blocker_ids:[]},
+            {id:"blocked-hold",title:"External approval",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:"blocked",hold_reason:"Await security approval",hold_until:null,hold_age_days:4,unresolved_blocker_ids:["security-review"]}
           ],
           landed:[{id:"landed-child",title:"Remote delivery",kind:"ship",completion:{verb:"merged",date:"2026-09-14"},pr_url:"https://github.com/example/omega/pull/9",report_path:null}],
           omitted:[]
@@ -198,7 +201,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
       }' "$FIXTURES/states.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$model"
   jq -e '
-    ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 5
+    ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 7
     and ([.projects[].tasks[] | select(.id == "mate-one:child-live")][0]
       | .lane == "running" and .project_id == "omega" and .crew.kind == "ship"
         and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
@@ -212,6 +215,19 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .gate.status == "decision" and .gate.label == "Choose runtime evidence · Approve evidence scope"
         and .decisions == ["Choose runtime evidence","Approve evidence scope"])
     and ([.projects[].tasks[] | select(.id == "mate-one:queued-child")][0].lane == "queued")
+    and ([.projects[].tasks[] | select(.id == "mate-one:dated-hold")][0]
+      | .lane == "waiting" and .state == "working" and .state_source == "structured-home"
+        and .started_at == "2026-09-15T11:45:00Z" and .elapsed_seconds == 960
+        and .runtime_evidence.home == "/fleet/mates/one"
+        and .hold.classification == "dated" and .hold.actionable == false
+        and .hold.question == "Wait for the maintenance window"
+        and .gate == {status:"dated",label:"Wait for the maintenance window"})
+    and ([.projects[].tasks[] | select(.id == "mate-one:blocked-hold")][0]
+      | .lane == "waiting" and .state == "unknown" and .state_source == "structured-home-hold"
+        and .crew == {liveness:"unavailable",summary:"UNAVAILABLE",kind:"ship",harness:null,backend:null}
+        and .runtime_evidence.endpoint_status == "unavailable"
+        and .hold.classification == "blocked" and .blockers == ["security-review"]
+        and .gate == {status:"blocked",label:"security-review"})
     and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")
   ' "$model" >/dev/null || fail "bounded secondmate surfaces were not projected with stable identity and deduplication"

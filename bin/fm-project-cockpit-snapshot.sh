@@ -303,12 +303,34 @@ jq \
       started_at:($record.started_at // null)
     } | task_projection($now));
   def secondmate_queued_projection($owner; $record):
-    ($record + {id:scoped_id($owner; $record)} | queued_projection);
+    ($record + {id:scoped_id($owner; $record)} | queued_projection)
+    | if $record.hold_bucket != null then
+        .lane="waiting"
+        | .state="unknown"
+        | .state_source="structured-home-hold"
+        | .crew.liveness="unavailable"
+        | .crew.summary="UNAVAILABLE"
+        | .runtime_evidence.endpoint_status="unavailable"
+      else . end;
+  def secondmate_active_hold_projection($owner; $record; $held; $now):
+    secondmate_active_projection($owner; $record; $now) as $base
+    | if $held == null then $base
+      else secondmate_queued_projection($owner; $held) as $hold
+      | $base + {
+          lane:"waiting",
+          attention:($base.attention or $hold.attention),
+          attention_rank:([$base.attention_rank,$hold.attention_rank] | min),
+          hold:$hold.hold,
+          blockers:$hold.blockers,
+          _truncated:(($base._truncated // false) or ($hold._truncated // false)),
+          gate:$hold.gate
+        }
+      end;
   def secondmate_decision_projection($owner; $record; $summaries; $queued; $active; $now):
     (($summaries | join(" · ")) | text(240)) as $decision_summary
     |
     (($queued // {}) + {
-        id:scoped_id($owner; $record),
+        id:$record.id,
         title:($record.summary // $queued.title // $record.id),
         repo:($queued.repo // $active.repo // null),
         kind:($queued.kind // $active.kind // "captain"),
@@ -318,7 +340,7 @@ jq \
         hold_until:($record.hold_until // $queued.hold_until // null),
         hold_age_days:($record.hold_age_days // $queued.hold_age_days // null),
         unresolved_blocker_ids:($queued.unresolved_blocker_ids // [])
-      } | queued_projection | .lane="waiting" | .state_source="structured-home-decision"
+      } | secondmate_queued_projection($owner; .) | .lane="waiting" | .state_source="structured-home-decision"
         | .decisions=$summaries[:$max_decisions]
         | ._truncated=((._truncated // false) or (($summaries | length) > $max_decisions))
         | if .gate.status == "unavailable" and $decision_summary != null
@@ -357,8 +379,9 @@ jq \
        | completed_projection + {_identity:("main:" + .id),_priority:3} ]) as $completed
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
-       | $mate.active_children[]?
-       | secondmate_active_projection($mate; .; $now)
+       | $mate.active_children[]? as $active_record
+       | ([ $mate.queued[]? | select(.id == $active_record.id and .hold_bucket != null) ][0] // null) as $held_record
+       | secondmate_active_hold_projection($mate; $active_record; $held_record; $now)
        | . + {_identity:("secondmate:" + .id),_priority:1} ]) as $secondmate_active
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
