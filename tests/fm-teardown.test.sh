@@ -656,7 +656,7 @@ backlog_row_state() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+  for cmd in awk bash basename cat chmod cmp cp cut date dirname env find git grep head hostname id ln \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
@@ -2719,6 +2719,165 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
+# --- Cleanup retains the supervisor's own record of the task
+#
+# Cleanup removes state/task-x1.{meta,status,busy-state}. Those hold firstmate's
+# side of the run - the model, the backend and endpoint, the delivery mode and
+# merge posture, the status events, the last turn-activity record - and the
+# worker's transcript does not. bin/fm-task-record-lib.sh copies them to
+# data/task-x1/record/ first, and cleanup refuses rather than removing records
+# it could not retain.
+
+# Give the task the evidence a real run leaves behind: the spawn fields naming
+# what ran it, a status stream, and a turn-activity record.
+seed_task_evidence() {  # <case-dir> [status-line]...
+  local case_dir=$1; shift
+  local line
+  if [ "$#" -eq 0 ]; then
+    set -- 'working: setup complete' 'done: PR https://github.com/example/repo/pull/7 checks green'
+  fi
+  printf '%s\n' 'harness=pi' 'model=claude-opus-5' 'effort=xhigh' 'yolo=off' \
+    >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.status"
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$case_dir/state/task-x1.status"
+  done
+  printf 'v1 gen=g9 seq=11 state=idle source=pi-ext event=agent-settled ts=1700000000\n' \
+    > "$case_dir/state/task-x1.busy-state"
+}
+
+retained_field() {  # <case-dir> <key>
+  local case_dir=$1 key=$2
+  sed -n "s/^$key=//p" "$case_dir/data/task-x1/record/retained" 2>/dev/null | head -1
+}
+
+test_teardown_retains_the_supervisor_record() {
+  local case_dir record
+  case_dir=$(make_case retain-task-record)
+  write_meta "$case_dir" no-mistakes ship
+  seed_task_evidence "$case_dir"
+  land_shippable_commit "$case_dir"
+  cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+  cp "$case_dir/state/task-x1.status" "$case_dir/status.before"
+  cp "$case_dir/state/task-x1.busy-state" "$case_dir/busy.before"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-task-record: teardown should succeed on landed work"
+
+  # The point of the whole exercise: the runtime records are gone and the
+  # supervisor-side facts they carried are not.
+  assert_absent "$case_dir/state/task-x1.meta" "cleanup left the runtime task record behind"
+  assert_absent "$case_dir/state/task-x1.status" "cleanup left the runtime status log behind"
+  record="$case_dir/data/task-x1/record"
+  cmp -s "$case_dir/meta.before" "$record/meta" \
+    || fail "retain-task-record: the retained record is not the task's own meta"
+  cmp -s "$case_dir/status.before" "$record/status" \
+    || fail "retain-task-record: the retained status stream is not the task's own"
+  cmp -s "$case_dir/busy.before" "$record/busy-state" \
+    || fail "retain-task-record: the retained turn-activity record is not the task's own"
+  assert_grep 'model=claude-opus-5' "$record/meta" "the retained record lost which model ran the task"
+  assert_grep 'harness=pi' "$record/meta" "the retained record lost which worker runtime ran the task"
+  assert_grep 'window=' "$record/meta" "the retained record lost the endpoint the task ran on"
+  assert_grep 'mode=no-mistakes' "$record/meta" "the retained record lost the delivery mode"
+  assert_grep 'yolo=off' "$record/meta" "the retained record lost the merge posture"
+  assert_grep 'source=pi-ext' "$record/busy-state" "the retained record lost the turn-activity source"
+  assert_grep 'checks green' "$record/status" "the retained record lost the task's own outcome"
+  [ "$(retained_field "$case_dir" schema)" = fm-task-record.v1 ] \
+    || fail "retain-task-record: the retained record does not declare its schema"
+  [ "$(retained_field "$case_dir" status_lines)" = 2 ] \
+    || fail "retain-task-record: wrong retained status line count"
+  [ "$(retained_field "$case_dir" status_lines_elided)" = 0 ] \
+    || fail "retain-task-record: a short status stream reported elided events"
+  # Secrets and live-endpoint scaffolding are not evidence and stay out.
+  assert_absent "$record/grok-turnend-token" "cleanup retained a per-task auth token"
+  pass "cleanup retains the supervisor's record of what ran before removing it"
+}
+
+test_teardown_refuses_rather_than_losing_the_record() {
+  local case_dir rc
+  case_dir=$(make_case retain-task-record-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  seed_task_evidence "$case_dir"
+  land_shippable_commit "$case_dir"
+  # The durable side is unwritable, so the record cannot be retained. A cleanup
+  # that shrugged this off would destroy the evidence with nothing to show for
+  # it, and nobody would find out until they went looking.
+  mkdir -p "$case_dir/data/task-x1"
+  chmod 500 "$case_dir/data/task-x1"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  chmod 700 "$case_dir/data/task-x1"
+
+  expect_code 1 "$rc" "retain-task-record-refuses: cleanup should refuse when the record cannot be retained"
+  assert_grep 'could not be retained' "$case_dir/stderr" \
+    "cleanup did not say the record could not be retained"
+  # Retention runs after the endpoint is gone, so what a refusal protects is the
+  # records themselves: every one of them is still here for a rerun to retain.
+  assert_present "$case_dir/state/task-x1.meta" \
+    "a refused retention still destroyed the task record"
+  assert_present "$case_dir/state/task-x1.status" \
+    "a refused retention still destroyed the status stream"
+  assert_present "$case_dir/state/task-x1.busy-state" \
+    "a refused retention still destroyed the turn-activity record"
+  assert_absent "$case_dir/data/task-x1/record" \
+    "a refused retention left a partial record behind"
+  pass "cleanup refuses and keeps every record when the retention cannot be written"
+}
+
+test_teardown_bounds_the_retained_status_stream() {
+  local case_dir i record kept
+  case_dir=$(make_case retain-task-record-bounded)
+  write_meta "$case_dir" no-mistakes ship
+  seed_task_evidence "$case_dir"
+  : > "$case_dir/state/task-x1.status"
+  i=1
+  while [ "$i" -le 450 ]; do
+    printf 'working: event %s\n' "$i" >> "$case_dir/state/task-x1.status"
+    i=$((i + 1))
+  done
+  land_shippable_commit "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-task-record-bounded: teardown should succeed on landed work"
+
+  record="$case_dir/data/task-x1/record"
+  kept=$(wc -l < "$record/status" | tr -d ' ')
+  [ "$kept" = 400 ] \
+    || fail "retain-task-record-bounded: retained $kept status events, expected the 400-event bound"
+  [ "$(retained_field "$case_dir" status_lines)" = 400 ] \
+    || fail "retain-task-record-bounded: the record misreports how many events it kept"
+  [ "$(retained_field "$case_dir" status_lines_elided)" = 50 ] \
+    || fail "retain-task-record-bounded: the record does not disclose the 50 dropped events"
+  # The bound drops the oldest events, never the outcome.
+  [ "$(tail -1 "$record/status")" = 'working: event 450' ] \
+    || fail "retain-task-record-bounded: the bound dropped the newest event"
+  assert_no_grep 'event 50$' "$record/status" \
+    "retain-task-record-bounded: an elided event was retained anyway"
+  pass "a runaway status stream is retained newest-first under a disclosed bound"
+}
+
+test_teardown_retains_a_task_that_never_reported() {
+  local record case_dir
+  case_dir=$(make_case retain-task-record-silent)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  # No status stream and no turn-activity record were ever written.
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-task-record-silent: teardown should succeed on landed work"
+
+  record="$case_dir/data/task-x1/record"
+  assert_present "$record/meta" "a silent task retained no record of what ran"
+  assert_present "$record/status" "a silent task's record omits the status stream entirely"
+  assert_present "$record/busy-state" "a silent task's record omits the turn-activity slot entirely"
+  [ ! -s "$record/status" ] \
+    || fail "retain-task-record-silent: invented status events for a task that reported none"
+  [ "$(retained_field "$case_dir" status_lines)" = 0 ] \
+    || fail "retain-task-record-silent: the record misreports an empty status stream"
+  pass "a task that never reported still leaves a complete, honest record"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -3750,3 +3909,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_teardown_retains_the_supervisor_record
+test_teardown_refuses_rather_than_losing_the_record
+test_teardown_bounds_the_retained_status_stream
+test_teardown_retains_a_task_that_never_reported

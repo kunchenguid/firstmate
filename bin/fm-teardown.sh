@@ -5,6 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# Before the first of those removals, the task's supervisor-side records are
+# copied to data/<id>/record/ so a finished task still answers what ran for it;
+# bin/fm-task-record-lib.sh owns what is kept, what bounds it, and why a failed
+# retention refuses here instead of cleaning up regardless. That retention rides
+# the path that was already going to succeed and loosens none of the landed-work
+# gates below.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -272,6 +278,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-task-record-lib.sh
+. "$SCRIPT_DIR/fm-task-record-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -874,6 +882,10 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  fm_task_record_retain "$STATE" "$DATA" "$ID" || {
+    echo "error: $ID's record of what ran could not be retained ($FM_TASK_RECORD_ERROR); preserving every record for retry" >&2
+    return 1
+  }
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"
@@ -3426,6 +3438,14 @@ if [ "$KIND" != secondmate ]; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
     exit 1
   fi
+fi
+# Everything below removes runtime records, so copy the supervisor-side ones to
+# their durable home first (bin/fm-task-record-lib.sh owns what and where).
+# This runs before the secondmate home removal below, because a nested remote
+# retirement can remove the home this home's own $DATA sits in.
+if ! fm_task_record_retain "$STATE" "$DATA" "$ID"; then
+  echo "error: $ID's record of what ran could not be retained ($FM_TASK_RECORD_ERROR); every record is preserved - rerun teardown once it can be written" >&2
+  exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
