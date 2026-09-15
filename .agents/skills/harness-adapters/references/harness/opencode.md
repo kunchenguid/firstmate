@@ -1,6 +1,6 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4 and the `--auto` permission posture verified on 2026-09-15 using 1.18.31.
 
 ## Operating facts
 
@@ -16,6 +16,7 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
+| Permissions | `--auto` on every Firstmate launch (`opencode __MODELFLAG__--auto --prompt ...` in `../../../../../bin/fm-spawn.sh`): auto-approve any permission request that is not explicitly denied, so the operator's own OpenCode config and repository-defined permission rules still apply. Verified on 1.18.31 that the flag exists on both the interactive and `run` paths, that a `--auto`-launched worker still executes shell writes outside its worktree, and that it does not need the retired `OPENCODE_CONFIG_CONTENT` wildcard-allow override. |
 
 OpenCode can auto-upgrade in the background, and the running TUI can exit mid-task.
 That behavior was observed live during an upgrade from 1.15.7 to 1.17.3.

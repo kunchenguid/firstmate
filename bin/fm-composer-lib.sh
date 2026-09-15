@@ -404,9 +404,12 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
-# ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
-# text, and only the run's LAST row is ever matched against it.
-FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+# ("Build · GPT-5.5 Fast OpenAI · high"). Under Firstmate's --auto launch
+# posture the mode word carries an auto qualifier ("Build auto · Big Pickle
+# OpenCode Zen", opencode 1.18.31), so the qualifier is optional. It is
+# composer furniture, not typed text, and only the run's LAST row is ever
+# matched against it.
+FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)([[:space:]]+auto)?[[:space:]]+·[[:space:]]+'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:

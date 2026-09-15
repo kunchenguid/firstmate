@@ -1567,7 +1567,12 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # opencode: --auto auto-approves every permission request that is not
+    # explicitly denied, giving an unattended worker full access while the
+    # operator's own OpenCode config and any repository-defined permission
+    # rules still apply (the harness-adapters opencode reference owns the
+    # posture fact and its verification).
+    opencode) printf '%s' 'opencode __MODELFLAG__--auto --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then

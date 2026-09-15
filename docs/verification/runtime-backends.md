@@ -481,6 +481,14 @@ The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_G
 Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owes a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width is not live-verified and may need adjustment if Grok's title rendering changes or scales with title length.
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
+The 2026-09-15 OpenCode `--auto` worker posture ([OpenCode worker permission posture](#opencode-worker-permission-posture)) renders the mode footer as `Build auto · <model>`, which the leftbar footer tolerance `^(Build|Plan)[[:space:]]+·` no longer matched, so an idle `--auto` worker read `pending` and would have starved steering for every opencode crewmate.
+The footer regex now takes an optional `auto` qualifier (`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT` in `bin/fm-composer-lib.sh`), pinned by the portable regressions in `tests/fm-composer-lib.test.sh`, and re-proven live on 2026-09-15:
+
+```text
+ok - opencode (1.18.31): real idle composer classifies empty
+```
+
+The same matrix run passed claude 2.1.259 and codex-cli 0.154.0, while pi 0.85.1 failed on a new first-launch folder-trust dialog in its worktree - a pre-existing drift the guard correctly reports loudly, unrelated to the footer change.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
@@ -506,9 +514,32 @@ ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker,
 ```
 
 All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
+A 2026-09-15 opencode-only rerun after the `--auto` posture change (with the footer tolerance above) passed identically: `ok - opencode (1.18.31): the doorbell reached a real worker, which acted and acked with the mv`.
 Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+
+## OpenCode worker permission posture
+
+Firstmate's opencode worker launch reaches full access through OpenCode's own auto-approve flag instead of a forced wildcard-allow config override, verified on 2026-09-15 with OpenCode 1.18.31 on macOS arm64, tmux 3.6a.
+`bin/fm-spawn.sh` previously prefixed every opencode launch with `OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}'`, which allowed everything but also replaced the operator's own OpenCode config and any permission rules a target repository defines for itself; the launch now passes `--auto`, which auto-approves any permission request that is not explicitly denied while those rules still apply.
+
+```sh
+opencode --help | grep -A 1 -- --auto
+opencode run --help | grep -- --auto
+```
+
+```text
+      --auto          auto-approve permissions that are not explicitly denied (dangerous!)
+                                                                      [boolean] [default: false]
+```
+
+Both the interactive path Firstmate launches (`opencode __MODELFLAG__--auto --prompt ...`) and the headless `opencode run --auto` path list the flag on 1.18.31.
+The behavioral consequence - a worker keeps every ability it had, including writes outside its worktree - was proven with a spawn-shaped worker in a throwaway git worktree under an isolated tmux socket, launched with the exact `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI opencode --model 'zai-coding-plan/glm-5.3-flash' --auto --prompt '<brief>'` shape and no config override.
+The brief told the worker to write a status file into a Firstmate-home-shaped directory outside the worktree, create and commit a file inside the worktree, then append a done line; observed result: the status file held both the `working:` and `done:` lines, the worktree log showed the proof commit on top of its init commit, and no permission prompt ever parked the turn.
+The steering-inbox doorbell guard rerun under the new recipe ([Steering-inbox doorbell](#steering-inbox-doorbell)) proves the same posture through the real `bin/fm-send.sh` path, and the launch-construction change itself is pinned by `tests/fm-spawn-dispatch-profile.test.sh` through the fake-pane launch log.
+One pre-existing 1.18.31 drift surfaced during verification and is not caused by the posture change: `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` fails its native later-message TUI step (the session-start nudge never runs in the second home) identically with the old and new fixture recipes, so that failure predates this change and stays open for a separate investigation.
+The dated evidence blocks in `docs/arm-pretool-check.md` and `docs/cd-guard.md` still quote the retired `OPENCODE_CONFIG_CONTENT` prefix because they record the exact commands those past validations ran; they are chronology, not the current launch posture, whose owner is the harness-adapters opencode reference.
 
 ## Gemini
 
