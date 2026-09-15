@@ -65,6 +65,11 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#      Active/parked records also require a successful bounded daemon probe;
+#      unavailable execution reports unknown, never a completed task or a
+#      license to relaunch. Full run-step detail includes the attributed run id
+#      and parked findings fingerprint so observers distinguish replacement
+#      runs and changed decisions without treating elapsed time as an event.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -276,6 +281,30 @@ nm_field() {  # <key>
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
 }
+
+# Gate identity excludes elapsed/activity fields but includes the complete
+# findings tables: equal counts can still mean a different decision.
+nm_gate_fingerprint() {
+  local findings
+  findings=$(printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*findings\[[0-9]+\]/ {
+      depth = match($0, /[^[:space:]]/)
+      table = 1
+      print
+      next
+    }
+    table && /[^[:space:]]/ {
+      if (match($0, /[^[:space:]]/) <= depth) table = 0
+      else print
+    }
+  ')
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$findings" | shasum -a 256 | cut -d' ' -f1
+  else
+    printf '%s' "$findings" | sha256sum | cut -d' ' -f1
+  fi
+}
+
 nm_gate_step_row() {
   local row step rest status findings
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
@@ -685,6 +714,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
+      gate_fingerprint=$(nm_gate_fingerprint)
+      [ -z "$gate_fingerprint" ] || RUN_DETAIL="$RUN_DETAIL${SEP}gate: $gate_fingerprint"
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
@@ -766,6 +797,20 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A persisted active row is not proof that its executor survived a reboot.
+  # An unavailable daemon makes that evidence unverified, never a task failure.
+  case "$RUN_STATE" in
+    working|parked)
+      if nm_daemon_probe_down; then
+        RUN_STATE=unknown
+        RUN_DETAIL="no-mistakes daemon unreachable; attributed run requires recovery"
+      fi
+      ;;
+  esac
+  if [ "$RUN_SOURCE" = full ]; then
+    run_id=$(strip_quotes "$(nm_field id)")
+    [ -z "$run_id" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $run_id"
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

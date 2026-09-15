@@ -818,7 +818,121 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+run_real_reconcile() {
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_RUN_FIXTURE="$WORLD/run" FM_INACTIVE_RECONCILE_SECS=60 \
+    "$RECON" scan --startup
+}
+
+# The run survives the endpoint, but no worker remains to append a status.
+# Drive the real current-state reader over a branch-matched CLI fixture.
+test_vanished_worker_run_is_observed() {
+  local wt head out result before after err seq generation pid ticks backend
+  make_world vanished-run
+  write_child "$MAIN" child 'captain-held [key=old]: preserved work'
+  wt="$MAIN/projects/child"
+  mkdir -p "$wt"
+  fm_git_identity fmtest fmtest@example.invalid
+  git -C "$wt" init -q
+  git -C "$wt" checkout -q -b fm/recovery
+  git -C "$wt" commit -q --allow-empty -m initial
+  head=$(git -C "$wt" rev-parse HEAD)
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'axi status') cat "$FM_RUN_FIXTURE" ;;
+  'daemon status') [ "${FM_DAEMON_DOWN:-0}" != 1 ] ;;
+esac
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in list-windows) exit 0 ;; *) exit 1 ;; esac
+SH
+  chmod +x "$WORLD/fakebin/no-mistakes" "$WORLD/fakebin/tmux"
+  for result in running awaiting_approval running awaiting_approval failed; do
+    printf 'run:\n  id: surviving-run\n  branch: fm/recovery\n  head: %s\n  status: %s\n' "$head" "$result" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    case "$result" in
+      running) [ -z "$out" ] || fail "active surviving run was reported as finished: $out" ;;
+      awaiting_approval) [ -n "$out" ] || fail "vanished worker validation decision remained silent" ;;
+      failed) [ -n "$out" ] || fail "vanished worker terminal failure remained silent" ;;
+    esac
+    before=$(wake_count "$MAIN" 'inactive-outcome:')
+    run_real_reconcile >/dev/null
+    after=$(wake_count "$MAIN" 'inactive-outcome:')
+    [ "$before" = "$after" ] || fail "unchanged run observation duplicated a notification"
+  done
+  grep -F 'state=failed' "$MAIN/state/.wake-queue" >/dev/null || fail "failure was not durably queued"
+  # A handled gate must not reappear after restart; a new run on the same HEAD
+  # is not the old run and must still report its own failure.
+  err="$WORLD/drain.err"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "could not acknowledge run observations"
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "acknowledged terminal outcome replayed after restart"
+  printf 'run:\n  id: replacement\n  branch: fm/recovery\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  run_real_reconcile >/dev/null
+  FM_DAEMON_DOWN=1 out=$(FM_DAEMON_DOWN=1 run_real_reconcile)
+  [ -n "$out" ] || fail "daemon failure behind a persisted running row stayed silent"
+  unset FM_DAEMON_DOWN
+  # A completely lost response after a known active run must not be mistaken
+  # for completion, nor forgotten because no worker can report the CLI error.
+  run_real_reconcile >/dev/null
+  : > "$WORLD/run"
+  out=$(run_real_reconcile)
+  case "$out" in *"no longer readable or attributable"*) ;; *) fail "lost run query did not request reconciliation: $out" ;; esac
+  printf 'run:\n  id: replacement\n  branch: fm/recovery\n  head: %s\n  status: failed\n' "$head" > "$WORLD/run"
+  # Exercise the actual watcher, not only its scan entry point, with capture
+  # failing because the endpoint disappeared in the reboot.
+  prime_seen "$MAIN/state" "$MAIN/state/child.status"
+  age "$MAIN/state/.inactive-outcome-reconcile"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_RUN_FIXTURE="$WORLD/run" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$WORLD/watch.out" 2>&1 &
+  pid=$!; ticks=0
+  while kill -0 "$pid" 2>/dev/null && [ "$ticks" -lt 200 ]; do sleep 0.1; ticks=$((ticks + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then reap "$pid"; fail "watcher did not observe the replacement run failure"; fi
+  wait "$pid" || fail "watcher failed: $(cat "$WORLD/watch.out")"
+  grep -F 'state=failed' "$MAIN/state/.wake-queue" >/dev/null || fail "watcher lost terminal failure"
+  grep -Fx 'captain-held [key=old]: preserved work' "$MAIN/state/child.status" >/dev/null || fail "observer changed the worker's decision"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || fail "observer changed preserved project work"
+  # The run source is independent of all five backend adapters. Unknown
+  # liveness is sufficient to observe, never sufficient to relaunch.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$WORLD/fakebin/herdr"
+  chmod +x "$WORLD/fakebin/herdr"
+  for backend in tmux herdr zellij orca cmux; do
+    printf 'backend=%s\n' "$backend" >> "$MAIN/state/child.meta"
+    age "$MAIN/state/child.meta"
+    printf 'run:\n  id: %s-run\n  branch: fm/recovery\n  head: %s\n  status: awaiting_approval\n' "$backend" "$head" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -n "$out" ] || fail "$backend lost a workerless validation decision"
+  done
+  # A gate can change between polls without an observed running interval.
+  # The same run, step, and finding count must not hide different findings.
+  for result in first-finding replacement-finding; do
+    printf 'run:\n  id: gate-revision\n  branch: fm/recovery\n  head: %s\n  status: awaiting_approval\n  findings[1]{id,severity,file,line,action,description}:\n    %s,error,file.sh,1,ask-user,requires a decision\n' "$head" "$result" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -n "$out" ] || fail "changed findings at the same gate stayed silent"
+    printf 'elapsed: different on each poll\n' >> "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -z "$out" ] || fail "elapsed display noise created a duplicate gate notification"
+  done
+  # A reused task id cannot inherit the previous incarnation's active observer,
+  # and another branch's run cannot be reported as this task's decision.
+  printf 'spawn_gen=reused-task\n' >> "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  printf 'run:\n  id: foreign\n  branch: fm/other\n  head: %s\n  status: awaiting_approval\n' "$head" > "$WORLD/run"
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "a reused task inherited an observation or attributed a foreign branch: $out"
+  pass "a surviving validation run reports its decision and failure without a worker"
+}
+
 test_main_direct_terminal_presentation_receipt
+test_vanished_worker_run_is_observed
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
