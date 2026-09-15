@@ -60,6 +60,11 @@
 #     hints.pending_decision and hints.blocked_event still report the fold that
 #     could not be carried. The row itself is never dropped: omitting a live task
 #     would publish it as vanished rather than as unobserved.
+#     That degradation covers composition only. While collecting evidence, a
+#     per-task observation this command cannot write at all - a metadata copy, a
+#     status or report capture, a current-state observation, or an endpoint
+#     observation - still fails the whole command loudly instead of publishing a
+#     snapshot whose evidence stage never ran.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
@@ -376,7 +381,7 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
 
 # <transport-prefix> names the file pair this payload rides on: a single status
 # line has no size bound of its own, so its raw text and note must never travel
-# on argv. Only the bounded verb stays there.
+# on argv. Only the bounded verb and the contract path stay there.
 status_event_json() {  # <observed-status-log> <contract-path> <transport-prefix>
   local log=$1 path=${2:-$1} prefix=$3 present=0 raw='' verb='' note=''
   if [ -f "$log" ]; then
