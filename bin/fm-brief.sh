@@ -354,6 +354,8 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
+
+Keep accepted task scope focused on the shortest robust path; route unrelated polish and speculative low-impact findings to firstmate for record or deferral, and never answer ask-user findings yourself.
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
