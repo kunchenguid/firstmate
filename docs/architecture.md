@@ -62,8 +62,10 @@ No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates and takes current state from `bin/fm-crew-state.sh`.
 An attributed validation run remains observed without a confirmed live worker, even under an old captain-held status: terminal outcomes use normal delivery, and decisions or unverified execution create durable local supervision obligations.
+A persisted parked run remains authoritative when the daemon probe fails because its durable findings still require a decision; only a persisted active run is downgraded to unverified execution.
 Its script owns observation identity, restart continuity, and acknowledgement; observation never creates a worker or run, changes a lease, or answers a decision.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
+A worker reporting a terminal no-mistakes outcome carries the structured return's exact identity in `done [run=<id>]: ...` or `failed [run=<id>]: ...`; the ledger receipt copies that producer-owned identity instead of guessing from a later run-state read.
 A secondmate home's terminal child ledger lines, PR registrations, captain holds, and merges are published on that same parent route by the scripts that record them, so no captain-facing outcome depends on the mate model appending it ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.

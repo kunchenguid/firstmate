@@ -339,6 +339,18 @@ status_line_verb() {  # <status-line> -> leading verb word
   done
   printf '%s' "$out"
 }
+
+# Exact no-mistakes run identity carried by a terminal producer before the
+# status line's first colon: `done [run=<id>]: ...`.
+status_line_run_id() {  # <status-line> -> run id
+  local prefix run_id
+  prefix=${1%%:*}
+  case "$prefix" in *\[run=*\]*) ;; *) return 1 ;; esac
+  run_id=${prefix#*\[run=}
+  run_id=${run_id%%\]*}
+  _fm_decision_slug_ok "$run_id" || return 1
+  printf '%s' "$run_id"
+}
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>

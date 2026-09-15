@@ -373,6 +373,10 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD still states the --yes ban as a preference"
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
+  assert_grep 'done [run=<id>]: PR {url} checks green' "$brief" \
+    "no-mistakes DOD must persist the producer-owned terminal run id"
+  assert_grep 'failed [run=<id>]: {failure}' "$brief" \
+    "no-mistakes DOD must tag terminal validation failures with their run id"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
