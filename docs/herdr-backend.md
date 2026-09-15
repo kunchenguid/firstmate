@@ -351,6 +351,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Mid-session secondmate agent-process liveness is not implemented.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
+- Herdr's `agent start <NAME>` caps names at 32 characters; `fm-spawn.sh` (fresh and `--relaunch`) and `fm-control.sh relaunch` refuse a longer id with the cap and offending length named before any pane, tab, workspace, or agent is created (predicate in `bin/fm-backend.sh` `fm_backend_herdr_agent_name_within_cap`).
 
 ## Regression entry points
 
@@ -373,6 +374,7 @@ tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-spawn-herdr-name-cap.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

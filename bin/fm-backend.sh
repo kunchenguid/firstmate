@@ -294,6 +294,24 @@ fm_backend_validate_spawn() {  # <name>
   return 1
 }
 
+# fm_backend_herdr_agent_name_cap: herdr's `agent start <NAME>` caps the name
+# length at FM_HERDR_AGENT_NAME_MAX characters (verified against real herdr;
+# over-cap names fail with `invalid_agent_name`: "agent name must start with a
+# lowercase letter and contain only lowercase letters, digits, '-' or '_'
+# (1-32 characters)"). fm-spawn.sh and fm-control.sh apply this BEFORE creating
+# any pane, tab, workspace, or agent, so a task id over the cap fails closed
+# rather than half-creating a stranded endpoint whose inner agent-start would
+# silently error. The cap is a length rule; herdr's stricter character set
+# (lowercase, digits, '-', '_') is intentionally NOT enforced here because
+# firstmate's existing fm_task_id_creation_valid accepts uppercase letters
+# and dots, and tightening that is a separate, broader scope.
+FM_HERDR_AGENT_NAME_MAX=32
+
+fm_backend_herdr_agent_name_within_cap() {  # <task-id>
+  local id=$1
+  [ "${#id}" -le "$FM_HERDR_AGENT_NAME_MAX" ]
+}
+
 # fm_backend_required_tools: the backend-SPECIFIC CLI tools a firstmate home on
 # <backend> genuinely requires, beyond firstmate's universal toolchain (owned by
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the

@@ -86,6 +86,11 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#   - `relaunch` on a herdr task whose id exceeds herdr's 32-char agent-name
+#     cap refuses before the old agent is stopped (bin/fm-backend.sh's
+#     fm_backend_herdr_agent_name_within_cap owns the predicate). The hint is
+#     to recreate the task under a shorter id; ids are semantic, so the script
+#     never auto-truncates.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -802,6 +807,14 @@ record_note() {
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
+
+  # Herdr caps agent names at FM_HERDR_AGENT_NAME_MAX chars; refuse here before
+  # stopping the old agent or mutating any durable record, so a relaunch that
+  # would silently strand the replacement never gets to that point. fm-spawn's
+  # own --relaunch path repeats the same check as a defense-in-depth backstop.
+  if [ "$BACKEND" = herdr ] && ! fm_backend_herdr_agent_name_within_cap "$ID"; then
+    die "herdr caps agent names at $FM_HERDR_AGENT_NAME_MAX characters (lowercase/digits/-/_), but task id '$ID' is ${#ID} chars; recreate the task under a shorter id before relaunching"
+  fi
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
