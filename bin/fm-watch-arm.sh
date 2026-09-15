@@ -529,7 +529,7 @@ child_err=$(mktemp "$STATE/.watch-arm-stderr.XXXXXX") || {
 # trusting the setsid() return, and refuse loudly if it did not.
 # shellcheck disable=SC2016 # Single-quoted on purpose: perl expands its own $$/$ARGV.
 DETACH_EXEC='use POSIX ();
-POSIX::setsid();
+eval { POSIX::setsid(); 1 } or exit 126;
 exit 126 unless POSIX::getpgrp() == $$;
 exec { $ARGV[0] } @ARGV;
 exit 127;'
