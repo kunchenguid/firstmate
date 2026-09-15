@@ -164,6 +164,24 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
+test_lost_run_attribution_does_not_promote_status_terminal() {
+  local out
+  make_world lost-run-attribution
+  write_child "$MAIN" child 'done: stale pre-validation delivery'
+  out=$(FM_FAKE_CREW_STATE='working · source: run-step · run: observed-run · validating (running)' \
+    run_reconcile "$MAIN" --startup)
+  [ -z "$out" ] || fail "active run observation produced an outcome: $out"
+  out=$(FM_FAKE_CREW_STATE='done · source: status-log · done: stale pre-validation delivery' \
+    run_reconcile "$MAIN" --startup)
+  case "$out" in
+    *"no longer readable or attributable"*) ;;
+    *) fail "lost run attribution promoted a stale status terminal: $out" ;;
+  esac
+  grep -Fq 'state=done' "$MAIN/state/.wake-queue" 2>/dev/null \
+    && fail "lost run attribution queued a false terminal outcome"
+  pass "lost run attribution cannot promote a stale status terminal"
+}
+
 # A secondmate delivers a child's terminal ledger line to the parent on the
 # very next poll, from the ledger alone: no current-state read, no inactive
 # cadence, and no line appended by the mate model. The delivery carries the
@@ -982,6 +1000,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_lost_run_attribution_does_not_promote_status_terminal
 test_vanished_worker_run_is_observed
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes

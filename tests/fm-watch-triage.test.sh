@@ -2593,10 +2593,10 @@ test_ended_worker_inherited_wedge_becomes_wait() {
 }
 
 test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
-  local dir state out capture key run_state pane='Ctrl+c:cancel preserved shell'
+  local dir state out capture key run_state calls pane='Ctrl+c:cancel preserved shell'
   dir=$(make_hold_home ended-unheld-wedge 'resolved [key=prior]: reboot interrupted recovery' nohold) \
     || fail "could not build stopped worker recovery fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; calls="$dir/crew-state-calls"
   key=$(hold_key)
   printf '%s\n' "$pane" > "$capture"
   printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
@@ -2618,21 +2618,26 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
     fail "stopped unheld worker repeated its recovery alarm"
   fi
   reap "$HOLD_WATCH_PID"
+  export FM_FAKE_CREW_STATE_COUNT_FILE="$calls"
   for run_state in working parked 'done'; do
+    : > "$calls"
+    rm -f "$state/.paused-resurfaced-$key"
     printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
     printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
     printf '2\n' > "$state/.wedge-escalations-$key"
     export FM_HOLD_FAKE_CREW_STATE="state: $run_state · source: run-step · run: surviving-$run_state"
     hold_watch_launch "$dir" "$out" "$capture"
-    if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
       reap "$HOLD_WATCH_PID"
       fail "a surviving $run_state run inherited the dead worker's wedge"
     fi
     [ ! -e "$state/.stale-since-$key" ] && [ ! -e "$state/.wedge-escalations-$key" ] \
       || { reap "$HOLD_WATCH_PID"; fail "a surviving $run_state run retained dead-worker wedge state"; }
+    [ "$(cat "$calls" 2>/dev/null || true)" = 1 ] \
+      || { reap "$HOLD_WATCH_PID"; fail "a surviving $run_state run was re-read inside the long cadence"; }
     reap "$HOLD_WATCH_PID"
   done
-  unset FM_HOLD_FAKE_CREW_STATE
+  unset FM_HOLD_FAKE_CREW_STATE FM_FAKE_CREW_STATE_COUNT_FILE
   pass "a dead worker ignores stale busy and resolved evidence without suppressing a surviving run"
 }
 
