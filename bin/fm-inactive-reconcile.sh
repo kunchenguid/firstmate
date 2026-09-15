@@ -353,14 +353,19 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 
 # The whole terminal line a child's ledger ends in, or non-zero when the ledger
 # is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line.
+# not end in a done or failed line. Teardown bookkeeping lines (`blocked:
+# teardown ...`, bin/fm-teardown.sh's failure record) are supervisor signals
+# about cleanup, not the worker's outcome statement, so they are transparent
+# here: a stranded record's own done/failed line stays deliverable past them.
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
   snapshot=${snapshot%"$marker"}
-  last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
+  snapshot=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | grep -v '^blocked: teardown ' || true)
+  [ -n "$snapshot" ] || return 1
+  last=$(printf '%s\n' "$snapshot" | tail -1)
   case "$(status_line_verb "$last")" in
     done|failed) printf '%s\n' "$last" ;;
     *) return 1 ;;
@@ -405,7 +410,12 @@ report_child_ledger_locked() { # <id> <meta>
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
+  # The predecessor head binds the ledger state before this event so a later
+  # terminal line reads as a new event; teardown bookkeeping lines are
+  # transparent here exactly as in child_terminal_ledger_line, so the binding
+  # matches the value computed before any failure record was appended.
   previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
+    | grep -v '^blocked: teardown ' \
     | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
   predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"

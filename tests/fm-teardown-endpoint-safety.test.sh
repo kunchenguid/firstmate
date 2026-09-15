@@ -972,6 +972,118 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# A finished task whose teardown failed after its slot went back to the pool
+# leaves a record naming a slot the pool has since handed on. Without the
+# slot-owner claim both records read as live claimants and both teardowns
+# refuse forever; with it, the claim names the live holder. The neighbour
+# tears down as the owner while the stale record is reported and left in
+# place, and the stale task's own retry finishes through the reassigned-slot
+# path without touching the slot. A conflict the claim cannot resolve - no
+# claim, an unreadable claim, or a live-or-ambiguous other endpoint - still
+# refuses with both records intact.
+test_claim_resolved_slot_collision_unblocks_both_teardowns() {
+  local dir id=stale-task other=live-task rc
+
+  # The neighbour owns the slot per the claim: it tears down, returns the
+  # slot, and leaves the stale record alone.
+  dir=$(make_case slot-collision-claim-neighbour)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "neighbour teardown blocked by a stale record the slot claim resolves: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$other.meta" "neighbour teardown left its own record"
+  assert_present "$dir/home/state/$id.meta" "neighbour teardown removed the stale record instead of leaving it"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "neighbour teardown left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "neighbour teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$id" \
+    "neighbour teardown should name the stale record it ignored"
+  assert_contains "$(cat "$dir/stderr")" "ignoring the stale record" \
+    "neighbour teardown should report the stale record it ignored"
+
+  # The stale task's retry finishes its own cleanup and never touches the slot.
+  dir=$(make_case slot-collision-claim-retry)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale-record retry blocked by the neighbour record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "stale-record retry left its own record"
+  assert_present "$dir/home/state/$other.meta" "stale-record retry removed the neighbour record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "stale-record retry removed the neighbour's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
+    "stale-record retry rewrote the neighbour's slot claim"
+  assert_present "$dir/worktree/sentinel" "stale-record retry reset a pool slot it does not own"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "stale-record retry returned a pool slot it does not own: $(cat "$dir/runtime.log")"
+
+  # No claim proves nothing either way: the neighbour still refuses and both
+  # records stay put for an operator to reconcile.
+  dir=$(make_case slot-collision-no-claim)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "neighbour teardown proceeded on an unproven slot collision"
+  assert_present "$dir/home/state/$other.meta" "unproven collision removed the neighbour record"
+  assert_present "$dir/home/state/$id.meta" "unproven collision removed the stale record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unproven collision reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$id" \
+    "unproven-collision refusal should name the other task holding the slot"
+
+  # A claim naming this task does not license ignoring a record whose worker
+  # may still be live: an unreadable other endpoint keeps the refusal.
+  dir=$(make_case slot-collision-live-other)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "neighbour teardown ignored a record whose endpoint cannot be proved dead"
+  assert_present "$dir/home/state/$other.meta" "ambiguous collision removed the neighbour record"
+  assert_present "$dir/home/state/$id.meta" "ambiguous collision removed the other record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "ambiguous collision reached the runtime: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a slot collision the owner claim resolves unblocks both teardowns; an unproven one still refuses"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -986,6 +1098,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_claim_resolved_slot_collision_unblocks_both_teardowns
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

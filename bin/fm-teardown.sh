@@ -13,7 +13,12 @@
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
+# is retried by the next session start. The same loudness holds past the last
+# refusal: every failure once the destructive sequence starts exits non-zero
+# with a named reason on stderr and appends one `blocked: teardown ...` line to
+# state/<id>.status, which is the ordinary wake path a supervisor watches, so a
+# teardown that strands its record cannot pass silently.
+# The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
 # data/backlog.md; those cases print the manual follow-up. A configured
 # non-markdown adapter remains active without a markdown file; any active
@@ -78,8 +83,10 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# in its worktree= or home= - unless the slot-owner claim resolves which record
+# is stale (exclusive_slot_conflict_claim_resolved owns that proof). One live
+# path with two task records is the reuse collision itself, whichever record is
+# stale; without the claim's verdict the refusal stands, not even with --force.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -360,6 +367,35 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+# Set once every landed/discard-work refusal above has passed and the
+# destructive sequence starts. A non-zero exit past that point leaves the
+# task's records behind by design (fail closed) with the slot possibly already
+# back in the pool - the stranded-record shape - so the EXIT trap owes a
+# durable `blocked:` line on the task's status log, which is the ordinary wake
+# path a supervisor actually watches. Refusals before that point leave
+# everything intact for a plain rerun and stay a stderr refusal plus a
+# non-zero exit. The line is deduplicated against an identical trailing line so
+# a refused rerun does not nag once per attempt, and `blocked:` (never
+# `done:`/`failed:`) so it cannot be mistaken for the task's own outcome.
+TEARDOWN_CLEANUP_STARTED=0
+teardown_report_cleanup_failure() {  # <exit-status>
+  local status=$1 last
+  [ "$status" -ne 0 ] || return 0
+  [ "$TEARDOWN_CLEANUP_STARTED" = 1 ] || return 0
+  [ -n "${ID:-}" ] || return 0
+  fm_task_id_path_safe "$ID" || return 0
+  [ -n "${STATE:-}" ] && [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] || return 0
+  if [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ]; then
+    last=$(tail -n 1 -- "$STATE/$ID.status" 2>/dev/null || true)
+    case "$last" in
+      "blocked: teardown "*) return 0 ;;
+    esac
+  fi
+  printf 'blocked: teardown exited %s after cleanup started with the task record retained; inspect and re-run bin/fm-teardown.sh %s\n' \
+    "$status" "$ID" >> "$STATE/$ID.status" 2>/dev/null || true
+  return 0
+}
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -400,6 +436,7 @@ teardown_release_locks() {
     TREEHOUSE_PROJECT_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
+  teardown_report_cleanup_failure "$status" || true
   return "$status"
 }
 trap teardown_release_locks EXIT
@@ -878,8 +915,10 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  status_retire_presentation_task "$STATE" "$ID" || return 1
-  fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
+  status_retire_presentation_task "$STATE" "$ID" \
+    || { echo "error: status-presentation retirement failed for remote secondmate $ID; preserving the local route for retry" >&2; return 1; }
+  fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" \
+    || { echo "error: remote secondmate $ID's task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR); preserving the local route for retry" >&2; return 1; }
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.stopped"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
@@ -2162,6 +2201,49 @@ collect_local_firstmate_states() {
   done
 }
 
+# Resolve one slot double-claim against the slot-owner claim before the
+# exclusivity scan refuses. A finished task whose teardown failed after its
+# slot went back to the pool leaves a record naming a slot the pool has since
+# handed on, so the finished record and its neighbour each read as a live
+# claimant blocking the other and neither teardown can proceed. The claim
+# (bin/fm-wake-lib.sh owns it) is the evidence that breaks the tie, because it
+# is written under the project lock at allocation and released only after a
+# genuine return: a claim naming another task proves this record is the stale
+# one, and a claim naming this task proves the other record does not hold the
+# slot. Returns 0 when the conflict is resolved and the other record may be
+# ignored for this teardown's return decision - the record itself is never
+# removed here, only reported - and non-zero when nothing proves which record
+# is stale, preserving the refusal. The claim-naming-this-task branch
+# additionally requires the other task's endpoint to read confidently dead or
+# missing (the same recovery-grade verdict the --legacy-record gate trusts),
+# so a live worker that shares the path by drift or pool reset keeps its
+# refusal; a live or ambiguous endpoint is never argued away.
+exclusive_slot_conflict_claim_resolved() {  # <slot> <record-id> <other-meta> <other-id>
+  local slot=$1 record_id=$2 other=$3 other_id=$4
+  local other_backend other_target other_state
+  fm_treehouse_slot_owner_state "$slot" "$record_id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other)
+      echo "warning: task $record_id's record still names pool slot $slot, but that slot was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}; ignoring the stale record for this return decision while its own cleanup runs." >&2
+      return 0
+      ;;
+    mine) ;;
+    *)
+      return 1
+      ;;
+  esac
+  other_backend=$(fm_backend_of_meta "$other")
+  other_target=$(fm_backend_target_of_meta "$other")
+  [ -n "$other_target" ] || return 1
+  other_state=$(fm_backend_agent_state "$other_backend" "$other_target")
+  case "$other_state" in
+    dead|missing) ;;
+    *) return 1 ;;
+  esac
+  echo "warning: task $other_id's record still names pool slot $slot, but the slot claim names $record_id and $other_id's endpoint reads $other_state; ignoring the stale record for this return decision - the record itself is left in place." >&2
+  return 0
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
@@ -2177,6 +2259,9 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if exclusive_slot_conflict_claim_resolved "$slot" "$record_id" "$other" "$other_id"; then
+          continue 2
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -3296,17 +3381,21 @@ else
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# them). The destructive sequence starts here: any failure past this point
+# leaves records behind with the slot possibly already recycled, so the EXIT
+# trap records it on the wake path (see TEARDOWN_CLEANUP_STARTED above).
+TEARDOWN_CLEANUP_STARTED=1
+# Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  conclude_task_no_mistakes_run "$WT" || exit 1
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" || exit 1
 elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
+  reap_task_worktree_processes tasktmp "$TASK_TMP" || exit 1
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -3331,7 +3420,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-agy-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || {
+    echo "error: Orca worktree removal failed for $ID; retaining every durable task record" >&2
+    exit 1
+  }
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
@@ -3466,10 +3558,21 @@ remove_agy_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+if [ -n "$TASK_TMP" ]; then
+  rm -rf "$TASK_TMP" || {
+    echo "error: per-task temp root removal failed for $ID at $TASK_TMP; retaining every durable task record" >&2
+    exit 1
+  }
+fi
+remove_pr_poll_artifacts "$STATE" "$ID" || {
+  echo "error: task PR-check artifact cleanup failed for $ID; retaining every durable task record" >&2
+  exit 1
+}
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-status_retire_presentation_task "$STATE" "$ID" || exit 1
+status_retire_presentation_task "$STATE" "$ID" || {
+  echo "error: status-presentation retirement failed for $ID; retaining every durable task record" >&2
+  exit 1
+}
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" "$STATE/$ID.stopped" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.agy-turnend-token" "$STATE/$ID.agy-session" \
@@ -3490,7 +3593,10 @@ rm -rf "$STATE/$ID.inbox"
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
 if [ "$BACKLOG_CLOSED" = 1 ]; then
-  BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+  BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || {
+    echo "error: $ID's pending backlog $BACKLOG_TRANSITION could not be resolved to a marker path ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2
+    exit 1
+  }
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
       "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     fm_lock_release "$META_LOCK"

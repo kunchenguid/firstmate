@@ -424,6 +424,26 @@ test_report_subcommand_delivers_and_refuses() {
   pass "report delivers a child's final line, owes nothing twice, and refuses only an unwritable channel"
 }
 
+# Teardown's own failure record (`blocked: teardown ...`) is a supervisor
+# signal about cleanup, not the worker's outcome statement: a ledger that ends
+# in a done line plus that bookkeeping still delivers the done line, exactly
+# once, with the predecessor binding matching the pre-failure ledger.
+test_report_ignores_teardown_bookkeeping_tail() {
+  local key
+  make_world report-bookkeeping; bind_secondmate local
+  write_child "$MATE" child 'done: final word'
+  printf 'blocked: teardown exited 1 after cleanup started with the task record retained; inspect and re-run bin/fm-teardown.sh child\n' \
+    >> "$MATE/state/child.status"
+  run_report "$MATE" child || fail "report refused a deliverable ledger line past teardown bookkeeping"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "report receipt key missing"
+  grep -Fq "done [key=$key]: child child done: final word" "$MAIN/state/mate.status" \
+    || fail "report did not deliver the child's final line past teardown bookkeeping"
+  run_report "$MATE" child || fail "report did not treat the delivered line as owed nothing"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "teardown bookkeeping caused a duplicate parent delivery"
+  pass "report delivers past a trailing teardown bookkeeping line without duplicating"
+}
+
 # Teardown calls report while holding the child's metadata lock. A concurrent
 # scan may hold the scan lock while waiting for that metadata lock, so report
 # must not wait for the scan lock in the opposite order.
@@ -830,6 +850,7 @@ test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
+test_report_ignores_teardown_bookkeeping_tail
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

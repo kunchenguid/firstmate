@@ -3666,7 +3666,50 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# A teardown that fails after the worktree is back in the pool strands its
+# record on a recycled slot, so the failure must be impossible to miss: a
+# non-zero exit with a named reason on stderr, plus one `blocked: teardown`
+# line on the task's status log, which is the ordinary wake path a supervisor
+# watches. The corrupted status-presentation manifest below makes the
+# post-return presentation retirement fail while the slot return itself
+# succeeds; before the fix this exited 1 with no reason and no wake record.
+test_post_return_failure_is_loud_and_wakes() {
+  local case_dir rc blocked_lines
+  case_dir=$(make_case post-return-loud)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'garbage-without-tabs\n' > "$case_dir/state/.status-presentation-cursor"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "post-return-loud: teardown must exit non-zero when post-return cleanup fails"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "post-return-loud: teardown removed the record it could not finish"
+  assert_contains "$(cat "$case_dir/stderr")" "status-presentation retirement failed for task-x1" \
+    "post-return-loud: the failure should name its reason on stderr"
+  assert_present "$case_dir/state/task-x1.status" \
+    "post-return-loud: teardown left no wake-path record for its stranded record"
+  assert_contains "$(cat "$case_dir/state/task-x1.status")" "blocked: teardown exited 1 after cleanup started" \
+    "post-return-loud: the wake-path record should name the failed teardown"
+  # A refused rerun must not stack another identical line: one wake, not one
+  # per attempt.
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "post-return-loud: the retry must still fail while the manifest is corrupt"
+  blocked_lines=$(grep -c '^blocked: teardown ' "$case_dir/state/task-x1.status")
+  [ "$blocked_lines" = 1 ] \
+    || fail "post-return-loud: expected one wake-path line after two failures, found $blocked_lines"
+  pass "a post-return teardown failure exits non-zero with a named reason and one wake-path record"
+}
+
 test_local_only_fork_remote_allows
+test_post_return_failure_is_loud_and_wakes
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
