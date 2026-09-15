@@ -213,6 +213,68 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Every GitHub check that is not green in the given live pull-request JSON, one
+# name per line. An entry is green when it is a status context whose state is
+# SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED.
+# A malformed or missing rollup is a failed read, never an empty red set.
+#
+# GitHub keeps superseded runs beside their replacements. A non-green completed
+# run is superseded only by a later green run with the same nonempty name and
+# whole-second UTC startedAt. Pending, undated, tied, status-context, and unnamed
+# entries remain non-green.
+fm_pr_github_checks_not_green() {
+  local json=$1
+  printf '%s' "$json" | jq -r '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | [ .statusCheckRollup
+        | to_entries[]
+        | .key as $i
+        | .value
+        | if .__typename == "CheckRun" then
+            {
+              kind: "check_run",
+              name: (.name // ""),
+              completed: (.status == "COMPLETED"),
+              ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
+              at: (.startedAt | settled_at)
+            }
+            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
+          else
+            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
+          end
+      ]
+    | . as $entries
+    | (
+        ($entries[]
+          | select(.kind == "status_context" and (.ok | not))
+          | .name
+        ),
+        ($entries
+          | [.[] | select(.kind == "check_run")]
+          | group_by(.group)[]
+          | {
+              name: .[0].name,
+              reds: [.[] | select(.ok | not)],
+              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+            }
+          | select(
+              (.reds | length) > 0
+              and (
+                .newest_green == null
+                or any(.reds[]; (.completed | not) or .at == null)
+                or ([.reds[] | .at] | max) >= .newest_green
+              )
+            )
+          | .name
+        )
+      )
+    | if . == "" then "(unnamed check)" else . end
+  ' 2>/dev/null || return 1
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null

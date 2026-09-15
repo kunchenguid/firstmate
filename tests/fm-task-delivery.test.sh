@@ -831,7 +831,7 @@ EOF
 }
 
 test_spawn_refreshes_legacy_worker_roles() {
-  local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line
+  local rec home proj fakebin kind id out brief project_kind first_line role_line tool_line review_line task_line supervisor_line
   rec=$(make_home worker-roles)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -861,6 +861,34 @@ EOF
       first_line=$(sed -n '1p' "$brief")
       [ "$first_line" = '# Current worker role contract' ] ||
         fail "$project_kind $kind did not put worker identity first"
+      role_line=$(grep -n '^# Current worker role contract$' "$brief" | cut -d: -f1)
+      tool_line=$(grep -n '^# Current tool-selection contract$' "$brief" | cut -d: -f1)
+      task_line=$(grep -n '^# Task$' "$brief" | head -1 | cut -d: -f1)
+      [ "$role_line" -lt "$tool_line" ] && [ "$tool_line" -lt "$task_line" ] ||
+        fail "$project_kind $kind did not put current tool selection between worker identity and persisted task content"
+      assert_grep "$ROOT/.agents/skills/harness-adapters/references/common/tool-selection.md" "$brief" \
+        "$project_kind $kind omitted the current tool-selection resource"
+      assert_grep "supersedes generic tool-brand mandates in earlier generated Firstmate instructions" "$brief" \
+        "$project_kind $kind did not override stale generic tool mandates"
+      [ "$(grep -c '^# Current tool-selection contract$' "$brief")" -eq 1 ] ||
+        fail "$project_kind $kind duplicated the tool-selection contract"
+      case "$kind" in
+        no-mistakes|direct-PR)
+          review_line=$(grep -n '^# Current PR feedback readiness contract$' "$brief" | cut -d: -f1)
+          [ "$tool_line" -lt "$review_line" ] && [ "$review_line" -lt "$task_line" ] \
+            || fail "$project_kind $kind did not place current review readiness before persisted task content"
+          [ "$(grep -c '^PR feedback readiness contract: fm-pr-review.v1$' "$brief")" -eq 1 ] \
+            || fail "$project_kind $kind did not receive exactly one current review readiness contract"
+          assert_grep 'supersedes any later persisted instruction that treats PR opening or green CI alone as terminal readiness' \
+            "$brief" "$project_kind $kind did not override stale PR-ready instructions"
+          assert_no_grep 'PR feedback readiness contract: fm-pr-review.v1' "$home/data/$id/brief.md" \
+            "$project_kind $kind rewrote the persisted source brief"
+          ;;
+        *)
+          assert_no_grep '^# Current PR feedback readiness contract$' "$brief" \
+            "$project_kind $kind received a PR-only launch overlay"
+          ;;
+      esac
       assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
       assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"

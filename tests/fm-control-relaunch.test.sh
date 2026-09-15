@@ -527,9 +527,13 @@ test_disabled_relaunch_clears_prior_trace_context() {
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
-  local dir out rc brief launch_brief first_line role_line task_line
+  local dir out rc brief launch_brief first_line role_line tool_line task_line
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
+  # A pre-mode ship record must still relaunch: the current review overlay only
+  # applies when metadata names one of the two PR delivery modes.
+  sed '/^mode=/d' "$dir/home/state/rl2.meta" > "$dir/home/state/rl2.meta.legacy"
+  mv "$dir/home/state/rl2.meta.legacy" "$dir/home/state/rl2.meta"
   cp "$ROOT/AGENTS.md" "$dir/wt/AGENTS.md"
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
@@ -546,6 +550,13 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   role_line=$(grep -n '^# Current worker role contract$' "$launch_brief" | cut -d: -f1)
   task_line=$(grep -n '^# Task$' "$launch_brief" | head -1 | cut -d: -f1)
   [ "$role_line" -lt "$task_line" ] || fail "the relaunched worker identity followed its task content"
+  tool_line=$(grep -n '^# Current tool-selection contract$' "$launch_brief" | cut -d: -f1)
+  [ "$role_line" -lt "$tool_line" ] && [ "$tool_line" -lt "$task_line" ] ||
+    fail "the relaunched worker did not receive tool selection between identity and persisted task content"
+  assert_grep "$ROOT/.agents/skills/harness-adapters/references/common/tool-selection.md" "$launch_brief" \
+    "the relaunched worker omitted the current tool-selection resource"
+  assert_no_grep '^# Current PR feedback readiness contract$' "$launch_brief" \
+    "a legacy ship with no recorded delivery mode received an invalid PR overlay"
   assert_grep "$dir/home/state/rl2.inbox" "$launch_brief" \
     "the Firstmate-worktree relaunch omitted the worker's exact steering inbox"
   assert_grep 'do not reject it as another home' "$launch_brief" \
@@ -1013,6 +1024,8 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch did not receive the promoted task identity"
     assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
       "$mode: the replacement launch left the stale scout prohibition readable at face value"
+    assert_grep '# Current tool-selection contract' "$launch" \
+      "$mode: the promoted worker did not receive the current tool-selection overlay"
     case "$mode" in
       direct-PR)
         rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;

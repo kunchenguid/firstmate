@@ -11,6 +11,7 @@ set -u
 . "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_REVIEW="$ROOT/bin/fm-pr-review.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
@@ -137,11 +138,25 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
-    printf '%s\n' \
-      "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
-      "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
-      "queued=${FM_TEST_GH_GRAPHQL_QUEUED:-false}" \
-      'base=main'
+    case " $* " in
+      *ReviewCommentsPage*)
+        printf '%s\n' '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+        ;;
+      *ReviewsPage*)
+        printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+        ;;
+      *ReviewThreadsPage*)
+        printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+        ;;
+      *ThreadCommentsPage*) exit 2 ;;
+      *)
+        printf '%s\n' \
+          "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
+          "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
+          "queued=${FM_TEST_GH_GRAPHQL_QUEUED:-false}" \
+          'base=main'
+        ;;
+    esac
     exit 0
     ;;
   "pr view")
@@ -225,12 +240,41 @@ run_check_entry() {
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
-    "$PR_CHECK" "$@"
+    "$PR_CHECK" --register-only "$@"
+}
+
+prepare_merge_review_evidence() { # <case-dir> <task-id> <github-pr-url>
+  local dir=$1 id=${2:-} url=${3:-} snapshot assessment existing
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 0
+  [ -f "$dir/home/state/$id.meta" ] && [ ! -L "$dir/home/state/$id.meta" ] || return 0
+  existing=$(grep '^pr=' "$dir/home/state/$id.meta" | tail -1 | cut -d= -f2- || true)
+  [ -z "$existing" ] || [ "$existing" = "$url" ] || return 0
+  run_check_entry "$dir" "$id" "$url" >/dev/null 2>&1 || return 1
+  rm -f -- "$dir/home/data/$id/pr-review-snapshot.json" "$dir/home/data/$id/pr-review.json"
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_PR_REVIEW_NOW_EPOCH=1000 \
+    FM_PR_REVIEW_NOW_ISO=2026-09-15T12:00:00Z PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_REVIEW" snapshot "$id" "$url" >/dev/null 2>&1 || return 1
+  snapshot="$dir/home/data/$id/pr-review-snapshot.json"
+  assessment="$dir/review-assessment.json"
+  jq '{schema:"fm-pr-review-assessment.v1",task_id:.task_id,spawn_gen:.spawn_gen,
+      pr_url:.pr_url,head:.head,snapshot_fingerprint:.fingerprint,sources:[]}' \
+    "$snapshot" > "$assessment" || return 1
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_PR_REVIEW_NOW_EPOCH=1120 \
+    FM_PR_REVIEW_NOW_ISO=2026-09-15T12:02:00Z PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_REVIEW" record "$id" "$url" "$assessment" >/dev/null 2>&1
 }
 
 run_merge_entry() {
-  local dir=$1
+  local dir=$1 id url
   shift
+  id=${1:-}
+  url=${2:-}
+  prepare_merge_review_evidence "$dir" "$id" "$url" || {
+    echo "error: could not prepare merge review evidence" >&2
+    return 1
+  }
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
@@ -2263,7 +2307,7 @@ test_authority_persistence_refuses_rebound_metadata() {
     || fail "rebind: could not arm the original poll"
   cat > "$dir/rebind.sh" <<SH
 #!/usr/bin/env bash
-"$PR_CHECK" task-a "$url_b" >/dev/null
+"$PR_CHECK" --register-only task-a "$url_b" >/dev/null
 SH
   chmod +x "$dir/rebind.sh"
   set +e
@@ -2365,10 +2409,17 @@ test_authority_retirement_preserves_replacement() {
   queue_merge "$dir" "$url_a"
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
-"$PR_CHECK" task-a "$url_b" >/dev/null
+"$PR_CHECK" --register-only task-a "$url_b" >/dev/null || exit \$?
+FM_PR_REVIEW_NOW_EPOCH=1000 FM_PR_REVIEW_NOW_ISO=2026-09-15T12:00:00Z \
+  "$PR_REVIEW" snapshot task-a "$url_b" >/dev/null || exit \$?
+jq '{schema:"fm-pr-review-assessment.v1",task_id:.task_id,spawn_gen:.spawn_gen,
+    pr_url:.pr_url,head:.head,snapshot_fingerprint:.fingerprint,sources:[]}' \
+  "$dir/home/data/task-a/pr-review-snapshot.json" > "$dir/replacement-assessment.json" || exit \$?
+FM_PR_REVIEW_NOW_EPOCH=1120 FM_PR_REVIEW_NOW_ISO=2026-09-15T12:02:00Z \
+  "$PR_REVIEW" record task-a "$url_b" "$dir/replacement-assessment.json" >/dev/null || exit \$?
 (
-  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
-  FM_TEST_GH_GRAPHQL_QUEUED=true \\
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+  FM_TEST_GH_GRAPHQL_QUEUED=true \
   "$PR_MERGE" task-a "$url_b" > "$dir/replacement-merge.out" 2> "$dir/replacement-merge.err"
   printf '%s\n' \$? > "$dir/replacement-merge.rc"
 ) &

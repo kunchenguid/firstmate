@@ -762,9 +762,50 @@ EOF
   local out; out=$(run_crew_state "$d" feat-cigreen)
   assert_contains "$out" "state: done" "green ci-monitor run -> done"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
-  assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
   pass "ci-monitoring run with checks already green surfaces done"
+}
+
+# An external review finding is independent of the no-mistakes run. A green CI
+# monitor and later unrelated status events cannot erase its keyed decision;
+# only the matching resolution releases it back to the pipeline classification.
+test_external_review_decision_outlives_green_ci() {
+  reset_fakes
+  local d out
+  d=$(new_case external-review-over-green)
+  make_repo_on_branch "$d/wt" fm/feat-external-review
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-external-review.meta" \
+    "window=fm:fm-feat-external-review" "worktree=$d/wt" "kind=ship"
+  printf '%s\n' \
+    'needs-decision [key=external-review-bot-17]: bot finding needs a scope decision' \
+    > "$d/state/feat-external-review.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-external-review)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+
+  out=$(run_crew_state "$d" feat-external-review)
+  assert_contains "$out" "state: parked" \
+    "an open external-review decision must outrank completed CI"
+  assert_contains "$out" "external-review-bot-17" \
+    "the current state must identify the open external-review decision"
+  assert_not_contains "$out" "state: done" \
+    "completed CI must not erase an external-review decision"
+
+  printf '%s\n' 'working: unrelated publication bookkeeping completed' \
+    >> "$d/state/feat-external-review.status"
+  out=$(run_crew_state "$d" feat-external-review)
+  assert_contains "$out" "state: parked" \
+    "an unrelated later event must not erase an external-review decision"
+
+  printf '%s\n' \
+    'resolved [key=external-review-bot-17]: assessment recorded against the current head' \
+    >> "$d/state/feat-external-review.status"
+  out=$(run_crew_state "$d" feat-external-review)
+  assert_contains "$out" "state: done" \
+    "the matching resolution must release the independent review decision"
+  assert_contains "$out" "source: run-step" \
+    "resolving review feedback must leave pipeline custody classification intact"
+  pass "external-review decisions remain open across green CI until explicitly resolved"
 }
 
 test_top_level_ci_checks_green_surfaces_done() {
@@ -778,7 +819,6 @@ test_top_level_ci_checks_green_surfaces_done() {
   local out; out=$(run_crew_state "$d" feat-topcigreen)
   assert_contains "$out" "state: done" "top-level ci with green log -> done"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
-  assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
   assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
   pass "top-level ci status uses ci log green marker"
 }
@@ -793,7 +833,6 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
   assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
@@ -812,7 +851,6 @@ EOF
   local out; out=$(run_crew_state "$d" feat-cirearm)
   assert_contains "$out" "state: working" "base-advance rearm marker -> working"
   assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
-  assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
   pass "base-advance rearm after green stays working"
 }
 
@@ -832,7 +870,6 @@ EOF
   local out; out=$(run_crew_state "$d" feat-cinochecksyet)
   assert_contains "$out" "state: working" "pending no-checks marker -> working"
   assert_not_contains "$out" "state: done" "pending no-checks marker must not read as done"
-  assert_not_contains "$out" "checks green" "pending no-checks marker must not read as checks green"
   pass "pending no-checks ci-monitor marker stays working"
 }
 
@@ -846,7 +883,6 @@ test_ci_monitoring_still_waiting_stays_working() {
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-ciwait)
   assert_contains "$out" "state: working" "ci step still red -> working"
-  assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
   pass "ci-monitoring run with checks not yet green stays working"
 }
 
@@ -2496,6 +2532,7 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_external_review_decision_outlives_green_ci
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_working

@@ -5,15 +5,15 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'PRESENTATION_UNAVAILABLE: lavish-axi ...', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# `PRESENTATION_UNAVAILABLE: lavish-axi ...`, silent optional-fallback absence,
+# and `BOOTSTRAP_INFO: ...` lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations,
-# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
-# which lavish-axi version is on PATH.
+# which no-mistakes version is on PATH, the read-only gh-axi compatibility
+# query's version result, and which lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -341,40 +341,54 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
-test_gh_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
+test_gh_axi_compatibility_query() {
+  local label version expected case_dir fakebin out rc n
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version expected; do
     [ -n "$label" ] || continue
     n=$((n + 1))
-    case_dir="$TMP_ROOT/gh-axi-$n"
+    case_dir="$TMP_ROOT/gh-axi-query-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
+    [ "$version" != absent ] || rm -f "$fakebin/gh-axi"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
-    esac
+      FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh" gh-axi-compatible)
+    rc=$?
+    expect_code "$expected" "$rc" "$label: compatibility result"
+    [ -z "$out" ] || fail "$label: compatibility query printed output: $out"
   done <<'ROWS'
-minimum gh-axi version is accepted^0.1.29^empty
-newer gh-axi patch is accepted^0.1.30^empty
-newer gh-axi minor is accepted^0.2.0^empty
-newer gh-axi major is accepted^1.0.0^empty
-older gh-axi patch reports an upgrade^0.1.19^missing
-much older gh-axi minor reports an upgrade^0.0.9^missing
-unparseable gh-axi version reports an upgrade^gh-axi development build^missing
+minimum gh-axi version is compatible^0.1.29^0
+newer gh-axi patch is compatible^0.1.30^0
+newer gh-axi minor is compatible^0.2.0^0
+newer gh-axi major is compatible^1.0.0^0
+older gh-axi patch is incompatible^0.1.19^1
+much older gh-axi minor is incompatible^0.0.9^1
+unparseable gh-axi version is incompatible^gh-axi development build^1
+absent gh-axi is incompatible^absent^1
 ROWS
-  pass "bootstrap enforces gh-axi minimum version"
+  pass "bootstrap exposes a silent read-only gh-axi compatibility query"
+}
+
+test_optional_fallback_clients_do_not_block_bootstrap() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/optional-fallback-clients"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION=0.0.9 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an old unused gh-axi produced startup diagnostics: $out"
+  rm -f "$fakebin/gh-axi" "$fakebin/chrome-devtools-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "missing optional fallback clients produced startup diagnostics: $out"
+  pass "bootstrap does not require old or absent optional fallback clients at session start"
 }
 
 test_lavish_axi_min_version() {
   local label version mode case_dir fakebin out unavailable n
-  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
+  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - Lavish-specific presentation is unavailable; native tools and plain-text decisions remain available'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -575,7 +589,7 @@ ROWS
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
-  local backend cli case_dir fakebin out missing
+  local backend cli case_dir fakebin base_sans_cli out missing
   # With the backend's OWN session CLI absent (and tmux also absent), bootstrap
   # must fail closed on the genuine dep and never substitute a false tmux demand.
   while IFS='^' read -r backend cli; do
@@ -586,7 +600,8 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    base_sans_cli=$(fm_test_base_path_sans "$BASE_PATH" "$cli")
+    out=$(PATH="$fakebin:$base_sans_cli" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     if [ "$backend" = herdr ]; then
       missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
@@ -1165,7 +1180,8 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_gh_axi_min_version
+test_gh_axi_compatibility_query
+test_optional_fallback_clients_do_not_block_bootstrap
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version

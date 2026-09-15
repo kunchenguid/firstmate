@@ -29,13 +29,13 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
-# fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
-# emitter, supplying it first in every ship/scout launch brief and never to a
-# secondmate charter. It names the one task-owned steering inbox without
-# relaxing isolation from every other home's endpoint namespace. Like
-# fm_brief_intent_overlay it is a distinctly titled launch section that states
-# its own precedence, so a brief or project instruction that authors a
-# conflicting role is superseded rather than duplicated.
+# fm_brief_worker_role owns the ship/scout role scope and
+# fm_brief_tool_selection owns the current native-first precedence overlay.
+# bin/fm-spawn.sh emits both before persisted instructions for every ship/scout
+# launch and never for a secondmate charter. The role overlay names the one
+# task-owned steering inbox without relaxing isolation from every other home's
+# endpoint namespace. Each distinctly titled section states its own precedence,
+# so conflicting persisted instructions are superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 
@@ -52,6 +52,15 @@ EOF
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
+EOF
+}
+
+fm_brief_tool_selection() {  # <code-root>
+  local code_root=$1
+  cat <<EOF
+# Current tool-selection contract
+Read and follow \`$code_root/.agents/skills/harness-adapters/references/common/tool-selection.md\`, selecting from this worker's active tool inventory rather than the supervisor's harness.
+This contract supersedes generic tool-brand mandates in earlier generated Firstmate instructions, but not explicit task tool requirements or operation-specific safety owners.
 EOF
 }
 
@@ -232,6 +241,61 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_pr_feedback_readiness_block() {  # <mode> <task-id>
+  local mode=$1 id=$2
+  printf '%s\n' 'PR feedback readiness contract: fm-pr-review.v1'
+  cat <<EOF
+
+GitHub PR readiness requires both green checks and complete evidence-backed external-feedback triage.
+Keep PR opened, CI complete, feedback needs action, and PR ready as distinct states.
+After the PR exists, run \`$FM_ROOT/bin/fm-pr-check.sh --register-only $id {url}\` so its canonical URL/head and merge watch are recorded without announcing readiness.
+Run \`$FM_ROOT/bin/fm-pr-review.sh snapshot $id {url}\`, then inspect every retained source in \`data/$id/pr-review-snapshot.json\` using the selected native tools.
+Do not dismiss a source because it is from a bot, resolved, outdated, minimized, low-severity, or attached to a passing check.
+For every source, prepare one \`fm-pr-review-assessment.v1\` entry with its exact id and fingerprint, one disposition (\`fixed\`, \`not-actionable\`, or \`needs-action\`), a rationale accounting for every finding in that source, and concrete evidence.
+A \`fixed\` entry needs current-head behavior evidence plus the verification result.
+A \`not-actionable\` entry needs an evidenced false-positive, informational-only, or duplicate rationale.
+An unfixed valid finding, material ambiguity, or decision outside your authority is \`needs-action\` and keeps the PR unready.
+Record the file with \`$FM_ROOT/bin/fm-pr-review.sh record $id {url} {assessment-json}\`.
+Refetch with \`$FM_ROOT/bin/fm-pr-review.sh verify $id {url}\` until it succeeds after two complete matching snapshots at least 120 seconds apart.
+Use the project's documented review timeout when it has one; otherwise stop after 15 minutes and report the exact pending check, source URL, or missing proof rather than declaring readiness.
+Any new/edited/deleted source, review-state change, check-state change, or head change resets evidence and settling.
+Do not reply to, resolve, dismiss, or approve GitHub discussions as part of this local evidence record.
+For an unresolved external decision, append \`needs-decision [key=external-review-<finding-key>]: {source URL and concrete decision}\` (or \`blocked\` for a non-decision blocker); only the existing explicit resolution/recorded-answer flow closes that key.
+EOF
+  if [ "$mode" = no-mistakes ]; then
+    cat <<EOF
+No-mistakes retains branch custody.
+If its currently awaiting gate advertises support for external findings, submit the finding only through that gate's documented \`no-mistakes axi respond --action fix --add-finding/--findings --instructions\` route and follow every synchronous return.
+For late feedback outside such a gate, inspect structured status and the current supported help for a documented intake or proof that branch custody returned.
+If the run still owns the branch and exposes no supported intake, leave the PR unready, report the exact finding URL and custody blocker to firstmate, and preserve the run; do not hand-edit, abort, restart, pass \`--yes\`, or start another validation run.
+Once structured status proves custody returned, an authorized follow-up fix preserves every pipeline fix and follows this delivery path.
+EOF
+  else
+    cat <<EOF
+For valid in-scope feedback, fix the behavior, verify it, push the new head, then register and assess that new head again before readiness.
+Route ambiguous, scope-expanding, destructive, and security-sensitive findings to firstmate.
+EOF
+  fi
+}
+fm_brief_pr_readiness_overlay() {  # <direct-PR|no-mistakes> <task-id>
+  local mode=$1 id=$2
+  cat <<'EOF'
+# Current PR feedback readiness contract
+This section supersedes any later persisted instruction that treats PR opening or green CI alone as terminal readiness.
+EOF
+  fm_pr_feedback_readiness_block "$mode" "$id"
+  case "$mode" in
+    direct-PR)
+      printf '%s\n' 'Only after `fm-pr-review.sh verify` succeeds, append `done: PR {url}` and stop.'
+      ;;
+    no-mistakes)
+      printf '%s\n' 'Only after `fm-pr-review.sh verify` succeeds, append `done: PR {url} checks green` and stop.'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -241,7 +305,12 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your assigned branch and open a PR through the selected GitHub tool.
+Opening the PR is a nonterminal milestone; report the URL without claiming completion.
+EOF
+      fm_pr_feedback_readiness_block direct-PR "$id"
+      cat <<EOF
+Only after \`fm-pr-review.sh verify\` succeeds, append \`done: PR {url}\` and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -289,7 +358,11 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point), do not wait for its background merge monitor, but do not claim PR readiness yet.
+EOF
+      fm_pr_feedback_readiness_block no-mistakes "$id"
+      cat <<EOF
+Only after \`fm-pr-review.sh verify\` succeeds, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)

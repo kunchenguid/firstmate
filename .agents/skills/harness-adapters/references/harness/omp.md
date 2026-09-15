@@ -3,6 +3,23 @@
 Verified for crew, scout, secondmate, and primary work on Herdr on 2026-09-05 with omp 18.1.11, building on the 2026-09-02 adapter investigation against 18.1.2.
 omp is a Pi fork, so `references/harness/pi.md` is the nearest relative; every difference from Pi is stated here.
 Cross-harness provider and credential identity is owned by `references/common/model-and-effort.md`.
+OMP tool choice follows the [capability-based tool-selection contract](../common/tool-selection.md).
+
+## Native tool surface
+
+| Operation | OMP default and exact boundaries |
+|---|---|
+| GitHub repository, file, search, and PR creation | Use native `github`, including the `xd://github` bridge when that is how the model receives it, after reading the current schema. |
+| PR and issue reads and PR diffs | Use native `read` with `pr://` and `issue://`, with qualified repository identifiers outside the current repository. |
+| Hosted repository files | Use `github` with `op: \"file_read\"`, not a browser or a downloaded raw file. |
+| Branch push | Preserve the assigned task copy and use `git push` for that branch when needed. Native `pr_push` requires a preceding native `pr_checkout`, so never create another isolated copy solely to enable it. |
+| Missing GitHub operations | Use `gh` for operations the current native schema lacks, such as repository creation, while preserving existing creation consent and target-branch rules. `gh-axi` is optional rather than the automatic alternative to a native tool. |
+| Static web content | Use native `read` on the URL instead of starting browser automation merely to fetch readable text. |
+| Interactive browser work | Use Eval's `browser.open`, returned tab helpers such as `observe`, interaction, and screenshot, and `tab.run` for custom execution, then release managed tabs. Use only authorized relay or CDP targets; never replace a logged-in user session with an unrelated managed browser or navigate the user's visible tab without consent. |
+| File and code operations | Use native `read`, `grep`, `glob`, `edit`, `write`, AST, and LSP tools according to their exposed capabilities; shell remains for actual CLI operations. |
+| Human choices | The primary uses native `ask` for a meaningful multi-option choice; simple yes-or-no questions may remain chat. Workers and secondmates return questions to their supervisor rather than using `ask` to address the captain. |
+| Persistent visual feedback | Keep Lavish for explicitly requested Lavish features or an actual persistent feedback or board requirement, not ordinary questions, screenshots, or browser QA. |
+
 
 ## Operating facts
 

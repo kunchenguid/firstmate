@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
-# live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# Record a PR task: store one validated canonical pr=<url> and the forge's exact
+# pr_head=<sha> when available, then atomically arm a static merge poll.
+# `--register-only` stops after that bookkeeping. The default GitHub path then
+# verifies the live evidence-backed feedback assessment through fm-pr-review.sh
+# before publishing any parent-channel PR-ready result. GitLab keeps its
+# existing blocking-discussion provider path.
+# Usage: fm-pr-check.sh [--register-only] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +20,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
+REGISTER_ONLY=0
+if [ "${1:-}" = --register-only ]; then
+  REGISTER_ONLY=1
+  shift
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -134,13 +139,24 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
-# In a secondmate home the registration itself is a captain-facing fact:
-# publish the child's PR-ready line with the canonical URL just recorded, so it
-# reaches the parent whether or not the mate model appends anything
-# (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
-# silent no-op there. The poll is armed either way; a channel that cannot be
-# written is reported as actionable, and bin/fm-inactive-reconcile.sh still
-# delivers the child's own ready line on the next supervision poll.
+printf 'armed: state/%s.check.sh\n' "$ID"
+if [ "$REGISTER_ONLY" = 1 ]; then
+  exit 0
+fi
+if [ "$PROVIDER" = github ]; then
+  REVIEW_STATUS=0
+  "$SCRIPT_DIR/fm-pr-review.sh" verify "$ID" "$URL" || REVIEW_STATUS=$?
+  if [ "$REVIEW_STATUS" -ne 0 ]; then
+    printf 'actionable: PR %s is registered, but review readiness is not proven\n' "$URL" >&2
+    exit "$REVIEW_STATUS"
+  fi
+fi
+# A successful review verification is the captain-facing fact published in a
+# secondmate home. Registration-only and failed verification deliberately
+# publish nothing upward. A main home has no parent channel and this remains a
+# silent no-op there. A channel that cannot be written is reported as
+# actionable, and bin/fm-inactive-reconcile.sh still delivers the child's own
+# terminal ready line on the next supervision poll.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -152,4 +168,3 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
-printf 'armed: state/%s.check.sh\n' "$ID"

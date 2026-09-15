@@ -94,21 +94,15 @@ SH
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
-  # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
-  # number fails. This keeps the landed-work check hermetic (never reaching the real
-  # gh-axi) and represents the common "no GitHub PR" baseline. Tests that need a
-  # merged PR or a lookup error override this file with the helpers below.
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
-  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
-esac
-exit 0
-SH
+  # Default `gh` mock: no PR is associated with the branch, and viewing any PR
+  # number fails. This keeps the landed-work check hermetic and represents the
+  # common no-GitHub-PR baseline. Tests that need another lookup outcome override
+  # the response file or this executable through the helpers below.
+  : > "$case_dir/gh-pr-list-output"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
+  "pr list") cat "${FM_TEST_GH_PR_LIST_OUTPUT:?}" ; exit 0 ;;
   "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
 exit 0
@@ -165,7 +159,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -249,19 +243,11 @@ land_on_origin_main() {
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "pr list")
-    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
-  "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
-esac
-exit 0
-SH
+  printf '%s\n' 7 > "$case_dir/gh-pr-list-output"
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
+  "pr list") cat "\${FM_TEST_GH_PR_LIST_OUTPUT:?}" ; exit 0 ;;
   "pr view")
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
@@ -272,7 +258,12 @@ esac
 echo "error: pull request not found" >&2
 exit 1
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+add_gh_pr_list_output() {
+  local case_dir=$1 output=$2
+  printf '%s' "$output" > "$case_dir/gh-pr-list-output"
 }
 
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
@@ -395,20 +386,15 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
 }
 
-# Override gh-axi so every call fails, simulating an API/network error.
-add_gh_axi_error() {
+# Override `gh` so every call fails, simulating an API or network error.
+add_gh_error() {
   local case_dir=$1
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-echo "error: gh-axi unavailable" >&2
-exit 1
-SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 echo "error: gh unavailable" >&2
 exit 1
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 # Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
@@ -628,6 +614,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEST_GH_PR_LIST_OUTPUT="$case_dir/gh-pr-list-output" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -808,8 +795,8 @@ test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
   write_meta "$case_dir" no-mistakes ship
-  # Real content that is not pushed, has no PR (default gh-axi mock), and never
-  # landed on origin/main: genuinely unlanded work that must still refuse.
+  # Real content that is not pushed, has no PR (the default gh mock returns an
+  # empty lookup), and never landed on origin/main: genuinely unlanded work.
   wt_commit_file "$case_dir" feature.txt hello "unpushed work"
 
   set +e
@@ -1022,7 +1009,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable() {
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
-  add_gh_axi_error "$case_dir"
+  add_gh_error "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1046,7 +1033,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+    "$PR_CHECK" --register-only task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   new_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1054,7 +1041,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+    "$PR_CHECK" --register-only task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
   count=$(grep -c '^pr_head=' "$case_dir/state/task-x1.meta" || true)
   expect_code 1 "$count" "pr-check-stale: stale rerun should not append a second pr_head"
@@ -1083,7 +1070,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+    "$PR_CHECK" --register-only task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
   grep -qxF "pr_head=$pr_head" "$case_dir/state/task-x1.meta" \
     || fail "pr-check-local-lags: did not record GitHub PR head"
@@ -1096,9 +1083,9 @@ test_content_in_default_fallback_allows() {
   local case_dir rc
   case_dir=$(make_case content-landed)
   write_meta "$case_dir" no-mistakes ship
-  # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
-  # cannot fire and the content check must carry it. The branch adds feature.txt, and
-  # the same net change has independently landed on origin/main via a squash commit.
+  # No pr= is recorded and the default gh mock reports no PR, so the merged-PR
+  # path cannot fire and the content check must carry it. The branch adds
+  # feature.txt, and the same net change landed on origin/main via a squash commit.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
   cat > "$case_dir/fakebin/treehouse" <<'SH'
@@ -1175,7 +1162,7 @@ test_gh_error_and_content_absent_refuses() {
   # Real content not pushed, the PR lookup errors, and origin/main never gained the
   # content. The fail-safe must refuse rather than allow on a transient gh failure.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  add_gh_axi_error "$case_dir"
+  add_gh_error "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1187,6 +1174,32 @@ test_gh_error_and_content_absent_refuses() {
   pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
+test_malformed_branch_pr_lookup_retains_unlanded_work() {
+  local case_dir rc response label n=0
+  while IFS='|' read -r label response; do
+    n=$((n + 1))
+    case_dir=$(make_case "gh-malformed-$n")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "unlanded work"
+    case "$label" in
+      multiline) add_gh_pr_list_output "$case_dir" "$(printf '7\n8\n')" ;;
+      *) add_gh_pr_list_output "$case_dir" "$response" ;;
+    esac
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$label: malformed branch-to-PR output must not authorize cleanup"
+    assert_present "$case_dir/state/task-x1.meta" "$label: malformed lookup removed task metadata"
+    assert_present "$case_dir/wt" "$label: malformed lookup removed unlanded work"
+  done <<'ROWS'
+zero|0
+nonnumeric|seven
+multiline|ignored
+mixed|7x
+ROWS
+  pass "fm-teardown rejects malformed gh branch-to-PR output and preserves unlanded work"
+}
 # Write a meta that predates the spawn_gen field entirely. Args: case_dir mode kind
 write_legacy_meta() {
   local case_dir=$1 mode=$2 kind=$3
@@ -1833,10 +1846,9 @@ configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
   fi
 }
 
-# Registering a PR inside a secondmate home publishes the child's ready line
-# with the canonical URL on the parent channel from fm-pr-check itself, once;
-# a main home publishes nothing.
-test_secondmate_pr_registration_publishes_ready_line() {
+# Register-only records the PR and arms its poll without publishing the child's
+# ready line; a main home likewise publishes nothing.
+test_secondmate_pr_registration_stays_nonterminal() {
   local case_dir pr_head channel url
   url=https://github.com/example/repo/pull/7
   case_dir=$(make_case mate-pr-ready)
@@ -1849,30 +1861,28 @@ test_secondmate_pr_registration_publishes_ready_line() {
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
-    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" --register-only task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
     || fail "mate-pr-ready: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
   grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready: poll was not armed"
-  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" "$channel" \
-    "mate-pr-ready: the ready line did not reach the parent channel"
+  [ ! -e "$channel" ] || fail "mate-pr-ready: register-only published a parent-ready line"
   ! grep -q '^actionable:' "$case_dir/pr-check.err" \
     || fail "mate-pr-ready: registration reported a channel problem: $(cat "$case_dir/pr-check.err")"
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
-    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2>&1 \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" --register-only task-x1 "$url" >/dev/null 2>&1 \
     || fail "mate-pr-ready: re-registration failed"
-  [ "$(grep -c 'child-pr-task-x1' "$channel")" -eq 1 ] \
-    || fail "mate-pr-ready: re-registration duplicated the ready line"
+  [ ! -e "$channel" ] || fail "mate-pr-ready: repeated register-only published a parent-ready line"
 
   case_dir=$(make_case main-pr-ready)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
-    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" --register-only task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
     || fail "main-pr-ready: fm-pr-check failed"
   ! grep -q '^actionable:' "$case_dir/pr-check.err" \
     || fail "main-pr-ready: a main home reported a channel problem"
   [ ! -e "$case_dir/state/parent-replies.status" ] || fail "main-pr-ready: a main home wrote a parent reply"
-  pass "fm-pr-check publishes the PR-ready line on a secondmate's parent channel once"
+  pass "fm-pr-check register-only arms the poll without publishing readiness"
 }
 
 # Tearing a child down inside a secondmate home delivers the child's final
@@ -3674,7 +3684,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
-test_secondmate_pr_registration_publishes_ready_line
+test_secondmate_pr_registration_stays_nonterminal
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
@@ -3703,6 +3713,7 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_malformed_branch_pr_lookup_retains_unlanded_work
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work

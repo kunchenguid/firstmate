@@ -1,9 +1,9 @@
 ---
 name: harness-adapters
 description: >-
-  Agent-only reference for firstmate harness operations.
-  Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy.
+  Agent-only reference for Firstmate harness operations and capability-based tool selection.
+  Use before selecting ordinary work tools, spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
+  Contains the shared native-first selection contract and verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -28,7 +28,7 @@ Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
 Do not pause current work for that choice.
 
-On `unknown`, ask the captain instead of guessing.
+For every operation except `tool-use`, on `unknown`, ask the captain instead of guessing.
 A current captain override beats detection, while a per-task override governs only that dispatch.
 For recovery and control, use the exact `harness=` in `state/<id>.meta`; never infer it from a model or provider.
 
@@ -56,10 +56,13 @@ The `harness-adapter-routing-v1` object is the machine-readable and human-visibl
 `default` is the normal scenario when no narrower scenario applies.
 Kimi establishes its unsupported primary boundary in its selected harness reference; Muse and Gemini follow Non-negotiable safety above.
 A new tool remains undispatchable until the `verify` plan, its harness entry, every named owner, and the live checks land.
+For `tool-use`, load the common resource and append the active harness reference only when that identity is known; an unknown identity uses the common resource alone.
+
 
 ```json harness-adapter-routing-v1
 {
   "operations": {
+    "tool-use": {"default": ["references/common/tool-selection.md"]},
     "start": {
       "default": ["references/common/dispatch.md", "references/common/model-and-effort.md"],
       "trust-dialog": ["references/common/control-and-recovery.md"]

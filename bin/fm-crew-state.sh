@@ -48,20 +48,22 @@
 #      bin/fm-nm-run-lib.sh also owns which of them wins: a LIVE run always
 #      outranks a terminal one, so a terminal answer here is provisional until
 #      the ledger has been asked whether a live sibling run exists.
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      The run-step is AUTHORITATIVE for pipeline custody: running/fixing ->
+#      working, ci -> working, awaiting_approval/fix_review -> parked, terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
-#      terminal FAILED run whose only failure is the ci monitor step, after
+#      green. That is CI completion only; it never proves external feedback
+#      triage. A still-open `external-review-*` keyed decision independently
+#      overrides the displayed current state until an explicit resolution.
+#      A terminal FAILED run whose only failure is the ci monitor step, after
 #      every substantive step completed and the ci log's last marker reads
-#      checks green, also reads done (held-for-merge), never failed: a monitor
-#      whose only remaining job is to observe a human merge decision must not
-#      convert the absence of that decision into a failure verdict
-#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident). In the
-#      coarse runs-ledger fallback (no steps table, no ci log), a terminal
+#      checks green, also reads done, never failed: a monitor whose only
+#      remaining job is to observe a human merge decision must not convert the
+#      absence of that decision into a failure verdict
+#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident).
+#      In the coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
@@ -186,6 +188,36 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# External feedback decisions are independent of pipeline custody. The complete
+# keyed fold, not the last event, decides whether one remains open; later CI or
+# unrelated status lines cannot erase it. The opening verb decides whether the
+# current surface reads parked (needs-decision) or blocked.
+external_review_open_decision() {
+  local open line found=''
+  open=$(status_open_decisions "$LOG") || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      external-review-*$'\t'*) found=$line ;;
+    esac
+  done <<EOF
+$open
+EOF
+  printf '%s' "$found"
+}
+EXTERNAL_REVIEW_OPEN=$(external_review_open_decision)
+emit_external_review_state() {
+  local key rest verb note
+  [ -n "$EXTERNAL_REVIEW_OPEN" ] || return 0
+  key=${EXTERNAL_REVIEW_OPEN%%$'\t'*}
+  rest=${EXTERNAL_REVIEW_OPEN#*$'\t'}
+  verb=${rest%%$'\t'*}
+  note=${rest#*$'\t'}
+  case "$verb" in
+    needs-decision) emit parked status-log "external review decision $key: $note" ;;
+    blocked) emit blocked status-log "external review blocker $key: $note" ;;
+  esac
+}
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -452,7 +484,7 @@ EOF
 nm_reclassify_failed_run_as_held_green() {
   nm_failed_run_is_green_held_ci || return 1
   RUN_STATE="done"
-  RUN_DETAIL="checks green: PR held for merge (ci monitor ended)"
+  RUN_DETAIL="CI complete; external review verification required (ci monitor ended)"
   local pr_url
   pr_url=$(strip_quotes "$(nm_field pr)")
   [ -n "$pr_url" ] && RUN_DETAIL="$RUN_DETAIL: $pr_url"
@@ -662,7 +694,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="CI complete; external review verification required" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -705,7 +737,7 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              RUN_DETAIL="CI complete; external review verification required (still monitoring for merge/close)"
             fi
             ;;
           fixing)
@@ -715,6 +747,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
     fi
   fi
+
+  emit_external_review_state
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
@@ -768,6 +802,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
+emit_external_review_state
 
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane

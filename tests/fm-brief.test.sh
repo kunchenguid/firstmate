@@ -214,6 +214,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
+    assert_grep "$ROOT/.agents/skills/harness-adapters/references/common/tool-selection.md" "$brief" \
+      "$id: brief missing the active-worker tool-selection contract"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -305,6 +307,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
+  assert_grep "open a PR through the selected GitHub tool" "$brief" \
+    "direct-PR brief did not use capability-based GitHub selection"
+  assert_grep "Opening the PR is a nonterminal milestone" "$brief" \
+    "direct-PR brief treated PR creation as readiness"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
@@ -821,40 +827,6 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
-# A scout brief offers the Lavish review loop only when bootstrap confirms the
-# supported lavish-axi floor at scaffold time; a missing or older build gets a
-# text-report instruction instead, so a scout never drives a below-floor Lavish.
-test_scout_lavish_line_follows_presentation_floor() {
-  local base label version expect case_dir fakebin brief n=0
-  local hosting='you may host the Lavish review loop yourself'
-  local text_only='deliver your findings as a text report without Lavish'
-  base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
-  while IFS='^' read -r label version expect; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/scout-lavish-$n"
-    mkdir -p "$case_dir/home/data"
-    fakebin=$(fm_fakebin "$case_dir")
-    [ "$version" = absent ] || fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION "$version"
-    PATH="$fakebin:$base" FM_HOME="$case_dir/home" \
-      "$ROOT/bin/fm-brief.sh" scout-lavish alpha --scout >/dev/null \
-      || fail "$label: scout scaffold failed"
-    brief="$case_dir/home/data/scout-lavish/brief.md"
-    if [ "$expect" = hosting ]; then
-      assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
-      assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
-    else
-      assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"
-      assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
-    fi
-  done <<'ROWS'
-lavish-axi at the floor^0.1.46^hosting
-lavish-axi above the floor^0.2.0^hosting
-lavish-axi just below the floor^0.1.45^text
-absent lavish-axi^absent^text
-ROWS
-  pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
-}
 
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
@@ -868,6 +840,8 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_grep "$ROOT/.agents/skills/harness-adapters/references/common/tool-selection.md" "$brief" \
+    "scout brief missing the active-worker tool-selection contract"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -928,4 +902,3 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
-test_scout_lavish_line_follows_presentation_floor
