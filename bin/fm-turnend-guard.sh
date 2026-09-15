@@ -181,7 +181,7 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE" "$GRACE" "$CONFIG"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
@@ -198,8 +198,9 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
-# Away mode transfers supervision ownership from the watcher to the away-mode
-# daemon, which runs the watcher one-shot and starts its replacement after every
+# Away mode and the continuous-supervision opt-in transfer supervision
+# ownership from the watcher to the shared daemon, which runs the watcher
+# one-shot and starts its replacement after every
 # wake (bin/fm-supervise-daemon.sh). A turn boundary regularly lands in that
 # hand-off, when no watcher process holds the lock and nothing is wrong, so
 # requiring one here alarmed on healthy away-mode supervision. A live
@@ -212,7 +213,7 @@ fi
 # cycling - just slower than a fixed 300s window - is not misread as down.
 AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
-  && fm_afk_daemon_owns_supervision "$STATE"; then
+  && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"; then
   allow_supervised_stop
 fi
 
@@ -234,6 +235,8 @@ block_stop() {
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
       printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
+    elif [ "$FM_SUP_REFILL" = true ]; then
+      printf '●  Desired concurrency needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
@@ -496,6 +499,8 @@ if [ "$terminal_status" -eq 0 ]; then
     NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
   elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
     NEED_DESC="$FM_SUP_CHECKS registered custom check(s)"
+  elif [ "$FM_SUP_REFILL" = true ]; then
+    NEED_DESC="desired-concurrency refill active"
   else
     NEED_DESC="X-mode relay polling active"
   fi

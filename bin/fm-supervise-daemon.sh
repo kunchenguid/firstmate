@@ -12,13 +12,13 @@
 # declared-wait recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
+# PRESENCE-GATING. The daemon injects while either the durable away-mode flag
+# state/.afk or the explicit per-home config/continuous-supervision opt-in is
+# present. Invoking /afk owns only the away flag; returning from away mode does
+# not disable an independent continuous-supervision preference.
+# When neither presence gate is active, normal fm-watch.sh supervision is the
+# active mechanism. Any buffered daemon escalations survive in
+# state/.subsuper-escalations and are flushed on the next supervised window's
 # catch-up or when afk is re-entered.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
@@ -236,6 +236,7 @@ LOG_KEEP_LINES_DEFAULT=2000
 # away-supervisor construction. The away-exit predicate intentionally retains
 # its landed leading-U+2063 compatibility behavior.
 AFK_FLAG_NAME=".afk"
+CONTINUOUS_CONFIG_NAME="continuous-supervision"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
@@ -264,6 +265,12 @@ _hash_text() {
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
+}
+
+# supervision_active: the daemon may inject in away mode or when this home has
+# explicitly opted into attended continuous supervision.
+supervision_active() {  # <state>
+  afk_active "$1" || [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/$CONTINUOUS_CONFIG_NAME" ]
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -1037,7 +1044,7 @@ housekeeping() {  # <state>
   # retry the normal delivery path. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+  if supervision_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
     # as the throttle). A successful flush clears the buffer; a failed one alarms
@@ -1224,7 +1231,7 @@ window_for_task() {  # <task-key> [state]
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
+# gone, the supervisor is busy, supervision is inactive, or the verified submit cannot
 # be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
@@ -1244,10 +1251,9 @@ window_for_task() {  # <task-key> [state]
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1) Presence-gate: inject while away mode or continuous supervision owns
+  # delivery. Otherwise escalations stay buffered for the next guarded flush.
+  supervision_active "$state" || { log "inject deferred: supervision inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain

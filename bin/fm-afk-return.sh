@@ -328,7 +328,7 @@ health_snapshot() {  # <evidence-file>
       lines="GAP: watcher downtime was detected during the away window (recovery marker present)"
     fi
   fi
-  if [ -e "$STATE/.afk" ] && ! fm_afk_daemon_owns_supervision "$STATE"; then
+  if [ -e "$STATE/.afk" ] && ! fm_afk_daemon_owns_supervision "$STATE" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
     lines="$lines
 GAP: the away daemon was not running at return (the away flag stood with no live daemon)"
   fi
