@@ -102,8 +102,8 @@ case "$*" in
   "server --session "*)
     trap 'printf "TERM\n" >> "$FM_FAKE_STATE/signals"; exit 0' TERM
     trap 'printf "USR1\n" >> "$FM_FAKE_STATE/signals"' USR1
-    printf 'pid=%s ppid=%s stat=%s session=%s\n' "$$" "$PPID" "$(ps -o stat= -p "$$" | tr -d ' ')" "${3:-}" \
-      > "$FM_FAKE_STATE/started.tmp"
+    printf 'pid=%s ppid=%s stat=%s xpc=%s session=%s\n' "$$" "$PPID" "$(ps -o stat= -p "$$" | tr -d ' ')" \
+      "${XPC_SERVICE_NAME:-unset}" "${3:-}" > "$FM_FAKE_STATE/started.tmp"
     mv "$FM_FAKE_STATE/started.tmp" "$FM_FAKE_STATE/started"
     behavior=$(cat "$FM_FAKE_STATE/server-behavior" 2>/dev/null || true)
     case "$behavior" in
@@ -304,12 +304,16 @@ pass "an empty session is started inside the launch agent"
 # --- a started server leads its own session under the supervised process ----
 
 new_case stopped
-guard_background
+guard_background XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
 wait_guard
 expect_code 0 "$GUARD_RC" "the guard failed to start a server that exited cleanly"
 assert_started "the guard did not start the server through its supervisor"
 assert_equals "$GUARD_PID" "$(started_field ppid)" \
   "the server is not the child of the process launchd supervises"
+# macOS sets XPC_SERVICE_NAME to 0 in a forked child, which would hide the
+# launchd label the owner library proves a launchd birth from.
+assert_equals dev.firstmate.herdr.fm-remote "$(started_field xpc)" \
+  "the server lost the launchd label the process launchd supervises was started with"
 case "$(started_field stat)" in
   *s*) ;;
   *) fail "the server does not lead its own session: $(cat "$CASE_STATE/started")" ;;

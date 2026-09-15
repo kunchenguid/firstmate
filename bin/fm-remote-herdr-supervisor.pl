@@ -20,6 +20,10 @@
 # Contract (this header is its single owner):
 #   - The child calls setsid(), then execs the command with this process's
 #     environment and standard streams. A failed setsid() or exec exits 127.
+#   - The child restores XPC_SERVICE_NAME to this process's value before it
+#     execs, because macOS sets that variable to 0 in every forked child, and
+#     bin/fm-remote-herdr-owner-lib.sh reads the launchd label from it; the
+#     server so carries the launchd environment it had as the job itself.
 #   - HUP, INT, QUIT, TERM, USR1, and USR2 received here are forwarded to the
 #     child, including one that arrives while the child is being started, so
 #     launchd's stop signal and `launchctl kill` still reach the server as they
@@ -49,6 +53,7 @@ unless (@command) {
 
 my @forwarded = qw(HUP INT QUIT TERM USR1 USR2);
 my $child = 0;
+my $service_name = $ENV{XPC_SERVICE_NAME};
 
 sub note { print STDERR "fm-remote-herdr-supervisor: @_\n" }
 
@@ -103,6 +108,7 @@ if ($pid == 0) {
   }
   note("cannot fork the watcher, so an abrupt supervisor exit would leave pid $$ running: $!") unless defined $watcher;
   close $watch_read;
+  $ENV{XPC_SERVICE_NAME} = $service_name if defined $service_name;
   POSIX::sigprocmask(POSIX::SIG_UNBLOCK(), $held);
   { no warnings 'exec'; exec { $command[0] } @command; }
   note("cannot exec $command[0]: $!");
