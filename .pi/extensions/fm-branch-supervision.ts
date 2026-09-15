@@ -147,6 +147,9 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
 const BRANCH_HEALTH_MESSAGE_TYPE = "fm-branch-health";
+const BRANCH_PAUSED_NOTE = "Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.";
+const BRANCH_RECOVERED_NOTE = "Supervision branch recovered after a successful cooldown probe.";
+const BRANCH_HEALTH_NOTES = new Set([BRANCH_PAUSED_NOTE, BRANCH_RECOVERED_NOTE]);
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
@@ -694,7 +697,7 @@ export default function (pi: ExtensionAPI) {
       probeInFlight: false,
     };
     if (firstLatch) {
-      deliverBranchHealthNote("Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.");
+      deliverBranchHealthNote(BRANCH_PAUSED_NOTE);
     }
   }
 
@@ -704,7 +707,7 @@ export default function (pi: ExtensionAPI) {
     if (!providerRecovery) return;
     branchBroken = "";
     providerRecovery = null;
-    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    deliverBranchHealthNote(BRANCH_RECOVERED_NOTE);
   }
 
   function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number): void {
@@ -2233,7 +2236,8 @@ ${context.command}
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
     const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
     const outputPad = 1;
-    return new CalmAwareRoutineNote(
+    const Note = BRANCH_HEALTH_NOTES.has(rest.trim()) ? Text : CalmAwareRoutineNote;
+    return new Note(
       `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,

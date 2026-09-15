@@ -914,6 +914,19 @@ const liveCalmRoutineNote = renderers.get("fm-branch-merge")(
 if (liveCalmRoutineNote.render(100).length !== 0) {
   throw new Error("a live routine note remained visible while Calm was on");
 }
+for (const text of [
+  "Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.",
+  "Supervision branch recovered after a successful cooldown probe.",
+]) {
+  const restoredLegacyHealthNote = renderers.get("fm-branch-merge")(
+    { content: `⛵ ${text}` },
+    { expanded: false },
+    renderTheme,
+  );
+  if (!restoredLegacyHealthNote.render(100).join("\n").includes(text)) {
+    throw new Error(`Calm hid a restored legacy branch health alert: ${text}`);
+  }
+}
 if (!captainRendered.render(100).join("\n").includes("checks green, ready for review")) {
   throw new Error("Calm hid a captain-facing outcome entry");
 }
