@@ -6,6 +6,7 @@ description: >-
   Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

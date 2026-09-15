@@ -5,6 +5,7 @@ description: >-
   Use before scoping a reported bug and before acting on a diagnostic report.
   Owns end-user-aligned reproduction, causal separation, divergent-path and history inspection, counterfactual testing, and disconfirming evidence.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---
