@@ -10,6 +10,18 @@
 
 **Related:** Dispatch A ([2026-09-15-portkey-codecov-always-upload.md](2026-09-15-portkey-codecov-always-upload.md)) fixes `codecov/project` reporting. This plan fixes the number it reports. They are independent — A can land first and should.
 
+
+## Measured starting point — read this before estimating
+
+**Current project coverage is 5.28%.** Read from `codecov/project`'s check-run title on PR #116 (`success: 5.28% (+0.00%) compared to 45fd980`) on 2026-09-15. The floor is **60%**.
+
+Two things follow, and both change how this plan should be read:
+
+1. **This is not a top-up.** The byte-share table below establishes that the node-testable surface is ~42% of the code, which is the *ceiling* reachable without a jsdom harness. It is not the current position. The climb is 5.28% → 60%, and it passes through 42% on the way, so the harness (Task 5) is required, not optional — there is no ordering of Tasks 2-4 that reaches the floor.
+2. **`codecov/project` reads `success` at 5.28%.** Codecov is configured as a *delta* check — it passes because coverage did not drop. zapp's gate 13 `coverageFloor` parses the same title and compares the absolute number against `minCoveragePct: 60`, so it fails. Do not take a green Codecov check as evidence this plan is done; the only number that matters is the percentage in the title.
+
+Task 1 still runs — the per-file statement budget is what orders the work — but the headline is no longer unknown.
+
 ## The constraint that shapes everything
 
 `vitest.config.mts` sets `environment: "node"`, and **none** of `jsdom`, `happy-dom`, `@testing-library/react`, `@testing-library/dom`, `@testing-library/user-event` or `@vitejs/plugin-react` is a dependency. There is no component test in the repo and no way to write one today.
