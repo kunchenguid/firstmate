@@ -11,16 +11,20 @@ While Calm is on:
 
 - tool call rows (`ToolUse`) are drawn at zero height.
 - tool result rows (`ToolResult`) are drawn at zero height.
+- the folded tool-run row (`ToolGroup`) is drawn at zero height, which is what takes the `Thinking` / `Thought for Ns` summary off the screen.
 - firstmate's operational user rows are drawn at zero height, recognised by every marker `bin/fm-operational-input.sh` writes: the invisible-separator `FIRSTMATE_OP: ` header, the from-firstmate `[fm-from-firstmate]` marker, and the legacy `Supervisor escalate (` prefix.
   A genuine prompt you typed is never hidden.
-- the `Spinner` row is replaced by a small animated two-row boat.
 
-Everything else is untouched.
+Everything else is untouched, the working spinner included: Claude Code draws its own, so `thinking`, `still thinking` and `thought for Ns` stay where they are and you can still see the session is alive.
+
+The thinking summary is not addressable on its own.
+The `ToolGroup` render input carries `calls`, `isActive` and `isExpanded`; the `Thinking` / `Thought` segment is assembled inside the component from counts the hook never sees, so the row is the smallest thing that can be hidden.
+Since the tool counts on that same row are already meant to be hidden here, hiding the whole row is the behaviour, not a compromise.
 The mod reads the transcript and draws rows; it never changes what is sent to the model, what the session stores, or what `/export` writes.
 `claude plugin validate .` prints the complete list of engine calls the module makes, which is the check that keeps this true.
 
-Behaviours the Pi extension has and this mod does not: hiding the collapsed-thinking label, and hiding mid-turn assistant narration while keeping the reply that ends a response.
-Both are deliberately out of scope here.
+Behaviours the Pi extension has and this mod does not: hiding mid-turn assistant narration while keeping the reply that ends a response, and replacing the working row with a boat.
+The first has no seam - the `AssistantMessage` render input carries no stop reason - and the second was dropped on purpose to keep Claude Code's own spinner text.
 
 ## Preference file
 

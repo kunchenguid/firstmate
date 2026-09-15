@@ -31,12 +31,12 @@ const TOOL_RESULT = {
   viewport: { columns: 80, rows: 40 },
 } as const;
 
-const SPINNER = {
+const TOOL_GROUP = {
   surface: "terminal",
-  component: "Spinner",
+  component: "ToolGroup",
   requestId: "main",
-  props: { word: "Working", message: "Working", mode: "requesting" },
-  viewport: { columns: 24, rows: 40 },
+  props: { calls: [], isActive: true, isExpanded: false },
+  viewport: { columns: 80, rows: 40 },
 } as const;
 
 type World = {
@@ -187,29 +187,34 @@ test("a genuine prompt row survives and an operational row does not", {}, async 
   expect(box(operational).children?.length).toBe(0);
 });
 
-test("the working row becomes the two-row boat while Calm is on", {}, async ($, on) => {
+test("the folded tool group, thinking summary and all, is replaced by an empty row", {}, async ($, on) => {
+  world(on);
+  mock.clock(on, { now: 100000 });
+  await startSession($);
+
+  expect(await delegated(() => $.ui.render(TOOL_GROUP))).toBe(true);
+
+  await toggle($);
+  expect(box(await $.ui.render(TOOL_GROUP)).children?.length).toBe(0);
+
+  await toggle($);
+  expect(await delegated(() => $.ui.render(TOOL_GROUP))).toBe(true);
+});
+
+test("the working row is left to Claude Code's own spinner", {}, async ($, on) => {
   world(on);
   mock.clock(on, { now: 100000 });
   await startSession($);
   await toggle($);
 
-  const boat = box(await $.ui.render(SPINNER));
-  expect(boat.props?.flexDirection).toBe("column");
-  expect(boat.children?.length).toBe(2);
-
-  await toggle($);
-  expect(await delegated(() => $.ui.render(SPINNER))).toBe(true);
-});
-
-test("the boat advances on the engine's clock, not on wall time", {}, async ($, on) => {
-  world(on);
-  const clock = mock.clock(on, { now: 100000 });
-  await startSession($);
-  await toggle($);
-
-  const first = JSON.stringify(await $.ui.render(SPINNER));
-  await clock.advance(220 * 4);
-  const later = JSON.stringify(await $.ui.render(SPINNER));
-
-  expect(first === later).toBe(false);
+  const spinner = await delegated(() =>
+    $.ui.render({
+      surface: "terminal",
+      component: "Spinner",
+      requestId: "main",
+      props: { word: "Working", message: "Working", mode: "requesting" },
+      viewport: { columns: 24, rows: 40 },
+    }),
+  );
+  expect(spinner).toBe(true);
 });
