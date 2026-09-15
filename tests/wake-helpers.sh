@@ -296,6 +296,15 @@ SH
   printf '%s\n' "$dir"
 }
 
+# An arm only exits, and only then reports its typed failure, after
+# wait_for_healthy_successor has spent the whole confirmation budget, so any case
+# that waits for that exit must outlast the largest production default (30s on
+# MSYS, 10s elsewhere - see ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is
+# a ceiling spent only when an arm genuinely fails to exit; a passing case
+# returns as soon as it does.
+# shellcheck disable=SC2034 # Shared test-timing constant consumed by sourcing suites.
+ARM_FAIL_EXIT_POLLS=400
+
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
