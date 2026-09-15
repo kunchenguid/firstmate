@@ -1018,26 +1018,41 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
 # _fm_composer_classify_rows: shared multi-row container verdict for the box
 # and separated shapes: pending beats empty, an unreadable row is unknown, and
 # geometry ambiguity turns pending into pending-unproven and empty into
-# unknown (an ambiguous container is not positive proof).
+# unknown (an ambiguous container is not positive proof). A row that is
+# nothing but a known idle placeholder is furniture, not a vote for pending,
+# regardless of whether ghost stripping could prove it dim - but furniture
+# rows are only ever excused, never themselves the proof: skipping every row
+# in the box leaves no positive evidence of emptiness (indistinguishable from
+# real typed text that happens to match the placeholder pattern, e.g. a
+# caller-supplied FM_COMPOSER_IDLE_RE override), so at least one row must
+# still resolve to empty on its own merits before the box reads empty.
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
-  local row raw content plain state unknown_seen=0
+  local row raw content plain state unknown_seen=0 empty_seen=0
+  local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
+  local furniture_re="^(${idle_re})$"
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
+    if [ -n "$content" ] && fm_composer_idle_matches "$content" "$furniture_re" insensitive; then
+      row=$((row + 1))
+      continue
+    fi
     state=$(fm_composer_classify_content 1 "$content" \
-      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
+      "$idle_re" insensitive "$plain" 1 "$styled")
     case "$state" in
       pending)
         if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
         return 0
         ;;
       unknown) unknown_seen=1 ;;
+      empty) empty_seen=1 ;;
     esac
     row=$((row + 1))
   done
+  if [ "$empty_seen" != 1 ]; then unknown_seen=1; fi
   if [ "$unknown_seen" = 1 ] || [ "$ambiguous" = 1 ]; then
     printf 'unknown'
   else
