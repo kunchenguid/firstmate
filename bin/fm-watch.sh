@@ -1355,6 +1355,14 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+stale_state_already_delivered() {  # <task> <last-status-line>
+  local task=$1 last=$2 surfaced
+  [ -n "$task" ] || return 1
+  [ -n "$last" ] || return 1
+  surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+  [ "$last" = "$surfaced" ]
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -2315,6 +2323,10 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif stale_state_already_delivered "$task" "$last"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$ewf"
+              triage_log "absorbed stale (terminal status already delivered, cosmetic pane change only): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
