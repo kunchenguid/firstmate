@@ -106,10 +106,12 @@
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
 #                          between observations for FM_SECONDMATE_WAKE_STALL_SECS
-#                          while the mate was not in an active turn; declared
-#                          external-wait pause rows do not feed this escalation,
-#                          observation is read-only, and one parent notification
-#                          covers each no-progress episode
+#                          while the mate was not in an active turn (a busy mate
+#                          is exempt only until the queue has been frozen for
+#                          BUSY_TURN_MAX_SECS); declared external-wait pause
+#                          rows do not feed this escalation, observation is
+#                          read-only, and one parent notification covers each
+#                          no-progress episode
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -738,13 +740,17 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # by the same BUSY_TURN_MAX_SECS that stops a busy pane from proving liveness
 # forever. A mate mid-turn has not stopped draining its queue - it simply drains
 # between turns - so this gate, not the elapsed interval, is what separates a
-# healthy mate from a frozen wake loop. Any absence of proof (no window, a failed
-# capture, an idle or unknown verdict, a busy pane past the bound) is NOT an
-# active turn, so a frozen queue still escalates.
-secondmate_in_active_turn() {  # <task> <window>
-  local task=$1 w=$2 tail40
+# healthy mate from a frozen wake loop. The bound is measured on <idle>, how long
+# the queue's drain position has not moved, because a mate's turns end in its own
+# home and this home holds no completed-turn evidence to age them by
+# (busy_turn_over_age, whose spawn-record fallback would age every mate from its
+# launch). Any absence of proof (no window, a failed capture, an idle or unknown
+# verdict, a queue frozen past the bound) is NOT an active turn, so a frozen
+# queue still escalates.
+secondmate_in_active_turn() {  # <window> <idle>
+  local w=$1 idle=$2 tail40
   [ -n "$w" ] || return 1
-  ! busy_turn_over_age "$task" || return 1
+  [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
   window_is_busy "$w" "$tail40"
 }
@@ -759,7 +765,8 @@ secondmate_in_active_turn() {  # <task> <window>
 # never to the interval. A moved position ends an alerted episode and starts a
 # new observation interval, so a newly-oldest row cannot alert immediately while
 # a later genuine freeze remains visible. A mate demonstrably inside an active
-# turn never escalates, so the interval is only the backstop behind that gate.
+# turn defers its escalation, but only while this same interval is under
+# BUSY_TURN_MAX_SECS, so a turn that never ends cannot hide a frozen queue.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
 secondmate_wake_stall_tick() {
@@ -823,7 +830,7 @@ EOF
     [ "$episode_alerted" -eq 0 ] || continue
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
-    ! secondmate_in_active_turn "$task" "$(fm_backend_target_of_meta "$meta")" || continue
+    ! secondmate_in_active_turn "$(fm_backend_target_of_meta "$meta")" "$idle" || continue
     receipt="$receipt_dir/$row_key"
     if [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ]; then
       fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
@@ -1279,17 +1286,35 @@ captain_call_stale_bound() {  # <window-key> <task>
 # verb from its last active run.
 # Once the endpoint is confirmed dead, only unread steers, declared waits, and
 # the authoritative run may override bounded recovery.
-ended_worker_stale_check() {  # <window> <task>
-  local win=$1 task=$2 key line last reason held=0
+ended_worker_reconcile_ready() {  # <window> <task>
+  local win=$1 task=$2
   [ -n "$task" ] || return 1
   [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null)" = dead ] || return 1
-  fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
+  ! fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null
+}
+
+ended_worker_stale_check() {  # <window> <task>
+  local win=$1 task=$2 key line last reason held=0
+  ended_worker_reconcile_ready "$win" "$task" || return 1
   last=$(last_status_line "$STATE/$task.status")
   status_is_paused_or_captain_held "$last" && return 1
   if task_captain_call_open "$task"; then
     held=1
   fi
   key=$(window_key "$win")
+  if [ "$held" -eq 1 ]; then
+    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
+  else
+    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
+  fi
+  if [ "$held" -eq 1 ] && afk_record_present; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
+  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
     *"source: run-step"*) clear_stale_hash_tracking "$key"; return 0 ;;
@@ -1297,18 +1322,8 @@ ended_worker_stale_check() {  # <window> <task>
     'state: unknown '*|'state: stopped '*) ;;
     *) return 1 ;;
   esac
-  if [ "$held" -eq 1 ]; then
-    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
-  else
-    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
-  fi
-  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
-    clear_stale_hash_tracking "$key"
-    return 0
-  fi
   clear_stale_hash_tracking "$key"
   if [ "$held" -eq 1 ]; then
-    afk_record_present && return 0
     reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
   else
     reason="stale: $win (worker ended - preserved state needs recovery, rechecked on a long cadence not a wedge)"
@@ -2290,8 +2305,9 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    if [ "$kind" != secondmate ] && ended_worker_stale_check "$w" "$task"; then
-      continue
+    ended_worker_ready=1
+    if [ "$kind" != secondmate ] && ended_worker_reconcile_ready "$w" "$task"; then
+      ended_worker_ready=0
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
@@ -2307,14 +2323,22 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$ended_worker_ready" -eq 0 ]; then
+      busy_now=1
+    elif window_is_busy "$w" "$tail40"; then
+      busy_now=0
+    else
+      busy_now=1
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ "$ended_worker_ready" -eq 0 ] && ended_worker_stale_check "$w" "$task"; then
+          continue
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;

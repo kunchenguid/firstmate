@@ -2636,6 +2636,35 @@ test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
   pass "a dead worker ignores stale busy and resolved evidence without suppressing a surviving run"
 }
 
+test_ended_worker_state_read_waits_for_stale_cadence() {
+  local dir state out capture calls
+  dir=$(make_hold_home ended-state-read-cadence 'resolved [key=prior]: reboot interrupted recovery' nohold) \
+    || fail "could not build stopped worker cadence fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; calls="$dir/crew-state-calls"
+  printf 'preserved shell\n' > "$capture"
+  export FM_FAKE_CREW_STATE_COUNT_FILE="$calls"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_poll_cycle "$state" "$HOLD_WATCH_PID" \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker surfaced before its pane was stale"; }
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 0 ] \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker read authoritative state before its pane was stale"; }
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker did not surface once its pane was stale"; }
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "stopped worker did not perform exactly one due authoritative state read"
+  ack_stopped_cycle "$state" || fail "could not acknowledge stopped worker cadence fixture"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped worker repeated its recovery inside the long cadence"
+  fi
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 1 ] \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker repeated authoritative state reads inside the long cadence"; }
+  reap "$HOLD_WATCH_PID"
+  unset FM_FAKE_CREW_STATE_COUNT_FILE
+  pass "a stopped worker reads authoritative state only at stale cadence boundaries"
+}
+
 
 
 # The disconfirming case keeps the same unheld terminal and blocker statuses
@@ -4951,6 +4980,7 @@ test_live_paused_until_controls_recheck_time
 test_open_captain_call_bounds_stale_churn
 test_ended_worker_inherited_wedge_becomes_wait
 test_unheld_ended_worker_inherited_wedge_becomes_recovery
+test_ended_worker_state_read_waits_for_stale_cadence
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window

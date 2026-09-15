@@ -2367,9 +2367,7 @@ const {
 
 const ESC = "\u001b";
 const BLUE = `${ESC}[34m`;
-const CYAN = `${ESC}[36m`;
 const YELLOW = `${ESC}[33m`;
-const RED = `${ESC}[31m`;
 const RESET = `${ESC}[39m`;
 const SAIL = "◿│◣";
 const HULL = "╲▁▁▁╱";
@@ -2508,7 +2506,7 @@ const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
       const codes = row.match(new RegExp(`${ESC}\\[[0-9;]*m`, "g")) ?? [];
       for (const code of codes) {
         check(
-          code === BLUE || code === CYAN || code === YELLOW || code === RED || code === RESET,
+          code === BLUE || code === YELLOW || code === RESET,
           `non-standard ANSI escape ${JSON.stringify(code)} in ${JSON.stringify(row)}`,
         );
       }
@@ -2525,19 +2523,31 @@ const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
     const leading = sailRow.slice(0, sailRow.indexOf(ESC));
     check(/^ *$/.test(leading), `sail row padding was colored: ${JSON.stringify(leading)}`);
 
-    // The smaller left sail and mast are yellow, the larger right sail is red, and
-    // zero-height blue water remains visible through all three hull-interior cells.
+    // Both sail halves and the mast are one yellow run, so the sail never splits into
+    // mismatched colors, and the hull is one yellow run whose interior is not blue.
     check(
-      sailRow.includes(`${YELLOW}◿│${RESET}${RED}◣${RESET}`),
-      `sail did not keep its restrained asymmetric colors: ${JSON.stringify(sailRow)}`,
+      sailRow.includes(`${YELLOW}◿│◣${RESET}`),
+      `sail was not painted as one unified yellow run: ${JSON.stringify(sailRow)}`,
     );
     check(
       visibleWidth("◿") === 1 && visibleWidth(SAIL) === 3,
       "the width-safe smaller sail broke the three-cell sprite",
     );
     check(
-      waterRow.includes(`${YELLOW}╲${RESET}${BLUE}▁▁▁${RESET}${YELLOW}╱${RESET}`),
-      `hull did not preserve blue trough water: ${JSON.stringify(waterRow)}`,
+      waterRow.includes(`${YELLOW}╲▁▁▁╱${RESET}`),
+      `hull was not painted as one unified yellow run: ${JSON.stringify(waterRow)}`,
+    );
+    // Every water cell outside the hull is blue whatever its height, so the swell
+    // reads through glyph height alone rather than a crest-versus-trough color split.
+    const waterCells = waterRow.replace(`${YELLOW}╲▁▁▁╱${RESET}`, "").match(/\u001b\[\d+m[▁▂▃▄]\u001b\[39m/g) ?? [];
+    check(waterCells.length > 0, "no colored water cells surrounded the hull");
+    check(
+      waterCells.every((cell) => cell.startsWith(BLUE)),
+      `water was not all blue: ${JSON.stringify(waterCells.filter((cell) => !cell.startsWith(BLUE)))}`,
+    );
+    check(
+      waterCells.some((cell) => cell.includes("▃") || cell.includes("▄")),
+      "the checked frame carried no crest cell, so the all-blue assertion proved nothing",
     );
     check(
       /^[▁▂▃▄╲╱]+$/.test(strip(waterRow)),
@@ -3211,7 +3221,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
-  pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow/red with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step
@@ -3880,8 +3890,8 @@ JS
   assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
   printf '%s\n' "$boat_hull_line" | grep -Eq '[▁▂▃▄]' \
     || fail "the working ship rendered no low waveform"
-  # Standard ANSI colors: blue troughs, cyan crests, yellow hull/left sail, red
-  # right sail, and no RGB/256 escapes.
+  # Standard ANSI colors: all water blue at every height, the whole hull and sail
+  # yellow, no cyan crests or red sail half, and no RGB/256 escapes.
   tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
   boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
   boat_sail_line=$(grep -F '◿' "$boat_color_snapshot" | head -1)
@@ -3891,17 +3901,21 @@ JS
     *'[34m'*) : ;;
     *) fail "the trough was not rendered with standard ANSI blue" ;;
   esac
-  case "$boat_color_line" in
-    *'[36m'*) : ;;
-    *) fail "the wave crests were not rendered with standard ANSI cyan" ;;
+  case "$boat_color_line$boat_sail_line" in
+    *'[36m'*) fail "the wave crests were still rendered in a second water color (cyan)" ;;
+    *'[31m'*) fail "the right sail was still rendered in a second boat color (red)" ;;
   esac
   case "$boat_color_line" in
     *'[33m'*) : ;;
     *) fail "the hull was not rendered with standard ANSI yellow" ;;
   esac
   case "$boat_sail_line" in
-    *'[33m'*'[31m'*) : ;;
-    *) fail "the asymmetric sail did not render yellow before standard ANSI red" ;;
+    *'[33m'*'◿│◣'*) : ;;
+    *) fail "the sail was not rendered as one standard ANSI yellow run" ;;
+  esac
+  case "$boat_color_line" in
+    *'[33m'*'╲▁▁▁╱'*) : ;;
+    *) fail "the hull was not rendered as one standard ANSI yellow run" ;;
   esac
   case "$boat_color_line$boat_sail_line" in
     *'[38;2;'*|*'[38;5;'*|*'[9'[0-9]'m'*) fail "the working ship used a non-standard color escape" ;;

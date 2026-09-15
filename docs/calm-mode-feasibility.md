@@ -172,7 +172,7 @@ Ticks rather than wall-clock timestamps drive every state change, so tests seek 
 The water is the lower half of the bottom-aligned one-cell bars that Pi Dictation uses for its level history, `▁▂▃▄`, so advancing the phase never changes visible width, adds a row, or moves the hull column.
 The swell is a deterministic field of smoothstep half-waves whose lengths vary between nine and thirteen cells from a fixed hash, surrounding a broad zero-height trough five cells either side of the hull center, so the boat never rides a crest and the surface still avoids a mechanical fixed period.
 
-Colors are standard ANSI foreground codes rather than theme lookups: blue for troughs and low water, cyan for crests, yellow for the left sail, mast, and hull edges, red for the right sail, and blue for the hull's interior water, with no bright variant, 256-color, or RGB escape.
+Colors are standard ANSI foreground codes rather than theme lookups: every water cell is blue whatever its height, so the swell reads through glyph height alone rather than a crest-versus-trough color split, and the whole boat, both sail halves, the mast, and the complete hull including its zero-height interior, is one yellow, with no bright variant, 256-color, or RGB escape.
 Each colored run is closed with a default-foreground reset so styling cannot bleed into the sail row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
 
 The presentation is TUI-only and visual-only.
