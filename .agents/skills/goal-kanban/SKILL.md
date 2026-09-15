@@ -97,7 +97,7 @@ Do not imply a dependency from numbering alone.
 Record parallelism only as a graph fact, without prescribing a worktree or a concurrent process.
 Record cross-part file or ownership conflicts as stop conditions in the affected parts.
 
-The chain reaches `Ready` only when the shared contract and every part pass the builder's auditability checks.
+The chain reaches `Ready` only when the shared contract is complete and each fully rendered part passes the builder's auditability checks.
 An approved chain does not authorize implementation, dispatch, merging, or delivery.
 
 ## Review output
