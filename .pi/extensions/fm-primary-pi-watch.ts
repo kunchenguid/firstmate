@@ -493,6 +493,7 @@ const cleanupOnProcessExit = () => {
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.FM_TASK_ID) return;
   let generation = createGeneration();
   activateGeneration(generation);
 

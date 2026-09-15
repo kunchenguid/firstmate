@@ -197,10 +197,11 @@
 #   naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
-#   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
-#   behavior suite from the repository primary checkout while that marker is
-#   set (its header owns the refusal). A secondmate runs in its own home and is
-#   not marked.
+#   the same channel as GOTMPDIR. Tracked primary hooks use that marker to
+#   stand down when a firstmate-repo task worktree inherits them, and
+#   bin/fm-test-run.sh refuses to execute the behavior suite from the repository
+#   primary checkout while it is set (its header owns the refusal). A
+#   secondmate runs in its own home and is not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -4316,9 +4317,10 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
-# suite in the repository's primary checkout. Ship and scout workers are the
-# ones assigned an isolated worktree; a secondmate runs its own home instead.
+# Mark the pane as a task worker so inherited primary hooks stand down and
+# bin/fm-test-run.sh can refuse to run the suite in the repository's primary
+# checkout. Ship and scout workers are the ones assigned an isolated worktree;
+# a secondmate runs its own home instead.
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then

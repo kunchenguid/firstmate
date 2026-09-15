@@ -40,6 +40,7 @@ async function resolveRoot(anchor) {
 }
 
 export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
+  if (process.env.FM_TASK_ID) return {};
   const root = worktree ? (() => {
     try {
       return realpathSync(worktree);

@@ -509,6 +509,7 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.FM_TASK_ID) return;
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
   const cleanupSessionstartOnProcessExit = (): void => {

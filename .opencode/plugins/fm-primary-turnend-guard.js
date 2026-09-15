@@ -55,6 +55,7 @@ async function letWatchArmRun(sessionID, client) {
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
+  if (process.env.FM_TASK_ID) return {};
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
 
   return {
