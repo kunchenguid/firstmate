@@ -924,6 +924,41 @@ SH
   [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-classifier-failed: lost task record"
   [ -d "$case_dir/wt" ] || fail "azure-classifier-failed: lost local work"
 
+  case_dir=$(make_case azure-classifier-exit1)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/python3"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-classifier-exit1: teardown should refuse when classification exits 1"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-classifier-exit1: exit 1 did not preserve work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-classifier-exit1: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-classifier-exit1: lost local work"
+
+  case_dir=$(make_case azure-repo-name-collision)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/ssh.dev.azure.com'
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-repo-name-collision: teardown should still detect Azure https origins"
+  assert_grep 'Azure task has no registered PR URL' "$case_dir/stderr" \
+    "azure-repo-name-collision: https repo-name collision bypassed Azure classification"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-repo-name-collision: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-repo-name-collision: lost local work"
+
   case_dir=$(make_case non-azure-origin)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello
@@ -936,7 +971,7 @@ SH
   expect_code 0 "$rc" "non-azure-origin: teardown should still use ordinary remote reachability"
   ! grep -q REFUSED "$case_dir/stderr" || fail "non-azure-origin: teardown unexpectedly refused"
 
-  pass "Azure origin classification failures preserve work and non-Azure still allows"
+  pass "Azure origin classification is explicit and preserves work on failures"
 }
 
 test_squash_merged_branch_deleted_allows() {
