@@ -502,6 +502,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. For a command that runs longer than a few minutes (a full test suite, a pipeline round), wrap it so its completion wakes you instead of polling it in sleep slices: \`$FM_ROOT/bin/fm-babysit.sh --fm-home $FM_HOME [--timeout <seconds>] [--tail <lines>] $ID -- <command> [...]\` (that helper's header owns the contract; FM_HOME in your pane works in place of --fm-home when it names this home).
 
 $INBOX_SECTION
 
