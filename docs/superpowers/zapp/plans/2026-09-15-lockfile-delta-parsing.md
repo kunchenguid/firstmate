@@ -58,6 +58,16 @@ State that framing in the PR description. "Lockfile candidates fell 64%" read on
 
 ---
 
+## Runs concurrently with PLAT-1312 — two things to know
+
+[`2026-09-15-skipped-is-not-green.md`](./2026-09-15-skipped-is-not-green.md) was dispatched first and is in flight.
+
+**Expect one merge conflict, in `tests/gates.test.ts`.** That plan appends `checksGreen` (gate 12) cases; this one appends `semverCap` (gate 8) cases. Different functions, different assertions, no semantic overlap — whoever merges second rebases and keeps both. Do not try to avoid it by skipping tests, and do not assume the other branch is wrong.
+
+**No source-file overlap.** That plan touches `ci-history.ts`, `ci-baseline.ts`, gate 12's filter in `gates.ts`, `ledger/post-merge.ts` and `03-risk/signals/scan-findings.ts`. This plan touches `01-classify/classify.ts`, a new `01-classify/lockfile.ts`, `policy-rules.yaml`, `03-risk/signals/dep-type.ts` and the caller of `fetchManifestSections`. `gates.ts` is shared but the edits are in different gates.
+
+**One real interaction, and it is safe.** PLAT-1312 moves `skipped` out of `scan-findings.ts`'s `CLEAN` set, so a skipped Cycode check will make `scannerFindings` read `unknown` where it currently reads `low`. `scannerFindings` is one of the two signals this plan's arithmetic counts as already-graded, so on a PR with a skipped scanner the count is **5, not 6** — still above `minSignalsGraded: 4`. If both land and deps.dev is also unreachable it drops to 3 and the PR reads `unknown`, which is correct fail-closed behaviour, not a regression. Recheck this arithmetic in Step 7 against whatever PLAT-1312 actually shipped rather than against this paragraph.
+
 ## Global Constraints
 
 - **`classify()` MUST stay pure.** It currently takes `files` plus a pre-fetched `sections` map and does no I/O. Fetch both lockfiles in the caller and pass parsed maps in the same way. Do not make `classify()` async, and do not thread `githubRequest` into it — several callers (`recordClosure`, `backfill-outcomes`) legitimately have no network context and pass `sections: null`.
@@ -70,7 +80,9 @@ State that framing in the PR description. "Lockfile candidates fell 64%" read on
 
 ## Decisions — one needs sign-off before Task 4
 
-Tasks 1–3 are safe to start immediately; they add measurement without changing any verdict. **Task 4 changes verdicts and needs Scott's confirmation of the recommendation below before it is written.**
+Tasks 1–3 are safe to start immediately; they add measurement without changing any verdict. Task 4 changes verdicts.
+
+**DECIDED: take option B.** Recorded 2026-09-15 so this does not block the dispatch. Scott can override before Task 4 lands; if you reach Task 4 and have heard nothing, take B and say so in the PR description.
 
 **The question:** once a lockfile-only PR has a real `maxDelta`, what class does it get?
 
@@ -143,7 +155,7 @@ Reuse `deltaLevel` and `RANK` as they are. Do not write a second semver comparat
 
 - [ ] **Step 4: The class and cap decision — verdicts change here**
 
-**Do not start until the Decisions section above is signed off.** Assuming **B**:
+Implementing **option B** per the Decisions section:
 
 - `policy-rules.yaml`: `lockfile-only.semverCap: none` → `patch`. Replace the `# generated content only; safe anywhere` comment on `maxResiliencyTier` — it is currently false and is quoted in PLAT-1322 as such. The new comment should say the loose limits are conditional on a *verified* patch-only delta, and name conductor#431 as the reason the old claim was wrong.
 - Leave `tierFloor: 1`, `classifications`, `minCoveragePct: 0` and `maxResiliencyTier: platinum` alone. Changing them is option A by increments.
