@@ -211,7 +211,7 @@ __FM_PROJECT_COCKPIT_DATA__
   (() => {
     "use strict";
     const byId = (id) => document.getElementById(id);
-    const state = { payload: null, projectId: null, taskKey: null, filter: "active", query: "", projectOrder: [] };
+    const state = { payload: null, projectId: null, taskKey: null, filter: "active", query: "" };
     const lanes = [
       ["running", "Running"],
       ["waiting", "Waiting / Captain hold"],
@@ -255,14 +255,6 @@ __FM_PROJECT_COCKPIT_DATA__
       return state.payload.projects.filter((project) => {
         const tasks = allTasks(project).filter((task) => state.filter === "all" || task.lane !== "recently_completed");
         return !q || project.label.toLocaleLowerCase().includes(q) || tasks.some((task) => `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(q));
-      });
-    };
-    const orderedProjects = (projects) => {
-      const prior = new Map(state.projectOrder.map((id, index) => [id, index]));
-      return [...projects].sort((a, b) => {
-        const ai = prior.has(a.id) ? prior.get(a.id) : Number.MAX_SAFE_INTEGER;
-        const bi = prior.has(b.id) ? prior.get(b.id) : Number.MAX_SAFE_INTEGER;
-        return ai - bi || a.rank - b.rank || a.id.localeCompare(b.id);
       });
     };
     const warningText = () => {
@@ -323,7 +315,7 @@ __FM_PROJECT_COCKPIT_DATA__
     const renderProjects = () => {
       const list = byId("project-list");
       list.replaceChildren();
-      const projects = orderedProjects(filteredProjects());
+      const projects = filteredProjects();
       projects.forEach((project) => list.append(projectButton(project)));
       if (!projects.length) list.append(el("li", "empty-state", state.payload.inventory.status === "unavailable" ? "Snapshot unavailable." : state.payload.inventory.status === "empty" ? "No active tasks in the fleet." : "No projects match this filter."));
     };
@@ -425,6 +417,14 @@ __FM_PROJECT_COCKPIT_DATA__
         call.append(el("strong", "", `${task.hold.classification} captain hold`), el("p", "", text(task.hold.question)));
         detail.append(call);
       }
+      if (Array.isArray(task.decisions) && task.decisions.length) {
+        const decisions = el("div", "attention-call");
+        decisions.append(el("strong", "", task.decisions.length === 1 ? "Open decision" : `${task.decisions.length} open decisions`));
+        const list = el("ul");
+        task.decisions.forEach((summary) => list.append(el("li", "", text(summary))));
+        decisions.append(list);
+        detail.append(decisions);
+      }
       const grid = el("dl", "detail-grid");
       detailRow(grid, "State", upper(task.state), task.state);
       detailRow(grid, "Source", task.state_source);
@@ -506,7 +506,6 @@ __FM_PROJECT_COCKPIT_DATA__
     };
     try {
       state.payload = validatePayload(JSON.parse(byId("cockpit-data").textContent));
-      state.projectOrder = state.payload.projects.map((project) => project.id);
       state.projectId = state.payload.projects[0]?.id || null;
       state.taskKey = state.payload.projects[0]?.tasks[0] ? taskKey(state.payload.projects[0].tasks[0]) : null;
       byId("search").addEventListener("input", (event) => { state.query = event.target.value; renderProjects(); renderBoard(); });

@@ -101,7 +101,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
           ],
           decisions_open:[
             {id:"release-call",verb:"captain-hold",summary:"Choose release route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"},
-            {id:"status-call",key:"runtime",verb:"needs-decision",summary:"Choose runtime evidence",reason:null,source:"status"}
+            {id:"status-call",key:"runtime",verb:"needs-decision",summary:"Choose runtime evidence",reason:null,source:"status"},
+            {id:"status-call",key:"scope",verb:"needs-decision",summary:"Approve evidence scope",reason:null,source:"status"}
           ],
           queued:[
             {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[]},
@@ -123,7 +124,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
       | .lane == "waiting" and .attention == true and .project_id == "omega"
         and .state == "working" and .state_source == "structured-home"
         and .crew.kind == "scout" and .runtime_evidence.home == "/fleet/mates/one"
-        and .gate.status == "decision" and .gate.label == "Choose runtime evidence")
+        and .gate.status == "decision" and .gate.label == "Choose runtime evidence · Approve evidence scope"
+        and .decisions == ["Choose runtime evidence","Approve evidence scope"])
     and ([.projects[].tasks[] | select(.id == "mate-one:queued-child")][0].lane == "queued")
     and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")

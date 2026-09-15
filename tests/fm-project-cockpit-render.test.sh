@@ -73,11 +73,19 @@ pass "desktop rendering, safe links, offline resources, landmarks, and keyboard 
 
 states_json=$(jq -c . "$states")
 replacement_json=$(jq -c . "$replacement")
+promoted_json=$(jq -c '.projects |= (map(select(.id == "beta")) + map(select(.id != "beta")))' "$states")
+multiple_decisions_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).decisions=["Choose deployment window","Approve rollback policy"]' "$states")
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.click(); b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.focus(); window.fmCockpit.replacePayload($states_json); return {state:window.fmCockpit.getState(),focused:document.activeElement.dataset.taskKey};}" \
   '\"focused\":\"healthy-work\\u001fgen-healthy-1\"' "same-generation refresh did not preserve focused task identity"
 assert_eval "() => {window.fmCockpit.replacePayload($replacement_json); return window.fmCockpit.getState();}" \
   'healthy-work\\u001fgen-healthy-2' "replacement generation retained the old selection identity"
-pass "refresh preserves stable identity and invalidates a replaced generation"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); window.fmCockpit.replacePayload($promoted_json); return window.fmCockpit.getState().projectId + '|' + document.querySelector('.project-button').dataset.projectId;}" \
+  'alpha|beta' "refresh did not adopt authoritative project priority while preserving selection"
+assert_eval "() => {window.fmCockpit.replacePayload($multiple_decisions_json); document.querySelector('[data-project-id=\"alpha\"]').click(); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); return document.getElementById('task-detail').innerText;}" \
+  'Approve rollback policy' "inspector omitted a consolidated decision summary"
+assert_eval '() => document.getElementById("task-detail").innerText' \
+  'Choose deployment window' "inspector omitted the other consolidated decision summary"
+pass "refresh preserves selection, adopts payload order, and renders consolidated decisions"
 
 empty_json=$(jq -c . "$empty")
 invalid_json=$(jq -c . "$invalid")
