@@ -524,6 +524,7 @@ EOF
   FM_HOME="$mate" "$REPORT" "done" "$corr" "audit clean" \
     || fail "$REPORT failed writing a correlated report"
   helper_line=$(tail -1 "$state/pinned.status")
+  status_line_at_epoch "$helper_line" >/dev/null || fail "report helper emitted no time"
   verb=$(status_line_verb "$helper_line")
   [ "$verb" = "done" ] \
     || fail "the classifier did not read through the helper's own line '$helper_line' (verb=[$verb])"
@@ -533,6 +534,7 @@ EOF
   FM_HOME="$mate" "$REPORT" --doc needs-decision "$corr" data/x/report.md "see the report" \
     || fail "$REPORT failed writing a correlated doc-pointer report"
   helper_line=$(tail -1 "$state/pinned.status")
+  status_line_at_epoch "$helper_line" >/dev/null || fail "doc report helper emitted no time"
   verb=$(status_line_verb "$helper_line")
   [ "$verb" = needs-decision ] \
     || fail "the classifier did not read through the helper's doc line '$helper_line' (verb=[$verb])"
@@ -540,6 +542,157 @@ EOF
   pass "both real correlation-token writers produce lines this classifier reads through"
 }
 
+test_optional_event_time() {
+  local line stamped epoch before after dir
+  before=$(date +%s)
+  line="needs-decision corr=$CORR [key=timed]: choose: A or B"
+  stamped=$(status_stamp_line "$line") || fail "status writer could not stamp an event"
+  after=$(date +%s)
+  epoch=$(status_line_at_epoch "$stamped") || fail "new event has no emission time"
+  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] || fail "event time is not append time"
+  [ "$(status_line_verb "$stamped")" = needs-decision ] || fail "time changed verb"
+  [ "$(_fm_decision_key "$stamped")" = timed ] || fail "time changed key"
+  [ "$(status_line_note "$stamped")" = 'choose: A or B' ] || fail "time changed note"
+  [ "$(status_stamp_line "$stamped")" = "$stamped" ] || fail "restamping changed emission time"
+  line='done [at=1700000000]: old event'
+  [ "$(status_stamp_line "$line")" = "$line" ] || fail "writer replaced an old emission time"
+  (
+    # shellcheck disable=SC2329 # status_stamp_line invokes this clock stub indirectly.
+    date() { return 1; }
+    [ "$(status_stamp_line 'done: clock unavailable')" = 'done: clock unavailable' ]
+  ) || fail "clock failure lost the event"
+  for line in 'done: legacy' 'done: [at=1700000000] prose' \
+    'done [at=]: empty' "done [at=\$(date +%s)]: literal substitution" \
+    'done [at=bad]: malformed' 'done [at=17:00]: malformed colon' 'done [at=-1]: negative' \
+    'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
+    'done [at=1] [at=2]: ambiguous'; do
+    if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
+  done
+  for line in "done [at=1700000000] [corr=$CORR]: finished" \
+    "done [corr=$CORR] [at=1700000000]: finished"; do
+    [ "$(status_line_at_epoch "$line")" = 1700000000 ] || fail "metadata order changed time"
+  done
+  dir=$(make_case event-time)
+  # The real parent publisher deduplicates a retry against both timed and
+  # legacy records without rewriting the first event's time.
+  . "$ROOT/bin/fm-parent-channel-lib.sh"
+  line="done [corr=$CORR]: path: C:\\notes"
+  printf '%s\n' "$(status_stamp_line "$line")" > "$dir/state/retry.status"
+  stamped=$(cat "$dir/state/retry.status")
+  fm_parent_channel_append_once "$dir/state/retry.status" "$line" || fail "parent retry failed"
+  [ "$(cat "$dir/state/retry.status")" = "$stamped" ] || fail "retry duplicated or restamped event"
+  printf '%s\n' "$line" > "$dir/state/legacy.status"
+  fm_parent_channel_append_once "$dir/state/legacy.status" "$line" || fail "legacy retry failed"
+  [ "$(cat "$dir/state/legacy.status")" = "$line" ] || fail "legacy retry acquired an invented time"
+  fm_parent_channel_append_once "$dir/state/retry.status" "done [corr=$CORR2]: path: C:\\notes"
+  [ "$(wc -l < "$dir/state/retry.status")" -eq 2 ] || fail "dedup discarded different correlation"
+  fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=1]'
+  fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=2]'
+  [ "$(wc -l < "$dir/state/retry.status")" -eq 4 ] || fail "dedup stripped a time mention from prose"
+  # A malformed time tag is ordinary event bytes, so it identifies the event:
+  # the unstamped line is a DIFFERENT event, while re-appending the same bytes
+  # is still a retry.
+  for line in 'done [at=17:00]: shipped' 'done [at=]: shipped' 'done [at=bad]: shipped'; do
+    printf '%s\n' "$line" > "$dir/state/malformed.status"
+    fm_parent_channel_append_once "$dir/state/malformed.status" 'done: shipped' \
+      || fail "append after a malformed time failed"
+    [ "$(wc -l < "$dir/state/malformed.status")" -eq 2 ] \
+      || fail "dedup stripped a malformed time tag: $line"
+    fm_parent_channel_append_once "$dir/state/malformed.status" "$line" \
+      || fail "malformed time retry failed"
+    [ "$(head -1 "$dir/state/malformed.status")" = "$line" ] \
+      && [ "$(wc -l < "$dir/state/malformed.status")" -eq 2 ] \
+      || fail "retry duplicated or rewrote malformed time: $line"
+  done
+  # A well-formed numeric tag still strips, in either metadata order.
+  for line in "done [at=1700000000] [corr=$CORR2]: stamped" \
+    "done [corr=$CORR2] [at=1700000000]: stamped"; do
+    printf '%s\n' "$line" > "$dir/state/timed.status"
+    fm_parent_channel_append_once "$dir/state/timed.status" "done [corr=$CORR2]: stamped" \
+      || fail "numeric time retry failed"
+    [ "$(cat "$dir/state/timed.status")" = "$line" ] \
+      || fail "dedup did not ignore a well-formed numeric time: $line"
+  done
+  stamped=$(status_stamp_line "needs-decision corr=$CORR [key=timed]: choose: A or B")
+  printf '%s\n' "$stamped" 'working [at=1700000000]: unrelated progress' > "$dir/state/task.status"
+  [ -n "$(status_open_decisions "$dir/state/task.status")" ] || fail "time cleared an open decision"
+  printf '%s\n' 'resolved [at=1700000001] [key=timed]: answered' >> "$dir/state/task.status"
+  [ -z "$(status_open_decisions "$dir/state/task.status")" ] || fail "timed resolution did not close decision"
+  pass "optional event time preserves parsing and legacy unknown time"
+}
+
+test_captain_override_ignores_event_time() {
+  local dir verb line event
+  local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
+  dir=$(make_case captain-override-time)
+  for verb in 'done' needs-decision blocked failed; do
+    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
+      "$verb [at=1] [at=2]: audit complete"; do
+      status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
+      printf '%s\n' "$line" > "$dir/state/task.status"
+      event=$(status_span_first_actionable "$dir/state/task.status" 0) \
+        || fail "override hid actionable status span: $line"
+      [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
+      [ "$(cat "$dir/state/task.status")" = "$line" ] || fail "classification rewrote stored event"
+    done
+  done
+  FM_CAPTAIN_RE='done:'
+  for line in 'blocked: waiting' 'blocked [at=1700000000]: waiting'; do
+    status_is_captain_relevant "$line" && fail "override admitted excluded event: $line"
+    printf '%s\n' "$line" > "$dir/state/task.status"
+    status_span_has_actionable "$dir/state/task.status" 0 \
+      && fail "override surfaced excluded event: $line"
+  done
+  for verb in working paused resolved captain-held; do
+    for line in "$verb: done: mentioned" "$verb [at=1700000000]: done: mentioned"; do
+      status_is_captain_relevant "$line" && fail "override bypassed nonterminal suppression: $line"
+    done
+  done
+  FM_CAPTAIN_RE='^custom-verb: audit complete$'
+  for line in 'custom-verb: audit complete' 'custom-verb [at=1700000000]: audit complete'; do
+    status_is_captain_relevant "$line" || fail "timestamp broke custom verb override: $line"
+  done
+  FM_CAPTAIN_RE="^done \\[corr=$CORR\\]: literal \\[at=1700000000\\]$"
+  for line in "done [corr=$CORR]: literal [at=1700000000]" \
+    "done [at=1700000000] [corr=$CORR]: literal [at=1700000000]" \
+    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]"; do
+    status_is_captain_relevant "$line" || fail "normalization changed correlation metadata or note: $line"
+  done
+  pass "captain regex overrides preserve timed and legacy relevance and event bytes"
+}
+
+# A malformed time tag is never read as a time: relevance, verb, and note all see
+# the same ordinary bytes, so a FM_CAPTAIN_RE override matching "<verb>:" does not
+# find a separator the line does not have, while the terminal-verb default still
+# surfaces the event.
+test_malformed_event_time_is_ordinary_bytes() {
+  local dir verb line event
+  dir=$(make_case malformed-event-time)
+  for verb in 'done' needs-decision blocked failed; do
+    for line in "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
+      "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
+      "$verb [at=\$(date +%s)]: audit complete"; do
+      if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
+      [ "$(status_line_verb "$line")" = "$verb" ] || fail "malformed time changed verb: $line"
+      status_is_captain_relevant "$line" \
+        || fail "default vocabulary lost an actionable event: $line"
+      printf '%s\n' "$line" > "$dir/state/task.status"
+      event=$(status_span_first_actionable "$dir/state/task.status" 0) \
+        || fail "default vocabulary hid actionable status span: $line"
+      [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
+      (
+        FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
+        status_is_captain_relevant "$line" && exit 1
+        exit 0
+      ) || fail "override matched a malformed tag as a stripped time: $line"
+    done
+  done
+  pass "malformed event times stay ordinary line bytes for every reader"
+}
+
+test_captain_override_ignores_event_time
+test_malformed_event_time_is_ordinary_bytes
+test_optional_event_time
 test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in
 test_untokened_pair_is_unchanged
