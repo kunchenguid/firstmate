@@ -33,8 +33,9 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
     const content = typeof message.content === "string" ? message.content :
       Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n") :
       typeof message.text === "string" ? message.text : "";
-    return type.startsWith("fm-") || type.startsWith("firstmate-") ||
-      /^\s*\u2063?FIRSTMATE(?:_OP| WATCHER| SUPERVISION)/.test(content);
+    const operational = /^\s*\u2063?FIRSTMATE(?:_OP:| WATCHER| SUPERVISION)/.test(content);
+    return operational || (message.role === "custom" &&
+      (type === "firstmate-sessionstart-nudge" || type === "fm-main-mirror"));
   };
   const wrapCard = (card: ObjectLike): void => {
     if (cards.has(card) || typeof card.render !== "function") return;
@@ -74,7 +75,7 @@ export function installCalmOmpPresentation(tui: unknown, hidden: () => boolean):
       const container = this.chatContainer;
       const start = container.children.length;
       const result = originalAdd.call(this, message, ...args);
-      if (message?.role === "custom" && message.customType === "advisor" || isFirstmateMessage(message)) {
+      if ((message?.role === "custom" && message.customType === "advisor") || isFirstmateMessage(message)) {
         for (const card of container.children.slice(start)) {
           if (message.customType === "advisor") {
             const render = card.render;
