@@ -453,6 +453,36 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Review dispatch (config/review-dispatch.json)
+
+`config/review-dispatch.json` is an optional local, gitignored file holding the captain's accepted list of no-mistakes review agents, in preference order, plus the floors that decide when a candidate is skipped.
+This section is the single owner of its schema and per-field semantics.
+[`bin/fm-review-pin.sh`](../bin/fm-review-pin.sh) is the only reader and the only writer of the resulting pin; its header owns how the list is walked, how quota rows are matched, and the pin, restore, lock, and in-flight mechanics.
+The [`review-dispatch` skill](../.agents/skills/review-dispatch/SKILL.md) owns when firstmate runs it.
+
+```json
+{
+  "codexReviewFloorPercent": 20,
+  "lowTankPercent": 20,
+  "default": [
+    { "harness": "<adapter>", "model": "<model>", "effort": "<minimal|low|medium|high|xhigh|max, optional>", "provider": "<quota-axi provider, optional>" },
+    { "harness": "<adapter>", "use": [ { "model": "<model>", "effort": "<optional>" } ], "provider": "<optional>" }
+  ]
+}
+```
+
+`default` is required and is the accepted list, walked in order; the first candidate outside the low-tank band wins, and there is no ranking.
+A concrete entry needs `harness` and `model`; `effort` is optional and is passed to no-mistakes in its common spelling.
+A group entry names one `harness` and a non-empty `use` array of models tried in that order, so "Cursor with those same three models" is one group placed after the concrete candidates it backs up.
+`provider` names the quota-axi provider whose rows bound the candidate when the helper's derivation from the harness and model prefix does not fit.
+`codexReviewFloorPercent` (default 20) skips a Codex-bounded candidate whose remaining percent is under it, or whose runway says it will run out before reset.
+`lowTankPercent` (default 20) is the band edge for every other candidate; an exhausted quota is always in the band.
+Unknown quota never disqualifies a candidate, and a list that skips every candidate leaves the current pin untouched and returns the decision to firstmate.
+Malformed JSON, an empty list, an unknown effort, or a harness without a no-mistakes agent is an error, never a selection.
+See [`docs/examples/review-dispatch.json`](examples/review-dispatch.json) for a starting point to copy into local `config/review-dispatch.json`.
+The pin itself is the shared no-mistakes global configuration under `NM_HOME` (default `~/.no-mistakes`), so one pin serves every home and lane on the machine, and the helper refuses to change it while another review is in flight.
+Secondmate homes inherit this file from the primary, so a secondmate pins its validations from the same accepted list.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

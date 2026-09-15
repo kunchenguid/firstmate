@@ -399,6 +399,7 @@ family_for_basename() {
     fm-live-gate.test.sh|\
     fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
     fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
+    fm-review-pin.test.sh|\
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
@@ -744,6 +745,7 @@ tests/fm-remote-backlog-handoff.test.sh 41432
 tests/fm-remote-doctor.test.sh 5198
 tests/fm-remote-entrypoint.test.sh 132
 tests/fm-remote-herdr-guard.test.sh 1500
+tests/fm-review-pin.test.sh 12000
 tests/fm-remote-job-orphan-reap.test.sh 2972
 tests/fm-remote-job.test.sh 59603
 tests/fm-remote-reply.test.sh 101690
@@ -1404,12 +1406,16 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      printf '%s\n' "__script__:fm-review-pin.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-review-pin.sh)
+      printf '%s\n' "__script__:fm-review-pin.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)

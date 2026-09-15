@@ -241,6 +241,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/review-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -334,6 +338,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/review-dispatch.json",
       "audience": "operator-example"
     },
     {
