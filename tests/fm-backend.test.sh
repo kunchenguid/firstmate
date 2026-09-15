@@ -791,6 +791,20 @@ test_peek_conformance_old_vs_new() {
 
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
+# bind_fake_lease_path <fakebin> <worktree>: the native lease model and its
+# pool identity resolve from one baked-in path, since these spawn cases do not
+# carry FM_FAKE_LEASE_PATH in the spawn environment.
+bind_fake_lease_path() {
+  local fb=$1 wt=$2 tool
+  fm_test_fake_treehouse "$fb"
+  fm_test_fake_treehouse_identity "$fb"
+  for tool in treehouse python3; do
+    mv "$fb/$tool" "$fb/$tool-model"
+    printf '#!/usr/bin/env bash\nexport FM_FAKE_LEASE_PATH=%q\nexec %q "$@"\n' "$wt" "$fb/$tool-model" > "$fb/$tool"
+    chmod +x "$fb/$tool"
+  done
+}
+
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
   local dir=$1 wt=$2 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -807,10 +821,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_test_fake_treehouse "$fb"
-  mv "$fb/treehouse" "$fb/treehouse-model"
-  printf '#!/usr/bin/env bash\nexport FM_FAKE_LEASE_PATH=%q\nexec %q "$@"\n' "$wt" "$fb/treehouse-model" > "$fb/treehouse"
-  chmod +x "$fb/treehouse"
+  bind_fake_lease_path "$fb" "$wt"
   printf '%s\n' "$fb"
 }
 
@@ -880,10 +891,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_test_fake_treehouse "$fb"
-  mv "$fb/treehouse" "$fb/treehouse-model"
-  printf '#!/usr/bin/env bash\nexport FM_FAKE_LEASE_PATH=%q\nexec %q "$@"\n' "$wt" "$fb/treehouse-model" > "$fb/treehouse"
-  chmod +x "$fb/treehouse"
+  bind_fake_lease_path "$fb" "$wt"
   printf '%s\n' "$fb"
 }
 

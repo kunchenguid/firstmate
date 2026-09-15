@@ -239,6 +239,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_treehouse_identity "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

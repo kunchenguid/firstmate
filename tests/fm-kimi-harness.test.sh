@@ -133,6 +133,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_treehouse_identity "$fakebin"
   fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
