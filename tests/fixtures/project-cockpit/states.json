@@ -1,0 +1,165 @@
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-09-15T12:00:00Z",
+  "backlog": {
+    "present": true,
+    "records": [
+      {
+        "structured": true,
+        "id": "healthy-work",
+        "state": "in_flight",
+        "title": "Acceptance tests",
+        "repo": "alpha",
+        "kind": "ship",
+        "hold_bucket": null,
+        "captain_actionable": false,
+        "unresolved_blocker_ids": [],
+        "body_excerpt": "PRIVATE-INBOX-TEXT-MUST-NOT-LEAK"
+      },
+      {
+        "structured": true,
+        "id": "captain-call",
+        "state": "in_flight",
+        "title": "Choose compatibility policy",
+        "repo": "alpha",
+        "kind": "captain",
+        "hold_bucket": "live",
+        "captain_actionable": true,
+        "hold_reason": "Keep legacy readers or require version 2?",
+        "hold_age_days": 3,
+        "hold_until": null,
+        "unresolved_blocker_ids": []
+      },
+      {
+        "structured": true,
+        "id": "blocked-work",
+        "state": "in_flight",
+        "title": "Blocked integration",
+        "repo": "beta",
+        "kind": "ship",
+        "hold_bucket": null,
+        "captain_actionable": false,
+        "unresolved_blocker_ids": ["upstream-api"]
+      },
+      {
+        "structured": true,
+        "id": "queued-work",
+        "state": "queued",
+        "title": "Queued follow-up",
+        "repo": "beta",
+        "kind": "ship",
+        "hold_bucket": null,
+        "captain_actionable": false,
+        "unresolved_blocker_ids": []
+      },
+      {
+        "structured": true,
+        "id": "done-work",
+        "state": "done",
+        "title": "Previous release",
+        "repo": "gamma",
+        "kind": "ship",
+        "completion": {"verb": "merged", "date": "2026-09-14"},
+        "pr_url": "https://github.com/example/gamma/pull/7",
+        "report_path": null
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "healthy-work",
+      "kind": "ship",
+      "harness": "codex",
+      "backend": "tmux",
+      "project": "/work/alpha",
+      "spawn_gen": "gen-healthy-1",
+      "started_at": "2026-09-15T10:30:00Z",
+      "backlog": {
+        "structured": true,
+        "id": "healthy-work",
+        "state": "in_flight",
+        "title": "Acceptance tests",
+        "repo": "alpha",
+        "kind": "ship",
+        "hold_bucket": null,
+        "captain_actionable": false,
+        "unresolved_blocker_ids": [],
+        "body_excerpt": "PRIVATE-INBOX-TEXT-MUST-NOT-LEAK"
+      },
+      "current_state": {"state": "working", "source": "run-step", "detail": "SECRET-STATUS-DETAIL", "raw": "SECRET-RAW-LINE", "observed_at": "2026-09-15T12:00:00Z"},
+      "endpoint": {"status": "alive", "target": "firstmate:fm-healthy-work"},
+      "paths": {"report": {"present": true, "path": "/fleet/data/healthy-work/report.md"}, "worktree": {"path": "/fleet/projects/healthy-work"}, "home": {"path": null}},
+      "pr": {"url": "https://github.com/example/alpha/pull/42"},
+      "hints": {"last_event_text": "PRIVATE-EVENT-TEXT", "open_decisions": [{"summary": "PRIVATE-DECISION-TEXT"}]},
+      "actions": {"steer": "FORBIDDEN-CONTROL-TEXT"}
+    },
+    {
+      "id": "captain-call",
+      "kind": "ship",
+      "harness": "claude",
+      "backend": "tmux",
+      "project": "/work/alpha",
+      "spawn_gen": "gen-call-1",
+      "started_at": null,
+      "backlog": {
+        "structured": true,
+        "id": "captain-call",
+        "state": "in_flight",
+        "title": "Choose compatibility policy",
+        "repo": "alpha",
+        "kind": "captain",
+        "hold_bucket": "live",
+        "captain_actionable": true,
+        "hold_reason": "Keep legacy readers or require version 2?",
+        "hold_age_days": 3,
+        "hold_until": null,
+        "unresolved_blocker_ids": []
+      },
+      "current_state": {"state": "parked", "source": "pane", "detail": "awaiting a decision", "observed_at": "2026-09-15T11:58:00Z"},
+      "endpoint": {"status": "alive", "target": "firstmate:fm-captain-call"},
+      "paths": {"report": {"present": false, "path": "/fleet/data/captain-call/report.md"}, "worktree": {"path": "/fleet/projects/captain-call"}, "home": {"path": null}},
+      "pr": {"url": null}
+    },
+    {
+      "id": "blocked-work",
+      "kind": "ship",
+      "harness": "codex",
+      "backend": "herdr",
+      "project": "/work/beta",
+      "spawn_gen": "gen-blocked-1",
+      "started_at": "2026-09-15T11:00:00Z",
+      "backlog": {
+        "structured": true,
+        "id": "blocked-work",
+        "state": "in_flight",
+        "title": "Blocked integration",
+        "repo": "beta",
+        "kind": "ship",
+        "hold_bucket": null,
+        "captain_actionable": false,
+        "unresolved_blocker_ids": ["upstream-api"]
+      },
+      "current_state": {"state": "blocked", "source": "run-step", "detail": "network unavailable", "observed_at": "2026-09-15T11:59:00Z"},
+      "endpoint": {"status": "alive", "target": "session/workspace/tab/pane"},
+      "paths": {"report": {"present": false, "path": null}, "worktree": {"path": "/fleet/projects/blocked-work"}, "home": {"path": null}},
+      "pr": {"url": "http://unsafe.example/pull/1"}
+    },
+    {
+      "id": "unknown-work",
+      "kind": "secondmate",
+      "harness": "codex",
+      "backend": "unknown",
+      "project": "/work/delta",
+      "spawn_gen": "gen-unknown-1",
+      "started_at": null,
+      "backlog": null,
+      "current_state": {"state": "unknown", "source": "none", "detail": "unreachable", "observed_at": "2026-09-15T11:57:00Z"},
+      "endpoint": {"status": "unknown", "target": null},
+      "paths": {"report": {"present": false, "path": null}, "worktree": {"path": null}, "home": {"path": "/fleet/secondmates/delta"}},
+      "pr": {"url": null}
+    }
+  ],
+  "main_inventory": {"valid": true, "reason": null, "orphan_in_flight": [], "unstructured_current_count": 0},
+  "secondmate_current": {"records": [], "total": 0, "shown": 0, "truncated": false},
+  "secondmate_landed": {"records": [], "truncated": [], "unreadable": [], "partial": []}
+}

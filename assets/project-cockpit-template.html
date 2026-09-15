@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Firstmate Project Cockpit</title>
+  <style>
+    :root {
+      --canvas: #111315;
+      --panel: #171a1d;
+      --panel-2: #1c2024;
+      --line: #343a40;
+      --line-soft: #272c31;
+      --text: #eef1f3;
+      --muted: #a8b0b7;
+      --green: #67d391;
+      --amber: #efba58;
+      --red: #f27070;
+      --gray: #98a1a9;
+      --focus: #8bc9ff;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); color: var(--text); font-family: var(--sans); }
+    body { margin: 0; min-width: 0; background: var(--canvas); }
+    button, input, select { font: inherit; }
+    button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .fleet-strip {
+      position: sticky; top: 0; z-index: 20; min-width: 0;
+      border-bottom: 1px solid var(--line); background: rgba(17,19,21,.97);
+      backdrop-filter: blur(8px);
+    }
+    .fleet-strip__row {
+      min-width: 0; display: flex; align-items: center; gap: 18px;
+      padding: 11px 16px; overflow-x: auto; scrollbar-width: thin;
+    }
+    .brand { min-width: max-content; margin-right: auto; }
+    .brand h1 { margin: 0; font-size: 14px; letter-spacing: .12em; text-transform: uppercase; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font: 11px var(--mono); }
+    .metric { min-width: max-content; display: grid; grid-template-columns: auto auto; gap: 5px; align-items: baseline; }
+    .metric__value { font: 700 16px var(--mono); }
+    .metric__label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    .metric--attention .metric__value, .tone-attention { color: var(--amber); }
+    .metric--blocked .metric__value, .tone-blocked, .tone-failed { color: var(--red); }
+    .freshness { min-width: max-content; padding-left: 14px; border-left: 1px solid var(--line); }
+    .freshness strong { display: block; font: 700 12px var(--mono); }
+    .freshness span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+    .warning {
+      display: none; margin: 0; padding: 8px 16px; border-top: 1px solid #6b5429;
+      color: #ffdda1; background: #2b2418; font-size: 12px;
+    }
+    .warning[data-visible="true"] { display: block; }
+    .toolbar {
+      display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 8px;
+      padding: 12px; border-bottom: 1px solid var(--line-soft);
+    }
+    .toolbar input, .toolbar select {
+      min-width: 0; min-height: 40px; color: var(--text); background: #101214;
+      border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
+    }
+    .layout {
+      display: grid; grid-template-columns: minmax(220px, 270px) minmax(360px, 1fr) minmax(300px, 380px);
+      min-width: 0; min-height: calc(100vh - 65px);
+    }
+    .navigator, .board, .inspector { min-width: 0; }
+    .navigator { border-right: 1px solid var(--line); background: #141719; }
+    .section-heading {
+      margin: 0; padding: 14px 14px 9px; color: var(--muted); font-size: 11px;
+      letter-spacing: .12em; text-transform: uppercase;
+    }
+    .project-list, .task-list { list-style: none; margin: 0; padding: 0; }
+    .project-button {
+      width: 100%; min-width: 0; min-height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) auto;
+      gap: 4px 10px; padding: 10px 14px; color: var(--text); text-align: left;
+      background: transparent; border: 0; border-top: 1px solid var(--line-soft); cursor: pointer;
+    }
+    .project-button:hover { background: var(--panel-2); }
+    .project-button[aria-current="true"] { background: #22272b; box-shadow: inset 3px 0 var(--focus); }
+    .project-name { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 650; }
+    .project-meta { min-width: 0; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+    .count-badge {
+      align-self: start; min-width: 22px; padding: 2px 5px; text-align: center; color: var(--amber);
+      border: 1px solid #725b2f; border-radius: 999px; font: 700 10px var(--mono);
+    }
+    .board { padding: 14px; background: var(--canvas); }
+    .project-summary {
+      min-width: 0; display: flex; align-items: flex-start; gap: 10px; justify-content: space-between;
+      padding: 0 0 13px; border-bottom: 1px solid var(--line);
+    }
+    .project-summary h2 { min-width: 0; margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+    .project-summary p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .board-section { min-width: 0; padding-top: 16px; }
+    .board-section h3 { margin: 0 0 8px; color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    .mobile-label { display: none; }
+    .task-list { display: grid; gap: 6px; }
+    .task-button {
+      width: 100%; min-width: 0; min-height: 58px; display: grid;
+      grid-template-columns: minmax(0, 1.8fr) minmax(72px, .7fr) minmax(72px, .7fr) minmax(88px, 1fr) minmax(54px, .5fr);
+      gap: 8px; align-items: center; padding: 9px 10px; color: var(--text); text-align: left;
+      background: var(--panel); border: 1px solid var(--line-soft); border-radius: 3px; cursor: pointer;
+    }
+    .task-button:hover { border-color: var(--line); background: var(--panel-2); }
+    .task-button[aria-current="true"] { border-color: #55728a; box-shadow: inset 3px 0 var(--focus); }
+    .task-primary { min-width: 0; }
+    .task-name { display: block; min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 650; }
+    .task-id { display: block; margin-top: 3px; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+    .cell { min-width: 0; font: 11px var(--mono); overflow-wrap: anywhere; }
+    .cell::before { display: block; margin-bottom: 3px; color: #737d85; font: 9px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+    .cell--phase::before { content: "Phase"; }
+    .cell--crew::before { content: "Crew"; }
+    .cell--gate::before { content: "Gate"; }
+    .cell--elapsed::before { content: "Elapsed"; }
+    .state-working, .state-done, .state-complete { color: var(--green); }
+    .state-parked, .state-paused, .state-queued, .state-stale, .state-live, .state-aged, .state-dated { color: var(--amber); }
+    .state-blocked, .state-failed { color: var(--red); }
+    .state-unknown, .state-unavailable, .state-not_started, .state-stopped { color: var(--gray); }
+    .empty-state { padding: 22px 12px; color: var(--muted); border: 1px dashed var(--line); font-size: 13px; }
+    .inspector { border-left: 1px solid var(--line); background: var(--panel); padding: 15px; }
+    .inspector__eyebrow { color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .inspector h2 { margin: 7px 0 4px; font-size: 18px; overflow-wrap: anywhere; }
+    .inspector__identity { margin: 0 0 15px; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+    .detail-grid { display: grid; grid-template-columns: minmax(90px, .7fr) minmax(0, 1.3fr); margin: 0; border-top: 1px solid var(--line); }
+    .detail-grid dt, .detail-grid dd { min-width: 0; margin: 0; padding: 9px 0; border-bottom: 1px solid var(--line-soft); }
+    .detail-grid dt { color: var(--muted); font-size: 11px; }
+    .detail-grid dd { font: 11px var(--mono); overflow-wrap: anywhere; }
+    .inspector details { margin-top: 12px; border: 1px solid var(--line); border-radius: 3px; }
+    .inspector summary { min-height: 40px; padding: 11px; cursor: pointer; color: var(--muted); font-size: 12px; }
+    .detail-body { padding: 0 11px 11px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .detail-body p { margin: 7px 0; }
+    .attention-call { margin: 13px 0; padding: 10px; border-left: 3px solid var(--amber); background: #252117; }
+    .attention-call strong { display: block; color: var(--amber); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    .attention-call p { margin: 6px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+    .artifact-link { color: #a8d7ff; overflow-wrap: anywhere; }
+    .copy-button {
+      min-height: 36px; margin-top: 6px; padding: 6px 9px; color: var(--text);
+      background: #111416; border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
+    }
+    .changed { animation: verified-change 1.2s ease-out; }
+    @keyframes verified-change { from { background-color: #33453b; } to { background-color: transparent; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; } }
+    @media (max-width: 1050px) {
+      .layout { grid-template-columns: minmax(200px, 250px) minmax(0, 1fr); }
+      .inspector { grid-column: 2; border-left: 0; border-top: 1px solid var(--line); }
+    }
+    @media (max-width: 760px) {
+      .fleet-strip__row { gap: 12px; padding: 10px 12px; }
+      .brand { min-width: 160px; }
+      .layout { display: block; min-width: 0; }
+      .navigator { border-right: 0; border-bottom: 1px solid var(--line); }
+      .project-list { display: grid; grid-template-columns: 1fr; }
+      .project-button { min-height: 64px; padding: 11px 12px; }
+      .board { padding: 12px; }
+      .project-summary h2 { font-size: 18px; }
+      .task-button { min-height: 76px; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 10px; }
+      .task-primary { grid-column: 1 / -1; }
+      .cell--gate { grid-column: 1; }
+      .cell--elapsed { grid-column: 2; text-align: right; }
+      .cell--phase, .cell--crew { display: none; }
+      .inspector { grid-column: auto; border-left: 0; border-top: 1px solid var(--line); padding: 13px 12px 28px; }
+      .toolbar { grid-template-columns: 1fr; }
+      .desktop-label { display: none; }
+      .mobile-label { display: inline; }
+    }
+  </style>
+</head>
+<body>
+  <header class="fleet-strip" aria-label="Fleet status">
+    <div class="fleet-strip__row">
+      <div class="brand"><h1>Project Cockpit</h1><p id="snapshot-stamp">Snapshot unavailable</p></div>
+      <div class="metric"><strong class="metric__value" id="count-running">0</strong><span class="metric__label">Running</span></div>
+      <div class="metric"><strong class="metric__value" id="count-waiting">0</strong><span class="metric__label">Waiting</span></div>
+      <div class="metric metric--blocked"><strong class="metric__value" id="count-blocked">0</strong><span class="metric__label">Blocked</span></div>
+      <div class="metric metric--attention"><strong class="metric__value" id="count-attention">0</strong><span class="metric__label">Attention</span></div>
+      <div class="freshness"><strong id="snapshot-age">Unavailable</strong><span>Snapshot age</span></div>
+    </div>
+    <p class="warning" id="inventory-warning" role="status" aria-live="polite"></p>
+  </header>
+  <div class="toolbar" role="search">
+    <label><span class="sr-only">Search projects and tasks</span><input id="search" type="search" placeholder="Filter projects and tasks" autocomplete="off"></label>
+    <label><span class="sr-only">Task view</span><select id="view-filter"><option value="active">Active</option><option value="all">All / history</option></select></label>
+  </div>
+  <main class="layout" id="cockpit-main">
+    <nav class="navigator" aria-labelledby="projects-heading">
+      <h2 class="section-heading" id="projects-heading">Projects</h2>
+      <ul class="project-list" id="project-list"></ul>
+    </nav>
+    <section class="board" aria-labelledby="project-title">
+      <div class="project-summary"><div><h2 id="project-title">No project selected</h2><p id="project-summary"></p></div></div>
+      <div id="project-board"></div>
+    </section>
+    <aside class="inspector" id="inspector" aria-labelledby="task-title" tabindex="-1">
+      <span class="inspector__eyebrow">Task inspector</span>
+      <h2 id="task-title">Select a task</h2>
+      <p class="inspector__identity" id="task-identity">No task identity</p>
+      <div id="task-detail" class="empty-state">Choose a task to inspect its structured evidence.</div>
+    </aside>
+  </main>
+  <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
+  <script id="cockpit-data" type="application/json">
+__FM_PROJECT_COCKPIT_DATA__
+  </script>
+  <script>
+  (() => {
+    "use strict";
+    const byId = (id) => document.getElementById(id);
+    const state = { payload: null, projectId: null, taskKey: null, filter: "active", query: "", projectOrder: [] };
+    const lanes = [
+      ["running", "Running"],
+      ["waiting", "Waiting / Captain hold"],
+      ["queued", "Queued"],
+      ["recently_completed", "Recently completed"]
+    ];
+    const text = (value, fallback = "Unavailable") => value === null || value === undefined || value === "" ? fallback : String(value);
+    const taskKey = (task) => `${task.id}\u001f${task.spawn_gen || "legacy"}`;
+    const upper = (value) => text(value).replaceAll("_", " ").toUpperCase();
+    const duration = (seconds) => {
+      if (!Number.isFinite(seconds)) return "Unavailable";
+      if (seconds < 60) return `${Math.floor(seconds)}s`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+      return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+    };
+    const safeUrl = (value) => {
+      try { const url = new URL(value); return url.protocol === "https:" ? url.href : null; }
+      catch (_) { return null; }
+    };
+    const el = (tag, className, content) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    };
+    const announce = (message) => { byId("announcer").textContent = message; };
+    const validatePayload = (payload) => {
+      if (!payload || payload.schema !== "fm-project-cockpit.v1" || !Array.isArray(payload.projects)) throw new Error("Invalid Project Cockpit payload");
+      if (!payload.inventory || !payload.counts || payload.projects.length > 80) throw new Error("Incomplete Project Cockpit payload");
+      payload.projects.forEach((project) => {
+        if (!project || typeof project.id !== "string" || !Array.isArray(project.tasks) || project.tasks.length > 160) throw new Error("Invalid project inventory");
+      });
+      return payload;
+    };
+    const allTasks = (project) => project ? project.tasks : [];
+    const currentProject = () => state.payload.projects.find((project) => project.id === state.projectId) || null;
+    const currentTask = () => allTasks(currentProject()).find((task) => taskKey(task) === state.taskKey) || null;
+    const filteredProjects = () => {
+      const q = state.query.trim().toLocaleLowerCase();
+      return state.payload.projects.filter((project) => {
+        const tasks = allTasks(project).filter((task) => state.filter === "all" || task.lane !== "recently_completed");
+        return !q || project.label.toLocaleLowerCase().includes(q) || tasks.some((task) => `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(q));
+      });
+    };
+    const orderedProjects = (projects) => {
+      const prior = new Map(state.projectOrder.map((id, index) => [id, index]));
+      return [...projects].sort((a, b) => {
+        const ai = prior.has(a.id) ? prior.get(a.id) : Number.MAX_SAFE_INTEGER;
+        const bi = prior.has(b.id) ? prior.get(b.id) : Number.MAX_SAFE_INTEGER;
+        return ai - bi || a.rank - b.rank || a.id.localeCompare(b.id);
+      });
+    };
+    const warningText = () => {
+      const inventory = state.payload.inventory;
+      const notices = [];
+      if (state.payload.freshness === "stale") notices.push("STALE SNAPSHOT");
+      if (inventory.status === "partial") notices.push("PARTIAL INVENTORY");
+      if (inventory.status === "invalid") notices.push("INVALID INVENTORY");
+      if (inventory.status === "unavailable") notices.push("SNAPSHOT UNAVAILABLE");
+      if (inventory.truncated) notices.push("TRUNCATED INVENTORY");
+      if (inventory.reason) notices.push(inventory.reason);
+      if (Array.isArray(inventory.partial_reasons)) notices.push(...inventory.partial_reasons);
+      return notices.join(" · ");
+    };
+    const renderHeader = () => {
+      const payload = state.payload;
+      byId("count-running").textContent = payload.counts.running;
+      byId("count-waiting").textContent = payload.counts.waiting;
+      byId("count-blocked").textContent = payload.counts.blocked;
+      byId("count-attention").textContent = payload.counts.attention;
+      byId("snapshot-stamp").textContent = `Observed ${payload.generated}`;
+      const warning = warningText();
+      byId("inventory-warning").textContent = warning;
+      byId("inventory-warning").dataset.visible = warning ? "true" : "false";
+      updateAge();
+    };
+    const updateAge = () => {
+      const generated = Date.parse(state.payload.generated);
+      if (!Number.isFinite(generated) || state.payload.freshness === "unavailable") {
+        byId("snapshot-age").textContent = "Unavailable";
+        return;
+      }
+      const age = Math.max(state.payload.age_seconds || 0, Math.floor((Date.now() - generated) / 1000));
+      byId("snapshot-age").textContent = duration(age);
+      if (age > state.payload.stale_after_seconds && state.payload.freshness !== "stale") {
+        state.payload.freshness = "stale";
+        const warning = warningText();
+        byId("inventory-warning").textContent = warning;
+        byId("inventory-warning").dataset.visible = "true";
+      }
+    };
+    const projectButton = (project) => {
+      const li = el("li");
+      const button = el("button", "project-button");
+      button.type = "button";
+      button.dataset.projectId = project.id;
+      button.setAttribute("aria-current", project.id === state.projectId ? "true" : "false");
+      button.append(el("span", "project-name", project.label));
+      if (project.attention_count > 0) button.append(el("span", "count-badge", `${project.attention_count}`));
+      const meta = el("span", "project-meta", `${project.active_count} active · ${project.latest_phase.toUpperCase()} · oldest ${duration(project.oldest_active_seconds)} · ${project.last_observed_at || "never observed"}`);
+      meta.style.gridColumn = "1 / -1";
+      button.append(meta);
+      button.addEventListener("click", () => selectProject(project.id, true));
+      button.addEventListener("keydown", projectKeydown);
+      li.append(button);
+      return li;
+    };
+    const renderProjects = () => {
+      const list = byId("project-list");
+      list.replaceChildren();
+      const projects = orderedProjects(filteredProjects());
+      projects.forEach((project) => list.append(projectButton(project)));
+      if (!projects.length) list.append(el("li", "empty-state", state.payload.inventory.status === "unavailable" ? "Snapshot unavailable." : state.payload.inventory.status === "empty" ? "No active tasks in the fleet." : "No projects match this filter."));
+    };
+    const projectKeydown = (event) => {
+      const buttons = [...byId("project-list").querySelectorAll("button")];
+      const index = buttons.indexOf(event.currentTarget);
+      let next = null;
+      if (event.key === "ArrowDown") next = buttons[index + 1] || buttons[0];
+      if (event.key === "ArrowUp") next = buttons[index - 1] || buttons.at(-1);
+      if (event.key === "Home") next = buttons[0];
+      if (event.key === "End") next = buttons.at(-1);
+      if (next) { event.preventDefault(); next.focus(); }
+    };
+    const taskButton = (task) => {
+      const li = el("li");
+      const button = el("button", "task-button");
+      button.type = "button";
+      button.dataset.taskKey = taskKey(task);
+      button.setAttribute("aria-current", taskKey(task) === state.taskKey ? "true" : "false");
+      const primary = el("span", "task-primary");
+      primary.append(el("span", "task-name", task.name), el("span", "task-id", task.id));
+      const phase = el("span", `cell cell--phase state-${task.state}`, upper(task.state));
+      const crew = el("span", `cell cell--crew state-${task.crew.liveness}`, task.crew.summary);
+      const gate = el("span", `cell cell--gate state-${task.gate.status}`, text(task.gate.label));
+      const elapsed = el("span", "cell cell--elapsed", duration(task.elapsed_seconds));
+      button.append(primary, phase, crew, gate, elapsed);
+      button.addEventListener("click", () => selectTask(taskKey(task), true));
+      button.addEventListener("keydown", taskKeydown);
+      li.append(button);
+      return li;
+    };
+    const taskKeydown = (event) => {
+      const buttons = [...byId("project-board").querySelectorAll("button.task-button")];
+      const index = buttons.indexOf(event.currentTarget);
+      let next = null;
+      if (event.key === "ArrowDown") next = buttons[index + 1] || buttons[0];
+      if (event.key === "ArrowUp") next = buttons[index - 1] || buttons.at(-1);
+      if (event.key === "Home") next = buttons[0];
+      if (event.key === "End") next = buttons.at(-1);
+      if (event.key === "Escape" && window.matchMedia("(max-width: 760px)").matches) {
+        event.preventDefault(); byId("project-list").querySelector('[aria-current="true"]')?.focus(); return;
+      }
+      if (next) { event.preventDefault(); next.focus(); }
+    };
+    const renderBoard = () => {
+      const project = currentProject();
+      const board = byId("project-board");
+      board.replaceChildren();
+      if (!project) {
+        byId("project-title").textContent = state.payload.inventory.status === "unavailable" ? "Snapshot unavailable" : "No project selected";
+        byId("project-summary").textContent = state.payload.inventory.status === "empty" ? "No active tasks were observed." : "";
+        board.append(el("div", "empty-state", state.payload.inventory.status === "empty" ? "No active tasks. The snapshot is valid and empty." : "Select a project to inspect its work."));
+        return;
+      }
+      byId("project-title").textContent = project.label;
+      byId("project-summary").textContent = `${project.active_count} active · ${project.blocker_count} blocked · oldest active ${duration(project.oldest_active_seconds)}`;
+      lanes.forEach(([lane, label]) => {
+        if (state.filter === "active" && lane === "recently_completed") return;
+        const tasks = project.tasks.filter((task) => task.lane === lane && (!state.query || `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(state.query.toLocaleLowerCase())));
+        const section = el("section", "board-section");
+        section.setAttribute("aria-labelledby", `lane-${lane}`);
+        const heading = el("h3");
+        heading.id = `lane-${lane}`;
+        heading.append(el("span", "desktop-label", label), el("span", "mobile-label", lane === "running" ? "Now" : lane === "waiting" ? "Decisions" : lane === "queued" ? "Queue" : "History"));
+        const list = el("ul", "task-list");
+        tasks.forEach((task) => list.append(taskButton(task)));
+        if (!tasks.length) list.append(el("li", "empty-state", `No ${label.toLocaleLowerCase()} work.`));
+        section.append(heading, list);
+        board.append(section);
+      });
+    };
+    const copyButton = (label, value) => {
+      const button = el("button", "copy-button", label);
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(value); announce(`${label} copied`); }
+        catch (_) { announce(`Could not copy ${label.toLocaleLowerCase()}`); }
+      });
+      return button;
+    };
+    const detailRow = (grid, label, value, tone) => {
+      grid.append(el("dt", "", label), el("dd", tone ? `state-${tone}` : "", text(value)));
+    };
+    const renderInspector = () => {
+      const task = currentTask();
+      const detail = byId("task-detail");
+      detail.replaceChildren();
+      detail.className = task ? "" : "empty-state";
+      if (!task) {
+        byId("task-title").textContent = "Select a task";
+        byId("task-identity").textContent = "No task identity";
+        detail.textContent = "Choose a task to inspect its structured evidence.";
+        return;
+      }
+      byId("task-title").textContent = task.name;
+      byId("task-identity").textContent = `${task.id} · generation ${task.spawn_gen || "legacy / unavailable"}`;
+      if (task.hold) {
+        const call = el("div", "attention-call");
+        call.append(el("strong", "", `${task.hold.classification} captain hold`), el("p", "", text(task.hold.question)));
+        detail.append(call);
+      }
+      const grid = el("dl", "detail-grid");
+      detailRow(grid, "State", upper(task.state), task.state);
+      detailRow(grid, "Source", task.state_source);
+      detailRow(grid, "Detail", task.state_detail_status === "unavailable" ? "Unavailable by privacy allowlist" : task.state_detail);
+      detailRow(grid, "Observed", task.observed_at);
+      detailRow(grid, "Started", task.started_at);
+      detailRow(grid, "Elapsed", duration(task.elapsed_seconds));
+      detailRow(grid, "Crew", `${task.crew.summary} · ${task.crew.kind}`);
+      detailRow(grid, "Gate", task.gate.label, task.gate.status);
+      detail.append(grid);
+      if (task.artifacts.pr_url) {
+        const href = safeUrl(task.artifacts.pr_url);
+        if (href) {
+          const link = el("a", "artifact-link", "Open pull request");
+          link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+          detail.append(link);
+        }
+      }
+      if (task.artifacts.report.path) detail.append(copyButton("Copy report path", task.artifacts.report.path));
+      detail.append(copyButton("Copy task ID", task.id));
+      if (task.hold?.question) detail.append(copyButton("Copy decision text", task.hold.question));
+      const events = el("details");
+      events.append(el("summary", "", "Events"));
+      events.append(el("div", "detail-body", task.events.status === "unavailable" ? task.events.reason : "Structured events available."));
+      const terminal = el("details");
+      terminal.append(el("summary", "", "Terminal · Unavailable"));
+      terminal.append(el("div", "detail-body", task.terminal.reason));
+      const evidence = el("details");
+      evidence.append(el("summary", "", "Runtime evidence"));
+      const evidenceBody = el("div", "detail-body");
+      [["Endpoint", task.runtime_evidence.endpoint_status], ["Target", task.runtime_evidence.target], ["Worktree", task.runtime_evidence.worktree], ["Home", task.runtime_evidence.home]].forEach(([label, value]) => evidenceBody.append(el("p", "mono", `${label}: ${text(value)}`)));
+      evidence.append(evidenceBody);
+      detail.append(events, terminal, evidence);
+    };
+    const selectProject = (id, focusTask) => {
+      state.projectId = id;
+      const project = currentProject();
+      if (!project || !project.tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = project?.tasks[0] ? taskKey(project.tasks[0]) : null;
+      renderProjects(); renderBoard(); renderInspector();
+      if (focusTask) requestAnimationFrame(() => byId("project-board").querySelector("button.task-button")?.focus());
+      announce(`Selected project ${project?.label || id}`);
+    };
+    const selectTask = (key, focusInspector) => {
+      state.taskKey = key; renderBoard(); renderInspector();
+      const task = currentTask();
+      if (focusInspector && window.matchMedia("(max-width: 760px)").matches) byId("inspector").focus();
+      announce(`Selected task ${task?.name || "unavailable"}`);
+    };
+    const renderAll = () => {
+      renderHeader(); renderProjects(); renderBoard(); renderInspector();
+    };
+    const replacePayload = (next) => {
+      const previous = currentTask();
+      const previousKey = state.taskKey;
+      const focusedProject = document.activeElement?.dataset?.projectId || null;
+      const focusedTask = document.activeElement?.dataset?.taskKey || null;
+      state.payload = validatePayload(next);
+      const projects = state.payload.projects;
+      if (!projects.some((project) => project.id === state.projectId)) state.projectId = projects[0]?.id || null;
+      const project = currentProject();
+      if (!project?.tasks.some((task) => taskKey(task) === previousKey)) state.taskKey = project?.tasks[0] ? taskKey(project.tasks[0]) : null;
+      renderAll();
+      const focusTarget = focusedTask
+        ? [...byId("project-board").querySelectorAll("button.task-button")].find((button) => button.dataset.taskKey === focusedTask)
+        : focusedProject
+          ? [...byId("project-list").querySelectorAll("button.project-button")].find((button) => button.dataset.projectId === focusedProject)
+          : null;
+      focusTarget?.focus();
+      const current = currentTask();
+      if (previous && current && taskKey(previous) === taskKey(current) && (previous.state !== current.state || previous.gate.label !== current.gate.label)) byId("task-detail").classList.add("changed");
+      announce("Project Cockpit snapshot updated");
+    };
+    const failClosed = (error) => {
+      document.body.replaceChildren();
+      const main = el("main", "empty-state");
+      main.setAttribute("role", "alert");
+      main.append(el("h1", "", "Project Cockpit unavailable"), el("p", "", error.message));
+      document.body.append(main);
+    };
+    try {
+      state.payload = validatePayload(JSON.parse(byId("cockpit-data").textContent));
+      state.projectOrder = state.payload.projects.map((project) => project.id);
+      state.projectId = state.payload.projects[0]?.id || null;
+      state.taskKey = state.payload.projects[0]?.tasks[0] ? taskKey(state.payload.projects[0].tasks[0]) : null;
+      byId("search").addEventListener("input", (event) => { state.query = event.target.value; renderProjects(); renderBoard(); });
+      byId("view-filter").addEventListener("change", (event) => { state.filter = event.target.value; renderProjects(); renderBoard(); });
+      renderAll();
+      setInterval(updateAge, 30000);
+      window.fmCockpit = { replacePayload, getState: () => ({ projectId: state.projectId, taskKey: state.taskKey }) };
+    } catch (error) { failClosed(error); }
+  })();
+  </script>
+</body>
+</html>

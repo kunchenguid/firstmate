@@ -1,0 +1,9 @@
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-09-15T12:00:00Z",
+  "backlog": {"present": true, "records": []},
+  "tasks": [],
+  "main_inventory": {"valid": true, "reason": null, "orphan_in_flight": [], "unstructured_current_count": 0},
+  "secondmate_current": {"records": [], "total": 0, "shown": 0, "truncated": false},
+  "secondmate_landed": {"records": [], "truncated": [], "unreadable": [], "partial": []}
+}
