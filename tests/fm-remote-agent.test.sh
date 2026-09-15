@@ -194,6 +194,7 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       get-exit-error) success '{}'; exit 1 ;;
       get-structure) success '{"session":{"id":70001},"messages":{}}'; exit 0 ;;
       get-session-mismatch) success '{"session":{"id":70002},"messages":[]}'; exit 0 ;;
+      get-stderr-unavailable) printf 'network request failed: HTTP 503 token=synthetic-secret\n' >&2; exit 1 ;;
       get-provider-error) error INTERNAL_ERROR 'temporary provider read failure'; exit 1 ;;
       get-unavailable) error HTTP_503 'service unavailable'; exit 1 ;;
       get-auth) error AUTH_REQUIRED 'authentication required'; exit 1 ;;
@@ -970,7 +971,7 @@ SH
   jq '.phase="running" | .provider_checkpoint="provider-running"' "$(state_file "$home" "$id")" >"$staged"
   chmod 0600 "$staged"; mv "$staged" "$(state_file "$home" "$id")"
 
-  printf 'get-provider-error\n' >"$mode_file"
+  printf 'get-stderr-unavailable\n' >"$mode_file"
   run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
     || fail "transient source arm failed"
   run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
@@ -1002,6 +1003,9 @@ SH
   artifacts=$(find "$home/state/remote-tasks/$id/artifacts" -name '*-observation.json' | wc -l | tr -d '[:space:]')
   [ "$results:$wakes:$artifacts" = 1:1:1 ] \
     || fail "identical transient retries grew durable state: results=$results wakes=$wakes artifacts=$artifacts"
+  if grep -R -E 'token=synthetic-secret|network request failed: HTTP 503' "$home/state" >/dev/null; then
+    fail "stderr-only transient leaked into durable state"
+  fi
 
   run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" retire "$source" >/dev/null \
     || fail "transient retry restart cleanup failed"

@@ -89,7 +89,7 @@ run_ida_json() { # <stdout> <stderr> <args...>
   shift 2
   : >"$out"; : >"$err"
   if fm_ida_run_bytedcli --json --as user ida --region sg "$@" >"$out" 2>"$err"; then IDA_RC=0; else IDA_RC=$?; fi
-  IDA_READ_ERROR=$(fm_ida_read_error_classify "$out" "$IDA_RC")
+  IDA_READ_ERROR=$(fm_ida_read_error_classify "$out" "$err" "$IDA_RC")
 }
 
 error_observation() { # <id> <kind> <class> [known-session-id] [known-task-id]

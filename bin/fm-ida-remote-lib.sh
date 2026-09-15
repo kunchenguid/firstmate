@@ -144,14 +144,20 @@ fm_ida_structured_success() {
 }
 
 # Read-only CLI calls preserve local failure categories without exposing stderr.
-# Only a structured provider error enters the shared remote-error classifier.
-fm_ida_read_error_classify() { # <stdout-file> <exit-code>; empty means success
-  local out=$1 rc=$2
+# Recognized transient stderr is classified in place and never persisted.
+fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty means success
+  local out=$1 err=$2 rc=$3 class
   case "$rc" in
     126) printf 'cli-not-executable\n'; return ;;
     127) printf 'cli-not-found\n'; return ;;
     124) printf 'timeout\n'; return ;;
   esac
+  if [ -s "$err" ]; then
+    class=$(fm_remote_error_classify "$err")
+    case "$class" in
+      rate-limited|timeout|unavailable) printf '%s\n' "$class"; return ;;
+    esac
+  fi
   if ! [ -s "$out" ]; then
     printf 'response-empty\n'
   elif ! jq -e -s 'length == 1' "$out" >/dev/null 2>&1; then
