@@ -548,7 +548,11 @@ unit_signal_exits_with_lock_cleanup() {
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() {
+      fm_afk_launch_entry_mark || return 1
+      date "+%s" > "$FM_AFK_LAUNCH_STATE/.afk"
+      sleep 30
+    }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
@@ -571,10 +575,11 @@ unit_signal_exits_with_lock_cleanup() {
     [ -e "$st/state/.afk-launch.lock" ] || break
     sleep 0.05
   done
-  if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
-    pass "launcher signal: TERM exits and releases the lifecycle lock"
+  if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ] \
+    && [ ! -e "$st/state/.afk-launching" ]; then
+    pass "launcher signal: TERM clears the entry marker and releases the lifecycle lock"
   else
-    fail "launcher signal: interrupted lifecycle resumed or retained its lock"
+    fail "launcher signal: interrupted lifecycle resumed or retained entry state"
   fi
   rm -rf "$st"
 }

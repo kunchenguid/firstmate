@@ -102,7 +102,6 @@ async function isPrimaryRoot(root, home) {
 }
 
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));

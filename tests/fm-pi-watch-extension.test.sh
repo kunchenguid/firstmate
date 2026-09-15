@@ -3933,6 +3933,52 @@ EOF
   pass "OpenCode treats an away-mode daemon deferral as a benign no-op"
 }
 
+test_opencode_legacy_afk_without_daemon_still_arms() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-legacy-afk-root"
+  home="$TMP_ROOT/opencode-legacy-afk-home"
+  log="$TMP_ROOT/opencode-legacy-afk.log"
+  stop="$TMP_ROOT/opencode-legacy-afk.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryWatchArm({
+  client: { session: { promptAsync: async () => {} } },
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const armed = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", {
+  session: { promptAsync: async () => {} },
+});
+if (armed !== "armed") throw new Error(`legacy .afk prevented an arm: ${armed}`);
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 1) throw new Error(`legacy .afk spawned ${rows.length} arm children`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+void hooks;
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must arm when only a legacy .afk flag is present"
+  [ -z "$out" ] || fail "OpenCode legacy .afk test printed output: $out"
+  pass "OpenCode arms when a legacy .afk has no daemon handoff"
+}
+
 test_opencode_actionable_close_hands_off_to_away_daemon() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -3948,6 +3994,8 @@ test_opencode_actionable_close_hands_off_to_away_daemon() {
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then
+  : > "${FM_HOME:?}/state/.afk"
+  : > "${FM_HOME:?}/state/.afk-launching"
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   printf 'signal: OpenCode away handoff\n'
   exit 0
@@ -4250,6 +4298,7 @@ test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_away_daemon_deferral_is_a_benign_noop
+test_opencode_legacy_afk_without_daemon_still_arms
 test_opencode_actionable_close_hands_off_to_away_daemon
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard

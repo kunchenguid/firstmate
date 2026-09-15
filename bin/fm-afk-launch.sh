@@ -137,6 +137,7 @@ fm_afk_launch_entry_mark() {
     rm -f "$pending"
     return 1
   fi
+  FM_AFK_LAUNCH_ENTRY_MARKED=1
 }
 
 fm_afk_launch_entry_clear() {
@@ -197,6 +198,16 @@ fm_afk_launch_lock_release() {
   pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
   [ "$pid" = "$$" ] || return 0
   rm -rf "$FM_AFK_LAUNCH_LOCK"
+}
+
+fm_afk_launch_exit_cleanup() {
+  local result=0
+  if [ "${FM_AFK_LAUNCH_COMPLETED:-}" != 1 ] \
+    && [ "${FM_AFK_LAUNCH_ENTRY_MARKED:-}" = 1 ]; then
+    fm_afk_launch_entry_clear || result=1
+  fi
+  fm_afk_launch_lock_release || result=1
+  return "$result"
 }
 
 fm_afk_launch_usage() {
@@ -753,12 +764,14 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
+  FM_AFK_LAUNCH_COMPLETED=0
+  FM_AFK_LAUNCH_ENTRY_MARKED=0
   # Traps first, lock second. Acquiring before the handlers exist leaves a
   # window where a signal terminates this process by default action and leaks
   # the lock directory, which then blocks the next away-mode launch until the
   # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
   # a lock this process owns, so arming it before acquisition is safe.
-  trap fm_afk_launch_lock_release EXIT
+  trap fm_afk_launch_exit_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
@@ -773,6 +786,7 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
+  FM_AFK_LAUNCH_COMPLETED=1
   fm_afk_launch_lock_release || result=1
   trap - EXIT INT TERM
   return "$result"

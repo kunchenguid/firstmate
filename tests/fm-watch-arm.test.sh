@@ -19,6 +19,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -912,6 +913,56 @@ test_arm_defers_during_away_entry() {
   pass "watch-arm: --restart defers during away-mode entry without displacing its watcher"
 }
 
+test_interrupted_away_entry_clears_marker_before_rearm() {
+  local dir home state fakebin ready armout launcher_pid watcher_pid i
+  dir=$(make_case interrupted-away-entry)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ready="$dir/entry-ready"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ENTRY_READY="$ready" bash -c '
+    . "$1"
+    fm_afk_launch_start() {
+      fm_afk_launch_entry_mark || return 1
+      date "+%s" > "$FM_AFK_LAUNCH_STATE/.afk"
+      : > "$FM_ENTRY_READY"
+      sleep 30
+    }
+    fm_afk_launch_main start
+  ' _ "$LAUNCH" &
+  launcher_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$ready" ] && [ -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ -e "$ready" ] && [ -e "$state/.afk-launching" ] \
+    || fail "interrupted away entry did not publish its launch marker"
+  kill -TERM "$launcher_pid" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+  for i in $(seq 1 100); do
+    [ ! -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ ! -e "$state/.afk-launching" ] \
+    || fail "interrupted away entry retained its launch marker"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "arm did not resume after interrupted away entry: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "rearm after interrupted away entry has no live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: an interrupted away entry clears its marker and re-arms"
+}
+
 test_legacy_afk_without_daemon_or_entry_still_arms() {
   local dir home state fakebin armout status watcher_pid
   dir=$(make_case legacy-afk-arm)
@@ -953,4 +1004,5 @@ test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_defers_to_a_live_away_daemon
 test_arm_defers_during_away_entry
+test_interrupted_away_entry_clears_marker_before_rearm
 test_legacy_afk_without_daemon_or_entry_still_arms
