@@ -1379,7 +1379,7 @@ if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_p
 for (const tool of mainTools) {
   if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
 }
-if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-health,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
@@ -1990,8 +1990,8 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers } = globalThis.__t;
 import { existsSync } from "node:fs";
 
 let now = 1_000_000;
@@ -2098,6 +2098,18 @@ const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Su
 if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
   throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
 }
+if (pauseNotes[0].message.customType !== "fm-branch-health") {
+  throw new Error(`the branch pause used a suppressible routine-note type: ${pauseNotes[0].message.customType}`);
+}
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+const pauseRendered = renderers.get("fm-branch-health")(
+  pauseNotes[0].message,
+  { expanded: false },
+  { fg: (_color, text) => text },
+);
+if (!pauseRendered.render(100).join("\n").includes("Supervision branch paused")) {
+  throw new Error("Calm hid the branch pause health alert");
+}
 
 // No provider attempt occurs inside the first five-minute cooldown. Exactly
 // one probe is accepted when it elapses, and all other wakes remain on main
@@ -2143,6 +2155,17 @@ if (mainUserMessages.length !== 0) throw new Error("a successful recovery probe 
 const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
   throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
+}
+if (recoveryNotes[0].message.customType !== "fm-branch-health") {
+  throw new Error(`the branch recovery used a suppressible routine-note type: ${recoveryNotes[0].message.customType}`);
+}
+const recoveryRendered = renderers.get("fm-branch-health")(
+  recoveryNotes[0].message,
+  { expanded: false },
+  { fg: (_color, text) => text },
+);
+if (!recoveryRendered.render(100).join("\n").includes("Supervision branch recovered")) {
+  throw new Error("Calm hid the branch recovery health alert");
 }
 
 // The durable report cleared both the latch and the old streak: one new

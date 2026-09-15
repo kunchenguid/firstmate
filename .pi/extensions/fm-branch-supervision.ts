@@ -146,6 +146,7 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const BRANCH_HEALTH_MESSAGE_TYPE = "fm-branch-health";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
@@ -673,7 +674,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverBranchHealthNote(text: string): void {
-    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
+    const message = { customType: BRANCH_HEALTH_MESSAGE_TYPE, content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
   }
@@ -2235,6 +2236,16 @@ ${context.command}
     return new CalmAwareRoutineNote(
       `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
+      0,
+    );
+  });
+  pi.registerMessageRenderer?.(BRANCH_HEALTH_MESSAGE_TYPE, (message, _options, theme) => {
+    const note = textOfContent(message.content);
+    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
+    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    return new Text(
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      1,
       0,
     );
   });

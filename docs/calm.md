@@ -29,6 +29,7 @@ Legacy operational custom messages remain in session data and Pi's sidebar tree,
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
 Toggling Calm on or off repaints restored and live routine supervision notes already on screen.
 Captain-facing anchor entries and their sequence-keyed processing remain visible and unchanged in either mode.
+Supervision branch pause and recovery health alerts also remain visible in either mode.
 
 Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
