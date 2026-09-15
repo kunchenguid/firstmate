@@ -260,7 +260,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'by running `no-mistakes axi run --intent "..."`' "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -374,6 +375,124 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# Seven no-mistakes workers in one session reported done on work the forge never
+# received. Every brief had told them, at the moment the code was committed, to
+# append `done:` and stop and wait for firstmate to authorize the pipeline. The
+# authorization has to sit where the finishing worker reads it, so this pins both
+# halves: the stop-and-wait instruction is gone, and the authorization plus the
+# forge readback are rendered at the two status-line instructions they govern.
+test_no_mistakes_dod_grants_pipeline_authority_at_the_done_instruction() {
+  local home id brief auth_line commit_line done_line
+  home="$TMP_ROOT/pipeline-authority-home"
+  mkdir -p "$home/data"
+  id="brief-pipeline-authority-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # The authorization itself: granted at dispatch, needing no further word.
+  assert_grep "IS your authorization to run the pipeline, and you already have it" "$brief" \
+    "no-mistakes DOD must state that the delivery mode is itself the pipeline authorization"
+  assert_grep "needs no further word from firstmate" "$brief" \
+    "no-mistakes DOD must state that the worker needs no further permission"
+  assert_grep "Committing the implementation is the MIDDLE of this task, not the end of it." "$brief" \
+    "no-mistakes DOD must say the implementation commit is not the end of the task"
+
+  # The instruction that produced the bug must be gone, not merely contradicted.
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still tells the worker to wait to be told to run the pipeline"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_no_grep 'append `done: {summary}` to the status file and stop' "$brief" \
+    "no-mistakes DOD still offers a terminal done gate at the implementation commit"
+
+  # Placement is the whole point: a correct sentence in a distant section is what
+  # produced this, so the authorization must render beside the status-line
+  # instruction the worker acts on when the code is committed.
+  auth_line=$(grep -n -F -- "needs no further word from firstmate" "$brief" | head -1 | cut -d: -f1)
+  commit_line=$(grep -n -F -- "start the pipeline in the same turn by running" "$brief" | head -1 | cut -d: -f1)
+  [ -n "$auth_line" ] && [ -n "$commit_line" ] \
+    || fail "no-mistakes DOD lost the authorization or the implementation-commit instruction"
+  [ "$((commit_line - auth_line))" -ge 0 ] && [ "$((commit_line - auth_line))" -le 4 ] \
+    || fail "no-mistakes DOD separated the pipeline authorization from the instruction it governs (lines $auth_line and $commit_line)"
+
+  # The one terminal gate, and the forge readback that backs a claim made at it.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `done: PR {url} checks green` and stop. You are finished.' "$brief" \
+    "no-mistakes DOD lost its single terminal done gate"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  done_line=$(grep -n -F -- 'append `done: PR {url} checks green` and stop.' "$brief" | head -1 | cut -d: -f1)
+  assert_grep "the PR URL is the deliverable and it is sufficient." "$brief" \
+    "no-mistakes DOD must make the PR URL the sufficient deliverable"
+  assert_grep "You never attest to what the forge holds: firstmate reads the PR head from the forge itself." "$brief" \
+    "no-mistakes DOD must keep forge-head attestation with firstmate"
+  assert_grep "genuinely pushed the branch and opened the PR" "$brief" \
+    "no-mistakes DOD must require a genuinely pushed branch and opened PR"
+  assert_grep "copying the full https:// URL from what the PR step actually produced rather than composing one." "$brief" \
+    "no-mistakes DOD must require copying the URL from the PR step"
+  assert_grep "Firstmate verifies a terminal claim against the forge, so a claim that names no PR cannot be checked at all, and a commit that exists only on the local branch is not a delivery." "$brief" \
+    "no-mistakes DOD must explain why forge-backed URL evidence matters"
+  assert_no_grep "head SHA" "$brief" \
+    "no-mistakes DOD must not require the worker to hand over a forge head SHA"
+  assert_grep "pipeline-authored fix commits stacked on the implementation commit" "$brief" \
+    "no-mistakes DOD must accept pipeline-owned fix commits at the terminal head"
+  assert_no_grep "head is not the work you committed" "$brief" \
+    "no-mistakes DOD still requires personal authorship of the terminal head"
+  assert_no_grep "say what actually happened instead" "$brief" \
+    "no-mistakes DOD still leaves forge verification failures without a machine-readable status"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `blocked: {what the forge actually shows}` when firstmate action is needed to get the work to the forge' "$brief" \
+    "no-mistakes DOD must expose a blocked forge-verification status"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `failed: {what the forge actually shows}` when delivery genuinely failed, then stop.' "$brief" \
+    "no-mistakes DOD must expose a failed forge-verification status"
+  auth_line=$(grep -n -F -- "You never attest to what the forge holds: firstmate reads the PR head from the forge itself." "$brief" | head -1 | cut -d: -f1)
+  [ -n "$done_line" ] && [ -n "$auth_line" ] && [ "$((done_line - auth_line))" -ge 0 ] \
+    && [ "$((done_line - auth_line))" -le 5 ] \
+    || fail "no-mistakes DOD separated forge-owned verification from the terminal done gate"
+
+  # fm-inactive-reconcile.sh scrapes a terminal line in exactly this shape when
+  # meta pr= is absent, while firstmate verifies the PR head from the forge.
+  assert_grep "Keep the status line itself in exactly the \`done: PR {url} checks green\` shape" "$brief" \
+    "no-mistakes DOD must preserve the machine-read terminal status-line shape"
+  pass "fm-brief.sh: the no-mistakes DOD grants pipeline authority where the finishing worker reads it"
+}
+
+# The fix is scoped to the no-mistakes pipeline brief. Every other scaffold keeps
+# its own terminal gate, and none of them inherits pipeline authority wording.
+test_pipeline_authority_is_scoped_to_no_mistakes() {
+  local home brief
+  home="$TMP_ROOT/pipeline-authority-scope-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scope-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/scope-scout/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `done: {one-line conclusion}` to the status file and stop' "$brief" \
+    "scout brief lost its own terminal done gate"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scope-local some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/scope-local/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `done: ready in branch fm/scope-local` to the status file and stop' "$brief" \
+    "local-only brief lost its own terminal done gate"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scope-direct some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/scope-direct/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and brace tokens must stay literal
+  assert_grep 'append `done: PR {url}` to the status file and stop' "$brief" \
+    "direct-PR brief lost its own terminal done gate"
+  assert_grep "Do NOT run /no-mistakes." "$brief" \
+    "direct-PR brief lost its no-pipeline instruction"
+
+  for brief in "$home/data/scope-scout/brief.md" "$home/data/scope-local/brief.md" "$home/data/scope-direct/brief.md"; do
+    assert_no_grep "IS your authorization to run the pipeline" "$brief" \
+      "$brief inherited the no-mistakes pipeline authorization"
+    assert_no_grep "invoke /no-mistakes in the same turn" "$brief" \
+      "$brief inherited the no-mistakes pipeline start instruction"
+  done
+  pass "fm-brief.sh: pipeline authority wording stays out of the scout, local-only, and direct-PR briefs"
 }
 
 test_ask_user_escalation_format() {
@@ -934,6 +1053,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_grants_pipeline_authority_at_the_done_instruction
+test_pipeline_authority_is_scoped_to_no_mistakes
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
