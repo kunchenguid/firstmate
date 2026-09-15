@@ -1443,6 +1443,161 @@ $snapshot
 EOF
 }
 
+# --- silenced decision replacements -----------------------------------------
+#
+# The fold above collapses same-key opens on purpose: a second opener for an
+# already-open key drops the first record and keeps only the second, and two
+# genuinely unkeyed decisions share the "default" key by documented design. The
+# collapse itself is never the defect, so this block never changes the fold. The
+# defect is the silence: a decision somebody wrote is discarded unread with
+# nothing anywhere saying so, and the surviving record can even carry the lost
+# key as prose (a mid-note "[key=x]" mention), which is the shape that made one
+# such loss invisible to the OPEN DECISIONS listing alone.
+#
+# status_decision_replacements is the announcement half of that contract. It
+# replays the stream through the exact same _fm_decision_fold_line rule the two
+# folds use and FIRES when a fold step is about to return one record for a key
+# that already had an open record AND the two notes DIFFER: a genuine
+# replacement, never benign. It stays silent on the two livable shapes: a
+# verbatim re-append (an idempotent retry, common) and any line that is not an
+# opener for that key - including a prose mention of a key, which never creates
+# a second open record to collide with. It keys on RECORDS BEING REPLACED, not
+# on token placement: no position is inspected here, so the rejected
+# misplaced-token detector shape cannot land on it. The reserved-key vocabulary
+# gate is mirrored line for line, so a foreign transition the fold ignores can
+# never manufacture a replacement either.
+#
+# The rule applies to EVERY key including "default" with no exemption: a
+# mid-note mention folds to "default", so exempting that bucket would leave the
+# very loss this exists for silent again, and one uniform rule is simpler than a
+# carve-out. A replacement marker lives only while its key is still open and is
+# cleared by the key's resolved/captain-held close: once the survivor closes
+# there is nothing actionable left to announce and the raw log still holds the
+# full history. Output is one TAB-separated
+# "<key>\t<survivor-verb>\t<discarded-note>\t<survivor-note>" line per
+# still-open replaced key, latest replacement wins; prints nothing when no open
+# key replaced another. Pure reads, no cursor state: the drain's snapshot
+# variant bounds its read to the captured endpoint for presentation consistency,
+# while the fleet-wide cost stays one bounded span per task with an open
+# decision rather than a second cursor to persist, version, and migrate.
+
+# The note stored for <key> in a folded open set (empty when it has no record).
+_fm_open_set_note() {  # <open-set> <key>
+  local line rest
+  while IFS= read -r line; do
+    case "$line" in
+      "$2"$'\t'*)
+        rest=${line#*$'\t'}
+        rest=${rest#*$'\t'}
+        printf '%s' "$rest"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$1
+EOF
+  return 0
+}
+
+# Fold a status stream from stdin into its silenced replacements (see the block
+# contract above). The single replay every file and snapshot scanner below
+# shares, so open/replacement semantics can never drift between them.
+_fm_decision_replacements_stream() {
+  local line verb key note old resolve held open='' repl=''
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    note=$(status_line_note "$line")
+    _fm_decision_key_transition_allowed "$key" "$note" || continue
+    case "$verb" in
+      needs-decision|blocked)
+        if _fm_open_set_has "$open" "$key"; then
+          old=$(_fm_open_set_note "$open" "$key")
+          if [ "$old" != "$note" ]; then
+            repl=$(_fm_decision_drop "$repl" "$key")
+            [ -n "$repl" ] && repl="${repl}"$'\n'
+            repl="${repl}${key}"$'\t'"${verb}"$'\t'"${old}"$'\t'"${note}"
+          fi
+        fi
+        ;;
+      "$resolve"|"$held")
+        repl=$(_fm_decision_drop "$repl" "$key")
+        [ -n "$repl" ] && repl="${repl}"$'\n'
+        ;;
+    esac
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+  done
+  printf '%s' "$repl"
+}
+
+# Replay one status file's whole stream into its silenced replacements. Prints
+# nothing when the file is missing, unreadable, symlinked, or holds no open
+# key that replaced another.
+status_decision_replacements() {  # <status-file>
+  local f=$1
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  _fm_decision_replacements_stream < "$f"
+}
+
+# Fleet-wide wrapper around status_decision_replacements: scans every task's
+# status log under <state> and prefixes each still-open replacement with its
+# owning task id. Prints one "<task>\t<key>\t<verb>\t<old-note>\t<new-note>"
+# line per replaced-while-open key, in glob (task id) order; prints nothing
+# when none are open.
+scan_decision_replacements() {  # <state>
+  local state=$1 f task repl line
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    repl=$(status_decision_replacements "$f") || continue
+    [ -n "$repl" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$repl
+EOF
+  done
+  return 0
+}
+
+# Snapshot-bounded sibling of scan_decision_replacements: the same per-key
+# replay and output shape, but each task's stream is the bounded span from byte
+# 0 through its captured snapshot endpoint rather than the live file, so the
+# announcement agrees with the OPEN DECISIONS section drawn from that same
+# snapshot even when a worker appends mid-presentation. A task whose span
+# cannot be read is skipped: its replacement waits for the next drain rather
+# than blocking this one's presentation.
+scan_decision_replacements_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f tmp repl line
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    case "$endpoint" in ''|*[!0-9]*) continue ;; esac
+    tmp="$f.repl.$$"
+    _fm_status_read_span "$f" 0 "$endpoint" > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp"; continue; }
+    repl=$(_fm_decision_replacements_stream < "$tmp")
+    rm -f "$tmp"
+    [ -n "$repl" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$repl
+EOF
+  done <<EOF
+$snapshot
+EOF
+}
+
 # --- unread status lines since the presentation cursor ----------------------
 #
 # The drain annotation historically printed only the newest status line, so a
