@@ -1009,7 +1009,7 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
-  local skip_restore=0
+  local skip_restore=0 get_status=0 code
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
@@ -1017,15 +1017,22 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   }
   active_tab=${before#*$'\t'}
-  info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
-    echo "warning: herdr presentation cleanup could not verify the exact pane; refusing focus-unsafe pane close" >&2
-    return 1
-  }
+  # Capture stdout and stderr: real Herdr writes structured pane_not_found to
+  # stderr and exits 1. That is confirmed-gone, not an unverifiable pane.
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1) || get_status=$?
+  code=$(printf '%s' "$info" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ "$code" = pane_not_found ]; then
+    return 0
+  fi
   target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
   target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
   target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
   if [ "$target_pane" != "$pane_id" ] || [ -z "$target_tab" ]; then
-    echo "warning: herdr presentation cleanup received an ambiguous exact-pane response; refusing focus-unsafe pane close" >&2
+    if [ "$get_status" -ne 0 ] || [ -n "$code" ]; then
+      echo "warning: herdr presentation cleanup could not verify the exact pane; refusing focus-unsafe pane close" >&2
+    else
+      echo "warning: herdr presentation cleanup received an ambiguous exact-pane response; refusing focus-unsafe pane close" >&2
+    fi
     return 1
   fi
   if [ -n "$required_agent_state" ]; then
@@ -2057,10 +2064,15 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
 }
 
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
-# succeed only when a structured follow-up proves the exact pane is gone.
+# succeed only when structured presence proves the exact pane is gone.
+# Close's process exit status is not that proof: real Herdr reports an
+# already-gone pane as pane_not_found on stderr and exits 1. The close
+# attempt is best-effort; fm_backend_herdr_pane_presence_state then
+# classifies the follow-up get, so a structured not-found finishes as gone
+# while present and unknown still refuse.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   local session=$1 pane_id=$2 presence
-  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   [ "$presence" = dead ]
 }
