@@ -1545,7 +1545,7 @@ ensure_commit_object() {
 }
 
 content_in_commit() {
-  local ref=$1 mode=${2:-unpushed} commits merge_base status path rc=0 paths_file
+  local ref=$1 mode=${2:-unpushed} commits merge_base status path rc=0 paths_file ref_tree_file head_tree_file
   case "$mode" in
     all)
       merge_base=$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null) || return 1
@@ -1560,7 +1560,8 @@ content_in_commit() {
   paths_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-paths.XXXXXX") || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
-    git -C "$WT" -c core.quotePath=false diff-tree --no-commit-id --name-status -r -z -m "$commit" -- \
+    git -C "$WT" -c core.quotePath=false -c diff.ignoreSubmodules=none \
+      diff-tree --ignore-submodules=none --no-commit-id --name-status -r -z -m "$commit" -- \
       >> "$paths_file" || {
         rm -f -- "$paths_file"
         return 1
@@ -1572,23 +1573,37 @@ EOF
     rm -f -- "$paths_file"
     return 0
   fi
+  ref_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-ref.XXXXXX") || {
+    rm -f -- "$paths_file"
+    return 1
+  }
+  head_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-head.XXXXXX") || {
+    rm -f -- "$paths_file" "$ref_tree_file"
+    return 1
+  }
   exec 3< "$paths_file"
   while IFS= read -r -d '' status <&3; do
     case "$status" in
       R*|C*)
         IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
+        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
         IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
+        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
         ;;
       *)
         IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" diff --quiet "$ref" HEAD -- ":(literal)$path" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
+        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
+        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
         ;;
     esac
   done
   exec 3<&-
-  rm -f -- "$paths_file"
+  rm -f -- "$paths_file" "$ref_tree_file" "$head_tree_file"
   [ "$rc" -eq 0 ]
 }
 
@@ -1980,7 +1995,7 @@ validate_worktree_teardown_safety() {
   esac
   [ -d "$WT" ] || return 0
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi

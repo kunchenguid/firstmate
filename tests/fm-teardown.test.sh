@@ -251,6 +251,74 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+setup_submodule_fixture() {
+  local case_dir=$1 tmp head
+  git init -q --bare "$case_dir/submodule-origin.git"
+  git -C "$case_dir/submodule-origin.git" symbolic-ref HEAD refs/heads/main
+
+  tmp="$case_dir/_submodule-seed"
+  git clone -q "$case_dir/submodule-origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/README.md"
+  git -C "$tmp" add -- README.md
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "submodule base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  tmp="$case_dir/_super-with-submodule"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" -c protocol.file.allow=always submodule add -q "$case_dir/submodule-origin.git" libs/sdk
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  head=$(git -C "$case_dir/wt/libs/sdk" rev-parse HEAD)
+  printf '%s\n' "$head"
+}
+
+advance_submodule_origin() {
+  local case_dir=$1 file=$2 content=$3 msg=$4 tmp head
+  tmp="$case_dir/_submodule-advance"
+  git clone -q "$case_dir/submodule-origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin main
+  head=$(git -C "$tmp" rev-parse HEAD)
+  rm -rf "$tmp"
+  printf '%s\n' "$head"
+}
+
+update_worktree_submodule_to() {
+  local case_dir=$1 head=$2 msg=$3
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  git -C "$case_dir/wt/libs/sdk" fetch -q origin
+  git -C "$case_dir/wt/libs/sdk" checkout -q "$head"
+  git -C "$case_dir/wt" add -- libs/sdk
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+land_submodule_pointer_on_origin_main() {
+  local case_dir=$1 head=$2 msg=$3 tmp
+  tmp="$case_dir/_land-submodule"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  git -C "$tmp/libs/sdk" fetch -q origin
+  git -C "$tmp/libs/sdk" checkout -q "$head"
+  git -C "$tmp" add -- libs/sdk
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+set_submodule_ignores_all() {
+  local case_dir=$1
+  git -C "$case_dir/wt" config diff.ignoreSubmodules all
+  git -C "$case_dir/wt" config submodule.libs/sdk.ignore all
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -1182,6 +1250,30 @@ test_merged_pr_refuses_unicode_merge_only_adjustment() {
   pass "merged PR containment preserves Unicode merge-only files absent from final content"
 }
 
+test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc pr_head local_head sub_head
+  case_dir=$(make_case merged-submodule-gitlink)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_url "$case_dir"
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set_submodule_ignores_all "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-submodule-gitlink: teardown should refuse an unlanded gitlink update despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-submodule-gitlink: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-submodule-gitlink "$local_head"
+  pass "merged PR containment preserves unlanded gitlink updates despite ignore settings"
+}
+
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
   local case_dir rc parent_head pr_head
   case_dir=$(make_case squash-replayed-patch)
@@ -1372,6 +1464,68 @@ test_pr_check_records_remote_head_when_local_lags() {
   ! grep -qxF "pr_head=$local_head" "$case_dir/state/task-x1.meta" \
     || fail "pr-check-local-lags: recorded local HEAD instead of remote PR head"
   pass "fm-pr-check records the remote PR head when the local worktree lags"
+}
+
+test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc local_head sub_head
+  case_dir=$(make_case content-submodule-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set_submodule_ignores_all "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-submodule-unlanded: teardown should refuse an unlanded gitlink update despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-submodule-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" content-submodule-unlanded "$local_head"
+  pass "content fallback preserves unlanded gitlink updates despite ignore settings"
+}
+
+test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc sub_head
+  case_dir=$(make_case content-submodule-contained)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  land_submodule_pointer_on_origin_main "$case_dir" "$sub_head" "land submodule gitlink"
+  set_submodule_ignores_all "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-submodule-contained: teardown should succeed when the landed default branch contains the gitlink update"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-submodule-contained: teardown printed a REFUSED line"
+  pass "content fallback accepts contained gitlink updates despite ignore settings"
+}
+
+test_dirty_submodule_work_refuses_despite_ignore_settings() {
+  local case_dir rc head
+  case_dir=$(make_case dirty-submodule-work)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  set_submodule_ignores_all "$case_dir"
+  printf '%s\n' dirty >> "$case_dir/wt/libs/sdk/README.md"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dirty-submodule-work: teardown should refuse dirty submodule work despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "dirty-submodule-work: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-submodule-work: refusal did not cite uncommitted changes"
+  assert_refusal_retained_task_state "$case_dir" dirty-submodule-work "$head"
+  pass "dirty submodule work is never hidden by ignore settings"
 }
 
 test_content_in_default_fallback_allows() {
@@ -4856,6 +5010,7 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_merged_pr_refuses_unicode_merge_only_adjustment
+test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_merged_pr_history_with_reapplied_local_change_refuses
@@ -4865,6 +5020,9 @@ test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
+test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
+test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_settings
+test_dirty_submodule_work_refuses_despite_ignore_settings
 test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
 test_content_fallback_contained_merge_history_allows
