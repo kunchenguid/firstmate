@@ -1167,7 +1167,7 @@ case "${1:-}" in
     ;;
   list-windows)
     [ "$target" = live-sess ] || exit 1
-    printf 'real-win\nfm-dotted.id\n'
+    printf 'real-win\nfm-dotted.id\nfm-dotted\nfm-auth\n'
     exit 0
     ;;
 esac
@@ -1189,16 +1189,15 @@ SH
   PATH="$fb:$PATH" fm_backend_target_exists tmux gone-sess:real-win && \
     fail "a session that answers no inventory must not read as a live endpoint"
 
-  # An exact window index or @id is proved by the window tmux actually resolved,
-  # so a fallback to a different window cannot pass on exit status alone.
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:0 \
-    || fail "the resolved window's own index must read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:9 && \
-    fail "an index tmux silently resolved to another window must NOT read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@7 \
-    || fail "the resolved window's own @id must read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@99 && \
-    fail "an @id tmux silently resolved to another window must NOT read as a live endpoint"
+  # Only an exact window name is a recorded endpoint. An index, @id, or
+  # pane-qualified form must never let tmux's own resolution stand in, because
+  # tmux reads a trailing ".N" as a pane qualifier and answers a sibling pane.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:0 && \
+    fail "a window index is not a recorded window name and must not read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@7 && \
+    fail "a window @id is not a recorded window name and must not read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win.0 && \
+    fail "a pane-qualified form must not read as a live endpoint even when tmux resolves its pane"
 
   # The away-mode daemon addresses the supervisor PANE (its own $TMUX_PANE), so
   # a bare pane id must stay present while a missing one is not.
@@ -1207,23 +1206,27 @@ SH
   PATH="$fb:$PATH" fm_backend_target_exists tmux %99 && \
     fail "a missing pane id, which tmux answers with an empty pane, must not read as live"
 
-  # A two-colon, pane-qualified, or malformed target never names a recorded
-  # window. A window name may itself contain a dot (task ids allow one), so the
-  # address is tried as a name before it is split as "<window>.<pane>".
+  # A two-colon or malformed target never names a recorded window.
   PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win:p1 && \
     fail "a two-colon target does not name a tmux window endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win.1 && \
-    fail "a pane qualifier tmux did not resolve must not read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win.0 \
-    || fail "a live window qualified by its real pane index must read as a live endpoint"
   PATH="$fb:$PATH" fm_backend_target_exists tmux real-win && \
     fail "a bare window name with no session is not a recorded window endpoint"
+
+  # A window name may itself contain a dot (task ids allow one), so a live dotted
+  # name still reads present.
   PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-dotted.id \
     || fail "a live window name containing a dot must read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-dotted.id.0 \
-    || fail "a live dotted window name qualified by its real pane index must read as a live endpoint"
-  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-dotted.id.9 && \
-    fail "a pane qualifier tmux did not resolve must not read as a live endpoint"
+
+  # Regression: a dotted recorded name whose window is ABSENT while its prefix
+  # window is live must read absent. tmux resolves "fm-auth.0" to the live
+  # prefix window's pane and exits 0; nothing but the exact inventory may prove
+  # the recorded window.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-auth \
+    || fail "the live prefix window itself must read as a live endpoint"
+  PATH="$fb:$PATH" tmux display-message -p -t live-sess:fm-auth.0 '#{pane_id}' >/dev/null 2>&1 \
+    || fail "fixture drifted: display-message must still resolve a dotted name to its live prefix window"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-auth.0 && \
+    fail "an absent dotted window whose live prefix window tmux resolved must NOT read as a live endpoint"
 
   pass "fm_backend_target_exists: the tmux arm proves the endpoint from tmux's own answer, never its silent fallback"
 }

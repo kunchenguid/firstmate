@@ -48,7 +48,8 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 The cheap endpoint-presence probe (`fm_backend_tmux_target_present` in `bin/backends/tmux.sh`) proves an endpoint from tmux's own answer.
 `tmux display-message -t <target>` alone is not a presence proof: tmux resolves an unknown window name to the addressed session's active window and still exits 0, so a vanished worker window used to read as a live endpoint.
-The probe matches the window tmux actually resolved against the recorded address - the exact window name, or an exact index, `@id`, or pane-qualified form - and proves a bare `%N` pane address by the pane id coming back nonempty, because tmux answers a missing pane id with an empty one.
+The probe proves a `<session>:<window>` endpoint only when the exact recorded window name appears in the session's window inventory; a bare `%N` pane address is proved by the pane id coming back nonempty, because tmux answers a missing pane id with an empty one.
+An index, `@id`, or pane-qualified form cannot stand in for the recorded name, so a window tmux silently resolved to another one never reads as present.
 
 ### Agent liveness probe
 
