@@ -1203,7 +1203,11 @@ test_orca_composite_identity_refuses_malformed_shapes() {
   refuse_shape "22ec401f-7dac-404b-b795-9594ac95aba0" "$dir/wt" "missing :: separator"
   refuse_shape "22ec401f-7dac-404b-b795-9594ac95aba0::rel/path" "rel/path" "non-absolute path"
   refuse_shape "22ec401f-7dac-404b-b795-9594ac95aba0::$dir/other" "$dir/wt" "path mismatch vs worktree="
-  refuse_shape "22ec401f-7dac-404b-b795-9594ac95aba0::$dir/wt::extra" "$dir/wt::extra" "extra :: segment"
+  # A path containing '::' is legal on Unix; splitting on the first '::'
+  # separator leaves it in the path half, where the exact worktree match
+  # accepts it. What must still refuse is a path half that does not equal
+  # the recorded worktree.
+  refuse_shape "22ec401f-7dac-404b-b795-9594ac95aba0::$dir/wt::extra" "$dir/wt" "path half with :: not matching worktree"
   refuse_shape "wt-teardown" "$dir/wt" "legacy bare id without uuid::"
   fm_write_meta "$dir/probe.meta" \
     "window=fm-probe" "endpoint_task_id=probe" "terminal=term-probe" \
