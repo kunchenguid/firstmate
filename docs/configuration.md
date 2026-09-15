@@ -25,22 +25,15 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
-### Per-task artifact layout
+## Calm preference (config/calm)
 
-`data/tasks/<id>/` is the canonical directory for one task's brief, generated launch instructions, scout report, contribution record, and other durable task artifacts.
-`bin/fm-task-path-lib.sh` is the single path owner: `fm_task_path` and `fm_task_relpath` always produce canonical write and link paths, while `fm_task_read_path` consults the matching legacy `data/<id>/` artifact only when the canonical artifact is absent.
-The fallback is bounded to that exact task id and artifact name; it does not scan arbitrary directories or create legacy symlinks.
-Existing homes can run `bin/fm-task-data-migrate.sh` while active ships and scouts remain present; the command serializes migration, inventories reserved and unknown directories without moving them, preserves active ship/scout directories, merges only identical or missing artifacts after interruption, and updates report links through the configured backlog owner.
-The migration is safe to repeat, and it refuses conflicting artifacts, unsafe symlinks, unsupported backlog mutations, or an active migration rather than overwriting data.
-New task directories are created at `data/tasks/<id>/` even when a legacy directory still exists, so migration and normal lifecycle writes converge on one layout.
-
-## Pi Calm preference (config/calm)
-
-The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
-The values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
+The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.
+Both resolve that home from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from their own path under it, or use `FM_CONFIG_OVERRIDE` as the config directory outright when that test and specialized-setup override is present.
+The values they write are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
 `max` is the legacy value written by a removed third presentation level whose behavior is now ordinary Calm, and it is still read as `on`, so a home upgraded from it keeps Calm on rather than dropping to off.
-The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
-The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+Each `/calm` command persists the new choice before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence; Pi replaces the file atomically, while the Claude Code mod writes it through the plugin API's plain file write.
+The Pi extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+The Claude Code mod likewise reloads it on every `session.start`, including same-process session replacement, and also loads it lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Pi supervision branch
@@ -98,7 +91,7 @@ An effort token Pi would not recognize at all is treated as no pin rather than p
 
 Cancelling the model picker cancels the whole command and changes neither choice.
 Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
-Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
+Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
