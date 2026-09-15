@@ -83,7 +83,7 @@ export type CalmWorkingShipAnimation = {
   position(): number;
   /** Current travel direction: 1 travelling right, -1 travelling left. */
   direction(): number;
-  /** Current water phase, exposed for deterministic ripple assertions. */
+  /** Current quarter-cell wave phase, exposed for deterministic swell assertions. */
   waterPhase(): number;
 };
 
