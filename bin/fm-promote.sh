@@ -3,8 +3,10 @@
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. Promotion also writes the crewmate's ship instructions to
-# data/<task-id>/ship-instructions.md and prints the fm-send.sh command that
-# delivers them. Those instructions carry the scratch-state inventory, the clean
+# data/<task-id>/ship-instructions.md, appends that same superseding contract to
+# data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
+# that delivers it to the current worker. Those instructions carry the
+# scratch-state inventory, the clean
 # default-branch base, the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
@@ -103,9 +105,17 @@ CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
 TMP=
+META=
+SCOUT_BRIEF=
+BRIEF_ORIGINAL=
+BRIEF_REPLACEMENT=
 promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
+  [ -z "$BRIEF_REPLACEMENT" ] || rm -f -- "$BRIEF_REPLACEMENT" 2>/dev/null || true
+  if [ -n "$BRIEF_ORIGINAL" ] && [ -e "$BRIEF_ORIGINAL" ]; then
+    mv -f -- "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null || true
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
     fm_lock_release "$META_LOCK" || true
@@ -168,12 +178,25 @@ PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
+promote_delivery_precedence() {
+  cat <<EOF
+# Current delivery mode contract
+This task is now kind=ship with mode=$MODE.
+This section supersedes every earlier brief instruction about delivery mode.
+Any earlier "Never push" or scout-only delivery language in this file is superseded.
+The mode-specific Definition of done below is the current delivery contract.
+EOF
+}
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {
   cat <<EOF
 Your scout task has been promoted to a ship task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
+
+EOF
+  promote_delivery_precedence
+  cat <<EOF
 
 # Task
 ## Captain's intent
@@ -198,6 +221,38 @@ mv "$TMP" "$INSTRUCTIONS"
 TMP=
 [ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
 
+# The current worker receives the instructions through fm-send, but a replacement
+# worker is launched from brief.md. Publish the same explicit precedence contract
+# there so a later relaunch cannot revive the original scout delivery rules.
+BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
+{
+  cat "$SCOUT_BRIEF"
+  printf '\n\n'
+  promote_delivery_precedence
+  if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
+    printf '\n\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
+    printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
+  fi
+  printf '\n'
+  fm_dod_block "$MODE" "$ID"
+} > "$BRIEF_REPLACEMENT" || {
+  echo "error: could not render the promoted brief for mode=$MODE" >&2
+  exit 1
+}
+BRIEF_ORIGINAL="$DATA/$ID/.brief.md.scout.${BASHPID:-$$}"
+mv "$SCOUT_BRIEF" "$BRIEF_ORIGINAL" || {
+  echo "error: could not stage the scout brief for promotion: $SCOUT_BRIEF" >&2
+  exit 1
+}
+if ! mv "$BRIEF_REPLACEMENT" "$SCOUT_BRIEF"; then
+  if mv "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null; then
+    BRIEF_ORIGINAL=
+  fi
+  echo "error: could not publish the promoted brief: $SCOUT_BRIEF" >&2
+  exit 1
+fi
+BRIEF_REPLACEMENT=
+
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
 {
@@ -212,6 +267,8 @@ if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE";
   exit 1
 fi
 TMP=
+rm -f -- "$BRIEF_ORIGINAL" 2>/dev/null || true
+BRIEF_ORIGINAL=
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
