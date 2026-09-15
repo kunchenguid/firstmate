@@ -414,12 +414,7 @@ telegram_kind_for_wake() {
   case "$reason" in
     heartbeat|heartbeat:*) return 1 ;;
     stale:*) printf 'stalled\n' ;;
-    check:*afk-codex-weekly*)
-      case "$reason" in
-        *error*|*failed*) printf 'error\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
+    check:*afk-codex-weekly*) return 1 ;;
     check:*) printf 'error\n' ;;
     signal:*) return 1 ;;
     needs-decision:*) printf 'error\n' ;;

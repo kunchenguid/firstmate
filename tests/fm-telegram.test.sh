@@ -179,6 +179,18 @@ env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-result "$home/state/quota.resu
 grep -Fq 'weekly quota is at or below 70% remaining' "$LOG" || fail "quota notification text missing"
 ok "quota result emits the fixed weekly protection notification"
 
+cat > "$home/state/quota.result" <<'EOF'
+quota: afk-codex-weekly
+status: error
+detail: quota check failed
+EOF
+quota_error_before=$(grep -c '^sendMessage$' "$LOG")
+env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-result "$home/state/quota.result" || fail "quota error result notification failed"
+printf '%s\n' 'check: process-event afk-codex-weekly error' | env "${send_env[@]}" "$BIN/fm-telegram.sh" notify-wake || fail "reserved quota check suppression failed"
+quota_error_after=$(grep -c '^sendMessage$' "$LOG")
+[ "$quota_error_after" -eq $((quota_error_before + 1)) ] || fail "reserved quota error produced duplicate notifications"
+ok "reserved quota errors notify only from their owned result"
+
 watch_signal_metadata() {
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
