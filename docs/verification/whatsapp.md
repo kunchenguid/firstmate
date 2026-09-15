@@ -30,9 +30,7 @@ Uma inicialização comum pode anunciar a mesma nota via recuperação genérica
 A prova com Pi e modelo reais, incluindo uma chegada durante trabalho controlado, está em [Verificação de runtimes](runtime-backends.md#pi-native-inbox-delivery).
 Ela não usa API WhatsApp nem prova resposta pela sessão instalada do usuário.
 
-Para aceitar uma instalação, registre separadamente recebimento pela ponte, mídia pronta quando aplicável, publicação da nota/evento, entrada e claim do principal, enqueue da resposta e recibo `delivered` do destinatário.
-Execute texto e áudio novos com o principal ocioso e ocupado, sem intervenção no chat separado; a confirmação automática não conta como resposta.
-Registre a duração observada de cada fase e os limites da prova, preservando os pedidos existentes e sem repetir o backlog.
+A prova de resposta substantiva no destinatário segue o [plano de aceitação na conta instalada](#plano-de-aceitação-na-conta-instalada).
 
 ## Critérios de aceitação
 
@@ -85,27 +83,34 @@ Buscas públicas pelos termos `WhatsApp Agent Platform` e `whatsapp_agent_platfo
 A implementação de entrada combina texto, imagens, documentos, áudio e vídeo, com respostas somente em texto.
 A prova local de decodificação ou transcrição não demonstra a entrega de mensagens do aplicativo, a interpretação do principal instalado ou o recebimento da resposta pelo destinatário.
 Registros de prova controlada e evidências da conta real pertencem ao relatório privado da tarefa ou ao PR; não transformam esta matriz em atestado automático de produção.
-A validação e publicação do código podem terminar com a aceitação externa explicitamente pendente; isso não dispensa nem satisfaz a exigência de funcionamento completo.
-Agentes dos gates não devem iniciar consumidor real, instalar ou ativar produção para produzir essa evidência.
+A sequência de validação, publicação, instalação controlada e ativação permanente está no [plano de aceitação na conta instalada](#plano-de-aceitação-na-conta-instalada); aprovação local não satisfaz a aceitação integral.
 As regressões locais incluem AAC silencioso com STT de fixture concluindo vazio, vídeo sem áudio, falha real de processo transcritor, recusa de áudio isolado sem transcrição, pixels RGBA/paleta, ordem reordenada de PPTX e nomes/ordem das abas XLSX por relações internas.
 Casos de Office verificam conteúdo dividido em trechos de formatação, fronteiras de parágrafos/células e valores numéricos armazenados; os casos de encerramento incluem `reply`, rollback e preservação de recibos consumidos.
 Esses casos usam decodificadores reais quando disponíveis, mas não comprovam um modelo STT instalado: a prova desse modelo exige áudio representativo e resultado observado separado da transcrição injetada.
 
 ### Plano de aceitação na conta instalada
 
-O principal é responsável pela execução controlada e pelos registros privados de cada linha após instalar o candidato validado, preservando conta, sessão, banco, cursor e consumidor único existentes.
+| Etapa | Responsável e condição de conclusão |
+| --- | --- |
+| Validação local e publicação do candidato | O executor externo conduz as fases de validação e publicação; os resultados locais e nativos isolados registrados acima não comprovam a conta instalada, cuja aceitação permanece pendente. |
+| Instalação controlada e aceitação real | Após validação e publicação, o principal instala o candidato e executa os ensaios abaixo na conta e sessão existentes, registrando a entrega real. |
+| Ativação permanente e conclusão da integração | O principal só efetiva a ativação já autorizada e declara a integração concluída após aprovação de todos os ensaios reais; não há dispensa dessa prova. |
+
+Antes da instalação controlada, o principal deve conferir e preservar as alterações locais de supervisão ainda não incorporadas ao candidato (delta do supervisor principal), sem sobrescrevê-las; uma dependência não conciliada impede a instalação.
+O principal é responsável pela execução controlada e pelos registros privados de cada linha, preservando conta, histórico, sessão, banco, cursor, pedidos pendentes, mídia e transcrição local existentes, sem repetir o backlog nem criar consumidor adicional.
+Agentes dos gates não devem editar a instalação principal, iniciar consumidor real, instalar ou ativar produção, nem reiniciar o pipeline para produzir essa evidência.
 
 | Modalidade | Evidência real ainda pendente |
 | --- | --- |
-| Texto | Entrada do proprietário, pedido/nota vinculados, claim pelo principal instalado, interpretação e resposta textual recebida. |
-| Áudio e nota de voz | Download e decodificação, transcrição pelo STT local autorizado com fala representativa, interpretação e resposta textual. |
+| Texto | Entrada nova do proprietário com o principal ocioso e ocupado, pedido/nota vinculados, claim pelo principal instalado, interpretação e resposta textual substantiva recebida pelo destinatário em ambos os ensaios, sem intervenção no chat separado. |
+| Áudio e nota de voz | Fala real nova com o principal ocioso e ocupado, download e decodificação, transcrição pelo STT local autorizado, interpretação e resposta textual substantiva recebida pelo destinatário em ambos os ensaios, sem intervenção no chat separado. |
 | Imagem | Abertura efetiva da prévia pelo principal, incluindo PNG transparente, interpretação visual e resposta textual. |
 | Vídeo | Abertura dos quadros, fala transcrita quando detectada, interpretação visual sem áudio e com AAC silencioso, resposta textual. |
 | Arquivos | TXT, PDF e Office aceitos pelo guia, leitura do conteúdo e das prévias aplicáveis, ordem de PPTX conferida e resposta textual. |
 
-Cada registro deve correlacionar mensagem de entrada, pedido, resultado do principal, wamid de saída e recibo de entrega, distinguindo aceitação pela API de recebimento pelo destinatário.
+Cada registro deve correlacionar mensagem de entrada, pedido, mídia e transcrição quando aplicáveis, publicação da nota/evento, entrada e claim do principal, resultado substantivo, enqueue da resposta textual, wamid de saída e recibo `delivered` do destinatário, distinguindo aceitação pela API de recebimento pelo destinatário.
+Registre a duração observada de cada fase e os limites da prova, sem prometer resposta instantânea ou um prazo não medido; a confirmação automática de recebimento não conta como resposta substantiva.
 O principal deve preservar também a evidência das recusas esperadas e da continuidade do serviço; nenhum novo destino de modelo ou dados faz parte desse plano.
-A ativação permanente já autorizada após validação só ocorre quando esses testes reais passarem; até lá, a aceitação integral permanece pendente.
 
 | Área | Gate de validação ou limite |
 | --- | --- |
