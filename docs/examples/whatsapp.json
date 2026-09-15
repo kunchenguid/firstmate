@@ -1,0 +1,27 @@
+{
+  "mode": "simulated",
+  "enabled": false,
+  "outbound_authorized": false,
+  "fm_home": "/absolute/path/to/firstmate-home",
+  "state_dir": "/absolute/path/to/firstmate-home/state/whatsapp",
+  "agent_id": "REPLACE_AGENT_ID_LOCALLY",
+  "creator_id": "user:REPLACE_CREATOR_ID_LOCALLY",
+  "token_file": "/absolute/path/to/private/whatsapp-token",
+  "poll_timeout": 25,
+  "send_timeout": 90,
+  "poll_limit": 50,
+  "startup_policy": "new-only",
+  "rate_limits": {
+    "updates": 15,
+    "messages": 12,
+    "statuses": 12,
+    "media-upload": 12,
+    "media-metadata": 12,
+    "media-delete": 12
+  },
+  "media": false,
+  "typing": false,
+  "read_receipts": false,
+  "tts": false,
+  "external_llm": false
+}

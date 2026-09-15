@@ -4049,6 +4049,59 @@ procevent_watch_bg() {  # <dir> <out>
     FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
 }
 
+test_inbox_arrival_reaches_handling_successor() {
+  local dir state out pid note key queued before
+  dir=$(make_case inbox-successor); state="$dir/state"; out="$dir/watch.out"
+  # A stale return gate is deliberately present. It must not govern ordinary
+  # intake, and this path neither reads nor clears that independent obligation.
+  printf 'unresolved return fixture\n' > "$state/.afk-return-catchup"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "inbox successor never reached its poll loop"
+  queued=$(FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" note --key wa-successor-probe - <<<'synthetic private transcript') \
+    || fail "keyed inbox capture failed"
+  note=$(printf '%s\n' "$queued" | sed -n 's/^queued //p'); key="inbox:$note"
+  wait_for_exit "$pid" 200 || { reap "$pid"; fail "running handling successor left the durable inbox note silent"; }
+  grep -F "check: captain inbox notes queued: $key" "$out" >/dev/null \
+    || fail "inbox arrival did not get its own main-only check close: $(cat "$out")"
+  grep -F 'synthetic private transcript' "$out" >/dev/null \
+    && fail "inbox body leaked into the watcher notification"
+  [ -f "$state/inbox/$note.note" ] || fail "watcher consumed the note on main's behalf"
+  grep -F "$key" "$state/.wake-queue" >/dev/null || fail "watcher consumed the durable queue row"
+  before=$(cat "$state/.afk-return-catchup")
+  [ "$before" = 'unresolved return fixture' ] || fail "watcher changed the return obligation"
+
+  # Reannouncing an immutable key must not create a second model wake while
+  # the first is queued for a busy main. A later, distinct note must still wake.
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" note --key wa-successor-probe - <<<'synthetic private transcript' >/dev/null \
+    || fail "keyed retry failed"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "already announced inbox key repeated into the successor"; }
+  queued=$(FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" note 'plain text probe') || fail "plain note capture failed"
+  note=$(printf '%s\n' "$queued" | sed -n 's/^queued //p')
+  wait_for_exit "$pid" 200 || { reap "$pid"; fail "a second, plain-text inbox arrival was stranded"; }
+  grep -F "inbox:$note" "$out" >/dev/null || fail "later note missing from the main check close"
+  grep -F "$key" "$out" >/dev/null && fail "the first note was announced twice"
+  pass "keyed and plain inbox arrivals wake a running handling successor once without consuming notes or bypassing return gates"
+}
+
+test_inbox_and_process_results_share_check_delivery() {
+  local dir state out pid
+  dir=$(make_case inbox-process-batch); state="$dir/state"; out="$dir/watch.out"
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" note --key wa-batch - <<<'synthetic attachment data' >/dev/null \
+    || fail "batch note capture failed"
+  append_wake "$state" check procevent:batch-control:1 'check: process result'
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 200 || { reap "$pid"; fail "mixed inbox/process checks never surfaced"; }
+  grep -F 'check: captain inbox notes queued: inbox:' "$out" >/dev/null || fail "mixed check omitted inbox"
+  grep -F '; process-event result captured: procevent:batch-control:1' "$out" >/dev/null || fail "mixed check omitted process result"
+  ack_stopped_cycle "$state" >/dev/null || fail "main could not acknowledge the mixed queue"
+  [ ! -s "$state/.wake-queue" ] || fail "main acknowledgement left consumed rows"
+  pass "inbox and process checks share one main delivery and retain generation-bound acknowledgement"
+}
+
 test_procevent_captured_result_surfaces_proactively() {
   local dir state out drain_out pid beacon_age
   dir=$(make_case procevent-delivery); state="$dir/state"
@@ -4797,6 +4850,17 @@ test_status_span_respects_decision_closure
 test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
+# Optional named cases keep a focused regression on the same executable
+# interface as the full suite. No arguments retains the complete CI walk.
+if [ "$#" -gt 0 ]; then
+  for selected_case in "$@"; do
+    case "$selected_case" in test_*) ;; *) fail "expected a test_ case name" ;; esac
+    declare -F "$selected_case" >/dev/null || fail "unknown case: $selected_case"
+    "$selected_case"
+  done
+  exit 0
+fi
+
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
@@ -4882,6 +4946,8 @@ test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_inbox_arrival_reaches_handling_successor
+test_inbox_and_process_results_share_check_delivery
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective

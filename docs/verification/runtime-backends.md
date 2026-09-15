@@ -1883,6 +1883,25 @@ The same guard against the pre-change extension in the same lab measured a 676.9
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
 
+## Pi native inbox delivery
+
+Verified on 2026-09-15 UTC with native Pi 0.85.1 and `openai-codex/gpt-5.6-sol`, using the installed provider configuration in an isolated `FM_HOME`.
+The opt-in guard runs the real RPC runtime, the tracked primary watcher extension, the real watcher and inbox scripts, and a test-only tool that records the model's calculated answer.
+It primes the watcher, publishes a second note into the actual handling successor, and requires an answer without another user prompt.
+A third note arrives during a controlled tool call: the guard requires native `followUp` input before releasing that call, then one answer and the ordinary note and wake acknowledgements.
+The test never sends a WhatsApp message, edits a production home, starts another bridge consumer, or drives a runtime backend lifecycle.
+
+```sh
+FM_PI_INBOX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-inbox-pi-live-e2e.test.sh --jobs 1
+```
+
+The final recorded run answered the idle successor note in 6.044 seconds and the controlled busy note in 8.003 seconds from starting local note intake.
+These are observations for three short synthetic calculations, not a response-time guarantee or an installed WhatsApp delivery measurement.
+The guard asserts event order and deduplication rather than these durations; `FM_PI_INBOX_EVIDENCE` preserves the synthetic event journal and stage timestamps, and `FM_PI_INBOX_MODEL` selects an already configured model.
+Run it after a Pi upgrade and before trusting refreshed native inbox-delivery evidence.
+The portable counterpart is [fm-watch-triage.test.sh](../../tests/fm-watch-triage.test.sh), including its named `test_inbox_arrival_reaches_handling_successor` case.
+Other harnesses retain their existing actionable `check` delivery; this Pi run makes no new vendor-specific verification claim about them.
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.
