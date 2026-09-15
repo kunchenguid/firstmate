@@ -2335,8 +2335,9 @@ fm_backend_herdr_server_running_state() {  # <session>
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead` - whether nothing is registered or a
 # registration lingers over a shell-only pane (stale-agent, issue #4115) - a
-# registered agent with a live process is `alive`, and an unexpected or failed
-# API read is `unreadable`.
+# registered lifecycle-status agent with a live process is `alive` (an unknown
+# registration never reads `alive`), and an unexpected or failed API read is
+# `unreadable`.
 #
 # One exception to that last case, and it is deliberately made HERE rather than
 # in the husk classifier: a read can fail because the recorded session's server
