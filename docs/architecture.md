@@ -218,7 +218,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
-The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation, the rule that picks a fresh task worktree's base, and its refusal rules, including spawns from linked homes.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
@@ -306,9 +306,11 @@ The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed e
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered into a generated ship brief, the ship instructions a promoted scout receives, and that scout's own `brief.md` so a later relaunch reads the same contract, so a promoted worker cannot be handed a weaker contract than a briefed one.
 It is also the one owner of the no-mistakes `--intent` contract those workers follow.
+The same file owns one fact the tooling derives from those contracts: which delivery modes open a pull request against origin.
+`bin/fm-spawn.sh` reads it when it picks a fresh task worktree's base and `bin/fm-review-diff.sh` reads it when it anchors the review, so a branch is built on and reviewed against the branch it delivers to, and no second copy of that list can drift.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 `bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
-When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
+When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` anchors on the branch the task delivers to (its header owns that rule) and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the forge CLI.

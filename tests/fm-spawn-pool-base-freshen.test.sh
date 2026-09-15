@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
-# These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# A treehouse pool can return a clean detached worktree whose base was left
+# behind: origin/main advanced after the slot was allocated, or a local-only
+# project landed work on the primary checkout's default branch that origin never
+# received.
+# These tests drive the real spawn path with a fake terminal, then prove the base
+# rule bin/fm-spawn.sh's header owns: the slot starts from origin's tip, or from
+# that same branch in the primary checkout when it strictly contains origin's tip
+# and the delivery lands locally; a pull-request delivery keeps origin's tip and
+# is told how far ahead the primary was, two diverged candidates keep origin's tip
+# and say so, a clean origin-less pool launches as-is, and an unusable origin or
+# an unclean slot stops the launch.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -177,6 +183,8 @@ test_stale_pool_base_refreshes_before_branching() {
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$current" ] || fail "spawn left the pooled worktree on stale history"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/main advanced past the pool base"
+  assert_contains "$out" "was 1 commit behind origin/main" \
+    "the refresh did not report the exact number of commits the slot was behind"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
     printf '# observed base: HEAD=%s origin/main=%s advanced-main=%s\n' \
@@ -743,6 +751,264 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A local-only project lands work with bin/fm-merge-local.sh: the primary
+# checkout's default branch advances and nothing is ever pushed, so origin stays
+# frozen at the last push while that branch keeps moving. A pool slot allocated at
+# the frozen tip is the shape that shipped work from hundreds of commits of stale
+# history, because the refresh itself planted it there by following origin.
+make_local_only_case() {  # <name> <id> [<landings>]
+  local name=$1 id=$2 landings=${3:-3} case_dir home project origin pool fakebin frozen n
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  frozen=$(git -C "$project" rev-parse HEAD)
+  # The slot is allocated at the frozen origin tip, the way a recycled slot arrives.
+  git -C "$project" worktree add --quiet --detach "$pool" "$frozen"
+
+  n=1
+  while [ "$n" -le "$landings" ]; do
+    printf 'landed locally %s\n' "$n" > "$project/landed-$n.txt"
+    git -C "$project" add "landed-$n.txt"
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm "land $n"
+    n=$((n + 1))
+  done
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$frozen|main"
+}
+
+# Push a commit the primary's branch does not contain, so neither candidate
+# contains the other.
+push_forge_only_commit() {
+  local publisher="$CASE_DIR/publisher"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
+  printf 'pushed straight to the forge\n' > "$publisher/forge-only.txt"
+  git -C "$publisher" add forge-only.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm forge-only
+  git -C "$publisher" push --quiet origin main
+}
+
+# The two deliveries that land locally rather than through a pull request.
+spawn_landing_locally() {  # <id> <local-only|scout>
+  if [ "$2" = scout ]; then
+    run_spawn "$1" --scout
+  else
+    run_spawn "$1" --mode local-only --yolo off
+  fi
+}
+
+test_local_landings_beat_a_frozen_origin() {
+  local rec id out status head landed contract
+  for contract in local-only scout; do
+    id="pool-local-only-${contract}-r12"
+    rec=$(make_local_only_case "local-only-$contract" "$id" 3)
+    read_case_record "$rec"
+
+    out=$(spawn_landing_locally "$id" "$contract")
+    status=$?
+    expect_code 0 "$status" "a $contract spawn should refresh a slot stranded on a frozen origin"$'\n'"$out"
+    landed=$(git -C "$PROJECT_DIR" rev-parse main)
+    head=$(git -C "$POOL_DIR" rev-parse HEAD)
+    [ "$landed" != "$INITIAL_SHA" ] || fail "fixture did not advance the primary past the frozen origin tip"
+    [ "$(git -C "$POOL_DIR" rev-parse origin/main)" = "$INITIAL_SHA" ] \
+      || fail "fixture did not leave origin frozen at the tip the slot was allocated from"
+    [ "$head" = "$landed" ] \
+      || fail "a $contract spawn left the slot at $head, not the primary's landed tip $landed"
+    assert_grep 'landed locally 3' "$POOL_DIR/landed-3.txt" \
+      "the refreshed $contract slot is missing work the primary had already landed"
+    assert_contains "$out" "was 3 commits behind main in the primary checkout" \
+      "the $contract refresh did not report the exact number of commits the slot was behind"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed %s refresh: %s\n' "$contract" "$(printf '%s\n' "$out" | grep 'commits behind')"
+    fi
+  done
+  pass "a slot stranded on a frozen origin is refreshed to the primary's landed tip, reporting the exact drift"
+}
+
+test_dirty_slot_survives_even_when_the_primary_is_ahead() {
+  local rec id out status before
+  id='pool-local-only-dirty-r13'
+  rec=$(make_local_only_case local-only-dirty "$id" 2)
+  read_case_record "$rec"
+  # Diverge the two candidates as well, so the slot is BOTH unclean and
+  # unresolvable: the operator must be pointed at the work only they can save,
+  # not at a ref reconciliation, whichever gate is reached first.
+  push_forge_only_commit
+  printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a dirty slot while the primary was ahead"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a dirty slot was not refused as uncommitted work"
+  assert_not_contains "$out" "have diverged" \
+    "a dirty slot was reported as a divergence instead of as unsaved work"
+  assert_grep 'work the captain has not committed' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while catching the slot up"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved a dirty slot's base instead of leaving it untouched"
+  pass "a dirty slot keeps its work and its base even when the primary has landed work ahead of it"
+}
+
+test_pull_request_delivery_keeps_the_forge_tip() {
+  local rec id out status head frozen landed
+  id='pool-pr-delivery-r15'
+  rec=$(make_local_only_case pr-delivery "$id" 3)
+  read_case_record "$rec"
+  frozen=$INITIAL_SHA
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a direct-PR spawn should still launch when the primary leads origin"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  landed=$(git -C "$PROJECT_DIR" rev-parse main)
+  [ "$landed" != "$frozen" ] || fail "fixture did not advance the primary past the frozen origin tip"
+  [ "$(git -C "$POOL_DIR" rev-parse origin/main)" = "$frozen" ] \
+    || fail "fixture did not leave origin frozen at the tip the slot was allocated from"
+  [ "$head" = "$frozen" ] \
+    || fail "a pull-request delivery started at $head, not origin's tip $frozen"
+  [ ! -e "$POOL_DIR/landed-3.txt" ] \
+    || fail "a pull-request delivery based its branch on commits origin has never seen"
+  assert_contains "$out" "carries 3 commits origin/main does not" \
+    "the spawn did not report how much the withheld primary branch carried"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the spawn did not say why the primary's branch was not used as the base"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed withheld candidate: %s\n' "$(printf '%s\n' "$out" | grep 'opens a pull request against origin')"
+  fi
+  pass "a pull-request delivery keeps origin's tip and reports the primary branch it withheld"
+}
+
+test_pull_request_delivery_ignores_a_diverged_primary() {
+  local rec id out status head forge
+  id='pool-pr-diverged-r17'
+  rec=$(make_local_only_case pr-diverged "$id" 2)
+  read_case_record "$rec"
+  push_forge_only_commit
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a PR delivery should not be blocked over a branch it never reads"$'\n'"$out"
+  forge=$(git -C "$POOL_DIR" rev-parse origin/main)
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$forge" ] || fail "a PR delivery started at $head, not origin's tip $forge"
+  assert_not_contains "$out" "have diverged" \
+    "a PR delivery was refused over a divergence in a branch it does not build on"
+  assert_grep 'pushed straight to the forge' "$POOL_DIR/forge-only.txt" \
+    "the slot did not receive the commit that exists only on origin"
+  pass "a pull-request delivery resolves to origin's tip even when the primary's branch has diverged"
+}
+
+# A merged pull request advances origin while the primary checkout still carries a
+# local landing nobody pushed, and that state persists until somebody pulls. A scout
+# and a local-only ship are the two deliveries that could have built on the primary's
+# branch, so they are the ones a divergence refusal would block - permanently,
+# because the only remedy is reconciling the primary checkout by hand, which
+# AGENTS.md hard rule 1 forbids firstmate from doing. Origin's tip is always a safe
+# base, so both launch from it and are told which branch was set aside.
+test_diverged_candidates_fall_back_to_the_forge_tip() {
+  local rec id out status head forge contract
+  for contract in local-only scout; do
+    id="pool-diverged-${contract}-r14"
+    rec=$(make_local_only_case "diverged-$contract" "$id" 2)
+    read_case_record "$rec"
+    push_forge_only_commit
+
+    out=$(spawn_landing_locally "$id" "$contract")
+    status=$?
+    expect_code 0 "$status" "a $contract spawn should not be blocked by a diverged primary and origin"$'\n'"$out"
+    forge=$(git -C "$POOL_DIR" rev-parse origin/main)
+    head=$(git -C "$POOL_DIR" rev-parse HEAD)
+    [ "$head" = "$forge" ] || fail "a $contract spawn started at $head, not origin's tip $forge"
+    assert_grep 'pushed straight to the forge' "$POOL_DIR/forge-only.txt" \
+      "the $contract slot did not receive the commit that exists only on origin"
+    [ ! -e "$POOL_DIR/landed-2.txt" ] \
+      || fail "a $contract spawn took the primary's diverged branch as its base"
+    assert_contains "$out" "have diverged" \
+      "the $contract spawn did not name the divergence it resolved past"
+    assert_contains "$out" "carries 2 commits origin lacks and lacks 1 commit origin has" \
+      "the $contract spawn did not count both sides of the divergence"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed %s divergence note: %s\n' "$contract" "$(printf '%s\n' "$out" | grep 'have diverged')"
+    fi
+  done
+  pass "a diverged primary and origin still launch a scout or a local-only ship from origin's tip"
+}
+
+# The base a fresh slot is given and the commit the captain's review starts from
+# must be the SAME commit, or a branch is built on one base and reviewed against
+# another. bin/fm-spawn.sh and bin/fm-review-diff.sh apply one rule from the two
+# sides of the branch's existence - the spawn picks the commit to plant, the
+# review picks the anchor whose merge base with the branch is that commit - and
+# share the one owner of which modes open a pull request. So this drives the
+# spawn, commits on the planted slot, runs the review, and requires the review's
+# actual starting commit (the anchor's merge base with the branch) to be the
+# slot's spawn base. Each delivery runs twice: once where the primary checkout
+# contains origin, and once where a forge-only push has left the two diverged,
+# which is where a rule that only compared the two branches by containment would
+# disagree with itself.
+test_the_review_starts_where_the_spawn_planted_the_slot() {
+  local contract shape id rec out status spawn_base base_line review_start
+  for contract in no-mistakes direct-PR local-only scout; do
+    for shape in converged diverged; do
+      id="pool-agree-${contract}-${shape}-r18"
+      rec=$(make_local_only_case "agree-$contract-$shape" "$id" 2)
+      read_case_record "$rec"
+      [ "$shape" = converged ] || push_forge_only_commit
+
+      if [ "$contract" = scout ]; then
+        out=$(run_spawn "$id" --scout)
+      else
+        out=$(run_spawn "$id" --mode "$contract" --yolo off)
+      fi
+      status=$?
+      expect_code 0 "$status" "spawn should launch a $contract task on a $shape history"$'\n'"$out"
+      spawn_base=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+      git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+      printf 'the work under review\n' > "$POOL_DIR/task-change.txt"
+      git -C "$POOL_DIR" add task-change.txt
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm "task work"
+      out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+        "$ROOT/bin/fm-review-diff.sh" "$id" --stat 2>/dev/null)
+      base_line=$(printf '%s\n' "$out" | sed -n 's/^diff base: //p')
+      [ -n "$base_line" ] || fail "$contract/$shape: fm-review-diff printed no base line"
+      review_start=$(git -C "$POOL_DIR" merge-base "$base_line" "fm/$id" 2>/dev/null) \
+        || fail "$contract/$shape: the review base '$base_line' has no merge base with the branch"
+      [ "$review_start" = "$spawn_base" ] \
+        || fail "$contract/$shape: the spawn planted the slot on $spawn_base but the review starts from $review_start (anchored on $base_line)"
+      assert_contains "$out" 'task-change.txt' \
+        "$contract/$shape: the review diff lost the task's own work"
+      assert_not_contains "$out" 'forge-only.txt' \
+        "$contract/$shape: the review diff carries a commit the task never authored"
+      assert_not_contains "$out" 'landed-2.txt' \
+        "$contract/$shape: the review diff carries a landing the task never authored"
+      if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+        printf '# observed %s/%s review base: %s\n' "$contract" "$shape" "$base_line"
+      fi
+    done
+  done
+  pass "the review starts from the commit the spawn planted the slot on, for every delivery, converged or diverged"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -763,5 +1029,11 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_local_landings_beat_a_frozen_origin
+test_dirty_slot_survives_even_when_the_primary_is_ahead
+test_pull_request_delivery_keeps_the_forge_tip
+test_pull_request_delivery_ignores_a_diverged_primary
+test_diverged_candidates_fall_back_to_the_forge_tip
+test_the_review_starts_where_the_spawn_planted_the_slot
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

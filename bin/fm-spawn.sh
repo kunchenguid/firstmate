@@ -203,12 +203,27 @@
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   resolves the current remote default branch, and resets the worktree to the
+#   base its delivery lands on: origin's tip, or that same branch in the primary
+#   checkout when it strictly contains origin's tip and the task lands locally (a
+#   local-only ship, or a scout). A local-only project lands work on the primary
+#   checkout's branch through bin/fm-merge-local.sh and never pushes, so origin
+#   stays frozen at the last push while that branch keeps moving, and following
+#   origin alone planted every fresh task hundreds of commits behind work already
+#   landed. A no-mistakes or direct-PR ship opens a pull request against origin,
+#   so it keeps origin's tip and is told how many commits the primary's branch
+#   carries that origin lacks (bin/fm-dod-lib.sh owns which modes open a pull
+#   request). Two candidates that have diverged keep origin's tip and say so,
+#   because origin's tip is always a safe base while the only remedy a refusal
+#   would leave is reconciling the primary checkout by hand. The refresh reports
+#   the exact number of commits the slot was behind, and every base it picks
+#   contains origin's tip, so the reset discards nothing the origin-only rule
+#   would have kept. When no origin is detected, spawn skips that remote
+#   freshness check and launches from the clean worktree's current HEAD. Relaunch
+#   reuses the recorded worktree without fetching or resetting its base. An
+#   unreachable detected origin, unresolved default branch, or non-clean worktree
+#   refuses a fresh spawn rather than risking a PR based on stale history or
+#   discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2609,8 +2624,52 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+spawn_commit_count() {  # <n>
+  if [ "$1" -eq 1 ] 2>/dev/null; then printf '1 commit'; else printf '%s commits' "$1"; fi
+}
+
+# Pick the commit a fresh pooled worktree starts from; the header owns the rule
+# and this is its one implementation. Sets SPAWN_BASE_REV and SPAWN_BASE_LABEL,
+# plus SPAWN_BASE_WITHHELD naming why the primary checkout's branch was set aside
+# whenever it was. Both candidates are read from the slot's own object store - a
+# pool slot is a linked worktree of the primary checkout and already holds its
+# commit - so nothing is fetched, and a standalone clone that lacks the primary's
+# commit keeps origin's tip. Every return path leaves a base that contains
+# origin's tip, which is what lets the reset below discard nothing the
+# origin-only rule would have kept.
+SPAWN_BASE_REV=""
+SPAWN_BASE_LABEL=""
+SPAWN_BASE_WITHHELD=""
+resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev> <mode>
+  local worktree=$1 primary=$2 default=$3 origin_rev=$4 mode=${5:-} primary_rev primary_branch ahead behind
+  SPAWN_BASE_REV=$origin_rev
+  SPAWN_BASE_LABEL="origin/$default"
+  SPAWN_BASE_WITHHELD=""
+  primary_rev=$(primary_head_commit "$primary" 2>/dev/null) || return 0
+  [ "$primary_rev" != "$origin_rev" ] || return 0
+  git -C "$worktree" rev-parse --verify --quiet "$primary_rev^{commit}" >/dev/null 2>&1 || return 0
+  if git -C "$worktree" merge-base --is-ancestor "$primary_rev" "$origin_rev" 2>/dev/null; then
+    return 0
+  fi
+  # Name the branch the commit came from: primary_head_commit reads the PRIMARY's
+  # own default branch, which need not be the one origin/HEAD names in the slot.
+  primary_branch=$(default_branch "$primary" 2>/dev/null) || primary_branch=$default
+  ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null) || ahead=0
+  if fm_delivery_opens_pull_request "$mode"; then
+    SPAWN_BASE_WITHHELD="$primary_branch in the primary checkout carries $(spawn_commit_count "$ahead") origin/$default does not, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+    return 0
+  fi
+  if git -C "$worktree" merge-base --is-ancestor "$origin_rev" "$primary_rev" 2>/dev/null; then
+    SPAWN_BASE_REV=$primary_rev
+    SPAWN_BASE_LABEL="$primary_branch in the primary checkout"
+    return 0
+  fi
+  behind=$(git -C "$worktree" rev-list --count "$primary_rev..$origin_rev" 2>/dev/null) || behind=0
+  SPAWN_BASE_WITHHELD="$primary_branch in the primary checkout and origin/$default have diverged: that branch carries $(spawn_commit_count "$ahead") origin lacks and lacks $(spawn_commit_count "$behind") origin has, so neither contains the other; starting from origin's tip, which carries nothing that branch has landed since they parted"
+}
+
+freshen_spawn_worktree_base() {  # <worktree> <primary-checkout> <mode>
+  local worktree=$1 primary=$2 mode=${3:-} default target expected actual status behind
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2647,14 +2706,24 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected" "$mode"
+  expected=$SPAWN_BASE_REV
+  target=$SPAWN_BASE_LABEL
+  [ -z "$SPAWN_BASE_WITHHELD" ] || echo "note: pooled worktree '$worktree': $SPAWN_BASE_WITHHELD" >&2
+  # Counted before the reset, so the note below carries the exact number of
+  # commits this slot would otherwise have started behind, not an adjective.
+  behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null) || behind=
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to $target ('$expected'); refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current $target ('$expected'); refusing to launch" >&2
     return 1
+  fi
+  if [ -n "$behind" ] && [ "$behind" -gt 0 ] 2>/dev/null; then
+    echo "note: pooled worktree '$worktree' was $(spawn_commit_count "$behind") behind $target; refreshed to $(git -C "$worktree" rev-parse --short HEAD)" >&2
   fi
 }
 
@@ -3386,7 +3455,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

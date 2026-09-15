@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's mode-specific "Definition of done" block, and of
+# the one fact tooling derives from it: which delivery modes open a pull request.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
@@ -29,6 +30,20 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+# Return 0 when this delivery mode opens a pull request against origin: exactly
+# the modes whose Definition of done below tells the worker, or the pipeline
+# acting for it, to push a branch and raise a PR; local-only is told the opposite.
+# bin/fm-spawn.sh picks a fresh task worktree's base with it and
+# bin/fm-review-diff.sh anchors the captain's review with it, so both agree on
+# which branch a task delivers to instead of each restating this list.
+fm_delivery_opens_pull_request() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
 # emitter, supplying it first in every ship/scout launch brief and never to a
 # secondmate charter. It names the one task-owned steering inbox without
