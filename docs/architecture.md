@@ -396,6 +396,10 @@ Each project `AGENTS.md` carries self-governance guidance; [`bin/fm-ensure-agent
 It refuses a case-variant real memory file such as a lowercase `agents.md`, so the pointer's `@AGENTS.md` import resolves to a real `AGENTS.md` on a case-sensitive filesystem, and surfaces the mismatch for manual reconciliation.
 The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by [`AGENTS.md`](../AGENTS.md) (project and knowledge management).
 
+That committed surface is not always where a project's knowledge actually lives.
+A project the captain started somewhere else keeps most of it in that checkout, so firstmate records which of the two places is the project's home, reports read-only what never travelled into the clone, carries material that must never enter the project's history into each task copy, and renders the project's own recipe catalog into every worker's start-of-work digest.
+[`project-memory.md`](project-memory.md) owns that capability, including why a project whose home is a live local folder routes durable knowledge back through the worker's report instead of through the delivery path above.
+
 ## Operational memory routing
 
 `/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.

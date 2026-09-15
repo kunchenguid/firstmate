@@ -52,6 +52,10 @@
 # tracked path, and after copying it verifies that git reports nothing under the
 # destination - a staged store git can still see is removed and the spawn fails,
 # because a worker cannot be told not to commit something git is offering it.
+# A copy that could not read the store in full - a `sync` of the same project is
+# not serialised against a spawn and can replace a tree under the read - is
+# removed and refuses the spawn the same way, because a worker handed a subset
+# of the project's material would read it as the whole of it.
 # The destination is added to the repository's exclude file, the same mechanism
 # fm-spawn already uses for the per-task harness files it writes into a copy.
 # What lands there is the store and nothing else, so material named like
