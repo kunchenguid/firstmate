@@ -600,6 +600,13 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # A missing adapter file must be a guardable refusal, never a fatal source
+  # error: under `set -e` (fm-teardown.sh and other lifecycle consumers) a
+  # failed `.` on a nonexistent file exits the shell even inside `||`/`if`
+  # guards on bash 3.2, which silently reports success instead of reaching the
+  # caller's "prerequisites unavailable" refusal. Precheck existence so the
+  # source only ever runs on a present file.
+  [ -f "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
