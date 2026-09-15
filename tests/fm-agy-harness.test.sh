@@ -815,7 +815,7 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn() {
     || fail "the gate must not send Enter into a pane that shows no dialog"
   assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a failed agy readiness gate left its launched endpoint running"
-  assert_grep 'failed: agy never showed its folder-trust dialog' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: agy never showed its folder-trust dialog' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "a failed agy readiness gate did not record the failure in the task status"
   pass "fm-spawn: a busy verdict on an unregistered path without a dialog fails and closes the endpoint"
 }
