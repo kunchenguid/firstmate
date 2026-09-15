@@ -20,6 +20,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+START="$ROOT/bin/fm-afk-start.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -913,6 +914,44 @@ test_arm_defers_during_away_entry() {
   pass "watch-arm: --restart defers during away-mode entry without displacing its watcher"
 }
 
+test_arm_defers_through_daemon_entry_window() {
+  local dir home state fakebin armout status
+  dir=$(make_case daemon-entry-window)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # The launcher prepares state/.afk plus the away-entry launching sentinel
+  # before it starts the daemon terminal. Run the REAL daemon entry (its
+  # non-prepared path) with a no-op daemon so its stale-artifact clear is
+  # exercised; that clear must not drop the sentinel before a daemon owns
+  # supervision, or an arm firing in this window would displace the daemon's
+  # watcher. The sentinel is owned by the launcher and cleared by the daemon
+  # after it takes the lock.
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    FM_AFK_DAEMON=/bin/true
+    fm_afk_start_main
+  ' _ "$START" >/dev/null 2>&1 \
+    || fail "daemon entry did not run to completion"
+  [ -e "$state/.afk-launching" ] \
+    || fail "daemon entry dropped the away-entry sentinel before the daemon was live"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must yield while the daemon entry window is open"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not report the entry-window deferral: $(cat "$armout")"
+  [ ! -e "$state/.watch.lock/pid" ] \
+    || fail "entry-window arm started a watcher instead of yielding"
+  pass "watch-arm: an arm defers through the daemon entry window until the daemon is live"
+}
+
 test_interrupted_away_entry_clears_marker_before_rearm() {
   local dir home state fakebin ready armout launcher_pid watcher_pid i
   dir=$(make_case interrupted-away-entry)
@@ -1004,5 +1043,6 @@ test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_defers_to_a_live_away_daemon
 test_arm_defers_during_away_entry
+test_arm_defers_through_daemon_entry_window
 test_interrupted_away_entry_clears_marker_before_rearm
 test_legacy_afk_without_daemon_or_entry_still_arms

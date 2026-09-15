@@ -64,7 +64,6 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-escalations.attempt" \
-        "$state/.afk-launching" \
         "$state/.subsuper-inject-wedged" 2>/dev/null
 }
 

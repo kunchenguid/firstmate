@@ -192,11 +192,15 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-escalations.attempt" ] \
-     && [ ! -e "$st/state/.afk-launching" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes away-mode delivery and entry artifacts"
+    pass "clear-stale: removes stale away-mode delivery artifacts"
   else
     fail "clear-stale: stale artifacts survived"
+  fi
+  if [ -e "$st/state/.afk-launching" ]; then
+    pass "clear-stale: preserves the away-entry sentinel until the daemon is live"
+  else
+    fail "clear-stale: dropped the away-entry sentinel before the daemon was live"
   fi
   if [ -e "$st/state/.wake-queue" ]; then
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
