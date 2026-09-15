@@ -1310,12 +1310,15 @@ ended_worker_stale_check() {  # <window> <task>
     clear_stale_hash_tracking "$key"
     return 0
   fi
+  # Only an attributed run (`source: run-step`) survives the worker: it keeps
+  # running without one and the inactive reconciler reports its outcome, so this
+  # window hands it over silently. Every other source describes the DEAD worker -
+  # the pane's leftover busy signature and the status log's last line both
+  # predate the stop and say nothing about now - so no state verb they carry may
+  # revive the inherited wedge timer.
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
   case "$line" in
     *"source: run-step"*) clear_stale_hash_tracking "$key"; stale_wait_record "$key"; return 0 ;;
-    'state: working '*|'state: parked '*|'state: blocked '*|'state: failed '*|'state: done '*) return 1 ;;
-    'state: unknown '*|'state: stopped '*) ;;
-    *) return 1 ;;
   esac
   clear_stale_hash_tracking "$key"
   if [ "$held" -eq 1 ]; then
