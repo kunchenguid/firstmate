@@ -172,7 +172,7 @@ jq \
       then $status else "unknown" end;
   def lane_for($state; $backlog_state; $hold):
     if $backlog_state == "done" or $state == "done" then "recently_completed"
-    elif $hold != null or (["parked","blocked","paused","failed"] | index($state)) != null then "waiting"
+    elif $hold != null or (["parked","blocked","paused","failed","unknown","stopped"] | index($state)) != null then "waiting"
     else "running" end;
   def attention_for($state; $actionable):
     ($actionable == true or $state == "blocked" or $state == "failed");

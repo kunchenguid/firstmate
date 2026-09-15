@@ -282,12 +282,13 @@ __FM_PROJECT_COCKPIT_DATA__
       updateAge();
     };
     const updateAge = () => {
-      const generated = Date.parse(state.payload.generated);
-      if (!Number.isFinite(generated) || state.payload.freshness === "unavailable") {
+      const baseline = Date.parse(state.payload.observed_at || state.payload.generated);
+      if (!Number.isFinite(baseline) || state.payload.freshness === "unavailable") {
         byId("snapshot-age").textContent = "Unavailable";
         return;
       }
-      const age = Math.max(state.payload.age_seconds || 0, Math.floor((Date.now() - generated) / 1000));
+      const elapsed = Math.max(0, Math.floor((Date.now() - baseline) / 1000));
+      const age = (state.payload.age_seconds || 0) + elapsed;
       byId("snapshot-age").textContent = duration(age);
       if (age > state.payload.stale_after_seconds && state.payload.freshness !== "stale") {
         state.payload.freshness = "stale";

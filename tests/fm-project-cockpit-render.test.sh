@@ -75,6 +75,7 @@ states_json=$(jq -c . "$states")
 replacement_json=$(jq -c . "$replacement")
 promoted_json=$(jq -c '.projects |= (map(select(.id == "beta")) + map(select(.id != "beta")))' "$states")
 multiple_decisions_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).decisions=["Choose deployment window","Approve rollback policy"]' "$states")
+aged_json=$(jq -c '.age_seconds=240 | .stale_after_seconds=300 | .freshness="fresh"' "$states")
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.click(); b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.focus(); window.fmCockpit.replacePayload($states_json); return {state:window.fmCockpit.getState(),focused:document.activeElement.dataset.taskKey};}" \
   '\"focused\":\"healthy-work\\u001fgen-healthy-1\"' "same-generation refresh did not preserve focused task identity"
 assert_eval "() => {window.fmCockpit.replacePayload($replacement_json); return window.fmCockpit.getState();}" \
@@ -85,6 +86,8 @@ assert_eval "() => {window.fmCockpit.replacePayload($multiple_decisions_json); d
   'Approve rollback policy' "inspector omitted a consolidated decision summary"
 assert_eval '() => document.getElementById("task-detail").innerText' \
   'Choose deployment window' "inspector omitted the other consolidated decision summary"
+assert_eval "() => {const original=Date.now; Date.now=()=>Date.parse('2026-09-15T12:02:10Z'); window.fmCockpit.replacePayload($aged_json); const result={age:document.getElementById('snapshot-age').innerText,warning:document.getElementById('inventory-warning').innerText}; Date.now=original; return result;}" \
+  '\"age\":\"5m\",\"warning\":\"STALE SNAPSHOT\"' "cached authority age did not advance from 240 to 310 seconds"
 pass "refresh preserves selection, adopts payload order, and renders consolidated decisions"
 
 empty_json=$(jq -c . "$empty")

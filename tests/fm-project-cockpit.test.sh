@@ -33,14 +33,14 @@ files_digest() {  # <home>
 }
 
 test_projection_is_deterministic_and_allowlisted() {
-  local one=$TMP_ROOT/model-one.json two=$TMP_ROOT/model-two.json
+  local one=$TMP_ROOT/model-one.json two=$TMP_ROOT/model-two.json stopped=$TMP_ROOT/model-stopped.json
   project states.json "$one"
   project states.json "$two"
   cmp -s "$one" "$two" || fail "fixed snapshot and observation time did not produce byte-stable output"
   jq -e '
     .schema == "fm-project-cockpit.v1"
     and .freshness == "fresh"
-    and .counts == {running:2,waiting:2,blocked:1,attention:2}
+    and .counts == {running:1,waiting:3,blocked:1,attention:2}
     and [.projects[].id] == ["alpha","beta","delta","gamma"]
     and ([.projects[].tasks[] | select(.id == "healthy-work")][0]
       | .state == "working" and .crew.summary == "1 LIVE" and .elapsed_seconds == 5460)
@@ -51,13 +51,19 @@ test_projection_is_deterministic_and_allowlisted() {
     and ([.projects[].tasks[] | select(.id == "blocked-work")][0]
       | .state == "blocked" and .blockers == ["upstream-api"] and .artifacts.pr_url == null)
     and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
-      | .state == "unknown" and .crew.summary == "UNKNOWN" and .state != "stopped")
+      | .lane == "waiting" and .state == "unknown" and .crew.summary == "UNKNOWN")
     and ([.projects[].tasks[] | select(.id == "done-work")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
   ' "$one" >/dev/null || fail "projected state semantics, stable ordering, elapsed time, or safe links are wrong"
   for unsafe in PRIVATE-INBOX-TEXT-MUST-NOT-LEAK SECRET-STATUS-DETAIL SECRET-RAW-LINE PRIVATE-EVENT-TEXT PRIVATE-DECISION-TEXT FORBIDDEN-CONTROL-TEXT; do
     ! grep -Fq "$unsafe" "$one" || fail "unsafe source text leaked through the allowlist: $unsafe"
   done
+  jq '(.tasks[] | select(.id == "unknown-work") | .current_state.state)="stopped"' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$stopped"
+  jq -e '.counts == {running:1,waiting:3,blocked:1,attention:2}
+      and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
+        | .lane == "waiting" and .state == "stopped" and .crew.summary == "UNKNOWN")' "$stopped" >/dev/null \
+    || fail "stopped lifecycle evidence was presented as running"
   pass "projection is deterministic, stably ordered, semantically faithful, and allowlisted"
 }
 
