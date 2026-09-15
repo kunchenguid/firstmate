@@ -354,7 +354,7 @@ For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-disco
 The optional local, gitignored `config/claude-permission-mode` holds one token selecting the permission flag every Claude worker launch carries: crewmates, scouts, Claude secondmates, and control-plane relaunches alike.
 The token is the file's whitespace-trimmed content.
 `bypass` keeps today's launch, `claude --dangerously-skip-permissions`, and is also the default when the file is absent, so an unconfigured home launches byte-for-byte as before.
-`auto` replaces that flag with `--permission-mode auto`, Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode; every other part of the Claude launch, including its environment prefix, inline settings, model, and effort flags, is unchanged.
+`auto` replaces that flag with `--permission-mode auto`, Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode; every other part of the Claude launch, including its environment prefix, `--settings` value, model, and effort flags, is unchanged.
 Any other value, or an unreadable file, refuses every spawn from that home, whichever harness it would launch, before any endpoint, worktree, or task record exists, and names the accepted values; Firstmate never falls back to a permission posture the captain did not choose.
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
@@ -406,7 +406,7 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
-Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
+Every claude launch firstmate composes also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}` through its single `--settings` value - inline JSON for a secondmate, and the firstmate-owned `state/<id>.claude-settings.json` for a task worker, which carries the same policy beside that task's hooks - so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

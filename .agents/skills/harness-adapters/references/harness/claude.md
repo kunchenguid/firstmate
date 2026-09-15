@@ -6,7 +6,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220, and their per-task settin
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks in firstmate's `state/<id>.claude-settings.json`, loaded through the launch's single `--settings` and never written into the project's own `.claude/settings.local.json`: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks in firstmate's `state/<id>.claude-settings.json`, loaded through the launch's single `--settings` and never written into the project's own `.claude/settings.local.json`: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. That wiring rides the canonical exact `claude` launch template, so a raw claude-shaped launch receives no per-task settings file: the spawn warns, and that worker has no trusted busy state and no turn-end notification, exactly like a raw gemini launch. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
