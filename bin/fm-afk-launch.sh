@@ -131,7 +131,7 @@ fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 fm_afk_launch_entry_mark() {
   local pending
   pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-launching.XXXXXX") || return 1
-  if ! printf '%s\n' pending > "$pending" \
+  if ! printf '%s\n' "$(date '+%s')" > "$pending" \
     || ! chmod 0600 "$pending" \
     || ! mv -f "$pending" "$FM_AFK_LAUNCHING"; then
     rm -f "$pending"

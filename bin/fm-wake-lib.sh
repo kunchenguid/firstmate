@@ -327,8 +327,35 @@ fm_afk_daemon_owns_supervision() {
   [ "$current" = "$recorded" ]
 }
 
+# fm_afk_launch_in_progress <state>
+# True while an away-mode ENTRY is still in flight (bin/fm-afk-launch.sh's
+# state/.afk-launching sentinel), so an arm yields instead of racing the
+# starting daemon. The sentinel records its creation epoch; a sentinel older
+# than FM_AFK_LAUNCHING_MAX_SECS (default 300; invalid or zero uses the default)
+# is treated as abandoned ONLY when no live identity-matched daemon owns
+# supervision, and is removed so arms resume. Without that bound a start-native
+# entry whose separate native daemon launch never ran would suppress supervision
+# forever. A fresh sentinel still defers, and a live away daemon still defers
+# through fm_afk_daemon_owns_supervision.
 fm_afk_launch_in_progress() {
-  [ -e "$1/.afk-launching" ]
+  local state=$1 marker="$1/.afk-launching" max created age
+  [ -e "$marker" ] || return 1
+  fm_afk_daemon_owns_supervision "$state" && return 0
+  max=${FM_AFK_LAUNCHING_MAX_SECS:-300}
+  case "$max" in ''|*[!0-9]*|0) max=300 ;; esac
+  created=$(head -n 1 "$marker" 2>/dev/null || true)
+  case "$created" in
+    ''|*[!0-9]*) age=$(fm_path_age "$marker") ;;
+    *)
+      age=$(( $(date +%s) - created ))
+      [ "$age" -ge 0 ] || age=0
+      ;;
+  esac
+  if [ "$age" -ge "$max" ]; then
+    rm -f "$marker" 2>/dev/null || true
+    return 1
+  fi
+  return 0
 }
 
 # fm_afk_mode <state>
