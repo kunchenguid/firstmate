@@ -314,6 +314,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-paseo.test.sh
 ```
 
 Bounded output from the incident regression:
@@ -321,6 +322,7 @@ Bounded output from the incident regression:
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
 ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - fm-teardown: a paseo endpoint refuses and keeps every record, rather than reporting completion over a still-running terminal
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -329,6 +331,8 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The paseo cell was added on 2026-09-06 and is metadata-only in the strongest sense: no Paseo lifecycle adapter exists yet, so nothing in it can reach a Paseo binary or daemon.
+`tests/fm-backend-paseo.test.sh` proves that directly by putting a tripwire `paseo` on PATH and asserting a `backend=paseo` record still refuses without it ever being executed.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Claude workspace trust
@@ -1527,6 +1531,127 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
+
+## paseo
+
+paseo is a registered backend NAME only, and it is EXPLICIT-ONLY: nothing auto-detects it.
+Its cleanup records are refused by the endpoint-validation boundary's fail-closed default for an adapterless backend rather than by any paseo-specific arm; no lifecycle adapter exists, so there is no live spawn, capture, send, or teardown evidence to record here yet.
+[`configuration.md`](../configuration.md) owns the current selection contract, including the fact that every paseo spawn refuses at `fm_backend_validate_spawn`.
+
+The dated investigation behind that decision ran on 2026-09-06 against Paseo 0.7.2 on macOS (Darwin 25.6.0), with the local daemon on `127.0.0.1:6767`.
+It is a private per-captain report under gitignored `data/paseo-adapter-a3/report.md`, cited by section number below; local paths, agent and terminal ids, daemon ids, and activity tokens are redacted here and stay in that report.
+
+OBSERVED first-hand on 2026-09-06: the Paseo CLI is not on `PATH` and is reached inside the app bundle.
+
+```sh
+command -v paseo; echo "exit=$?"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Paseo.app/Contents/Info.plist
+```
+
+Observed output:
+
+```text
+exit=1
+0.7.2
+```
+
+That is the empirical basis for `fm_backend_required_tools paseo` declaring `treehouse` alone and no session-provider CLI: a `paseo` `PATH` probe would report a missing dependency on a machine where Paseo is installed and working.
+
+### Detection markers and why paseo is explicit-only
+
+OBSERVED, recorded verbatim in that report at section 9.2, run from a genuine tmux pane that `fm-spawn.sh` had created from a firstmate itself hosted as a Paseo agent:
+
+```sh
+env | grep -iE '^(PASEO|TMUX|__CFBundleIdentifier)'
+```
+
+Observed output:
+
+```text
+PASEO_AGENT_CWD=<checkout path>
+PASEO_AGENT_ID=<uuid>
+PASEO_CLI=/Applications/Paseo.app/Contents/Resources/bin/paseo
+PASEO_WEB_UI_ENABLED=false
+TMUX=<socket>,<pid>,0
+TMUX_PANE=%1
+__CFBundleIdentifier=sh.paseo.desktop
+```
+
+Both markers are set in one pane, because a Paseo agent session exports `PASEO_AGENT_ID` into every process it starts and the id leaks straight through the tmux spawn.
+Only `$TMUX` names the layer actually executing, so the Paseo marker is present in a pane where Paseo is not the running layer.
+That is the whole basis for making paseo explicit-only: a marker that leaks arbitrarily far down the process tree cannot establish that Paseo is the executing runtime, so selecting paseo from it would capture workers on a Paseo-hosted machine that the captain never pointed at Paseo.
+
+OBSERVED, recorded in the same report at section 5.8 as the environment injected into every Paseo-created terminal; the report retained the output but not the exact command:
+
+```text
+PASEO_TERMINAL_ID=<uuid>
+PASEO_WORKSPACE_ID=wks_<hex>
+PASEO_CLI=/Applications/Paseo.app/Contents/Resources/bin/paseo
+PASEO_HOOK_CLI=/Applications/Paseo.app/Contents/Resources/bin/paseo
+PASEO_ACTIVITY_TOKEN=<token>
+PASEO_TERMINAL_ACTIVITY_URL=http://127.0.0.1:6767/api/terminal-activity
+PASEO_WEB_UI_ENABLED=false
+PASEO_ZSH_ZDOTDIR=
+__CFBundleIdentifier=sh.paseo.desktop
+```
+
+`PASEO_AGENT_ID` is absent in a terminal and `TMUX`, `CMUX_*`, and `HERDR_*` are all absent, so the daemon does not leak its launcher's environment into terminals.
+The two Paseo contexts therefore carry disjoint primary markers, and there is no cmux false positive in either direction: a Paseo surface reports `__CFBundleIdentifier=sh.paseo.desktop`, not `com.cmuxterm.app`.
+`PASEO_CLI` is present in both contexts and is deliberately not a marker; the report records that the CLI shim exports it itself, so it is inherited arbitrarily far down a process tree and cannot mean "running inside Paseo".
+It is the right variable for binary resolution and the wrong one for runtime detection, the same distinction already drawn for cmux between `CMUX_WORKSPACE_ID` and the user-settable `CMUX_SOCKET_PATH`.
+
+DERIVED, not measured: that a Paseo marker seen alongside a tmux or herdr marker never means Paseo is the executing layer rests on Paseo being a desktop app plus daemon that cannot run nested inside either, while both can run inside a Paseo-provided shell.
+No detection-ordering rule is derived from this, because paseo is not auto-detected at all; the observation is recorded as the reason an ambient marker cannot stand in for an explicit selection.
+
+OBSERVED first-hand on 2026-09-12, re-run against the shipped code from a checkout of this branch after paseo auto-detection was removed:
+
+```sh
+env -i PATH="$PATH" HOME="$HOME" TMUX=/tmp/x,1,0 PASEO_AGENT_ID=a \
+  bash -c '. bin/fm-backend.sh; fm_backend_detect; echo " signal=$FM_BACKEND_DETECT_SIGNAL"'
+env -i PATH="$PATH" HOME="$HOME" PASEO_AGENT_ID=a \
+  bash -c '. bin/fm-backend.sh; fm_backend_detect; echo " signal=$FM_BACKEND_DETECT_SIGNAL"'
+env -i PATH="$PATH" HOME="$HOME" PASEO_TERMINAL_ID=t \
+  bash -c '. bin/fm-backend.sh; fm_backend_detect; echo " signal=$FM_BACKEND_DETECT_SIGNAL"'
+env -i PATH="$PATH" HOME="$HOME" CMUX_WORKSPACE_ID=w PASEO_AGENT_ID=a \
+  bash -c '. bin/fm-backend.sh; fm_backend_detect; echo " signal=$FM_BACKEND_DETECT_SIGNAL"'
+```
+
+Observed output:
+
+```text
+tmux signal=TMUX
+ signal=
+ signal=
+cmux signal=CMUX_WORKSPACE_ID
+```
+
+The two middle lines are the change: a Paseo marker now selects nothing, so `fm_backend_detect` returns non-zero and prints no backend and no signal, while tmux and cmux still detect normally alongside it.
+Explicit selection is the only way to reach paseo:
+
+```sh
+env -i PATH="$PATH" HOME="$HOME" PASEO_AGENT_ID=a FM_BACKEND=paseo \
+  bash -c '. bin/fm-backend.sh; echo "name=$(fm_backend_name)"'
+```
+
+Observed output:
+
+```text
+name=paseo
+```
+
+```sh
+tests/fm-backend-paseo.test.sh
+```
+
+That portable regression pins explicit-only selection, including that no Paseo marker alone or combined selects a backend while tmux, herdr and both cmux signals still detect normally beside one, plus the paseo cleanup-record refusal and the fail-closed default behind it - driving both real functions to assert that every backend whose cleanup record validates has a reachable `fm_backend_kill`; it needs no Paseo install.
+
+### Not verified here
+
+The endpoint record shape a paseo task will carry (`paseo_workspace_id=`, `paseo_terminal_id=`, and `window=` carrying the composite `<workspace>:<terminal>`) is DERIVED from the terminal environment above, whose `wks_<hex>` and UUID id shapes both satisfy `fm_backend_endpoint_atom_valid`.
+No code writes such a record yet, and `fm_backend_validate_task_endpoint` refuses every `backend=paseo` record until the lifecycle adapter can close one, so the shape is enforced and confirmed against a real endpoint only when that adapter lands.
+
+No harness behavior on Paseo is verified here.
+Grok and Kimi in particular were never run on this surface and are neither refused nor claimed.
 
 ## Codex App host tools
 

@@ -25,7 +25,15 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 REGISTERS paseo as an
+# EXPERIMENTAL backend NAME and lands its safety boundary - explicit-only
+# selection and endpoint-record refusal - BEFORE any lifecycle code exists.
+# paseo is deliberately NOT spawn-capable: there is no bin/backends/paseo.sh
+# yet, so fm_backend_validate_spawn refuses it at the boundary every spawn caller
+# already shares, fm_backend_validate_task_endpoint refuses every backend=paseo
+# cleanup record at the single boundary every teardown caller already shares,
+# and every other runtime operation refuses through the unimplemented-backend
+# arms below rather than degrading.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -65,8 +73,14 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# paseo is EXPERIMENTAL, KNOWN-ONLY, and EXPLICIT-ONLY for now: the name
+# exists, but the lifecycle adapter does not, so paseo is absent from
+# FM_BACKEND_SPAWN, every spawn refuses at fm_backend_validate_spawn, and every
+# cleanup record refuses at fm_backend_validate_task_endpoint. Like zellij and
+# orca it is never auto-detected. It joins the spawn set - and gets a
+# record-shape check - when that adapter lands.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
@@ -132,6 +146,19 @@ fm_backend_is_known() {  # <name>
 #      scrubbed entirely (no bundle id to inherit); NOT usable from inside
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
+#
+# paseo is NEVER auto-detected, exactly like zellij and orca: it is selected
+# only by an explicit `config/backend`, `FM_BACKEND=paseo`, or `--backend
+# paseo`. That is a deliberate choice, not a gap. Paseo's runtime markers are
+# real - a Paseo AGENT session sets PASEO_AGENT_ID and a Paseo-created TERMINAL
+# sets PASEO_TERMINAL_ID - but PASEO_AGENT_ID LEAKS: verified live, a tmux pane
+# spawned by a Paseo-hosted firstmate carries BOTH $TMUX and PASEO_AGENT_ID,
+# because the agent id passes straight through the tmux spawn into every
+# descendant. An ambient marker that survives arbitrarily far down the process
+# tree cannot mean "running inside Paseo", so selecting paseo from it would
+# capture workers on a Paseo-hosted machine that the captain never pointed at
+# Paseo. Requiring an explicit selection is what keeps that consent explicit.
+# docs/verification/runtime-backends.md#paseo owns the dated leak evidence.
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
 # TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
@@ -239,7 +266,8 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # today's default-path behavior and callers must see zero change. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
+# distinct from the primary-marker case. paseo prints no notice at all: it is
+# never auto-detected, so this path is never reached for it.
 fm_backend_name() {
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -304,8 +332,14 @@ fm_backend_validate_spawn() {  # <name>
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, paseo); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI.
+# paseo declares treehouse ONLY. It is session-provider-only, so treehouse is a
+# genuine dependency, but its transport-specific tool delta is deliberately
+# absent until the lifecycle adapter exists and can name it: Paseo's CLI shim is
+# not installed on PATH (it lives inside the desktop app bundle and is reached
+# through $PASEO_CLI), so declaring a `paseo` PATH tool here would report a
+# spurious missing dependency on a machine where Paseo is installed and working.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -314,6 +348,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    paseo)  printf '%s' 'treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -527,6 +562,22 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: cmux endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
+      ;;
+    *)
+      # Fail closed for any name registered in FM_BACKEND_KNOWN before its
+      # lifecycle adapter lands - paseo is the current occupant. Passing this
+      # boundary is what authorizes teardown to destroy durable state, while
+      # every kill caller swallows fm_backend_kill failures because an
+      # already-gone endpoint is legitimately not an error. So accepting a
+      # record no adapter can act on would let teardown return the worktree,
+      # delete the durable metadata, and report completion while the terminal is
+      # still running - destroying the only record of the endpoint it had left.
+      # No firstmate path writes such a record while the adapter is absent, so
+      # any that exists is unintended and its task state must be preserved.
+      # Per-field record-shape validation lands with the adapter that can
+      # actually act on the record.
+      echo "REFUSED: backend '$backend' has no lifecycle adapter, so task $id's endpoint cannot be closed; preserving task state." >&2
+      return 1
       ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
