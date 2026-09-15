@@ -493,6 +493,8 @@ class Session:
         self.prompt = str(uuid.uuid4())
         self.stream = None
         self.reader_task = None
+        self.client = None
+        self.transport = None
         self.audio_content = None
         self.turn = {}
         self.tool_calls = 0
@@ -535,17 +537,30 @@ class Session:
             AsyncBedrockRuntimeClient,
             InvokeModelWithBidirectionalStreamOperationInput)
         from aws_sdk_bedrock_runtime.config import AsyncBedrockRuntimeConfig
+        try:
+            from smithy_http.aio.crt import AWSCRTHTTPClient
+            self.transport = AWSCRTHTTPClient()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "voice relay requires the duplex transport; install "
+                "aws-sdk-bedrock-runtime[awscrt] in the voice environment"
+            ) from exc
 
         creds = await self.credentials.get()
         began = time.monotonic()
         config = await AsyncBedrockRuntimeConfig.resolve(
             endpoint_uri="https://bedrock-runtime.{}.amazonaws.com".format(
                 self.options.region),
-            region=self.options.region, **creds)
-        client = AsyncBedrockRuntimeClient(config=config)
-        self.stream = await client.invoke_model_with_bidirectional_stream(
-            InvokeModelWithBidirectionalStreamOperationInput(
-                model_id=self.options.model))
+            region=self.options.region,
+            transport=self.transport, **creds)
+        self.client = AsyncBedrockRuntimeClient(config=config)
+        try:
+            self.stream = await self.client.invoke_model_with_bidirectional_stream(
+                InvokeModelWithBidirectionalStreamOperationInput(
+                    model_id=self.options.model))
+        except BaseException:
+            await self._close_sdk()
+            raise
         self.connect_seconds = round(time.monotonic() - began, 3)
         self.reader_task = asyncio.create_task(self._read_model())
 
@@ -574,9 +589,22 @@ class Session:
         log(self.verbose, "session up in {}s, read scope {}".format(
             self.connect_seconds, self.scope))
 
+    async def _close_sdk(self):
+        for name in ("client", "transport"):
+            resource = getattr(self, name)
+            if resource is None:
+                continue
+            try:
+                await resource.close()
+            except Exception as exc:                       # noqa: BLE001
+                log(self.verbose, "{} close: {}: {}".format(
+                    name, type(exc).__name__, exc))
+            setattr(self, name, None)
+
     async def close(self):
         self.closing = True
         if self.stream is None:
+            await self._close_sdk()
             return
         try:
             if self.audio_content:
@@ -602,6 +630,7 @@ class Session:
                     timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+        await self._close_sdk()
 
     # ------------------------------------------------------------------ uplink
 
