@@ -29,6 +29,22 @@ SH
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [[ " $* " == *' --if-lease-id '* ]]; then
+  path=${!#}
+  real=$(cd "$path" && pwd -P)
+  state="$(dirname "$(dirname "$real")")/treehouse-state.json"
+  tmp=$(mktemp "$state.XXXXXX")
+  jq '(.worktrees[]) |= del(.leased,.lease_id,.lease_holder)' "$state" > "$tmp"
+  mv "$tmp" "$state"
+  # Like upstream ReleaseConditional: a recorded base that no longer exists
+  # parks the slot on the default branch and clears base_branch on success.
+  base=$(jq -r --arg p "$real" '.worktrees[] | select(.path == $p) | .base_branch // ""' "$state")
+  if [ -n "$base" ] && ! git -C "$real" rev-parse --verify --quiet "refs/heads/$base" >/dev/null; then
+    tmp=$(mktemp "$state.XXXXXX")
+    jq --arg p "$real" '(.worktrees[] | select(.path == $p)) |= del(.base_branch)' "$state" > "$tmp"
+    mv "$tmp" "$state"
+  fi
+fi
 exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
@@ -834,12 +850,11 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
 # worker exited, its slot was granted to another task, and that task leaves no
 # record this home can enumerate. Nothing in the record scan contradicts the
 # stale worktree= line, so the slot's own owner claim is the only evidence that
-# it was reassigned. The slot is no longer this task's, so teardown finishes the
-# task's own cleanup and leaves the slot - its worker, its copy, its claim -
-# exactly as it found it.
+# it was reassigned. Teardown must preserve both the stale record and the slot
+# without inferring what happened to the earlier task's work.
 assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   local dir=$1 id=$2 other=$3 description=$4
-  assert_absent "$dir/home/state/$id.meta" "$description: the stale task's own record was not removed"
+  assert_present "$dir/home/state/$id.meta" "$description: the stale task record must survive the ownership refusal"
   assert_present "$dir/pool/1/.fm-slot-owner" "$description: another task's slot claim was removed"
   assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
     "$description: another task's slot claim was rewritten"
@@ -852,12 +867,12 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
     "$description: the warning should name the reassignment as the cause"
 }
 
-test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
+test_reassigned_pool_slot_refuses_without_touching_copy_or_record() {
   local dir id=stale-task other=reassigned-task worker rc
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
-  # discarding this task's unlanded work, which is already gone with the slot,
-  # never the other task's live work.
+  # discarding this task's unlanded work, never the other task's live work.
+  # Reassignment alone proves nothing about the earlier work's outcome.
   dir=$(make_case slot-reassigned)
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -875,7 +890,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   rc=$?
   set -e
 
-  [ "$rc" -eq 0 ] || fail "teardown of a task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$rc" -ne 0 ] || fail "teardown of a task whose slot was reassigned succeeded: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
@@ -907,7 +922,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$rc" -ne 0 ] || fail "teardown of a clean ship task whose slot was reassigned succeeded: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
   kill "$worker" 2>/dev/null || true
@@ -935,11 +950,11 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
     "unreadable-claim refusal should name the claim file to inspect"
 
-  pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
+  pass "fm-teardown: a pool slot claimed by another task is left alone and its stale record survives the refusal"
 }
 
-# The two states that must never become a false refusal: the task's own claim,
-# and no claim at all (a slot taken before claims existed, or already returned).
+# Unleased legacy slots retain the existing cleanup route with their own
+# legacy claim or no claim; native leases require an exact binding below.
 test_own_and_absent_slot_claims_still_tear_down() {
   local dir id=owned-task
 
@@ -972,6 +987,120 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# Native lease binding complements, and never bypasses, the existing dirty and
+# landed-work gates. All runtime commands are fakes; the Git histories are real.
+test_reserved_slot_cleanup_keeps_existing_work_guards() {
+  local dir id=lease-cleanup holder lease=fixture-native-id out rc before claim phase
+  dir=$(make_case lease-cleanup)
+  mark_case_as_treehouse_pool "$dir"
+  holder="firstmate:$dir/home:$id"
+  jq --arg h "$holder" --arg l "$lease" \
+    '.worktrees[0] += {leased:true,lease_id:$l,lease_holder:$h}' \
+    "$dir/pool/treehouse-state.json" > "$dir/pool/next.json"
+  mv "$dir/pool/next.json" "$dir/pool/treehouse-state.json"
+  claim_pool_slot "$dir" "$id"
+  printf 'lease_id=%s\n' "$lease" >> "$dir/pool/1/.fm-slot-owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" "spawn_gen=s1.2.3" \
+    "harness=codex" "kind=ship" "mode=local-only" "yolo=off" \
+    "worktree=$dir/worktree" "project=$dir/project"
+  before=$(cat "$dir/pool/treehouse-state.json")
+  claim=$(cat "$dir/pool/1/.fm-slot-owner")
+  for phase in missing-claim foreign-home wrong-lease; do
+    case "$phase" in
+      missing-claim) rm "$dir/pool/1/.fm-slot-owner" ;;
+      foreign-home)
+        mkdir -p "$dir/foreign-home"
+        printf 'task=%s\nhome=%s\nlease_id=%s\n' "$id" "$dir/foreign-home" "$lease" > "$dir/pool/1/.fm-slot-owner"
+        ;;
+      wrong-lease) printf '%s\n' "$claim" | sed 's/^lease_id=.*/lease_id=other-lease/' > "$dir/pool/1/.fm-slot-owner" ;;
+    esac
+    out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "$phase native binding was accepted for forced cleanup"
+    assert_present "$dir/home/state/$id.meta" "$phase refusal lost its task record"
+    [ "$(cat "$dir/pool/treehouse-state.json")" = "$before" ] || fail "$phase refusal changed native ownership"
+    ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail "$phase refusal called native return"
+    printf '%s\n' "$claim" > "$dir/pool/1/.fm-slot-owner"
+  done
+  for phase in missing-state symlink-state; do
+    mv "$dir/pool/treehouse-state.json" "$dir/pool/state.saved"
+    if [ "$phase" = symlink-state ]; then
+      ln -s state.saved "$dir/pool/treehouse-state.json"
+    fi
+    out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "$phase downgraded a claimed copy to an unowned worktree"
+    assert_contains "$out" 'cannot read native reservation' "$phase lost the native-state refusal"
+    assert_present "$dir/home/state/$id.meta" "$phase refusal lost its task record"
+    assert_present "$dir/worktree/sentinel" "$phase refusal changed its copy"
+    [ "$(cat "$dir/pool/1/.fm-slot-owner")" = "$claim" ] || fail "$phase refusal changed its claim"
+    ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail "$phase refusal called native return"
+    [ ! -L "$dir/pool/treehouse-state.json" ] || rm "$dir/pool/treehouse-state.json"
+    mv "$dir/pool/state.saved" "$dir/pool/treehouse-state.json"
+    [ "$(cat "$dir/pool/treehouse-state.json")" = "$before" ] || fail "$phase refusal changed native state"
+  done
+  for phase in dirty unlanded; do
+    if [ "$phase" = unlanded ]; then
+      git -C "$dir/worktree" checkout -qb preserved-change
+      git -C "$dir/worktree" add sentinel
+      git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm retained
+    fi
+    out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "leased $phase work was cleaned without authorization"
+    assert_present "$dir/home/state/$id.meta" "$phase refusal lost its task record"
+    assert_present "$dir/pool/1/.fm-slot-owner" "$phase refusal lost its claim"
+    [ "$(cat "$dir/pool/treehouse-state.json")" = "$before" ] || fail "$phase refusal changed its native lease"
+    ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail "$phase refusal returned its slot"
+  done
+  git -C "$dir/project" merge --ff-only --quiet preserved-change
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" 2>&1); rc=$?
+  expect_code 0 "$rc" "safe local landing should permit exact own reservation cleanup: $out"
+  assert_contains "$(cat "$dir/runtime.log")" "<--if-lease-id> <$lease>" "safe cleanup did not condition return on its exact native lease"
+  assert_absent "$dir/home/state/$id.meta" "safe own cleanup retained its task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "safe own cleanup retained its spent claim"
+  pass "leased dirty and unlanded work refuse cleanup; safely landed own work returns with exact lease identity"
+}
+
+# A successful native return may rewrite more than the lease: when the slot's
+# recorded base branch was deleted after merge, upstream parks the slot on the
+# default branch and clears base_branch. Success evidence is bound to the exact
+# slot identity, so that rewrite must not turn a completed return into an
+# unrecoverable refusal.
+test_returned_slot_with_stale_base_branch_completes_cleanup() {
+  local dir id=base-fallback holder lease=fixture-base-lease out rc
+  dir=$(make_case base-fallback)
+  mark_case_as_treehouse_pool "$dir"
+  holder="firstmate:$dir/home:$id"
+  jq --arg h "$holder" --arg l "$lease" \
+    '.worktrees[0] += {leased:true,lease_id:$l,lease_holder:$h,base_branch:"merged-feature"}' \
+    "$dir/pool/treehouse-state.json" > "$dir/pool/next.json"
+  mv "$dir/pool/next.json" "$dir/pool/treehouse-state.json"
+  ! git -C "$dir/project" rev-parse --verify --quiet refs/heads/merged-feature >/dev/null \
+    || fail "fixture base branch must not exist"
+  claim_pool_slot "$dir" "$id"
+  printf 'lease_id=%s\n' "$lease" >> "$dir/pool/1/.fm-slot-owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  out=$(run_case "$dir" "$id" 2>&1); rc=$?
+  expect_code 0 "$rc" "a successful return that cleared base_branch was rejected: $out"
+  assert_contains "$(cat "$dir/runtime.log")" "<--if-lease-id> <$lease>" \
+    "cleanup did not condition return on its exact native lease"
+  jq -e '.worktrees[0] | (.leased // false) == false and has("base_branch") == false' \
+    "$dir/pool/treehouse-state.json" >/dev/null \
+    || fail "fixture return did not clear the lease and stale base branch: $(cat "$dir/pool/treehouse-state.json")"
+  assert_absent "$dir/home/state/$id.meta" "completed cleanup retained its task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "completed cleanup retained its spent claim"
+  assert_absent "$dir/pool/1/.fm-slot-owner.returned" "completed cleanup retained its return receipt"
+  pass "fm-teardown: a native return that parks on the default branch and clears base_branch is still exact-slot success"
+}
+
+test_reserved_slot_cleanup_keeps_existing_work_guards
+test_returned_slot_with_stale_base_branch_completes_cleanup
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -984,7 +1113,7 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
-test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_reassigned_pool_slot_refuses_without_touching_copy_or_record
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

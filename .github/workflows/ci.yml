@@ -256,6 +256,10 @@ jobs:
           set -eu
           bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.5"
+          cache: false
       - name: Install pinned Treehouse
         run: |
           set -eu

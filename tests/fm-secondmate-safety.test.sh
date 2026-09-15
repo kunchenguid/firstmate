@@ -266,9 +266,9 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log lease out
+  local home acquired acquired_abs fakebin log lease out status retained_status
   home="$TMP_ROOT/dash-home"
-  acquired="$TMP_ROOT/dash-acquired-home"
+  acquired="$TMP_ROOT/dash-acquired-home-pool/1/firstmate"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-alpha.git"
@@ -278,6 +278,20 @@ test_home_seed_uses_treehouse_acquired_home() {
   log="$TMP_ROOT/dash-fake/tmux.log"
   lease="$TMP_ROOT/dash-fake/lease"
 
+  fm_write_meta "$home/state/preserved.meta" "kind=ship" "worktree=$acquired" "project=$ROOT"
+  retained_status=$(jq -nc --arg p "$acquired" '[{name:"1",path:$p,status:"available"}]')
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_STATUS="$retained_status" FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "home seeding acquired an unleased retained worker copy"
+  assert_contains "$out" "without a durable lease" "home seeding did not report the retained copy"
+  [ ! -e "$lease" ] || fail "refused home seeding acquired a lease"
+  [ -f "$home/state/preserved.meta" ] && [ -f "$acquired/AGENTS.md" ] || fail "home seeding removed retained work or metadata"
+  ! grep -F "get --lease --json --lease-holder firstmate:$home:dash" "$log" >/dev/null || fail "home seeding requested a copy before resolving its retained record"
+  rm "$home/state/preserved.meta"
+  : > "$log"
+
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
@@ -285,9 +299,9 @@ test_home_seed_uses_treehouse_acquired_home() {
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
-  grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  grep -F "get --lease --json --lease-holder firstmate:$home:dash" "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
   [ -f "$lease" ] || fail "seed did not record a treehouse lease"
-  [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
+  [ "$(cat "$lease")" = "firstmate:$home:dash" ] || fail "seed did not set the lease holder to the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
   [ "$(cat "$acquired/.fm-secondmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
   [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
@@ -298,7 +312,7 @@ test_home_seed_uses_treehouse_acquired_home() {
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   local home acquired acquired_abs fakebin log err
   home="$TMP_ROOT/dash-fail-home"
-  acquired="$TMP_ROOT/dash-fail-acquired-home"
+  acquired="$TMP_ROOT/dash-fail-acquired-home-pool/1/firstmate"
   err="$TMP_ROOT/dash-fail.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
@@ -316,7 +330,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
     fail "seed reused an acquired home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
-  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-id seed-fixture $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
@@ -327,7 +341,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
 test_home_seed_warns_when_acquired_home_return_fails() {
   local home acquired acquired_abs fakebin log err lease
   home="$TMP_ROOT/dash-return-fail-home"
-  acquired="$TMP_ROOT/dash-return-fail-acquired-home"
+  acquired="$TMP_ROOT/dash-return-fail-acquired-home-pool/1/firstmate"
   err="$TMP_ROOT/dash-return-fail.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
@@ -350,7 +364,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   grep -F "warning: failed to return treehouse-acquired home $acquired_abs during seed rollback" "$err" >/dev/null \
     || fail "seed rollback did not warn when treehouse return failed"
   [ -f "$lease" ] || fail "failed rollback return did not preserve lease evidence"
-  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-id seed-fixture $acquired_abs" "$log" >/dev/null \
     || fail "failed rollback did not attempt to return the acquired home"
   pass "home seed rollback warns when treehouse-acquired return fails"
 }
@@ -379,7 +393,7 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
 
   : > "$log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
-    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-home-seed.sh" dash-descendant - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home inside the active firstmate home"
   fi
   grep -F 'secondmate home cannot be inside the active firstmate home' "$err" >/dev/null \
@@ -561,6 +575,61 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   [ "$projects" = 'alpha, beta' ] \
     || fail "secondmate spawn resolved the wrong projects field: '$projects'"
   pass "secondmate spawn resolves home validation and projects from punctuated registry fields"
+}
+
+# A seed whose acquisition was interrupted leaves this id's receipt behind by
+# design. A later spawn onto an explicitly supplied home must judge that receipt
+# before any launch, name it, and leave it in place; a matching receipt retires.
+test_secondmate_spawn_judges_retained_acquisition_receipt_before_launch() {
+  local home sub sub_abs fakebin log receipt out rc
+  home="$TMP_ROOT/receipt-spawn-home"
+  sub="$TMP_ROOT/receipt-spawn-subhome"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  mark_firstmate_home "$sub"
+  printf 'receipted\n' > "$sub/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf -- '- receipted - receipt notes (home: %s; scope: receipts; projects: alpha; added 2026-07-30)' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/receipt-spawn-fake")
+  log="$TMP_ROOT/receipt-spawn-fake/tmux.log"
+  receipt="$home/state/receipted.treehouse-acquisition"
+  jq -n --arg pool "$TMP_ROOT/elsewhere/.treehouse/other-pool" --arg root "$TMP_ROOT/elsewhere" \
+    --arg holder "firstmate:$(cd "$home" && pwd -P):receipted" \
+    '{pool:$pool,root:$root,holder:$holder}' > "$receipt"
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate spawn launched over a mismatched acquisition receipt"
+  assert_contains "$out" "$receipt" "mismatched receipt refusal did not name the receipt"
+  assert_contains "$out" "does not match" "mismatched receipt refusal did not explain the mismatch"
+  assert_present "$receipt" "mismatched receipt was removed by the refusal"
+  assert_absent "$home/state/receipted.meta" "mismatched receipt refusal published a task record"
+  [ ! -s "$log" ] || fail "mismatched receipt refusal reached the terminal: $(cat "$log")"
+
+  rm "$receipt"
+  ln -s "$TMP_ROOT/receipt-spawn-fake/pane.txt" "$receipt"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate spawn launched over an unsafe acquisition receipt"
+  assert_contains "$out" "$receipt" "unsafe receipt refusal did not name the receipt"
+  [ -L "$receipt" ] || fail "unsafe receipt was replaced or removed by the refusal"
+  [ ! -s "$log" ] || fail "unsafe receipt refusal reached the terminal: $(cat "$log")"
+
+  rm "$receipt"
+  jq -n --arg pool "$(dirname "$(dirname "$sub_abs")")" --arg root "$TMP_ROOT" \
+    --arg holder "firstmate:$(cd "$home" && pwd -P):receipted" \
+    '{pool:$pool,root:$root,holder:$holder}' > "$receipt"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/receipt-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" receipted "$sub" codex --secondmate 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "secondmate spawn refused its own matching acquisition receipt: $out"
+  assert_absent "$receipt" "published secondmate spawn retained its matching receipt"
+  assert_grep "home=$sub_abs" "$home/state/receipted.meta" "published secondmate spawn lost its home"
+  pass "secondmate spawn refuses a mismatched or unsafe acquisition receipt before launch and retires a matching one"
 }
 
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings() {
@@ -1522,7 +1591,7 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 test_secondmate_teardown_retires_empty_home() {
   local home subhome subhome_abs fakebin log lease fmroot
   home="$TMP_ROOT/teardown-home"
-  subhome="$TMP_ROOT/teardown-subhome"
+  subhome="$TMP_ROOT/teardown-subhome-pool/1/firstmate"
   fmroot="$TMP_ROOT/teardown-fmroot"
   make_firstmate_git_root "$fmroot"
   git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
@@ -1743,7 +1812,7 @@ test_secondmate_force_teardown_preserves_nested_restore_status() {
   home="$TMP_ROOT/procevent-nested-fail-home"
   subhome="$TMP_ROOT/procevent-nested-fail-subhome"
   childhome="$TMP_ROOT/procevent-nested-fail-childhome"
-  grandchildhome="$TMP_ROOT/procevent-nested-fail-grandchildhome"
+  grandchildhome="$TMP_ROOT/procevent-nested-fail-grandchildhome-pool/1/firstmate"
   fmroot="$TMP_ROOT/procevent-nested-fail-fmroot"
   sweep_log="$TMP_ROOT/procevent-nested-fail-sweep.log"
   rearm_log="$TMP_ROOT/procevent-nested-fail-rearm.log"
@@ -1781,7 +1850,7 @@ EOF
 
   [ "$rc" -eq 4 ] || fail "nested process-event restoration failure was collapsed at a recursive teardown boundary"
   grep -F 'active waits may remain retired; recover registrations from ' "$err" >/dev/null || fail "nested restoration failure did not report its recovery backup"
-  backup=$(find "$TMP_ROOT" -maxdepth 1 -type d -name '.fm-procevent-restore.*' \
+  backup=$(find "$TMP_ROOT" -type d -name '.fm-procevent-restore.*' \
     -exec test -e '{}/leaf-source.source' \; -print -quit)
   [ -n "$backup" ] && [ -e "$backup/leaf-source.source" ] || fail "nested restoration failure did not retain its registration backup"
   [ -e "$childhome/state/leaf.meta" ] || fail "nested restoration failure removed its parent identity record"
@@ -1793,7 +1862,7 @@ EOF
 test_secondmate_teardown_refuses_failed_leased_home_return() {
   local home subhome subhome_abs fakebin log fmroot err rc sweep_log rearm_log backup
   home="$TMP_ROOT/teardown-return-fail-home"
-  subhome="$TMP_ROOT/teardown-return-fail-subhome"
+  subhome="$TMP_ROOT/teardown-return-fail-subhome-pool/1/firstmate"
   fmroot="$TMP_ROOT/teardown-return-fail-fmroot"
   err="$TMP_ROOT/teardown-return-fail.err"
   sweep_log="$TMP_ROOT/teardown-return-fail-sweep.log"
@@ -1848,7 +1917,7 @@ EOF
 
   [ "$rc" -eq 4 ] || fail "failed process-event restoration did not return its distinct recoverable status"
   grep -F 'active waits may remain retired; recover registrations from ' "$err" >/dev/null || fail "failed process-event restoration did not report its recovery backup"
-  backup=$(find "$TMP_ROOT" -maxdepth 1 -type d -name '.fm-procevent-restore.*' \
+  backup=$(find "$TMP_ROOT" -type d -name '.fm-procevent-restore.*' \
     -exec test -e '{}/source.source' \; -print -quit)
   [ -n "$backup" ] && [ -e "$backup/source.source" ] || fail "failed process-event restoration did not retain its registration backup"
   pass "secondmate teardown refuses to hide failed leased-home return"
@@ -1925,8 +1994,8 @@ EOF
     fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
-    || fail "force teardown failed to discard child work"
+    "$ROOT/bin/fm-teardown.sh" domain --force >"$TMP_ROOT/force-teardown-result" 2>&1 \
+    || fail "force teardown failed to discard child work: $(cat "$TMP_ROOT/force-teardown-result")"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
@@ -2954,6 +3023,17 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+if [ "${FM_TREEHOUSE_REPAIR_ONLY:-0}" = 1 ]; then
+  test_home_seed_uses_treehouse_acquired_home
+  test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
+  test_home_seed_warns_when_acquired_home_return_fails
+  test_home_seed_does_not_return_unsafe_acquired_home
+  test_secondmate_teardown_retires_empty_home
+  test_secondmate_force_teardown_preserves_nested_restore_status
+  test_secondmate_teardown_refuses_failed_leased_home_return
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2973,6 +3053,7 @@ test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
 test_secondmate_spawn_resolves_punctuated_registry_projects
+test_secondmate_spawn_judges_retained_acquisition_receipt_before_launch
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
