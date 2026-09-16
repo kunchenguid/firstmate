@@ -32,8 +32,9 @@ ROOT=${FM_ROOT_OVERRIDE:-${CLAUDE_PROJECT_DIR:-}}
 ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-session-start.sh" ] || exit 0
 
+# state/ may not exist yet: a fresh checkout has none until
+# fm-session-start.sh's lock creates it, so it is not a gate.
 STATE=${FM_STATE_OVERRIDE:-$ROOT/state}
-[ -d "$STATE" ] || exit 0
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 MARKER="$STATE/.dsh-sessionstart-delivered"
 

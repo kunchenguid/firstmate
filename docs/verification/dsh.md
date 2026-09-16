@@ -71,6 +71,7 @@ Measured against synthetic homes:
 | `dsh --dump-config` fails, or reports no plain-number `agent-instructions` `maxBytes` | FAIL, naming the command to run and the patch file to set |
 | New sessions default to a permission preset other than `danger-full-access`, from the profile or from `$DSH_HOME/settings.yaml`, which outranks it | FAIL, naming the preset and where it came from |
 | No explicit default permission preset, so DSH would infer one from the sandbox knobs | FAIL |
+| The composed `sandbox-policy` mode that hooks run under is not `danger-full-access`: the preflight run without the launcher's `DSH_PERMISSION_MODE`, or a profile pinning another mode | FAIL, naming the mode |
 | Conforming home | pass, all required checks |
 | `lsof` absent | warning, not failure: teardown's stale-lock proof and orphan reap refuse rather than proceed |
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
@@ -90,6 +91,11 @@ The sandbox check was the other assurance that could not fail.
 It ran `ps` inside the preflight, but the preflight runs in the launching shell before DSH starts and DSH sandboxes only a live session's tool subprocesses, so it always reported ok; its earlier row in this table was measured with a fake `ps`.
 A runtime probe is not possible before exec, so the preflight now asserts what launch can observe: the permission preset a new session is seeded with, read from `$DSH_HOME/settings.yaml`'s `permission.defaultPreset` (written by DSH's settings page, and outranking the profile) or else the composed profile row, failing unless it is `danger-full-access`.
 That proves the default, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
+
+That preset still left every hook without `ps`.
+Driven live through the documented `web` launch with every preflight check ok, the digest in a `danger-full-access` session read `READ-ONLY SESSION` and `cannot locate harness process in ancestry`, and a probe hook got `/bin/ps: Operation not permitted`.
+The hooks bridge calls `runHook(ctx.shell, …)` with no session, so `dsh-sandbox-policy` resolves the host default, `process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`, whatever preset the session holds.
+With the host started under `DSH_PERMISSION_MODE=danger-full-access` the same probe ran `ps` and the digest acquired the lock, so the launcher now exports it and the preflight evaluates the composed `sandbox-policy` mode in the launcher's environment.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -113,6 +119,13 @@ Four defects in the first version of that adapter were found by the full-reposit
 
 The gate is per session id and re-arms for a new one, and a durable terminal-alarm latch is prepended rather than merged, so a session that died before the agent relayed the alarm still reports it.
 `tests/fm-dsh-harness.test.sh` pins all four behaviours against a stub home, including that an empty digest leaves the gate unset.
+
+Two more defects surfaced when the digest was driven through a real DSH host:
+
+| Defect | Fix |
+|---|---|
+| The adapter exited when `state/` was absent, but `state/` is gitignored and only `fm-session-start.sh`'s lock creates it, so a fresh checkout never got a digest | The existence gate is gone; the gate marker is written after session start has created `state/` |
+| Inside the digest the host is the ninth process above `fm-harness.sh` (hooks wrapper, adapter and its command substitution, `fm-session-start.sh` and its timeout wrapper), but the DSH ancestry walk stopped at eight, so `FM_DSH_HARNESS` was refused and the digest named no harness | `fm_dsh_ancestry` walks sixteen parents, the depth the session lock already walks |
 DSH supplies **no session-open `source` field**, so the digest always runs as a first startup and cannot re-emit after a compaction — a real limitation, not a design choice.
 
 ## PreToolUse: deny blocks, but only with a matched bridge

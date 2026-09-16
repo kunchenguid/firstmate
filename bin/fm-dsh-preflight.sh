@@ -19,13 +19,15 @@
 #      CLAUDE.md pointer and a budget marker the operator never sees. Under
 #      dsh-web-app the host row is disabled and the session's agent preset
 #      carries the budget, so a raise on the host row there is not a budget.
-#   3. PERMISSION PRESET. `ps` is denied under the `workspace-write` sandbox.
-#      Harness ancestry, the PID-strict watcher lock and away-mode daemon
-#      ownership then read "unknown" or "down" rather than reporting a
-#      misconfiguration, so the home looks broken instead of unsandboxed. This
-#      preflight runs in the launching shell before DSH starts, where nothing
-#      is sandboxed, so it cannot probe `ps` itself; it asserts the permission
-#      preset new sessions are seeded with instead.
+#   3. SANDBOX. `ps` is denied under the `workspace-write` sandbox. Harness
+#      ancestry, the PID-strict watcher lock and away-mode daemon ownership
+#      then read "unknown" or "down" rather than reporting a misconfiguration,
+#      so the home looks broken instead of unsandboxed. Two settings decide it:
+#      the permission preset new sessions are seeded with governs their tool
+#      calls, and the host's sandbox-policy mode governs every hook, which the
+#      hooks bridge runs with no session. This preflight runs in the launching
+#      shell before DSH starts, where nothing is sandboxed, so it cannot probe
+#      `ps` itself; it asserts both settings instead.
 #
 # Usage: fm-dsh-preflight.sh [--profile <name>] [--home <firstmate-home>] [--patch <path>]... [--quiet]
 # Exit: 0 all required checks passed; 3 at least one required check failed.
@@ -151,7 +153,7 @@ settings_value() {  # <section> <key>
 DUMP=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null) || DUMP=
 if [ -z "$DUMP" ]; then
   fail "could not read the composed configuration: dsh --profile $PROFILE --dump-config failed" \
-    "run that command to see why; neither the instruction budget nor the permission preset new sessions default to can be checked without it"
+    "run that command to see why; neither the instruction budget nor the sandbox that sessions and hooks run under can be checked without it"
 fi
 
 # --- 2. the session agent's instruction budget fits the rendered chain -------
@@ -221,7 +223,7 @@ elif [ -n "$DUMP" ]; then
   fi
 fi
 
-# --- 3. new sessions default to a sandbox that permits ps --------------------
+# --- 3. sessions and hooks run under a sandbox that permits ps --------------
 # A new session is seeded with the settings document's default permission
 # preset, else the profile's. That proves the default, not any one session: a
 # resumed session keeps the preset it recorded, and the per-session /permission
@@ -238,6 +240,24 @@ if [ -n "$DUMP" ]; then
   else
     fail "new sessions default to permission preset '${PERMISSION_PRESET:-<inferred from the sandbox knobs>}' ($PERMISSION_FROM), not danger-full-access" \
       "set the permission entry's defaultPreset to danger-full-access in $PATCH_FILE and clear any permission defaultPreset in $SETTINGS_FILE: any other sandbox denies ps, so harness ancestry, the PID-strict watcher lock and away-mode ownership degrade silently (sandbox-policy.mode alone is refused at load)"
+  fi
+
+  # Hooks are not session tool calls: the hooks bridge runs them with no
+  # session, so they get the host's sandbox-policy mode whatever preset a
+  # session was seeded with. DSH evaluates a `!!js` mode at host start in the
+  # environment it was launched with, so it is evaluated here in this one.
+  SANDBOX_ROW=$(printf '%s\n' "$DUMP" | entry_lines sandbox-policy)
+  HOOK_MODE=$(printf '%s\n' "$SANDBOX_ROW" | entry_value mode)
+  case "$HOOK_MODE" in
+    '!!js '*)
+      HOOK_MODE=$(node -e 'process.stdout.write(String(eval(process.argv[1])))' \
+        "$(printf '%s\n' "$SANDBOX_ROW" | sed -n 's/^mode:[[:space:]]*!!js[[:space:]]*//p' | tail -1)" 2>/dev/null) || HOOK_MODE= ;;
+  esac
+  if [ "$HOOK_MODE" = danger-full-access ]; then
+    ok "hooks run under the danger-full-access sandbox mode"
+  else
+    fail "hooks run under sandbox mode '${HOOK_MODE:-<unreadable>}', not danger-full-access" \
+      "launch through bin/fm-dsh-launch.sh, which exports DSH_PERMISSION_MODE=danger-full-access, and leave sandbox-policy's mode to that variable: the hooks bridge runs hooks with no session, so ps is denied in every hook and the digest reads READ-ONLY with an unknown harness"
   fi
 fi
 

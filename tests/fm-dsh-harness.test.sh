@@ -51,6 +51,34 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# A fake `ps` answering a parent chain <depth> processes tall: the script's own
+# pid, then synthetic ancestors above any real pid, the topmost of which is a
+# node process carrying <args>.
+make_ps_chain() {  # <dir> <depth> <args>
+  local dir=$1 depth=$2 args=$3 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+pid= field=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in -p) pid=\$2; shift ;; -o) field=\$2; shift ;; esac
+  shift
+done
+[ -n "\$pid" ] || exit 1
+hop=0
+[ "\$pid" -gt 7700000 ] && hop=\$((pid - 7700000))
+top=\$(($depth - 1))
+case "\$field" in
+  ppid=) if [ "\$hop" -lt "\$top" ]; then echo \$((7700001 + hop)); else echo 1; fi ;;
+  comm=) if [ "\$hop" -eq "\$top" ]; then echo node; else echo bash; fi ;;
+  args=) if [ "\$hop" -eq "\$top" ]; then echo '$args'; else echo 'bash /x/bin/fm-session-start.sh'; fi ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
 # A fake `ps` that answers nothing, so the ancestry walk finds no harness. The
 # suite itself frequently runs inside a real DSH session, whose genuine ancestry
 # would otherwise satisfy every dsh query - the same blinding the agy suite
@@ -102,6 +130,7 @@ make_digest_home() {  # <name> <stdout-text>
   mkdir -p "$dir/bin" "$dir/state"
   cat > "$dir/bin/fm-session-start.sh" <<SH
 #!/usr/bin/env bash
+mkdir -p '$dir/state'
 printf '%s\n' '$text'
 exit 0
 SH
@@ -191,6 +220,20 @@ test_dsh_digest_retries_when_nothing_was_produced() {
   pass "fm-dsh-sessionstart.sh: an empty digest leaves the gate unset and retries"
 }
 
+test_dsh_digest_reaches_a_home_without_state() {
+  local home
+  # state/ is gitignored and fm-session-start.sh's own lock creates it, so a
+  # fresh checkout has none until the digest runs. Gating on it first left a
+  # new home without a digest on every prompt.
+  home=$(make_digest_home fresh 'DIGEST-BODY')
+  rm -rf "$home/state"
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "a home without state/ must still receive the digest"
+  [ -f "$home/state/.dsh-sessionstart-delivered" ] \
+    || fail "the gate was not recorded once session start created state/"
+  pass "fm-dsh-sessionstart.sh: a fresh home without state/ receives the digest"
+}
+
 test_dsh_guard_alarms_when_the_budget_lock_is_unavailable() {
   local home rc
   # An unacquirable budget lock is not proof that budget remains. Falling
@@ -255,6 +298,17 @@ permission_row() {  # <default preset|->
   [ "$1" = - ] || printf -- '    defaultPreset: %s\n' "$1"
 }
 
+# The composed sandbox-policy row as dsh-base ships it, or with a literal <mode>.
+sandbox_row() {  # [<mode>]
+  printf -- '- id: sandbox-policy\n  name: "@deepseek-ai/dsh-sandbox-policy"\n  config:\n'
+  if [ -n "${1:-}" ]; then
+    printf -- '    mode: %s\n' "$1"
+  else
+    printf -- "    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'\n"
+  fi
+  printf -- '    workspaceRoot: !!js process.cwd()\n'
+}
+
 # The composed tree `dsh --dump-config` prints, reduced to the entries the
 # checks have to tell apart.
 write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>] [<default permission preset|->]
@@ -262,6 +316,7 @@ write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>]
     printf '# == @deepseek-ai/dsh-base\n'
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: %s\n' "$2"
     [ -z "${3:-}" ] || printf -- '- id: other-plugin\n  name: other-plugin\n  config:\n    maxBytes: %s\n' "$3"
+    sandbox_row
     permission_row "${4:-danger-full-access}"
     printf -- '- id: skill\n  name: "@deepseek-ai/dsh-skill"\n'
   } > "$1"
@@ -276,6 +331,7 @@ write_web_dump() {  # <file> <default preset>
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n'
     printf '# == @deepseek-ai/dsh-web-app\n'
     printf -- '- id: agent-presets\n  name: "@deepseek-ai/dsh-agent-presets"\n  config:\n    default: %s\n    roots:\n      - path: !!js process.cwd() + "/.dsh/agent-presets"\n        trust: system\n' "$2"
+    sandbox_row
     permission_row danger-full-access
   } > "$1"
 }
@@ -312,7 +368,7 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
 #!/usr/bin/env bash
 case " \$* " in
   *" --dump-config "*) ;;
-  *) printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'; exit 0 ;;
+  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'; exit 0 ;;
 esac
 case " \$* " in *" --profile p "*) ;; *) exit 1 ;; esac
 dump='$dir/dump.yml'
@@ -328,7 +384,7 @@ run_preflight() {  # <dsh-home> [preflight args...] -> stdout in $PREFLIGHT_OUT,
   local home=$1
   shift
   PREFLIGHT_RC=0
-  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" DSH_PERMISSION_MODE=danger-full-access \
     "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" "$@" 2>&1) || PREFLIGHT_RC=$?
 }
 
@@ -345,11 +401,14 @@ test_dsh_launcher_roots_the_host_in_its_checkout() {
   : > "$dir/overlay.yml"
   elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
   rc=0
-  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_PERMISSION_MODE=workspace-write DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
       "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
   [ "$rc" -eq 0 ] || fail "the launcher must pass a preflight whose budget is raised by --patch, got rc=$rc"
   assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
   assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
+  # Hooks run with no session, so they get the host's sandbox-policy mode, which
+  # dsh-base reads from DSH_PERMISSION_MODE; any other mode denies ps in every hook.
+  assert_equals "mode=danger-full-access" "$(sed -n 3p "$dir/dsh-env")" "the host was not started with hooks able to run ps"
   pass "fm-dsh-launch.sh: the host is rooted in its checkout whatever the caller's cwd"
 }
 
@@ -510,6 +569,36 @@ test_dsh_preflight_checks_the_permission_preset_sessions_default_to() {
   pass "fm-dsh-preflight.sh: the permission preset new sessions default to must permit ps"
 }
 
+test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
+  local home rc out
+  # The hooks bridge runs a hook with no session, so the hook gets the host's
+  # sandbox-policy mode, not the session's permission preset. dsh-base computes
+  # that mode from DSH_PERMISSION_MODE at host start, so a preflight run outside
+  # the launcher's environment, or a profile pinning another mode, must fail.
+  home=$(make_dsh_home "$TMP_ROOT/pre-hookmode" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  rc=0
+  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
+  [ "$rc" -eq 3 ] || fail "hooks defaulting to workspace-write must fail the preflight, got rc=$rc: $out"
+  assert_contains "$out" "hooks run under sandbox mode 'workspace-write'" "the hook sandbox mode was not named"
+  { sandbox_row workspace-write; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a profile pinning workspace-write must fail even when launched, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode 'workspace-write'" "the pinned mode was not named"
+  # An expression only DSH's loader scope can evaluate is not a passing mode.
+  { sandbox_row '!!js ctx.loader.mode'; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an unevaluable mode must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode '<unreadable>'" "the unevaluable mode was not named"
+  write_dump "$home/dump.yml" 262144
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the launcher's DSH_PERMISSION_MODE must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under the danger-full-access sandbox mode" "the passing hook mode was not reported"
+  pass "fm-dsh-preflight.sh: hooks must run under a sandbox mode that permits ps"
+}
+
 test_dsh_preflight_passes_a_conforming_home() {
   local home
   home=$(make_dsh_home "$TMP_ROOT/pre-good" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
@@ -576,6 +665,19 @@ test_dsh_marker_requires_real_ancestry() {
   [ "$out" != dsh ] \
     || fail "FM_DSH_HARNESS without a dsh ancestor must not claim the identity, got '$out'"
   pass "fm-harness.sh: the DSH launch marker is not evidence on its own"
+}
+
+test_dsh_marker_reaches_the_host_above_the_digest_chain() {
+  local fakebin out
+  # Inside the session-start digest the DSH host is the ninth process above
+  # fm-harness.sh: the hooks.json bash -lc wrapper, the adapter and its command
+  # substitution, and fm-session-start.sh with its timeout wrapper sit between.
+  # A shorter walk refuses the launch marker and the digest names no harness.
+  fakebin=$(make_ps_chain "$TMP_ROOT/anc-deep" 9 'node /x/node_modules/.bin/dsh web')
+  out=$(FM_DSH_HARNESS=dsh PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "the launch marker must be honored with the host nine processes up, got '$out'"
+  pass "fm-harness.sh: the DSH marker reaches a host above the digest hook chain"
 }
 
 test_dsh_marker_outranks_an_inherited_claudecode() {
@@ -928,6 +1030,7 @@ test_dsh_digest_delivers_session_start_stdout_whole
 test_dsh_digest_surfaces_a_durable_alarm
 test_dsh_digest_gate_is_per_session
 test_dsh_digest_retries_when_nothing_was_produced
+test_dsh_digest_reaches_a_home_without_state
 test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
 test_dsh_guard_budget_is_an_episode_not_a_session
 test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command
@@ -940,6 +1043,7 @@ test_dsh_preflight_reads_only_the_agent_instructions_entry
 test_dsh_preflight_reads_the_budget_dsh_composes
 test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget
 test_dsh_preflight_checks_the_permission_preset_sessions_default_to
+test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under
 test_dsh_preflight_passes_a_conforming_home
 test_dsh_launcher_roots_the_host_in_its_checkout
 test_dsh_ancestry_detects_the_launcher_path
@@ -947,6 +1051,7 @@ test_dsh_ancestry_detects_the_installed_bin_js
 test_dsh_ancestry_detects_a_global_install
 test_dsh_ancestry_rejects_unrelated_node_commands
 test_dsh_marker_requires_real_ancestry
+test_dsh_marker_reaches_the_host_above_the_digest_chain
 test_dsh_marker_outranks_an_inherited_claudecode
 test_dsh_guard_blocks_then_alarms_then_allows
 test_dsh_guard_budget_is_session_scoped

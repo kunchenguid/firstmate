@@ -19,6 +19,11 @@
 #                       from this script's own location, never inherited.
 #   LC_ALL / LC_CTYPE   a locale. Unset, bin/fm-line-cap-lib.sh's character cap
 #                       becomes a byte cap and slices UTF-8 mid-character.
+#   DSH_PERMISSION_MODE the host's sandbox-policy mode, which dsh-base reads at
+#                       start. Hooks run with no session, so this mode - not a
+#                       session's permission preset - decides whether `ps` works
+#                       in every firstmate hook. Overridden, not defaulted: an
+#                       inherited workspace-write would silently break them.
 #
 # DSH takes the invoking directory as its workspace root, so the host is started
 # from this checkout whatever directory the operator launched from.
@@ -38,6 +43,7 @@ export FM_ROOT="$ROOT"
 export FM_HOME="${FM_HOME:-$ROOT}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 export LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
+export DSH_PERMISSION_MODE=danger-full-access
 
 unset CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE \
   ROVODEV_CLI PI_CODING_AGENT FM_PI_HARNESS FM_OMP_HARNESS 2>/dev/null || true

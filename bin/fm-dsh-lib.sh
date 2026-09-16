@@ -56,10 +56,13 @@ fm_dsh_args_ere() {
   printf '%s\n' '/\.?bin/dsh([[:space:]]|$)|/@deepseek-ai/dsh/lib/bin\.js|/apps/cli/src/bin\.ts'
 }
 
-# True when a genuine DSH launcher sits within eight parents of [<pid>].
+# True when a genuine DSH launcher sits within sixteen parents of [<pid>], the
+# depth the session lock walks. Inside the session-start digest the host is the
+# ninth process up: the hooks.json wrapper, this adapter's command substitution
+# and fm-session-start.sh's timeout wrapper all sit between.
 fm_dsh_ancestry() {  # [<pid>]
   local pid=${1:-$$} args
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
     fm_dsh_args_are_dsh "$args" && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
