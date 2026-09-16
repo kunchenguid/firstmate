@@ -11,6 +11,26 @@ DSH-hosted environment and produced the correct deliverable. Teardown parity (th
 chain, the DSH-specific state files in the volatile-state sweep, and the hook-placement/git-exclude
 rule) is NOT done; see the findings below.
 
+**Phase 2 acceptance — met (supervisor-only scope).** A full lifecycle was run end to end:
+spawn → deliver → captain inventory → teardown. The scout produced `data/<id>/report.md` with the
+correct answer; `fm-captain-hold.sh complete <id> --none` recorded the inventory; `fm-teardown.sh`
+returned the worktree to the treehouse pool, killed the tmux window, and removed the record with no
+leftover `state/` files. Every refusal path behaved correctly and preserved state: an unlanded gate,
+a missing captain inventory, and a missing `treehouse` each aborted before any destructive step.
+
+Three dependencies this surfaced, all now installed on this machine:
+
+- `tasks-axi` (0.2.5, floor ≥0.2.4) is required by the scout completion gate, not merely by the
+  backlog. Without it, the gate refuses every scout teardown.
+- `treehouse` is required by **teardown** as well as spawn; installing it for the spawn alone leaves
+  teardown aborting after it has already force-killed leaked worktree processes.
+- The scout independently diagnosed the missing `tasks-axi` and recorded it as a `blocked:` status
+  line. That line is what the classifier reads as an open captain decision, so `complete --none` is
+  refused until a `resolved:` line closes it — the escalation machinery working exactly as designed.
+
+`treehouse` was installed to `/Users/stevemcqueen/Sandbox/dsh/tools` and is NOT on the default PATH;
+a real deployment must place it somewhere the spawn and teardown both resolve.
+
 **Phases 3–5 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
 process-event sources, secondmates), the optional DSH crewmate, and upstreaming remain. They are
 larger than the work completed above, not smaller.
