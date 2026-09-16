@@ -736,10 +736,11 @@ remote_teardown_locks_release() {
 }
 
 # Validate $STATE/pending-replies for local and remote secondmate retirement:
-# refuse a symlinked directory and any non-regular entry, and pin the realpath
-# so later cleanup cannot follow a swapped link target.
+# refuse a symlinked directory, any non-regular entry, and any entry whose
+# basename or corr_id is not a 16-hex correlation id; pin the realpath so later
+# cleanup cannot follow a swapped link target or a crafted confirmation path.
 pending_replies_recovery_validate() {
-  local mode=${1:-initial} pending_dir real rec
+  local mode=${1:-initial} pending_dir real rec base corr
   pending_dir="$STATE/pending-replies"
   if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
     [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
@@ -756,6 +757,14 @@ pending_replies_recovery_validate() {
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] \
         || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      base=$(basename "$rec")
+      printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      corr=$(fm_meta_get "$rec" corr_id)
+      if [ -n "$corr" ]; then
+        printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' \
+          || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      fi
     done
   elif [ "$mode" != initial ] && [ "$PENDING_REPLIES_DIR_PRESENT" -ne 0 ]; then
     echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
@@ -816,6 +825,7 @@ pending_replies_cleanup_for_task() {
       [ "$task_id" = "$ID" ] || continue
       corr=$(fm_meta_get "$rec" corr_id)
       [ -n "$corr" ] || corr=${rec#./}
+      printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || exit 1
       confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
       rm -f -- "$confirmation" "$rec" || exit 1
     done

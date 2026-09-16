@@ -264,6 +264,23 @@ phase_teardown() {
     "unsafe local retirement removed an external pending reply"
   rm -f "$HOME_DIR/state/pending-replies"
   mv "$HOME_DIR/state/pending-replies.safe" "$HOME_DIR/state/pending-replies"
+  mkdir -p "$HOME_DIR/state/pending-replies/.delivery-confirmed-.."
+  mkdir -p "$TMP_ROOT/escape"
+  touch "$TMP_ROOT/escape/pwned"
+  printf 'task_id=design\nphase=resolved\ncorr_id=../../../../../escape/pwned\n' \
+    > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a pending-reply with unsafe corr_id"
+  fi
+  assert_present "$SUB" "unsafe corr_id retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "unsafe corr_id retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "unsafe corr_id retirement removed the registry route"
+  assert_present "$TMP_ROOT/escape/pwned" \
+    "unsafe corr_id cleanup deleted outside pending-replies"
+  rm -rf "$HOME_DIR/state/pending-replies/.delivery-confirmed-.."
+  rm -f "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
