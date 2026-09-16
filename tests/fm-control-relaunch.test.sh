@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fm-control.sh relaunch: the transactional replace-the-agent verb.
 #
-# Relaunch is the only control verb that changes durable records, so these
-# tests pin the transaction itself, hermetically (stubbed session provider, no
-# real agent):
+# Relaunch changes durable records (as `recover-missing` does, in its own
+# suite), so these tests pin the transaction itself, hermetically (stubbed
+# session provider, no real agent):
 #   1. A same-harness relaunch keeps every identity axis and reuses the SAME
 #      endpoint and worktree - it replaces an agent, it never forks a task.
 #   2. A harness switch is one ordinary relaunch: the record follows, the
@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The record rewrite leaves an already-armed merge poll authenticated, so
+#      a relaunched task still gets its merge notification.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -25,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -430,6 +434,36 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# Relaunch is a supported recovery step, and it rewrites the durable record of a
+# task that may already have an armed merge poll. Preserving the pr= line is not
+# enough: the watcher re-authenticates the poll against that record on every
+# cycle, so a relaunch that leaves the record unreadable to that check silently
+# revokes the merge notification for the rest of the task's life.
+test_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc state url old_umask
+  dir=$(new_case armed-poll rl40)
+  add_ship_task "$dir" rl40 claude
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/40
+  printf 'pr=%s\n' "$url" >> "$state/rl40.meta"
+  old_umask=$(umask)
+  fm_pr_poll_prepare "$state" rl40 github "$url" github.com example/repo 40 \
+    "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the armed poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the armed poll fixture"
+  umask "$old_umask"
+  fm_pr_poll_artifacts_valid "$state" rl40 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed poll fixture was not authenticated before relaunch"
+
+  out=$(run_control "$dir" rl40 relaunch --note "continuing review work"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with an armed merge poll"$'\n'"$out"
+  [ "$(meta_field "$dir" rl40 pr)" = "$url" ] || fail "relaunch dropped the task PR"
+  [ -n "$(meta_field "$dir" rl40 control_relaunch_tx)" ] \
+    || fail "relaunch did not record its own transaction key on the task record"
+  fm_pr_poll_artifacts_valid "$state" rl40 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch silently revoked the armed merge poll"
+  pass "fm-control relaunch: an armed merge poll survives the record rewrite"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1686,6 +1720,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

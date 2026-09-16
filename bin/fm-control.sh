@@ -7,6 +7,8 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> recover-missing
+#                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -53,6 +55,31 @@
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
+#   recover-missing Recreate the exact recorded terminal for a task whose
+#              endpoint is authoritatively missing, then hand the launch to the
+#              existing owner (bin/fm-spawn.sh --relaunch). Proves the missing
+#              state and refuses an unavailable or conflicting local-copy
+#              ownership rather than resetting or reallocating anything.
+#              Uncommitted work in that copy is the NORMAL state of a task
+#              worth rescuing and is neither a refusal nor something this verb
+#              touches: nothing under it writes to the local copy except the
+#              launch owner's own git-excluded harness wiring, and the base
+#              refresh that would reset a worktree is skipped for a relaunch,
+#              which is how every recovery spawns. No new worktree or pool slot
+#              is created. Recreation is tmux-only today, because a tmux window
+#              comes back under the same recorded fm-<id> handle and so rewrites
+#              no durable record; every other backend refuses before anything is
+#              touched.
+#              Both tmux losses are recovered: the task's window gone from a
+#              session that is still alive, and the whole session (or the whole
+#              server) gone, which is recreated under its exact recorded name
+#              before the window. A session that still exists is untouched.
+#              It continues the SAME run, so the recorded harness, model, and
+#              effort carry through unchanged - nothing is re-resolved from
+#              configuration, including a secondmate's config/secondmate-harness
+#              pin - and only --note/--note-file apply; picking up a changed pin
+#              or choosing a different runtime is what `relaunch` is for.
+#
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
 # endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
@@ -78,10 +105,11 @@
 #     is refused rather than guessed at.
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
-#   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#   - `exit`, `relaunch`, and `recover-missing` require a backend with a
+#     recovery-grade agent-state classifier (tmux, herdr), because without one
+#     the "the agent stopped" or "the endpoint is missing" postcondition cannot
+#     be proven. zellij, orca, and cmux are refused rather than reported as
+#     successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -90,7 +118,9 @@
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
-#   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
+#   FM_CONTROL_EXIT_WAIT         wait for an endpoint to read agent-free: after
+#                                the exit command, and for a recreated
+#                                terminal's shell to finish starting (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
@@ -144,6 +174,7 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+SETTLE_READS=3
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -242,10 +273,20 @@ if [ -n "$control_want_value" ]; then
   die "--$control_want_value requires a value"
 fi
 
-if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
-fi
+case "$VERB" in
+  relaunch) ;;
+  recover-missing)
+    # A recovery recreates the recorded terminal and continues the SAME run, so
+    # it carries the recorded harness, model, and effort through unchanged.
+    # Choosing a different runtime is what 'relaunch' is for.
+    [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+      || die "--harness, --model, and --effort apply to 'relaunch' only; 'recover-missing' continues the recorded runtime"
+    ;;
+  *)
+    [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+      || die "--harness, --model, and --effort apply to 'relaunch' only, and --note to 'relaunch' or 'recover-missing' only"
+    ;;
+esac
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -346,9 +387,42 @@ wait_agent_state() {  # <timeout> <wanted>...
   return 1
 }
 
-require_state_verified_backend() {  # <verb>
+# wait_endpoint_settled <timeout>: poll until the endpoint reads 'dead' on
+# SETTLE_READS consecutive reads. Prints the last observed state; returns 0
+# once it has settled.
+#
+# A terminal that was just created is not agent-free yet even though it holds
+# nothing but a shell: the login shell is still running its rc files, and each
+# command they start (nvm's node, a prompt's git) owns the pane tty's
+# foreground process group for a moment, which classifies as `ambiguous`. A
+# single `dead` read proves nothing either, because the gaps between those
+# commands read agent-free too - so the state has to HOLD before the terminal
+# is handed to the launch owner, which takes one un-retried read and requires
+# exactly `dead`.
+wait_endpoint_settled() {  # <timeout>
+  local timeout=$1 state elapsed=0 held=0
+  while :; do
+    state=$(agent_state)
+    if [ "$state" = dead ]; then
+      held=$((held + 1))
+      if [ "$held" -ge "$SETTLE_READS" ]; then
+        printf '%s' "$state"
+        return 0
+      fi
+    else
+      held=0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$state"
+  return 1
+}
+
+require_state_verified_backend() {  # <verb> <postcondition>
   fm_control_backend_state_verified "$BACKEND" && return 0
-  die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
+  die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove $2; refusing rather than reporting an unproven transition as done"
 }
 
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
@@ -450,7 +524,7 @@ retire_busy_incarnation() {
 # `already-stopped` or `stopped`.
 do_exit() {
   local state cmd verdict composer_state cancel interrupt_result=not-needed
-  require_state_verified_backend exit
+  require_state_verified_backend exit "the agent actually stopped"
   state=$(agent_state)
   case "$state" in
     dead)
@@ -526,6 +600,7 @@ RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
+RELAUNCH_PAST_TENSE=relaunched
 PRIOR_HARNESS=$HARNESS
 PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
 CONFIG_HARNESS=
@@ -579,7 +654,32 @@ relaunch_rollback() {
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
-      echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
+      if [ "$VERB" = recover-missing ]; then
+        echo "error: $ID's missing-endpoint recovery was refused before its terminal was recreated; its agent was already gone, so nothing was touched and nothing changed" >&2
+      else
+        echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
+      fi
+      ;;
+    recreating)
+      # Recovery only ever runs against a missing endpoint, so no agent was
+      # touched in any phase: the instructions go back byte-exact, exactly as
+      # they do for a relaunch refused before its agent was stopped. Without
+      # this every failed attempt would leave another progress note appended.
+      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+      fi
+      journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-and-instructions-restored" || true
+      if [ -f "$META_PRIOR" ]; then
+        mv "$META_PRIOR" "$META" 2>/dev/null || true
+      fi
+      case "$(agent_state 2>/dev/null || printf unknown)" in
+        dead|alive|ambiguous)
+          echo "error: $ID's missing-endpoint recovery recreated the terminal but could not hand it over; its agent was never touched, so the progress note was rolled back and its work is preserved at $WT" >&2
+          ;;
+        *)
+          echo "error: $ID's missing-endpoint recovery failed while recreating the terminal; its agent was never touched, so the progress note was rolled back and its work is preserved at $WT" >&2
+          ;;
+      esac
       ;;
     stopping)
       state=$(agent_state 2>/dev/null || printf unknown)
@@ -614,7 +714,14 @@ relaunch_rollback() {
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+        echo "error: $ID was ${RELAUNCH_PAST_TENSE} on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+      elif [ "$VERB" = recover-missing ]; then
+        # Recovery never stops anything, so saying so would be a false account.
+        # The terminal it recreated is still there holding a bare shell, which
+        # reads 'dead' rather than 'missing' - so the verb that retries this is
+        # relaunch, not another recover-missing.
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
+        echo "error: $ID's terminal was recreated but the replacement did not launch; no agent was ever stopped, its work plus the recorded progress note are preserved at $WT, and the recreated terminal now holds a bare shell - retry with 'relaunch', which is the verb for an agent-free endpoint" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
@@ -633,12 +740,15 @@ resolve_relaunch_profile() {
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
+    if [ "$VERB" = recover-missing ]; then
+      die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; recovery continues the recorded runtime and would have to substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running, so it refuses rather than bringing the terminal back on a different runtime than the record names"
+    fi
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
   fi
   CONFIG_HARNESS=
   CONFIG_MODEL=
   CONFIG_EFFORT=
-  if [ "$KIND" = secondmate ]; then
+  if [ "$KIND" = secondmate ] && [ "$VERB" != recover-missing ]; then
     # A secondmate's harness, model, and effort are a durable configured pin
     # that every respawn re-resolves (the secondmate-provisioning contract), so
     # a relaunch with no explicit harness picks up a newly configured one
@@ -646,6 +756,13 @@ resolve_relaunch_profile() {
     # and scouts deliberately do NOT resolve config here: their harness comes
     # from firstmate's own dispatch-profile judgment at intake, and silently
     # re-resolving it would bypass that consultation.
+    #
+    # recover-missing resolves NOTHING here, for any kind. It continues the
+    # same run in the same terminal, so every identity axis comes from the
+    # task's own durable record - which is what its header, its refusal of
+    # --harness/--model/--effort, and docs/agent-control.md all already
+    # promise. Re-resolving the pin here would silently move a secondmate onto
+    # a different runtime, and reset its model and effort, during a rescue.
     CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
     CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
@@ -672,8 +789,12 @@ resolve_relaunch_profile() {
   # is only reached after the old agent has been stopped. Asking the same
   # capability table here keeps that refusal on the pre-stop side of the
   # transaction, where nothing has changed yet.
-  fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
-    || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  if ! fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND"; then
+    if [ "$VERB" = recover-missing ]; then
+      die "'$TARGET_HARNESS' is not verified to run a $KIND task, so recovering $ID would recreate its terminal for a launch that must be refused; its endpoint is missing and nothing was touched, so its work is preserved at $WT until this adapter is verified for this kind"
+    fi
+    die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.
@@ -803,7 +924,7 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
-  require_state_verified_backend relaunch
+  require_state_verified_backend relaunch "the agent actually stopped"
   resolve_relaunch_profile
 
   case "$KIND" in
@@ -867,6 +988,122 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+do_recover_missing() {
+  local state note_line wt wname proj_abs
+  local -a spawn_args
+
+  require_state_verified_backend recover-missing "the endpoint is actually missing"
+  [ "$BACKEND" = tmux ] \
+    || die "backend $BACKEND has no supported way to recreate an endpoint with the recorded identity; refusing to recover"
+  resolve_relaunch_profile
+  RELAUNCH_PAST_TENSE=recovered
+
+  case "$KIND" in
+    ship|scout)
+      RELAUNCH_BRIEF="$DATA/$ID/brief.md"
+      [ -f "$RELAUNCH_BRIEF" ] \
+        || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to recover a worker with nothing to work from"
+      [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
+        || die "recovery of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
+      ;;
+    secondmate)
+      RELAUNCH_BRIEF=
+      ;;
+    *)
+      die "task $ID records kind '$KIND', which has no defined recovery shape"
+      ;;
+  esac
+
+  state=$(agent_state)
+  case "$state" in
+    missing) ;;
+    dead|alive|ambiguous) die "task $ID's endpoint reads '$state'; recover-missing requires a positively missing endpoint and no agent owning the task" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to recover" ;;
+  esac
+
+  wt=$(fm_meta_get "$META" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] || die "task $ID's recorded worktree '${wt:-none}' is absent; refusing to recover without the local copy its work lives in"
+
+  if fm_treehouse_pool_slot "$(fm_meta_get "$META" project)" "$wt" >/dev/null 2>&1; then
+    fm_treehouse_slot_owner_state "$wt" "$ID"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      other) die "task $ID's recorded pool slot $wt is currently claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to recover and tangle ownership" ;;
+      unsafe) die "task $ID's recorded pool slot $wt has an unreadable owner claim; refusing to recover and risk a conflict" ;;
+    esac
+  fi
+
+  if [ -n "$NOTE" ]; then
+    note_line="note_file=$NOTE_FILE"
+  else
+    note_line="note=none"
+  fi
+  # No dirty-copy refusal here on purpose. The task this verb rescues is
+  # mid-work by definition, so uncommitted changes are its normal state, and
+  # recovery only recreates the terminal beside that work - safe_checkpoint
+  # records what it found (worktree_dirty=) as evidence, and nothing below
+  # cleans, resets, or stashes any of it.
+  safe_checkpoint
+  cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before recovery"
+  RELAUNCH_ACTIVE=1
+  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  record_note
+  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  journal_write recreating "${CHECKPOINT_LINES[@]}" "$note_line"
+  wname="fm-$ID"
+  proj_abs=$(cd "$wt" && pwd -P)
+  fm_backend_source "$BACKEND" || die "could not load backend $BACKEND"
+  # Endpoint validation already proved $T is exactly <session>:fm-<id> with a
+  # non-empty session (bin/fm-backend.sh's fm_backend_validate_task_endpoint,
+  # called before any verb runs), which is what refuses a recorded endpoint
+  # string that will not parse. The window comes back under that same name, so
+  # $T keeps addressing the terminal and neither the postconditions below nor
+  # the durable record need rewriting.
+  #
+  # Two shapes read as a missing endpoint and both are recovered here: the
+  # task's window is gone from a session that is still alive, or the whole
+  # session (or the whole tmux server) is gone. The second needs the session
+  # back before a window can be added to it; the first leaves it untouched.
+  # A failure after the session is recreated but before the window exists still
+  # reads missing, so the verb stays retryable rather than stranding the task.
+  fm_backend_tmux_recreate_session "${T%%:*}" "$proj_abs" \
+    || die "task $ID's recorded tmux session '${T%%:*}' is gone and could not be recreated"
+  fm_backend_tmux_create_task "${T%%:*}" "$wname" "$proj_abs" >/dev/null \
+    || die "could not recreate tmux window for $ID"
+
+  # The launch owner requires a positively agent-free endpoint, so wait for the
+  # new terminal's shell to finish starting before handing it over. Still
+  # inside the `recreating` phase: a refusal here rolls the progress note back
+  # and touches nothing else.
+  state=$(wait_endpoint_settled "$EXIT_WAIT") || {
+    die "task $ID's recreated terminal did not settle to an agent-free shell within ${EXIT_WAIT}s (endpoint reads '$state'); the terminal exists now, so once its shell is idle bring the worker up with 'relaunch'"
+  }
+
+  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+    RELAUNCH_META_PUBLISHED=1
+  else
+    [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
+      || RELAUNCH_META_PUBLISHED=1
+    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+
+  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+  }
+  RELAUNCH_AGENT_CONFIRMED=1
+
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=recreated"
+  RELAUNCH_ACTIVE=0
+  echo "recovered $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$wt"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -892,5 +1129,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  recover-missing)
+    do_recover_missing
     ;;
 esac
