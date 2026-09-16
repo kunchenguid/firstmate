@@ -2410,7 +2410,7 @@ test_wedge_alarm_hung_channel_times_out_and_falls_through() {
 }
 
 test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant() {
-  local dir daemon_log child_file child command
+  local dir daemon_log child_file child command child_state
   dir=$(make_wedge_case wedge-backgrounded-timeout)
   daemon_log="$dir/daemon.log"
   child_file="$dir/notifier-child"
@@ -2421,8 +2421,11 @@ test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant() {
   child=$(cat "$child_file")
   grep -F 'command notifier timed out' "$daemon_log" >/dev/null \
     || fail "a backgrounded command notifier bypassed its timeout: $(cat "$daemon_log" 2>/dev/null)"
-  if is_live_non_zombie "$child"; then
+  child_state=0
+  is_live_non_zombie "$child" || child_state=$?
+  if [ "$child_state" -ne 1 ]; then
     kill -TERM "$child" 2>/dev/null || true
+    [ "$child_state" -ne 2 ] || fail "timed-out command notifier descendant liveness was unreadable (pid $child)"
     fail "a timed-out command notifier left its descendant running (pid $child)"
   fi
   pass "a backgrounded command notifier remains bounded until its process group is reaped"
