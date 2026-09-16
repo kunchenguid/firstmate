@@ -1517,7 +1517,7 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, inherited worktree setup and base selection, command-terminal launch readiness and fallback cleanup, compound worktree identity, metadata routing, popup-safe submit, and path-matched release refusal.
 
 ## cmux
 
