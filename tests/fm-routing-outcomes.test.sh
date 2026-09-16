@@ -53,33 +53,45 @@ class RoutingOutcomesTest(unittest.TestCase):
             encoding="utf-8")
         return {"spawn_gen": spawn_gen}
 
-    def check_receipt(self, *, passed=True, criterion="focused-tests"):
-        artifact = self.dir / f"check-{criterion}-{'pass' if passed else 'fail'}.json"
+    def check_receipt(self, *, task="task-one", spawn_gen="spawn-1", attempt="attempt-one",
+                      passed=True, criterion="focused-tests", criterion_text="focused tests pass"):
+        artifact = self.dir / f"check-{task}-{spawn_gen}-{attempt}-{'pass' if passed else 'fail'}.json"
+        criteria = [{"id": criterion, "text": criterion_text}]
+        criteria_sha = hashlib.sha256(json.dumps(
+            criteria, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
         payload = {"schema": "fm-routing-check.v1", "check_id": "unit",
                    "grader_id": "focused-tests", "criteria_ids": [criterion],
+                   "task_id": task, "spawn_gen": spawn_gen, "attempt_id": attempt,
+                   "acceptance_criteria_sha256": criteria_sha,
                    "passed": passed, "exit_code": 0 if passed else 1}
         self.write_json(artifact, payload)
         sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
         return {"kind": "test", "id": "unit", "passed": passed,
                 "criteria_ids": [criterion], "artifact_path": str(artifact), "sha256": sha}
 
-    def write_pi(self, path, *, custom=True, effort="max", task="task-one", duplicate=False):
+    def write_pi(self, path, *, custom=True, effort="max", task="task-one",
+                 spawn_gen="spawn-1", duplicate=False, extra_request=None, assistant_model="gpt-5.6-luna"):
         rows = [{"type": "session", "id": "session-1", "timestamp": "2030-01-01T00:00:00Z"}]
         if custom:
             rows.append({
                 "type": "custom", "id": "request-1", "parentId": "user-1",
                 "customType": "fm-routing-request", "timestamp": "2030-01-01T00:00:01Z",
-                "data": {"schema": "fm-routing-request.v1", "taskId": task,
+                "data": {"schema": "fm-routing-request.v1", "taskId": task, "spawnGen": spawn_gen,
                          "requestSequence": 1, "at": "2030-01-01T00:00:01Z",
                          "provider": "openai-codex", "selectedModel": "gpt-5.6-luna",
                          "selectedThinkingLevel": "max", "api": "openai-codex-responses",
                          "payloadModel": "gpt-5.6-luna", "payloadReasoningEffort": effort},
             })
+            if extra_request is not None:
+                extra = copy.deepcopy(rows[-1])
+                extra["id"] = "request-2"
+                extra["data"].update(extra_request)
+                rows.append(extra)
         assistant = {
             "type": "message", "id": "assistant-1", "parentId": "request-1",
             "timestamp": "2030-01-01T00:00:03Z",
             "message": {"role": "assistant", "provider": "openai-codex",
-                        "model": "gpt-5.6-luna", "api": "openai-codex-responses",
+                        "model": assistant_model, "api": "openai-codex-responses",
                         "content": [{"type": "text", "text": "PRIVATE PROMPT RESPONSE"}],
                         "usage": {"input": 100, "output": 20, "cacheRead": 10,
                                   "cacheWrite": 0, "reasoning": 5, "totalTokens": 130,
@@ -101,8 +113,9 @@ class RoutingOutcomesTest(unittest.TestCase):
             row["quotaSemantics"]["unresolvedWindowIds"] = unresolved
         self.write_json(path, {"schemaVersion": 5, "generatedAt": "2030-01-01T00:00:00Z", "providers": [row]})
 
-    def manifest(self, *, receipt=None, task="task-one", attempt="attempt-one", outcome="accepted"):
-        task_binding = self.bind_task(task)
+    def manifest(self, *, receipt=None, task="task-one", spawn_gen="spawn-1",
+                 attempt="attempt-one", outcome="accepted"):
+        task_binding = self.bind_task(task, spawn_gen)
         return {
             "schema": "fm-routing-attempt.v1", "task_id": task, "attempt_id": attempt,
             "task_binding": task_binding,
@@ -124,7 +137,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                         "grader": {"kind": "deterministic-check", "id": "focused-tests"},
                         "first_pass": "pass", "final_result": "pass", "defect_count": 0,
                         "fix_count": 0, "retry_count": 0,
-                        "receipts": [self.check_receipt()],
+                        "receipts": [self.check_receipt(task=task, spawn_gen=spawn_gen, attempt=attempt)],
                         "overhead": {"duration_ms": 3, "tokens": None,
                                      "actual_incremental_usd": None}},
             "outcome": outcome,
@@ -187,7 +200,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         failed["billing"]["actual_incremental_usd"] = 0.1
         failed["grading"].update({"first_pass": "fail", "final_result": "fail",
                                   "defect_count": 1, "fix_count": 0, "retry_count": 1,
-                                  "receipts": [self.check_receipt(passed=False)]})
+                                  "receipts": [self.check_receipt(attempt="attempt-failed", passed=False)]})
         failed["handoff"] = {"alternative_attempt_id": "attempt-accepted", "side_effects": "none",
                              "quality_preserved": True, "privacy_preserved": True,
                              "reconciliation_receipt": "no external action existed"}
@@ -213,7 +226,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         later["finished_at"] = "2030-01-01T00:03:00Z"
         later["billing"]["actual_incremental_usd"] = 0.9
         later["grading"].update({"first_pass": "fail", "final_result": "fail",
-                                  "receipts": [self.check_receipt(passed=False)]})
+                                  "receipts": [self.check_receipt(attempt="later", passed=False)]})
         self.import_manifest(later)
         result = self.run_cli("scorecard", "--store", self.store,
                               "--shadow-store", self.shadow_store, "--format", "json")
@@ -229,6 +242,21 @@ class RoutingOutcomesTest(unittest.TestCase):
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("current task incarnation", json.loads(result.stdout)["error"])
 
+    def test_native_receipt_and_store_identity_follow_task_incarnation(self):
+        self.import_manifest(self.manifest())
+        self.bind_task("task-one", "spawn-2")
+        stale = self.manifest(spawn_gen="spawn-2")
+        result = self.import_manifest(stale, ok=False)
+        self.assertIn("native Pi task incarnation", json.loads(result.stdout)["error"])
+        self.write_pi(self.pi, spawn_gen="spawn-2")
+        self.import_manifest(self.manifest(spawn_gen="spawn-2"))
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(score["attempt_count"], 2)
+        self.assertEqual(score["task_count"], 2)
+        self.assertEqual({row["spawn_gen"] for row in score["tasks"]}, {"spawn-1", "spawn-2"})
+
     def test_duplicate_native_message_id_is_not_double_counted(self):
         self.write_pi(self.pi, duplicate=True)
         self.import_manifest(self.manifest())
@@ -240,9 +268,18 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("effective effort requirement not proven", json.loads(blocked.stdout)["error"])
         allowed = self.manifest()
         allowed["requirements"] = None
+        allowed["outcome"] = "unresolved"
         self.import_manifest(allowed)
         self.assertIsNone(self.latest_record()["native"]["effective_effort"])
         self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"], "missing")
+
+    def test_mixed_pi_route_evidence_is_rejected(self):
+        self.write_pi(self.pi, extra_request={"payloadReasoningEffort": None})
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("mixed or incomplete effective effort", json.loads(result.stdout)["error"])
+        self.write_pi(self.pi, extra_request={"payloadModel": "gpt-other"})
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("mixed or incomplete effective model", json.loads(result.stdout)["error"])
 
     def test_actual_zero_allowance_and_unresolved_agy_windows_remain_literal(self):
         self.write_quota(self.quota_before, 0, "2030-01-02T00:00:00Z", provider="agy",
@@ -353,6 +390,15 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["requirements"] = {"effective_model": "gemini-3.8-flash-medium"}
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("effective model requirement not proven", json.loads(result.stdout)["error"])
+        manifest["requirements"] = None
+        manifest["outcome"] = "unresolved"
+        self.import_manifest(manifest)
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(
+            score["routes"][0]["route"],
+            "agy/google/requested-only:gemini-3.8-flash-medium/requested-only:medium")
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"
@@ -389,6 +435,28 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["grading"]["receipts"][0]["sha256"] = "0" * 64
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("must match the check artifact", json.loads(result.stdout)["error"])
+
+    def test_grade_artifact_is_bound_to_task_attempt_incarnation_and_criteria(self):
+        source = self.manifest()
+        reused = copy.deepcopy(source["grading"]["receipts"])
+        target = self.manifest(task="task-two", attempt="attempt-two")
+        self.write_pi(self.pi, task="task-two")
+        target["grading"]["receipts"] = reused
+        result = self.import_manifest(target, ok=False)
+        self.assertIn("task attempt binding", json.loads(result.stdout)["error"])
+
+        self.write_pi(self.pi)
+        changed = self.manifest()
+        changed["grading"]["acceptance_criteria"][0]["text"] = "focused tests and docs pass"
+        result = self.import_manifest(changed, ok=False)
+        self.assertIn("acceptance criteria binding", json.loads(result.stdout)["error"])
+
+        self.bind_task("task-one", "spawn-2")
+        changed_incarnation = self.manifest(spawn_gen="spawn-2")
+        changed_incarnation["grading"]["receipts"] = reused
+        self.write_pi(self.pi, spawn_gen="spawn-2")
+        result = self.import_manifest(changed_incarnation, ok=False)
+        self.assertIn("task attempt binding", json.loads(result.stdout)["error"])
 
     def test_handoff_is_one_alternative_and_requires_side_effect_reconciliation(self):
         manifest = self.manifest()

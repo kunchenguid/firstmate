@@ -3612,6 +3612,7 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3829,6 +3830,7 @@ export default function (pi: any) {
     pi.appendEntry("fm-routing-request", {
       schema: "fm-routing-request.v1",
       taskId: "$ID",
+      spawnGen: "$SPAWN_GEN",
       requestSequence: ++routeRequestSequence,
       at: new Date().toISOString(),
       provider: typeof model.provider === "string" ? model.provider : null,
@@ -4070,7 +4072,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1

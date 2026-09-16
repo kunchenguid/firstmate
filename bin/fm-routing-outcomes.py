@@ -78,6 +78,9 @@ native model rows have one exact applicable entry. Actual incremental charges
 and fixed subscription expense are separate manifest facts; neither is inferred
 from quota or list price.
 
+An fm-routing-check.v1 artifact names task_id, spawn_gen, attempt_id, check_id,
+grader_id, criteria_ids, acceptance_criteria_sha256, passed, and exit_code.
+
 Shadow manifest, schema fm-routing-shadow.v1, records a recommendation without
 executing it. It must account for every candidate's eligibility, capability
 class fit, runway feasibility, spend priority (number or null), uncertainty,
@@ -281,6 +284,15 @@ def one_or_unknown(values: Iterable[Any]) -> Any:
     return next(iter(found)) if len(found) == 1 else None
 
 
+def one_observed(values: Iterable[Any], field: str) -> Any:
+    items = list(values)
+    if not items or all(value is None for value in items):
+        return None
+    if any(value is None for value in items) or len(set(items)) != 1:
+        fail(f"native Pi session has mixed or incomplete {field} evidence")
+    return items[0]
+
+
 def token_row(model: Any, provider: Any, usage: dict[str, Any], mapping: dict[str, str], *, service_tier: Any = None) -> dict[str, Any]:
     tokens: dict[str, Any] = {}
     for target, source in mapping.items():
@@ -326,6 +338,15 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
             "cache_write": "cacheWrite", "reasoning": "reasoning", "total": "totalTokens",
         }))
     request_data = [row["data"] for row in requests]
+    task_id = one_observed((item.get("taskId") for item in request_data), "task identity")
+    spawn_gen = one_observed((item.get("spawnGen") for item in request_data), "task incarnation")
+    requested_model = one_observed((item.get("selectedModel") or item.get("requestedModel") for item in request_data), "requested model")
+    selected_effort = one_observed((item.get("selectedThinkingLevel") for item in request_data), "selected effort")
+    payload_model = one_observed((item.get("payloadModel") for item in request_data), "effective model")
+    payload_effort = one_observed((item.get("payloadReasoningEffort") for item in request_data), "effective effort")
+    assistant_model = one_observed((row["message"].get("model") for row in assistants), "assistant model")
+    if payload_model is not None and assistant_model is not None and payload_model != assistant_model:
+        fail("native Pi session has mixed effective model evidence")
     timestamps = [row.get("timestamp") for row in rows if isinstance(row.get("timestamp"), str)]
     return {
         "kind": "pi-session",
@@ -333,13 +354,14 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
         "session_id": next((row.get("id") for row in rows if row.get("type") == "session"), None),
         "request_count": len(request_data),
         "response_count": len(assistants),
-        "task_id_receipt": one_or_unknown(item.get("taskId") for item in request_data),
-        "requested_model_receipt": one_or_unknown(item.get("selectedModel") or item.get("requestedModel") for item in request_data),
-        "selected_effort_receipt": one_or_unknown(item.get("selectedThinkingLevel") for item in request_data),
-        "effective_model": one_or_unknown((item.get("payloadModel") for item in request_data)) or one_or_unknown(row["message"].get("model") for row in assistants),
-        "effective_effort": one_or_unknown(item.get("payloadReasoningEffort") for item in request_data),
-        "provider": one_or_unknown((item.get("provider") for item in request_data)) or one_or_unknown(row["message"].get("provider") for row in assistants),
-        "api": one_or_unknown((item.get("api") for item in request_data)) or one_or_unknown(row["message"].get("api") for row in assistants),
+        "task_id_receipt": task_id,
+        "spawn_gen_receipt": spawn_gen,
+        "requested_model_receipt": requested_model,
+        "selected_effort_receipt": selected_effort,
+        "effective_model": payload_model or assistant_model,
+        "effective_effort": payload_effort,
+        "provider": one_observed((item.get("provider") for item in request_data), "provider") or one_observed((row["message"].get("provider") for row in assistants), "assistant provider"),
+        "api": one_observed((item.get("api") for item in request_data), "API") or one_observed((row["message"].get("api") for row in assistants), "assistant API"),
         "models": models,
         "tokens": total_tokens(models),
         "first_native_at": min(timestamps) if timestamps else None,
@@ -353,8 +375,8 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
         "completeness": {
             "request_payload": "complete" if request_data else "missing",
             "usage": "complete" if assistants and all(value is not None for value in total_tokens(models).values()) else "partial",
-            "effort": "provider-request" if request_data and one_or_unknown(item.get("payloadReasoningEffort") for item in request_data) else "unknown",
-            "attribution": "task-entry" if request_data and one_or_unknown(item.get("taskId") for item in request_data) else "manifest-only",
+            "effort": "provider-request" if payload_effort else "unknown",
+            "attribution": "task-incarnation-entry" if task_id and spawn_gen else "manifest-only",
         },
     }
 
@@ -573,7 +595,7 @@ def validate_time(manifest: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     return started, finished, cleaned
 
 
-def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
+def validate_grading(value: Any, outcome: str, task_id: str, spawn_gen: str, attempt_id: str) -> dict[str, Any]:
     grade = copy.deepcopy(need_object(value, "grading"))
     method = grade.get("method")
     if method not in {"deterministic", "blind-review", "none"}:
@@ -600,6 +622,8 @@ def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
         cleaned_criteria.append({"id": criterion_id,
                                  "text": need_text(item.get("text"), f"grading.acceptance_criteria[{index}].text")})
     grade["acceptance_criteria"] = cleaned_criteria
+    criteria_sha256 = digest(cleaned_criteria)
+    grade["acceptance_criteria_sha256"] = criteria_sha256
     grader = need_object(grade.get("grader"), "grading.grader")
     grade["grader"] = {"kind": need_text(grader.get("kind"), "grading.grader.kind"),
                        "id": need_id(grader.get("id"), "grading.grader.id")}
@@ -627,6 +651,10 @@ def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
             fail(f"grading.receipts[{index}] check artifact identity does not match")
         if artifact.get("grader_id") != grade["grader"]["id"] or artifact.get("criteria_ids") != cleaned["criteria_ids"]:
             fail(f"grading.receipts[{index}] check artifact binding does not match")
+        if (artifact.get("task_id"), artifact.get("spawn_gen"), artifact.get("attempt_id")) != (task_id, spawn_gen, attempt_id):
+            fail(f"grading.receipts[{index}] check artifact task attempt binding does not match")
+        if artifact.get("acceptance_criteria_sha256") != criteria_sha256:
+            fail(f"grading.receipts[{index}] check artifact acceptance criteria binding does not match")
         if artifact.get("passed") is not cleaned["passed"]:
             fail(f"grading.receipts[{index}] check artifact result does not match")
         if artifact.get("exit_code") != (0 if cleaned["passed"] else artifact.get("exit_code")):
@@ -828,6 +856,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         fail("phase must be measurement or shadow")
     category = need_text(manifest.get("category"), "category")
     task_shape = need_text(manifest.get("task_shape"), "task_shape")
+    task_binding = bind_task(task_id, manifest.get("task_binding"))
     route = validate_route(manifest.get("route"))
     native = parse_native(manifest.get("native_receipt"))
     if native.get("task_id_receipt") not in (None, task_id):
@@ -836,6 +865,8 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         fail("native requested model does not match route.requested_model")
     if native.get("selected_effort_receipt") not in (None, route["requested_effort"]):
         fail("native selected effort does not match route.requested_effort")
+    if native.get("spawn_gen_receipt") not in (None, task_binding["spawn_gen"]):
+        fail("native Pi task incarnation does not match task_binding.spawn_gen")
     requirements = manifest.get("requirements")
     if requirements is not None:
         requirements = need_object(requirements, "requirements")
@@ -853,14 +884,17 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     outcome = manifest.get("outcome")
     if outcome not in OUTCOMES:
         fail("outcome must be accepted, unresolved, failed, or abandoned")
+    if native.get("kind") == "pi-session" and outcome == "accepted" and (
+            native.get("task_id_receipt") is None or native.get("spawn_gen_receipt") is None):
+        fail("accepted Pi outcome requires native task incarnation evidence")
     record = {
         "schema": ATTEMPT_SCHEMA, "task_id": task_id, "attempt_id": attempt_id,
-        "task_binding": bind_task(task_id, manifest.get("task_binding")),
+        "spawn_gen": task_binding["spawn_gen"], "task_binding": task_binding,
         "phase": phase, "category": category, "task_shape": task_shape,
         "route": route, "native": native, "requirements": copy.deepcopy(requirements),
         "started_at": started, "finished_at": finished, "time_ms": time_values,
         "billing": billing_record, "quota": quota_record(manifest.get("quota")),
-        "grading": validate_grading(manifest.get("grading"), outcome),
+        "grading": validate_grading(manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id),
         "comparison": validate_comparison(manifest.get("comparison")),
         "handoff": validate_handoff(manifest.get("handoff")),
         "outcome": outcome,
@@ -877,12 +911,12 @@ def import_attempt(args: argparse.Namespace) -> dict[str, Any]:
         if not record.get("comparison"):
             return
         pair_ids = {event["record"]["comparison"]["pair_id"] for key, event in latest.items()
-                    if key != (record["task_id"], record["attempt_id"])
+                    if key != (record["task_id"], record["spawn_gen"], record["attempt_id"])
                     and event["record"].get("category") == record["category"] and event["record"].get("comparison")}
         pair_ids.add(record["comparison"]["pair_id"])
         if len(pair_ids) > 2:
             fail(f"initial pilot already has two comparison pairs for category {record['category']}")
-    result = upsert_event(store, EVENT_SCHEMA, ("task_id", "attempt_id"), record, comparison_cap)
+    result = upsert_event(store, EVENT_SCHEMA, ("task_id", "spawn_gen", "attempt_id"), record, comparison_cap)
     return {"ok": True, "task_id": record["task_id"], "attempt_id": record["attempt_id"], **result}
 
 
@@ -927,8 +961,9 @@ def import_shadow(args: argparse.Namespace) -> dict[str, Any]:
     recommended = canonical(record["recommended_route"])
     if recommended not in {canonical(item["route"]) for item in record["candidates"]}:
         fail("recommended_route must exactly match one accounted candidate")
+    record["spawn_gen"] = record["task_binding"]["spawn_gen"]
     store = Path(args.shadow_store).expanduser()
-    result = upsert_event(store, SHADOW_EVENT_SCHEMA, ("task_id", "decision_id"), record)
+    result = upsert_event(store, SHADOW_EVENT_SCHEMA, ("task_id", "spawn_gen", "decision_id"), record)
     return {"ok": True, "task_id": task_id, "decision_id": decision_id, **result}
 
 
@@ -948,8 +983,8 @@ def contextual_values(values: Iterable[Any]) -> dict[str, Any]:
 
 def route_name(record: dict[str, Any]) -> str:
     route = record["route"]
-    effective_model = record["native"].get("effective_model") or route["requested_model"]
-    effective_effort = record["native"].get("effective_effort") or f"requested:{route['requested_effort']}"
+    effective_model = record["native"].get("effective_model") or f"requested-only:{route['requested_model']}"
+    effective_effort = record["native"].get("effective_effort") or f"requested-only:{route['requested_effort']}"
     return f"{route['harness']}/{route['provider']}/{effective_model}/{effective_effort}"
 
 
@@ -976,8 +1011,8 @@ def legacy_history(path: Path) -> dict[str, Any]:
 
 
 def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
-    records = [event["record"] for event in fold_events(store, EVENT_SCHEMA, ("task_id", "attempt_id")).values()]
-    shadows = [event["record"] for event in fold_events(shadow_store, SHADOW_EVENT_SCHEMA, ("task_id", "decision_id")).values()]
+    records = [event["record"] for event in fold_events(store, EVENT_SCHEMA, ("task_id", "spawn_gen", "attempt_id")).values()]
+    shadows = [event["record"] for event in fold_events(shadow_store, SHADOW_EVENT_SCHEMA, ("task_id", "spawn_gen", "decision_id")).values()]
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for record in records:
         groups.setdefault((record["category"], record["task_shape"], route_name(record)), []).append(record)
@@ -1004,10 +1039,10 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             )}),
         })
     task_rows = []
-    by_task: dict[str, list[dict[str, Any]]] = {}
+    by_task: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in records:
-        by_task.setdefault(record["task_id"], []).append(record)
-    for task_id, items in sorted(by_task.items()):
+        by_task.setdefault((record["task_id"], record["spawn_gen"]), []).append(record)
+    for (task_id, spawn_gen), items in sorted(by_task.items()):
         accepted_items = [item for item in items if item["outcome"] == "accepted"]
         accepted = bool(accepted_items)
         accepted_span = None
@@ -1021,7 +1056,8 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
         else:
             completed_sequence = []
             overlapping = 0
-        task_rows.append({"task_id": task_id, "category": one_or_unknown(item["category"] for item in items),
+        task_rows.append({"task_id": task_id, "spawn_gen": spawn_gen,
+                          "category": one_or_unknown(item["category"] for item in items),
                           "task_shape": one_or_unknown(item["task_shape"] for item in items),
                           "attempts": len(items), "accepted": accepted,
                           "accepted_task_actual_incremental_usd": metric([*(item["billing"].get("actual_incremental_usd") for item in completed_sequence), *([None] * overlapping)]) if accepted else None,
@@ -1075,11 +1111,11 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
     if not scorecard["routes"]:
         lines.append("| - | - | - | 0 | 0 | unknown | unknown | unknown | unknown | unknown | unknown | unknown | no samples |")
     lines.extend(["", "## Accepted-task and failure cost", "",
-                  "| Task | Category | Shape | Attempts | Accepted | Accepted actual | Grader actual | Fixed subscription | API-equivalent | Accepted time | Unresolved/failure actual |",
-                  "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|"])
+                  "| Task | Incarnation | Category | Shape | Attempts | Accepted | Accepted actual | Grader actual | Fixed subscription | API-equivalent | Accepted time | Unresolved/failure actual |",
+                  "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|"])
     for row in scorecard["tasks"]:
         lines.append("| " + " | ".join([
-            row["task_id"], row["category"] or "mixed", row["task_shape"] or "mixed", str(row["attempts"]), "yes" if row["accepted"] else "no",
+            row["task_id"], row["spawn_gen"], row["category"] or "mixed", row["task_shape"] or "mixed", str(row["attempts"]), "yes" if row["accepted"] else "no",
             format_metric(row["accepted_task_actual_incremental_usd"], " USD") if row["accepted_task_actual_incremental_usd"] else "n/a",
             format_metric(row["grader_actual_incremental_usd"], " USD"),
             format_context(row["accepted_task_fixed_subscription_usd"], " USD") if row["accepted_task_fixed_subscription_usd"] else "n/a",
@@ -1088,7 +1124,7 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
             format_metric(row["unresolved_or_failure_actual_usd"], " USD"),
         ]) + " |")
     if not scorecard["tasks"]:
-        lines.append("| - | - | - | 0 | no | n/a | unknown | n/a | n/a | n/a | unknown |")
+        lines.append("| - | - | - | - | 0 | no | n/a | unknown | n/a | n/a | n/a | unknown |")
     lines.extend(["", "## Shadow recommendations", ""])
     if scorecard["shadow_recommendations"]:
         for row in scorecard["shadow_recommendations"]:
@@ -1108,8 +1144,8 @@ def scorecard_command(args: argparse.Namespace) -> Any:
 
 def inspect_command(args: argparse.Namespace) -> dict[str, Any]:
     task_id = need_id(args.task, "--task")
-    records = [event["record"] for key, event in fold_events(Path(args.store).expanduser(), EVENT_SCHEMA, ("task_id", "attempt_id")).items() if key[0] == task_id]
-    return {"ok": True, "task_id": task_id, "attempts": sorted(records, key=lambda row: row["attempt_id"])}
+    records = [event["record"] for key, event in fold_events(Path(args.store).expanduser(), EVENT_SCHEMA, ("task_id", "spawn_gen", "attempt_id")).items() if key[0] == task_id]
+    return {"ok": True, "task_id": task_id, "attempts": sorted(records, key=lambda row: (row["spawn_gen"], row["attempt_id"]))}
 
 
 def parser() -> argparse.ArgumentParser:

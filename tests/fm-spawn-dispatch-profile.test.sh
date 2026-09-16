@@ -722,9 +722,10 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
     "pi-signed spawn did not seed the busy-state record from the launch brief"
-  local ext gen receipt
+  local ext gen receipt spawn_gen
   ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
   gen=$(cat "$HOME_DIR/state/$id.busy-gen")
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta")
   assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
   assert_contains "$ext" 'pi.on("agent_settled"' "pi extension lost the semantic agent_settled idle edge"
   assert_contains "$ext" 'ctx.isIdle()' "pi extension no longer confirms idle with ctx.isIdle()"
@@ -733,16 +734,17 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   receipt=$(drive_pi_route_receipt "$HOME_DIR/state/$id.pi-ext.ts") \
     || fail "generated Pi extension route hook did not execute: $receipt"
-  printf '%s' "$receipt" | jq -e --arg id "$id" '
+  printf '%s' "$receipt" | jq -e --arg id "$id" --arg spawn_gen "$spawn_gen" '
     length == 1 and
     .[0].customType == "fm-routing-request" and
     .[0].data.taskId == $id and
+    .[0].data.spawnGen == $spawn_gen and
     .[0].data.provider == "openai-codex" and
     .[0].data.selectedModel == "selected-model" and
     .[0].data.selectedThinkingLevel == "max" and
     .[0].data.payloadModel == "payload-model" and
     .[0].data.payloadReasoningEffort == "max" and
-    (.[0].data | keys | sort) == (["api", "at", "payloadModel", "payloadReasoningEffort", "provider", "requestSequence", "schema", "selectedModel", "selectedThinkingLevel", "taskId"] | sort)
+    (.[0].data | keys | sort) == (["api", "at", "payloadModel", "payloadReasoningEffort", "provider", "requestSequence", "schema", "selectedModel", "selectedThinkingLevel", "spawnGen", "taskId"] | sort)
   ' >/dev/null || fail "generated Pi extension emitted an incomplete or unsanitized route receipt: $receipt"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }

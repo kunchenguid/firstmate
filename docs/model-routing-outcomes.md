@@ -35,7 +35,8 @@ It is never an automatic scorecard input, so an unrelated or incompatible legacy
 
 An import hashes its normalized record.
 It also requires the named task's current authoritative `state/<task-id>.meta` record and exact `spawn_gen`, preventing telemetry from silently attaching to a reused task identifier.
-Replaying an identical attempt is a no-op, while a changed attempt appends a new revision under the same task and attempt identity.
+Replaying an identical attempt is a no-op, while a changed attempt appends a new revision under the same task-incarnation and attempt identity.
+Reusing a task identifier under a new `spawn_gen` creates a separate durable identity and task scorecard row.
 Readers fold only the newest revision, so a restart, resume, or corrected grade does not duplicate tokens, costs, or accepted-task counts.
 Writers serialize and fsync each append.
 
@@ -58,7 +59,7 @@ Supported source shapes are:
 - `agy-result` reads agy `--output-format json`; an optional native log proves only the selected model label and its low, medium, or high variant.
 
 A Firstmate-spawned Pi worker writes one sanitized custom entry immediately before each provider request.
-The entry contains the task identifier, request sequence, timestamp, selected provider/model/thinking level/API, final payload model, and final payload reasoning effort.
+The entry contains the task identifier, task `spawn_gen`, request sequence, timestamp, selected provider/model/thinking level/API, final payload model, and final payload reasoning effort.
 It contains no other payload field.
 That final-payload evidence can enforce an `effective_effort` requirement rather than trusting requested launch metadata.
 The associated assistant message remains Pi's native response/usage receipt.
@@ -67,6 +68,7 @@ Claude Code's current result and session receipts do not prove effective reasoni
 The importer therefore preserves requested effort and leaves effective effort unknown.
 Agy's one-shot result gives native usage, and its native selected-model log can prove a named effort variant, while the current interactive conversation store is not treated as a prompt-safe portable receipt.
 These limitations remain visible in `native.completeness` and in scorecard uncertainty.
+A Pi session with mixed or partially missing task, incarnation, model, effort, provider, or API evidence is rejected instead of pooling its usage into one exact route.
 
 Token categories retain the native source's accounting.
 Reasoning tokens are reported separately but never added on top of output tokens for cost calculations, because the price catalog contract requires `reasoning: included_in_output`.
@@ -81,6 +83,7 @@ The accepted-task table spans the earliest recorded attempt start through the fi
 Native API duration is retained separately where a tool emits it.
 
 An accepted outcome requires an independent deterministic or blind-review grade, a final pass, explicit task acceptance criteria, a separately identified grader or check, and hashed structured check artifacts covering every criterion.
+Each check artifact is bound to the task identifier, `spawn_gen`, attempt identifier, and SHA-256 of the normalized acceptance criteria.
 The implementation route cannot self-assert acceptance by setting an outcome string alone.
 First-pass result, final result, defect count, fix count, retry count, grader duration, grader tokens, and grader incremental charge stay explicit.
 The importer does not create a second full review pipeline; callers attach the ordinary task's actual check receipts and use limited blind review only where subjective grading requires it.
@@ -106,7 +109,7 @@ It never sums shared and model-window deltas, converts allowance percentages to 
 ## Scorecard interpretation
 
 The scorecard groups exact attempts by category, task shape, harness, provider, effective model, and effective effort.
-When effective effort is unavailable, the route is labeled with requested effort rather than misrepresented as proven.
+When effective model or effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
 It includes sample counts, outcomes, known token/cost/time totals, unknown counts, and unresolved or failed costs at the task level.
 It also prints each shadow recommendation and the eligibility, capability-class fit, runway feasibility, spend priority, explanation, and uncertainty recorded for every candidate.
 Attempts that begin after first acceptance do not increase accepted-task cost, while an attempt overlapping first acceptance contributes an explicit unknown rather than mismatched cost and time.
