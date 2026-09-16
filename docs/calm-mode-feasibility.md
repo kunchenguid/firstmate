@@ -277,7 +277,7 @@ These conclusions are deliberately limited to the named versions and supported s
 They do not claim that a harness can never add the missing renderer API, and the Claude Code row is the first that changed for exactly that reason.
 For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod and OMP extension change drawings only; every producer and non-Pi transport remains unchanged.
+Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
 
 ## Regression coverage
 
@@ -290,7 +290,7 @@ It asserts one persisted and rendered captain answer, exact user-role operationa
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
-`tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
+`tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod's home resolution and working-note policy match Pi's, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
 `tests/fm-calm-claude-mod-plugin.test.sh` runs wherever `claude` is installed without spending a model turn: strict `claude plugin validate` on the folder and on the `.claude/skills` auto-load path, then the mod's own `claude plugin test` suites, which drive the hooks module in the engine's host against a mocked clock, environment, file system, and drawing surface.
 `tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, and `claude --continue` restores the hidden rows.
 
@@ -691,7 +691,7 @@ Three further observations, recorded so they are not read as failures: the `ctrl
 `.claude/mods/firstmate-calm` holds the plugin: its manifest, `hooks/hooks.json` naming the one module, `hooks/register.ts` (the only file that touches `$`), and pure libraries the tests drive under Node: the sprite core both harnesses share, the Raster packing, the presentation policy, and a port of `bin/fm-operational-input.sh`'s `classify` guarded by a corpus parity test.
 `.agents/skills/firstmate-calm` is a symlink to it, so the project's `.claude/skills` scan adopts it, and it carries no `SKILL.md` so other harnesses' skill loaders see nothing.
 The mod declares no command file, skill, agent, or classic hook; its function-hooks handlers independently require the exact environment opt-in before `/calm` registration or any other side effect, including when Claude Code loads the module through its rollout flag.
-Working-note and preserved-reply keys are recorded from `turn.step` per text block and seeded from `$.session.messages()` for a restored transcript, with [`calm.md`](calm.md#claude-code) owning the exact Claude Code visibility contract.
+Working notes are recorded from `turn.step` per text block (a step that stopped for `tool_use`, or `max_tokens` with tool calls) and seeded from `$.session.messages()` for a restored transcript, the same rule as Pi's `assistant-working-note` class.
 
 ```text
 $ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mods/firstmate-calm
@@ -743,19 +743,4 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ⏺ The three words are alpha, beta, and gamma.
 
 ✻ Sautéed for 8s · done 11:07 AM
-```
-
-## 2026-09-15 OMP 18.2.0 global plugin-link verification
-
-The OMP Calm extension ships as the `extensions/fm-calm-omp` package and installs through `omp plugin link`, which symlinks the package into `~/.omp/plugins/node_modules/fm-calm-omp` and records it enabled in `omp-plugins.lock.json`; its `package.json` `omp.extensions` entry then loads in every omp session regardless of working directory.
-OMP de-duplicates extension entries by resolved absolute path rather than realpath (the `runtime-backends.md` extension-loading row records the same `-e` plus auto-discovery double-load), so the package deliberately lives outside `.omp/extensions/` and the installer retires the legacy project-local copy.
-Verified on this host with OMP 18.2.0: `bin/fm-omp-calm-install.sh` linked the package, `omp plugin list` and `omp plugin doctor` reported `fm-calm-omp@0.1.0` healthy, and `omp -p "/calm-omp"` in a directory outside any firstmate checkout executed the registered command locally with no model call, while an unknown command in the same session reached the model.
-
-```text
-$ tests/fm-omp-calm-install.test.sh
-ok - install links package into user plugin scope
-ok - reinstall is idempotent
-ok - identical legacy copy removed
-ok - divergent legacy copy preserved as .bak
-ok - manifest entry resolves through link
 ```

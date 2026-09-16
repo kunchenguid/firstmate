@@ -1,8 +1,8 @@
 # Calm mode
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
-It is fully supported on Pi, available on OMP through a linked user-scope plugin, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the sections below describe.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on Pi and Claude Code through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns; on OMP the command delegates to OMP's own persisted display setting instead.
+It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
 
 ## Pi
 
@@ -76,9 +76,8 @@ On Claude Code the boat is painted in Claude Code's own theme colors rather than
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
-A mid-turn working note, the text of a model step that stopped to call tools or ran out of tokens while calling them, draws at zero height once that step settles only when its raw text contains no newline and its trimmed length is below the 240-character preservation threshold.
-Mid-turn content whose raw text contains a newline or whose trimmed length is at least 240 characters is preserved and treated as a final reply, including when `claude --continue` restores the transcript.
-Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and the preference is read before the first row draws.
+A mid-turn working note, the text of a model step that stopped to call tools or ran out of tokens while calling them, draws at zero height once that step settles, so narration is briefly visible while it streams and then collapses; the reply that ends a response stays visible.
+Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and `claude --continue` restores a transcript with Calm's rows still hidden because the preference is read before the first row draws.
 Nothing is rewritten: hidden rows remain in the message, model context, session storage, and exports, and the mod never touches tool execution, prompts, or the stored transcript.
 
 Bounds of the Claude Code support, each recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod):
@@ -95,21 +94,4 @@ Regression entry points:
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
-```
-
-## OMP
-
-Calm on OMP is the standalone `fm-calm-omp` package under `extensions/fm-calm-omp/` (including `lib/fm-calm-working-ship.ts`), installed into OMP's user plugin scope so it loads in every omp session regardless of working directory.
-`bin/fm-omp-calm-install.sh` copies that package to `~/.local/share/fm-calm-omp` (override with `FM_CALM_OMP_DIR`) and runs `omp plugin link` against the copy, so the global install does not depend on firstmate checkout path or upstream merge status. Re-run the installer after updating firstmate to refresh the copy.
-To unload it, run `omp plugin disable fm-calm-omp`. The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
-The installer retires a legacy project-local `.omp/extensions/fm-calm-omp.ts` for the same reason, removing an identical copy and renaming a divergent one to `.bak`.
-
-OMP exposes no extension setter for tool-activity visibility, so `/calm-omp` reaches the native toggle through a one-shot widget probe of the focused editor and delegates to it, including its own persisted `display.hideToolActivity` setting, tool images, and terminal-history repainting.
-While that setting hides tool activity and a run is under way, the extension draws the same two-row sailboat animation from the vendored working-ship module in `extensions/fm-calm-omp/lib/`.
-When the probe finds no visibility action the command reports the fallback (`Ctrl+Shift+O` or `/settings > Appearance > Display > Hide Tool Activity`) and changes nothing.
-
-Regression entry point:
-
-```sh
-tests/fm-omp-calm-install.test.sh
 ```

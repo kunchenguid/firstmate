@@ -15,7 +15,7 @@
 // glue under `claude plugin test`. Nothing here rewrites a message: `ui.render` changes
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
-// Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
+// Presentation while Calm is on, matching Pi Calm's policy where the mods API allows:
 // the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
@@ -45,7 +45,7 @@ import {
 import {
   calmPreferencePath,
   parseCalmPreference,
-  classifyRestoredTranscript,
+  restoredAssistantText,
   serializeCalmPreference,
   stepTextIsWorkingNote,
   userTextIsOperational,
@@ -109,7 +109,7 @@ async function load($: EngineInterface): Promise<void> {
   calm = parseCalmPreference(await readPreference($, preferencePath));
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
-    const restored = classifyRestoredTranscript(await $.session.messages());
+    const restored = restoredAssistantText(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
     for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
@@ -229,14 +229,17 @@ export const register: Register = (on) => {
     const result = await stream.result;
     if (e.agentId === undefined) {
       let changed = false;
-      for (const text of [...blocks.values(), result.answer]) {
-        const key = workingNoteKey(text);
-        if (key === "") continue;
-        if (stepTextIsWorkingNote(result, text)) {
-          if (finalReplies.has(key) || workingNotes.has(key)) continue;
+      if (stepTextIsWorkingNote(result)) {
+        for (const text of [...blocks.values(), result.answer]) {
+          const key = workingNoteKey(text);
+          if (key === "" || finalReplies.has(key) || workingNotes.has(key)) continue;
           workingNotes.add(key);
           changed = true;
-        } else {
+        }
+      } else {
+        for (const text of [...blocks.values(), result.answer]) {
+          const key = workingNoteKey(text);
+          if (key === "") continue;
           if (!finalReplies.has(key)) {
             finalReplies.add(key);
             changed = true;

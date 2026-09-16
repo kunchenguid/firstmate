@@ -2,11 +2,11 @@
 //
 // This module owns the decisions ../hooks/register.ts applies through `$`: where the
 // shared per-home Calm preference lives and how its value reads, which assistant text is
-// a mid-turn working note, and which transcript rows Calm hides. It shares Pi Calm's
-// broad presentation boundary: genuine user prompts, genuine agent responses, and
-// working activity stay visible; tool rows, tool groups, classified working notes, and
-// canonically classified operational user rows hide. docs/calm.md owns the exact
-// captain-facing contract and docs/configuration.md
+// a mid-turn working note, and which transcript rows Calm hides. It mirrors the Pi
+// policy in .pi/extensions/lib/fm-calm-visibility.ts and .pi/extensions/fm-calm.ts:
+// genuine user prompts, genuine agent responses, and working activity stay visible;
+// tool rows, tool groups, working notes, and canonically classified operational user
+// rows hide. docs/calm.md owns the captain-facing contract and docs/configuration.md
 // the persisted preference schema. Everything here is pure so tests run it under Node.
 import { classifyFirstmateOperationalText } from "./fm-operational-input.ts";
 
@@ -68,34 +68,18 @@ export type CalmStepOutcome = {
 };
 
 /**
- * Single-line narration in session history topped out around 215 characters, while
- * substantive single-line content began around 270; every multi-line message was
- * substantive, so this empirical boundary stays deliberately tunable.
- */
-export const CALM_PRESERVE_MIN_CHARS = 240;
-
-/** Whether text is substantive enough to preserve despite ending alongside a tool call. */
-function shouldPreserveMidTurnText(text: string): boolean {
-  const trimmedText = text.trim();
-  return text.includes("\n") || trimmedText.length >= CALM_PRESERVE_MIN_CHARS;
-}
-
-/**
- * Whether text from a model step is a mid-turn working note: the model did not end
+ * Whether the text of a model step is a mid-turn working note: the model did not end
  * its response there, because it stopped to call tools, or ran out of tokens while
- * calling them. Short single-line narration stays a note; substantive text is a final
- * reply even when the step also called tools.
+ * calling them. The same rule as Pi Calm's `assistant-working-note` class.
  */
-export function stepTextIsWorkingNote(step: CalmStepOutcome, text: string): boolean {
-  const midTurn = step.stopReason === "tool_use" || (step.stopReason === "max_tokens" && step.toolUses.length > 0);
-  return midTurn && !shouldPreserveMidTurnText(text);
+export function stepTextIsWorkingNote(step: CalmStepOutcome): boolean {
+  if (step.stopReason === "tool_use") return true;
+  return step.stopReason === "max_tokens" && step.toolUses.length > 0;
 }
 
-/** A trimmed text key that retains whether the raw row contained a newline. */
+/** The key a working note is remembered under: its trimmed text; empty text is no note. */
 export function workingNoteKey(text: string): string {
-  const trimmedText = text.trim();
-  if (trimmedText === "") return "";
-  return text.includes("\n") ? `${trimmedText}\n` : trimmedText;
+  return text.trim();
 }
 
 /** The shape of one `$.session.messages()` row this policy reads. */
@@ -109,10 +93,9 @@ export type CalmSessionRow = {
  * The structurally identified working notes and final replies in a restored transcript.
  * The stored transcript keeps each content block as its own row, so assistant text is a
  * working note when its own row called tools, or when a tool-calling assistant row
- * follows it before the next user row. Substantive text in either position is preserved
- * as a final reply, matching the live classifier.
+ * follows it before the next user row.
  */
-export function classifyRestoredTranscript(rows: readonly CalmSessionRow[]): {
+export function restoredAssistantText(rows: readonly CalmSessionRow[]): {
   workingNotes: string[];
   finalReplies: string[];
 } {
@@ -130,8 +113,7 @@ export function classifyRestoredTranscript(rows: readonly CalmSessionRow[]): {
         break;
       }
     }
-    if (followedByToolCall && shouldPreserveMidTurnText(row.text)) finalReplies.add(key);
-    else if (followedByToolCall) notes.add(key);
+    if (followedByToolCall) notes.add(key);
     else finalReplies.add(key);
   }
   for (const key of finalReplies) notes.delete(key);
