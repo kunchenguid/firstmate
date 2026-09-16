@@ -6,7 +6,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 Verified on 2026-09-15 on macOS (Darwin 25.2.0) with `lavish-axi` 0.1.67 installed.
-Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
+Generic keyed-answer feed verified on 2026-08-16 on macOS (Darwin 25.5.0), against the published poll response shape of `lavish-axi` 0.1.45.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
