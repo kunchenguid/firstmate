@@ -152,9 +152,13 @@
 # mutation. Local and remote retirement serialize their destructive phase with
 # that mate's backlog-handoff lock under the registry lock. Pending handoff wake
 # state is retired with the home, and local removal failure restores that state
-# before preserving the route for retry. Teardown then discards child work, kills
-# child runtime endpoints, and removes the retired home. Removing a leased home
-# releases its durable treehouse lease so the pool slot is freed,
+# before preserving the route for retry. After a successful local or remote
+# secondmate retirement, every parent pending-reply record for that id (resolved
+# leftovers included) and its delivery confirmation is removed so retired mates
+# cannot leave durable reply expectations behind. Non-forced retirement refuses
+# while any of those records is still unresolved. Teardown then discards child
+# work, kills child runtime endpoints, and removes the retired home. Removing a
+# leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
@@ -786,18 +790,51 @@ remote_recovery_paths_validate() {
   fi
 }
 
-remote_pending_replies_cleanup() {
-  local rec
-  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
+# Remove every parent pending-reply record for $ID, plus its delivery
+# confirmation when present. Shared by local and remote secondmate retirement
+# after the home/route is safely gone.
+pending_replies_cleanup_for_task() {
+  local pending_dir=$1 expected_real=${2-} rec corr confirmation task_id
+  [ -d "$pending_dir" ] || return 0
   (
-    CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
-    [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
+    CDPATH='' cd -- "$pending_dir" 2>/dev/null || exit 1
+    if [ -n "$expected_real" ]; then
+      [ "$(pwd -P)" = "$expected_real" ] || exit 1
+    fi
     for rec in ./*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+      task_id=$(fm_meta_get "$rec" task_id)
+      [ "$task_id" = "$ID" ] || continue
+      corr=$(fm_meta_get "$rec" corr_id)
+      [ -n "$corr" ] || corr=${rec#./}
+      confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+      rm -f -- "$confirmation" "$rec" || exit 1
     done
   )
+}
+
+remote_pending_replies_cleanup() {
+  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
+  pending_replies_cleanup_for_task "$STATE/pending-replies" "$REMOTE_PENDING_DIR_REAL"
+}
+
+# Refuse non-forced secondmate retirement while any parent pending-reply for
+# this id is still unresolved (local and remote share the gate).
+secondmate_unresolved_pending_replies_refuse() {
+  local rec task_id phase
+  [ -d "$STATE/pending-replies" ] || return 0
+  for rec in "$STATE/pending-replies"/*; do
+    [ -f "$rec" ] || continue
+    task_id=$(fm_meta_get "$rec" task_id)
+    [ "$task_id" = "$ID" ] || continue
+    phase=$(fm_meta_get "$rec" phase)
+    [ "$phase" = resolved ] || {
+      echo "REFUSED: secondmate $ID still has an unresolved routed reply" >&2
+      return 1
+    }
+  done
+  return 0
 }
 
 remote_outbox_cleanup() {
@@ -811,7 +848,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -832,17 +869,8 @@ remote_secondmate_teardown() {
     echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
     return 1
   fi
-  if [ "$FORCE" != --force ] && [ -d "$STATE/pending-replies" ]; then
-    for rec in "$STATE/pending-replies"/*; do
-      [ -f "$rec" ] || continue
-      task_id=$(fm_meta_get "$rec" task_id)
-      [ "$task_id" = "$ID" ] || continue
-      phase=$(fm_meta_get "$rec" phase)
-      [ "$phase" = resolved ] || {
-        echo "REFUSED: remote secondmate $ID still has an unresolved routed reply" >&2
-        return 1
-      }
-    done
+  if [ "$FORCE" != --force ]; then
+    secondmate_unresolved_pending_replies_refuse || return 1
   fi
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
@@ -3150,6 +3178,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
+  secondmate_unresolved_pending_replies_refuse || exit 1
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -3498,6 +3527,8 @@ if [ "$KIND" = secondmate ]; then
   fi
   handoff_wake_retire_stage_commit \
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  pending_replies_cleanup_for_task "$STATE/pending-replies" \
+    || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
