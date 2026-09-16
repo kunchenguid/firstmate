@@ -72,6 +72,9 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
+        ". '"*"'") staged=${literal#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || literal=$(cat "$staged") ;;
+      esac
+      case "$literal" in
         *'run --yolo'*)
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_ROVO_STATE"
