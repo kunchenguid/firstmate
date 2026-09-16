@@ -937,11 +937,17 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Generic captain-message ingress (fm-inbox.sh)
+
+`bin/fm-inbox.sh` is the surface an external tool (the sheets bridge) hands a captain message to firstmate through and reads back what became of it; the script's own header owns the exact commands.
+`note` queues one durable note and appends one `check` wake, `outcome <id> <text>` records a latest-wins result summary for that note, and `list --json` exports every note, pending or handled, newest first, as one JSON array of `{id, state, outcome, outcome_at}` with null fields when no outcome was recorded, so a poller reads progress without touching firstmate's private state files.
+A note without an outcome stays valid, an unknown id is refused, and none of these three subcommands needs the spoken-interface configuration below.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
-That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
+That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `outcome`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
 
 | File | Environment | Holds |

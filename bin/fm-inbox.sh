@@ -8,6 +8,9 @@
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
 #           This is the only subcommand that touches firstmate's wake queue.
+#   outcome Record the durable result summary for one note, by the id `note`
+#           printed. Latest write wins, notes without an outcome stay valid,
+#           and no wake is appended - `list --json` is the reader surface.
 #   say     Same as `note`, but the body comes from spoken audio on stdin.
 #           Speech is an INPUT METHOD here, not an architecture: it transcribes
 #           and then takes exactly the `note` path.
@@ -20,10 +23,11 @@
 #
 # Usage:
 #   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh outcome <id> <text>...   | fm-inbox.sh outcome <id> -  (body from stdin)
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
-#   fm-inbox.sh list
+#   fm-inbox.sh list [--json]
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
@@ -41,7 +45,7 @@
 # An absent profile means the call uses whatever credentials are already in the
 # environment, which is also what FM_INBOX_PROFILE= (empty) forces.
 #
-# `note`, `status`, `list` and `drain` need NO configuration at all, because they
+# `note`, `outcome`, `status`, `list` and `drain` need NO configuration at all, because they
 # make no model call. The voice handover depends on `note`, so it keeps working in
 # a home that has configured nothing.
 #
@@ -49,7 +53,7 @@
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
-# `note`, `status`, `list` and `drain` make no network call at all.
+# `note`, `outcome`, `status`, `list` and `drain` make no network call at all.
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
@@ -80,6 +84,7 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 INBOX="$STATE/inbox"
+OUTCOMES="$INBOX/outcomes"
 
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
@@ -205,6 +210,37 @@ cmd_note() {
     body="$*"
   fi
   queue_note text "$body"
+}
+
+# ---------------------------------------------------------------- outcome
+
+# The durable result summary for one note, keyed by the id `note` printed. The
+# sheets bridge polls `list --json` for it; the record itself is private state.
+cmd_outcome() {
+  [ -n "${1:-}" ] || die "usage: fm-inbox.sh outcome <id> <text>...   (or: outcome <id> - to read stdin)"
+  local id=$1 body
+  shift
+  [ -f "$INBOX/$id.note" ] || [ -f "$INBOX/handled/$id.note" ] \
+    || die "no such note: $id (queue one with: fm-inbox.sh note <text>...)"
+  if [ "$#" -eq 0 ]; then
+    die "usage: fm-inbox.sh outcome <id> <text>...   (or: outcome <id> - to read stdin)"
+  elif [ "$1" = "-" ]; then
+    body=$(cat)
+  else
+    body="$*"
+  fi
+  [ -n "${body//[[:space:]]/}" ] || die "refusing to record an empty outcome"
+  mkdir -p "$OUTCOMES"
+  local tmp
+  tmp=$(mktemp "$OUTCOMES/.staging-XXXXXX")
+  {
+    printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf -- '--\n'
+    printf '%s\n' "$body"
+  } >"$tmp"
+  # Publish atomically; a second outcome for the same note replaces the first.
+  mv -f "$tmp" "$OUTCOMES/$id"
+  printf 'recorded outcome for %s\n' "$id"
 }
 
 # ---------------------------------------------------------------- say
@@ -345,6 +381,45 @@ PY
 
 # ---------------------------------------------------------------- list / drain
 
+# Minimal JSON string escaping for note ids and outcome bodies. Bash cannot
+# hold NUL, so the remaining control characters cannot reach the text.
+json_escape() {  # <text> -> escaped JSON string content
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+# The machine-readable view an external poller reads: every note, pending or
+# handled, newest first, each with its outcome when one was recorded.
+cmd_list_json() {
+  printf '['
+  local first=1 id state f at body
+  {
+    for f in "$INBOX"/*.note; do [ -e "$f" ] || continue; printf '%s pending\n' "$(basename "$f" .note)"; done
+    for f in "$INBOX/handled"/*.note; do [ -e "$f" ] || continue; printf '%s handled\n' "$(basename "$f" .note)"; done
+  } | sort -rn | while read -r id state; do
+      [ -n "$id" ] || continue
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      at="" body=""
+      if [ -f "$OUTCOMES/$id" ]; then
+        at=$(sed -n 's/^at=//p' "$OUTCOMES/$id" | head -1)
+        body=$(sed -n '/^--$/,$p' "$OUTCOMES/$id" | tail -n +2)
+      fi
+      printf '{"id":"%s","state":"%s"' "$(json_escape "$id")" "$state"
+      if [ -n "$body" ]; then
+        printf ',"outcome":"%s","outcome_at":"%s"}' "$(json_escape "$body")" "$(json_escape "$at")"
+      else
+        printf ',"outcome":null,"outcome_at":null}'
+      fi
+    done
+  printf ']\n'
+}
+
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
   local any=0
@@ -380,12 +455,22 @@ cmd_drain() {
 # ---------------------------------------------------------------- dispatch
 
 case "${1:-}" in
-  note)   shift; cmd_note "$@" ;;
+  note)    shift; cmd_note "$@" ;;
   say)    shift; cmd_say "$@" ;;
   status) shift; cmd_status ;;
   ask)    shift; cmd_ask "$@" ;;
-  list)   shift; cmd_list ;;
+  list)
+    shift
+    if [ "${1:-}" = "--json" ]; then
+      shift
+      [ "$#" -eq 0 ] || die "usage: fm-inbox.sh list [--json]"
+      cmd_list_json
+    else
+      cmd_list
+    fi
+    ;;
   drain)  shift; cmd_drain "$@" ;;
+  outcome) shift; cmd_outcome "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the
     # shebang up to the first line that is not a comment. A fixed line range
