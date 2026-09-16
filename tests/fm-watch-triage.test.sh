@@ -737,7 +737,7 @@ test_turn_ended_provably_working_absorbed() {
 # pipeline, so the wake must surface instead of being absorbed.
 
 test_turn_ended_not_working_surfaced() {
-  local dir state fakebin out drain_out pid
+  local dir state fakebin out drain_out pid rows marker
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   : > "$state/task.turn-ended"
@@ -747,10 +747,58 @@ test_turn_ended_not_working_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end whose crew is not provably working"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "task.turn-ended" { n++ } END { print n + 0 }' \
+    "$state/.wake-queue")
+  [ "$rows" -eq 1 ] \
+    || fail "one unchanged turn-end signal produced $rows durable rows instead of one"
+  marker="$state/.seen-task_turn-ended"
+  [ -f "$marker" ] || fail "the surfaced turn-end did not commit its seen marker"
+  [ "$(cat "$marker")" = "$(seen_sig "$state/task.turn-ended")" ] \
+    || fail "the unchanged turn-end marker did not commit its observed signature"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
+}
+
+test_turn_ended_grace_coalescing_keeps_later_signature() {
+  local dir state fakebin out pid rows signal marker expected actual real_sleep
+  dir=$(make_case turn-ended-grace-later); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; signal="$state/task.turn-ended"
+  printf 'early\n' > "$signal"
+  real_sleep=$(command -v sleep)
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "${FM_SIGNAL_GRACE:-1}" ] \
+   && [ ! -e "${FM_TEST_SIGNAL_MUTATED:?}" ]; then
+  printf 'later\n' >> "${FM_TEST_SIGNAL_FILE:?}"
+  : > "$FM_TEST_SIGNAL_MUTATED"
+fi
+exec "${FM_TEST_REAL_SLEEP:?}" "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  export FM_TEST_SIGNAL_FILE="$signal"
+  export FM_TEST_SIGNAL_MUTATED="$state/.signal-mutated-during-grace"
+  export FM_TEST_REAL_SLEEP="$real_sleep"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  unset FM_TEST_SIGNAL_FILE FM_TEST_SIGNAL_MUTATED FM_TEST_REAL_SLEEP
+  wait_for_exit "$pid" 100 \
+    || fail "watcher did not surface a turn-end mutated during signal grace"
+  [ -e "$state/.signal-mutated-during-grace" ] \
+    || fail "the signal fixture did not mutate during the grace sleep"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "task.turn-ended" { n++ } END { print n + 0 }' \
+    "$state/.wake-queue")
+  [ "$rows" -eq 1 ] \
+    || fail "one turn-end mutated during grace produced $rows durable rows instead of one"
+  marker="$state/.seen-task_turn-ended"
+  [ -f "$marker" ] || fail "the grace-coalesced turn-end did not commit its seen marker"
+  expected=$(seen_sig "$signal")
+  actual=$(cat "$marker")
+  [ "$actual" = "$expected" ] \
+    || fail "signal grace committed the earlier signature ($actual), expected later $expected"
+  pass "signal grace coalescing keeps one row and commits the later file signature"
 }
 
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
@@ -3066,6 +3114,159 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
 
 
 
+# --- delivered work whose PR merge poll is armed: pane churn must not re-alarm
+# The third settled population, and the one with no wait record any status line
+# or backlog row can carry. A `done: PR ...` task is FINISHED: its worker has
+# exited, its pane will never move again on its own, and the armed merge poll is
+# what is watching that PR. The captain-relevant stale branch nevertheless
+# alarmed on every new pane hash, which on the observed one-minute cadence is one
+# supervision turn a minute for as long as the PR stays open - reproduced live on
+# 2026-08-17 and again on 2026-09-14, both times with the poll armed and firstmate
+# holding nothing to do.
+# Pinned here in all three directions: the first sight still alarms, further
+# sights of the same delivery and armed poll are absorbed, and the window's end
+# re-surfaces once, because the poll speaks only on a MERGE - a PR closed
+# unmerged would otherwise leave the task silent forever.
+
+merge_poll_key() {
+  printf '%s' test:fm-merge-poll | tr ':/.' '___'
+}
+
+merge_poll_stale_wakes() {  # <state>
+  awk -F '\t' '$3 == "stale" && $4 == "test:fm-merge-poll" { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+# A delivered task, optionally with its merge poll actually armed by the only
+# thing that arms one. bin/fm-pr-check.sh is run for real rather than a
+# hand-written sidecar, because the watcher validates the whole published set -
+# data, registration, check bytes and metadata identity - and a fixture that
+# faked it would pin this test's idea of an armed poll instead of the real one.
+make_merge_poll_home() {  # <name> <status-line> <arm|noarm>
+  local name=$1 line=$2 arm=$3 dir state
+  dir=$(make_case "$name"); state="$dir/state"
+  printf 'window=test:fm-merge-poll\nkind=ship\nharness=grok\nbackend=tmux\n' \
+    > "$state/merge-poll.meta"
+  printf '%s\n' "$line" > "$state/merge-poll.status"
+  printf '%s' "$(seen_sig "$state/merge-poll.status")" > "$state/.seen-merge-poll_status"
+  if [ "$arm" = arm ]; then
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 \
+      "$ROOT/bin/fm-pr-check.sh" merge-poll https://github.com/example/repo/pull/1 \
+      >/dev/null 2>&1 || return 1
+    [ -f "$state/merge-poll.pr-poll" ] || return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+MERGE_POLL_WATCH_PID=
+merge_poll_watch_launch() {  # <dir> <out> <capture>
+  local dir=$1 out=$2 capture=$3
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-merge-poll \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  MERGE_POLL_WATCH_PID=$!
+}
+
+merge_poll_watch_surface() {  # <dir> <out> <capture> <pane-text>
+  local dir=$1 out=$2 capture=$3 text=$4
+  printf '%s\n' "$text" > "$capture"
+  merge_poll_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$MERGE_POLL_WATCH_PID" 100 || { reap "$MERGE_POLL_WATCH_PID"; return 1; }
+  return 0
+}
+
+# <count> successive pane changes driven through ONE watcher, three poll cycles
+# each: see the new hash, count it stable and classify, prove the classification
+# held. The watcher must stay in its loop throughout.
+merge_poll_watch_churn() {  # <dir> <out> <capture> <label> <count>
+  local dir=$1 out=$2 capture=$3 label=$4 count=$5 i=1 c
+  local state="$dir/state"
+  printf '%s 0\n' "$label" > "$capture"
+  merge_poll_watch_launch "$dir" "$out" "$capture"
+  while [ "$i" -le "$count" ]; do
+    printf '%s %s\n' "$label" "$i" > "$capture"
+    c=0
+    while [ "$c" -lt 3 ]; do
+      wait_poll_cycle "$state" "$MERGE_POLL_WATCH_PID" 300 \
+        || { reap "$MERGE_POLL_WATCH_PID"; return 1; }
+      c=$((c + 1))
+    done
+    i=$((i + 1))
+  done
+  reap "$MERGE_POLL_WATCH_PID"
+  return 0
+}
+
+test_armed_merge_poll_bounds_delivered_stale_churn() {
+  local dir state out capture throttle wakes
+  dir=$(make_merge_poll_home armed-delivery \
+    'done: PR https://github.com/example/repo/pull/1 checks green' arm) \
+    || fail "could not arm a real PR merge poll for a delivered task"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(merge_poll_key)"
+
+  # First sight still alarms: the poll bounds repetition, never the first look.
+  merge_poll_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of delivered work did not surface"
+  wakes=$(merge_poll_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  # The pane churns while the SAME delivery and armed poll stand. Every one of
+  # these used to alarm, once a minute, for the whole life of the open PR.
+  merge_poll_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(merge_poll_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed delivered work $wakes time(s) while its merge poll was armed"
+
+  # The poll only ever reports a MERGE, so the absorb stays bounded: after the
+  # window ends the next new hash re-surfaces the finished task exactly once.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  merge_poll_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "delivered work did not re-surface once its re-surface window elapsed"
+  wakes=$(merge_poll_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "elapsed re-surface window produced $wakes wakes instead of one"
+  pass "delivered work whose merge poll is armed surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+# The other half of the bound. A settled delivery is the ONLY thing it may quiet:
+# an unarmed delivery has nothing watching its PR, and a blocked or
+# needs-decision line is firstmate's to act on whatever its PR is doing, so both
+# must keep alarming on every new hash exactly as they do today.
+test_stale_churn_without_an_armed_merge_poll_still_alarms() {
+  local spec name line arm dir state out capture round wakes
+  for spec in \
+    'unarmed-delivery|done: PR https://github.com/example/repo/pull/1 checks green|noarm' \
+    'armed-blocker|blocked: cannot reach the release host|arm' \
+    'armed-decision|needs-decision: squash or rebase the branch|arm'
+  do
+    name=${spec%%|*}; line=${spec#*|}; arm=${line#*|}; line=${line%%|*}
+    dir=$(make_merge_poll_home "$name" "$line" "$arm") \
+      || fail "[$name] could not build a delivered-task fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      merge_poll_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] an unbounded stale window stopped alarming on round $round"
+      wakes=$(merge_poll_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "a stale window with no armed merge poll, and a held-up delivery that has one, keep alarming on every new hash"
+}
+
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5289,6 +5490,7 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_grace_coalescing_keeps_later_signature
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
@@ -5353,6 +5555,8 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_armed_merge_poll_bounds_delivered_stale_churn
+test_stale_churn_without_an_armed_merge_poll_still_alarms
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

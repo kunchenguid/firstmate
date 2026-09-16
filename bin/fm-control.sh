@@ -440,7 +440,15 @@ do_interrupt() {
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 
-retire_busy_incarnation() {
+finish_busy_incarnation() {
+  if [ "$HARNESS" = omp ]; then
+    if [ -f "$STATE/$ID.busy-gen" ]; then
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle --current-gen \
+        --source fm-control --event exit >/dev/null 2>&1 || return 1
+    fi
+    rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.omp-ext.ts"
+    return
+  fi
   if [ -f "$STATE/$ID.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
   fi
@@ -454,6 +462,10 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      if [ "$HARNESS" = omp ]; then
+        finish_busy_incarnation \
+          || die "task $ID is stopped, but its OMP lifecycle completion could not be recorded"
+      fi
       printf 'already-stopped'
       return 0
       ;;
@@ -468,7 +480,8 @@ do_exit() {
       state=$(agent_state)
       case "$state" in
         dead)
-          retire_busy_incarnation
+          finish_busy_incarnation \
+            || die "task $ID stopped during interrupt, but its lifecycle completion could not be recorded"
           printf 'stopped'
           return 0
           ;;
@@ -503,9 +516,11 @@ do_exit() {
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
-  # The incarnation is over: retire its busy wiring so no stale record or
-  # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
+  # OMP's verified agent death is a semantic idle edge. Keep that generation
+  # settled so current-state reads can fold the terminal status until relaunch
+  # replaces it or teardown retires it; other adapters keep their retirement.
+  finish_busy_incarnation \
+    || die "task $ID stopped, but its lifecycle completion could not be recorded"
   printf 'stopped'
 }
 

@@ -188,6 +188,9 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # (grok's rendered tail, muse's session log) rather than through a stored
 # record. Listing a source here without a writer that can clear it would seed a
 # busy record nothing could ever settle.
+# OMP additionally trusts fm-control only for a verified intentional exit:
+# that source settles the current incarnation idle without retiring its
+# generation, so terminal status can be folded until relaunch or teardown.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -199,7 +202,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
-    omp) adapter=omp-ext ;;
+    omp) adapter='omp-ext fm-control' ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
