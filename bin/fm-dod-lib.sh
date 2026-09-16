@@ -39,6 +39,18 @@ Other projects retain their own instructions unchanged.
 EOF
 }
 
+fm_brief_skill_routing() {
+  cat <<'EOF'
+# Skill routing
+Default code review: ce-code-review. review-gauntlet is explicit-only for serious/adversarial review.
+Default diagnosis: investigate-first.
+Scope control: surgical-patch, safe-refactor, verify-and-stop (use the narrowest that fits).
+Site research: aside-dispatch for AI-resistant sites (Reddit, Cloudflare-walled, bot-checked, JS-heavy).
+tdd-workflow and no-mistakes are explicit-only; do not auto-trigger either.
+Local/brief-driven workers: follow these injected procedures; do not wait to discover skills.
+EOF
+}
+
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>

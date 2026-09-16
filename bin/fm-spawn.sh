@@ -2378,6 +2378,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     cat "$SOURCE_BRIEF" &&
       printf '\n' &&
       fm_brief_worker_role &&
+      fm_brief_skill_routing &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
