@@ -63,6 +63,34 @@ make_ps_blind() {  # <dir>
   printf '%s\n' "$fakebin"
 }
 
+test_dsh_session_lock_matcher_detects_launcher_paths() {
+  # state/.lock is acquired through this matcher, and a host that cannot be
+  # named there leaves every DSH session permanently read-only.
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches node "node /Users/x/.npm/_npx/abc/node_modules/.bin/dsh web" \
+    || fail "the npx .bin/dsh launcher must be a harness process"
+  fm_harness_process_matches node "node /g/node_modules/@deepseek-ai/dsh/lib/bin.js web" \
+    || fail "the installed dsh bin.js must be a harness process"
+  fm_harness_process_matches node "/Users/x/apps/cli/src/bin.ts" \
+    || fail "the source-launch bin.ts must be a harness process"
+  pass "fm-session-lock-lib: dsh launcher paths are harness processes"
+}
+
+test_dsh_session_lock_matcher_rejects_firstmate_paths() {
+  # A bare `dsh` alternative would claim firstmate's own scripts and reopen the
+  # false positives the anchored pi/omp arms exist to prevent.
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches node "node /Users/x/bin/fm-dsh-sessionstart.sh" \
+    && fail "firstmate's own fm-dsh-*.sh path must not claim the dsh identity" || true
+  fm_harness_process_matches node "node /Users/x/dshish.js" \
+    && fail "an unrelated dshish path must not claim the dsh identity" || true
+  fm_harness_process_matches claude claude || fail "claude must still be a harness process"
+  fm_harness_process_matches omp omp || fail "omp must still be a harness process"
+  pass "fm-session-lock-lib: dsh matching adds no false positives"
+}
+
 test_dsh_ancestry_detects_the_launcher_path() {
   local fakebin out
   fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-node" node \
@@ -222,3 +250,5 @@ test_dsh_guard_budget_is_session_scoped
 test_dsh_guard_clears_the_budget_when_supervision_is_not_needed
 test_dsh_guard_fails_open_on_unusable_input
 test_dsh_stop_wrapper_fails_open_without_a_root
+test_dsh_session_lock_matcher_detects_launcher_paths
+test_dsh_session_lock_matcher_rejects_firstmate_paths
