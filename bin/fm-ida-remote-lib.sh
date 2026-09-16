@@ -20,6 +20,9 @@
 # no private prompt payload. All bytedcli children discard ambient proxy
 # variables, which otherwise divert the SG identity endpoint through an
 # incompatible proxy, while preserving the rest of the operator environment.
+# CLI lookup first uses the caller's PATH, then the standard user-global npm
+# launcher at $HOME/.npm-global/bin/bytedcli so watcher-started successor reads
+# do not depend on the environment of the foreground command that armed them.
 # Durable artifacts are normalized here and never preserve raw MCP responses
 # or raw provider streams.
 set -u
@@ -53,9 +56,34 @@ fm_ida_config_optional_field() {
   [ "$count" -eq 0 ] || sed -n "s/^$key=//p" "$file"
 }
 
+fm_ida_resolve_bytedcli() {
+  local candidate
+  candidate=$(type -P bytedcli 2>/dev/null || true)
+  if [ -n "$candidate" ]; then
+    [ -f "$candidate" ] && [ -x "$candidate" ] || return 126
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  [ -n "${HOME:-}" ] || return 127
+  candidate="$HOME/.npm-global/bin/bytedcli"
+  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    [ -f "$candidate" ] && [ -x "$candidate" ] || return 126
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 127
+}
+
 fm_ida_run_bytedcli() (
+  local executable rc
+  executable=$(fm_ida_resolve_bytedcli) || return $?
   unset http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
-  BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli "$@"
+  BYTEDCLI_NO_AUTO_UPGRADE=1 "$executable" "$@"
+  rc=$?
+  # 126 and 127 from resolution above describe the local launch boundary.
+  # Once the executable started, the same exit values belong to the CLI and
+  # must not be mislabeled as a shell lookup failure.
+  case "$rc" in 126|127) return 125 ;; *) return "$rc" ;; esac
 )
 
 fm_ida_config_load() {
@@ -159,7 +187,7 @@ fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty 
     esac
   fi
   if ! [ -s "$out" ]; then
-    printf 'response-empty\n'
+    if [ "$rc" -ne 0 ]; then printf 'cli-exit-error\n'; else printf 'response-empty\n'; fi
   elif ! jq -e -s 'length == 1' "$out" >/dev/null 2>&1; then
     printf 'response-invalid-json\n'
   elif jq -e 'type == "object" and .status == "error"

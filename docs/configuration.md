@@ -148,7 +148,7 @@ The default instruction bound is 262144 bytes (`FM_REMOTE_MAX_INSTRUCTION_BYTES`
 Submission uses the official domain-restricted `bytedcli --as user mcp --allow-domains ida` server and its `run_command` tool to invoke `ida --region sg deep-research create`.
 `bin/fm-bytedcli-mcp-call.sh` constructs that command inside a mode-`0600` stdin request so prompt bytes do not enter operating-system argv.
 Raw session list, session get, and cancellation use official `bytedcli --json --as user ida --region sg ...` commands.
-Every iDA-owned bytedcli child unsets conventional upper- and lower-case proxy variables because ambient proxies can divert the SG identity endpoint through an incompatible route; this sanitation is child-local and preserves all unrelated operator environment.
+Every iDA-owned bytedcli child resolves the executable from the current `PATH` or the standard user-global npm launcher at `$HOME/.npm-global/bin/bytedcli`, then unsets conventional upper- and lower-case proxy variables because ambient proxies can divert the SG identity endpoint through an incompatible route; this lookup and sanitation are child-local and preserve all unrelated operator environment.
 Firstmate stores only normalized bounded observations, not the MCP exchange, raw messages, SSE/event bodies, credentials, or private request payload.
 
 Before the sole allowed create, the adapter records a unique marker derived from the Firstmate task id and instruction digest.

@@ -67,7 +67,7 @@ cmd_probe() {
   local root out err capability rc=0 agent_id args=(agent get)
   [ "$#" -eq 0 ] || usage
   fm_ida_config_load || die "iDA remote-agent config is missing or invalid"
-  command -v bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
+  fm_ida_resolve_bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
   root=$(temp_root); out="$root/out"; err="$root/err"; capability="$root/capability.json"
   [ "$IDA_CONFIG_AGENT_ID" = default ] || args+=(--agent-id "$IDA_CONFIG_AGENT_ID")
   if fm_ida_run_bytedcli --json --as user ida --region sg "${args[@]}" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
@@ -163,7 +163,7 @@ cmd_dispatch() {
   fm_remote_instruction_validate "$id" "$instructions" || exit 1
   fm_ida_config_load || die "iDA remote agent is disabled: config is missing or invalid"
   [ "$IDA_CONFIG_ENABLED" = true ] || die "iDA remote agent is disabled in config"
-  command -v bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
+  fm_ida_resolve_bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
   [ -z "$model" ] || validate_dispatch_model "$model"
   sha=$(fm_remote_sha256_file "$instructions") || die "cannot hash iDA instruction"
   marker=$(fm_ida_session_marker "$id" "$sha") || die "cannot derive iDA session marker"
