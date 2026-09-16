@@ -93,6 +93,9 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
+#     Current queued and landed rows also carry bounded report_path plus
+#     report_present evidence established by the source home at capture; a missing
+#     or non-true report_present value is unproven and must fail closed downstream.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
