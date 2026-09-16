@@ -962,8 +962,11 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   add_ship_task "$dir" rl21 claude
   mkdir -p "$dir/home/config"
   printf 'codex\n' > "$dir/home/config/crew-harness"
+  printf 'started_at=2026-09-10T08:00:00Z\n' >> "$dir/home/state/rl21.meta"
   printf 'zsh' > "$dir/fake/command"
   out=$(run_spawn "$dir" rl21 --relaunch)
+  [ "$(meta_field "$dir" rl21 started_at)" = 2026-09-10T08:00:00Z ] \
+    || fail "fm-spawn --relaunch changed the task's original start time"
   [ "$(meta_field "$dir" rl21 harness)" = claude ] \
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"

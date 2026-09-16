@@ -178,6 +178,7 @@ kind=ship
 mode=local-only
 yolo=off
 spawn_gen=spawn-cleanup
+started_at=2026-09-15T10:11:12Z
 backend=tmux
 EOF
 printf 'done: ready in branch fm/cleanup-task\n' > "$cleanup/state/cleanup-task.status"
@@ -211,5 +212,8 @@ FM_TEARDOWN_GUARD_DONE=1 FM_FAKE_TMUX_LOG="$log" PATH="$fakebin:$PATH" \
   FM_HOME="$cleanup" "$CLOSE" cleanup-task >/dev/null || fail "close did not compose guarded cleanup"
 assert_absent "$cleanup/state/cleanup-task.meta" "guarded cleanup left the task record"
 assert_grep "kill-window" "$log" "close did not delegate endpoint retirement to teardown"
-[ -f "$cleanup/data/closed-tasks/cleanup-task/closure.json" ] || fail "cleanup-composed close did not archive"
+cleanup_closure="$cleanup/data/closed-tasks/cleanup-task/closure.json"
+[ -f "$cleanup_closure" ] || fail "cleanup-composed close did not archive"
+[ "$(jq -r '.dates.started' "$cleanup_closure")" = "2026-09-15T10:11:12Z" ] \
+  || fail "closure did not retain the authoritative task start date"
 pass "close composes the existing guarded cleanup path"

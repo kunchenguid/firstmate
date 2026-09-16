@@ -165,6 +165,11 @@ test_pi_tasks_command_preserves_rendered_table() {
 [ "${COLUMNS:-}" = 50 ] || { printf 'wrong width: %s\n' "${COLUMNS:-unset}" >&2; exit 2; }
 printf '┌─────┐\n│ t7  │\n└─────┘\n'
 SH
+  cat > "$repo/bin/fm-task.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = t7 ] && [ "$#" -eq 1 ] || exit 2
+printf 'Task t7: detailed-task\nNext action: Ready to close\n'
+SH
   cat > "$repo/bin/fm-close.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = --review ] && [ "${2:-}" = t7 ] || exit 2
@@ -180,7 +185,7 @@ else
   exit 2
 fi
 SH
-  chmod +x "$repo/bin/fm-tasks.sh" "$repo/bin/fm-close.sh" "$repo/bin/fm-history.sh"
+  chmod +x "$repo/bin/fm-tasks.sh" "$repo/bin/fm-task.sh" "$repo/bin/fm-close.sh" "$repo/bin/fm-history.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
@@ -196,7 +201,7 @@ const pi = {
 Object.defineProperty(process.stdout, "columns", { value: 52, configurable: true });
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-for (const name of ["tasks", "close", "history"]) {
+for (const name of ["tasks", "task", "close", "history"]) {
   if (!handlers.has(name)) throw new Error(`Pi ${name} command was not registered`);
 }
 const context = {
@@ -211,6 +216,10 @@ await handlers.get("tasks")("t7", context);
 const expected = "┌─────┐\n│ t7  │\n└─────┘";
 if (notification?.message !== expected || notification?.type !== "info") {
   throw new Error(`rendered table was not returned verbatim: ${JSON.stringify(notification)}`);
+}
+await handlers.get("task")("t7", context);
+if (notification?.message !== "Task t7: detailed-task\nNext action: Ready to close" || notification?.type !== "info") {
+  throw new Error(`task detail was not returned verbatim: ${JSON.stringify(notification)}`);
 }
 await handlers.get("close")("--review t7", context);
 if (notification?.message !== "Review only: t7" || notification?.type !== "info") {
@@ -229,7 +238,7 @@ EOF
   status=$?
   expect_code 0 "$status" "Pi task lifecycle commands must return their script output verbatim"
   [ -z "$out" ] || fail "Pi task lifecycle command test printed output: $out"
-  pass "Pi /tasks, /close, and /history return their script output without reformatting"
+  pass "Pi /tasks, /task, /close, and /history return their script output without reformatting"
 }
 
 test_pi_tool_returns_agent_tool_result() {

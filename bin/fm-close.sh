@@ -15,6 +15,7 @@
 #
 # Archive: data/closed-tasks/<canonical-id>/closure.json plus any regular
 # brief.md, launch-brief.md, report.md, task.txt, notes.md, and status.log.
+# The closure record preserves explicit created, started, completed, and closed dates when their authoritative source exists; missing dates remain null.
 # Prepared archive records are hidden from fm-history.sh and make an interrupted
 # close retryable by canonical id or human name. A second close of an already
 # closed canonical id or unambiguous name is an idempotent success.
@@ -300,8 +301,8 @@ validate_extra_followups() {  # <snapshot-json>
   done
 }
 
-prepare_archive() {  # <id> <row> <ref> <name> <result> <followups-newline>
-  local id=$1 row=$2 ref=$3 name=$4 result=$5 followups=$6 target stage source file body
+prepare_archive() {  # <id> <row> <ref> <name> <result> <followups-newline> <started-at>
+  local id=$1 row=$2 ref=$3 name=$4 result=$5 followups=$6 started=$7 target stage source file body
   local closed_at now data_label artifacts_file retained_file followups_file closure_tmp
   target="$ARCHIVE_ROOT/$id"
   [ ! -e "$target" ] && [ ! -L "$target" ] || { fail "archive target already exists for $id"; return 1; }
@@ -343,6 +344,7 @@ prepare_archive() {  # <id> <row> <ref> <name> <result> <followups-newline>
     --arg project "$(printf '%s\n' "$row" | jq -r '.repo // "-"')" \
     --arg kind "$(printf '%s\n' "$row" | jq -r '.kind // "task"')" \
     --arg created "$(printf '%s\n' "$row" | jq -r '.since // empty')" \
+    --arg started "$started" \
     --arg completed "$(printf '%s\n' "$row" | jq -r '.done // .completion.date // empty')" \
     --arg closed "$closed_at" --argjson closedEpoch "$now" --arg result "$result" \
     --arg archive "$data_label/closed-tasks/$id" \
@@ -352,6 +354,7 @@ prepare_archive() {  # <id> <row> <ref> <name> <result> <followups-newline>
     '{version:1, disposition:$disposition, id:$id, ref:$ref, name:$name,
       project:$project, kind:$kind,
       dates:{created:(if $created=="" then null else $created end),
+             started:(if $started=="" then null else $started end),
              completed:(if $completed=="" then null else $completed end), closed:$closed},
       closedEpoch:$closedEpoch, result:$result, artifacts:$artifacts,
       retainedKnowledge:$retained, followUps:$followUps, archive:$archive}' \
@@ -438,7 +441,7 @@ close_prepared() {  # <closure-json> <snapshot-json>
 
 close_one() {  # <selector>
   local selector=$1 fleet id row fields ref name state kind current terminal='' out rc resource
-  local followups follow result lock closure existing_archive now
+  local followups follow result lock closure existing_archive now started=''
   fleet=$(snapshot) || { fail "could not read current tasks"; return 1; }
   id=$(active_id_from_snapshot "$fleet" "$selector" "$((1 - REVIEW))" || true)
   if [ -z "$id" ]; then
@@ -480,6 +483,7 @@ close_one() {  # <selector>
   IFS=$'\t' read -r ref name <<< "$fields"
   validate_extra_followups "$fleet" || return 1
   if [ -f "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
+    started=$(awk -F= '$1 == "started_at" {sub(/^[^=]*=/, ""); print; exit}' "$STATE/$id.meta")
     if [ "$state" = "done" ]; then
       current="done"
     else
@@ -541,7 +545,7 @@ close_one() {  # <selector>
     return "$rc"
   fi
   PREPARED_CLOSURE=
-  if ! prepare_archive "$id" "$row" "$ref" "$name" "$result" "$followups"; then
+  if ! prepare_archive "$id" "$row" "$ref" "$name" "$result" "$followups" "$started"; then
     fm_lock_release "$lock"
     fail "could not prepare the private archive for task $id"
     return 1

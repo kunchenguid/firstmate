@@ -347,8 +347,7 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
-# Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
-# consumers can distinguish a replacement worker that reuses the same task id.
+# The local metadata publication path records started_at= in UTC on a fresh spawn and preserves it on relaunch, while each fresh spawn or relaunch records a new spawn_gen= incarnation token so durable consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -4083,6 +4082,9 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$RELAUNCH" -eq 0 ]; then
+    echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

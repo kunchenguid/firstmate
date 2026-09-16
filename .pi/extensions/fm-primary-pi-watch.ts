@@ -1139,6 +1139,26 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand?.("task", {
+    description: "Show one current or closed Firstmate task in detail.",
+    handler: async (args, ctx) => {
+      const detailScript = `${fmRoot}/bin/fm-task.sh`;
+      const selector = args.trim();
+      const detailArgs = selector ? selector.split(/\s+/) : [];
+      const result = await runCommandAsync("bash", [detailScript, ...detailArgs], {
+        cwd: fmRoot,
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || "No task detail.";
+      ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
+    },
+  });
+
   pi.registerCommand?.("close", {
     description: "Review or close completed Firstmate tasks into private history.",
     handler: async (args, ctx) => {
