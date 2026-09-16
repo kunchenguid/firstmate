@@ -39,8 +39,9 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
-An interrupt is not complete until the composer is empty.
-muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
+The control-plane interrupt sequence is backend-owned and does not itself promise that the composer becomes empty.
+For the separate `fm-send.sh --key Escape` path, muse may restore the cancelled prompt as real text; that path sends Ctrl+U only after proving the composer content is a suffix of the cancelled run's recorded `started.prompt`.
+Fresh input, a mismatch, an unreadable composer, or an unprovable prompt leaves the composer untouched with a warning, so the captain's input is not clobbered.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
