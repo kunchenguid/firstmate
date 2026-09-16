@@ -100,7 +100,7 @@ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 ## OMP
 
 Calm on OMP is the `fm-calm-omp` extension package under `extensions/fm-calm-omp`, installed into OMP's user plugin scope so it loads in every omp session regardless of working directory.
-`bin/fm-omp-calm-install.sh` runs `omp plugin link` against that package; `omp plugin uninstall fm-calm-omp` removes it.
+`bin/fm-omp-calm-install.sh` runs `omp plugin link` against that package. To unload it, run `omp plugin disable fm-calm-omp` (or delete the linked symlink); `omp plugin uninstall fm-calm-omp` clears the lockfile entry but leaves the symlink, so the extension still loads.
 The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
 The installer retires a legacy project-local `.omp/extensions/fm-calm-omp.ts` for the same reason, removing an identical copy and renaming a divergent one to `.bak`.
 
