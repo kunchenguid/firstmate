@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-send typed-plane submit-confirm budget for agy targets.
+# fm-send typed-plane submit-confirm budgets for agy and HumanLayer targets.
 #
 # A typed send to an explicit tmux agy endpoint is acknowledged only by the
 # submit core's idle-to-busy transition poll: agy's bare `>` composer verdict
@@ -11,8 +11,7 @@
 # submitted" for a message that landed and ran, inviting a duplicate resend.
 # fm-send now gives agy typed targets a longer default budget (20 retries,
 # ~8s at the default cadence); an explicit FM_SEND_RETRIES still wins and every
-# other harness keeps the
-# shared 3-retry default. These tests pin that behavior hermetically (stubbed
+# other harness except HumanLayer keeps the shared 3-retry default. These tests pin that behavior hermetically (stubbed
 # tmux + sleep, no real agent): the fake tmux renders the busy footer only
 # from the BUSY_AT-th plain pane capture, so the number of logged 0.4s waits
 # stands in for wall-clock latency and each case is deterministic:
@@ -46,12 +45,21 @@ TMP_ROOT=$(fm_test_tmproot fm-send-agy-confirm)
 make_stubs() {  # <dir> <busy-at> -> echoes fakebin dir
   local dir=$1 busy_at=$2 fb="$1/fakebin"
   mkdir -p "$fb"
+  printf '%s' "$busy_at" > "$dir/busy-at"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 cnt_file="$dir/plain.count"
 case "\${1:-}" in
-  send-keys) exit 0 ;;
+  pipe-pane)
+    if [ "\$2" = -O ]; then printf '%s' "\${!#}" > "$dir/pipe-command"; else rm -f "$dir/pipe-command"; fi
+    exit 0 ;;
+  send-keys)
+    if [ "\${FM_TEST_HARNESS:-}" = humanlayer ]; then
+      printf '%s\n' "\$*" >> "$dir/keys.log"
+      case "\$*" in *Enter*) touch "$dir/submitted" ;; esac
+    fi
+    exit 0 ;;
   display-message)
     for a in "\$@"; do
       case "\$a" in
@@ -61,6 +69,15 @@ case "\${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ "\${FM_TEST_HARNESS:-}" = humanlayer ]; then
+      if [ "\${FM_TEST_DRAFT:-0}" = 1 ]; then printf '> draft\n'; exit 0; fi
+      if [ ! -f "$dir/submitted" ]; then printf '>\n'; exit 0; fi
+      n=\$(( \$(cat "\$cnt_file" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "\$n" > "\$cnt_file"
+      printf '> Append steer1 line to notes.md\n'
+      [ "\$n" -lt $busy_at ] || printf '[Assistant] Done\n'
+      exit 0
+    fi
     styled=0
     for a in "\$@"; do [ "\$a" = -e ] && styled=1; done
     if [ "\$styled" = 1 ]; then
@@ -83,6 +100,14 @@ SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${1:-}" >> "$FM_SLEEP_LOG"
+dir=${FM_SLEEP_LOG%/*}
+if [ "${FM_TEST_HARNESS:-}" = humanlayer ] && [ -f "$dir/submitted" ] && [ -f "$dir/pipe-command" ]; then
+  n=$(( $(cat "$dir/evidence.count" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$dir/evidence.count"
+  if [ "$n" -ge "$(cat "$dir/busy-at")" ]; then
+    printf '> Append steer1 line to notes.md\n[Assistant] Done\n' | bash -c "$(cat "$dir/pipe-command")"
+  fi
+fi
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -105,11 +130,17 @@ run_send() {  # <harness> <busy-at> [env=val ...]
   log="$dir/sleep.log"; : > "$log"
   fm_write_meta "$dir/state/agyw.meta" "window=sess:win" "harness=$harness"
   (
-    export FM_GATE_REFUSE_BYPASS=1 FM_SEND_SETTLE=0
+    export FM_GATE_REFUSE_BYPASS=1 FM_SEND_SETTLE=0 FM_TEST_HARNESS="$harness"
+    unset FM_SEND_RETRIES
     export PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_SLEEP_LOG="$log"
     for a in "$@"; do eval "export $a"; done
     "$SEND" sess:win 'Append steer1 line to notes.md' 2>"$dir/err"
-    printf 'rc %s\n' "$?"
+    send_rc=$?
+    if [ "${FM_TEST_DRAFT:-0}" = 1 ] && [ -s "$dir/keys.log" ]; then
+      printf 'draft was injected into\n' >&2
+      send_rc=99
+    fi
+    printf 'rc %s\n' "$send_rc"
   )
 }
 
@@ -163,3 +194,26 @@ expect_code 1 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
   "claude typed send keeps the shared 3-retry default"
 grep -q 'verdict=unknown' "$TMP_ROOT"/*/err || fail "claude typed send: expected verdict=unknown refusal"
 pass "claude typed send: late busy footer still refuses (agy budget is agy-scoped)"
+
+# HumanLayer confirms only after provider output arrives. Model a response
+# after 24 seconds using the recorded poll cadence, without spending tokens.
+out=$(run_send humanlayer 60)
+expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "humanlayer default confirms delayed provider output"
+out=$(run_send humanlayer 60 'FM_SEND_RETRIES=3')
+expect_code 1 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "humanlayer explicit short budget still expires"
+out=$(run_send humanlayer 999)
+expect_code 1 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "humanlayer missing submission evidence still refuses"
+out=$(run_send humanlayer 1 'FM_TEST_DRAFT=1')
+expect_code 1 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "humanlayer pending draft still refuses before injection"
+for case_dir in "$TMP_ROOT"/case-*; do
+  [ ! -f "$case_dir/keys.log" ] || {
+    enters=$(grep -c Enter "$case_dir/keys.log" || true)
+    [ "$enters" = 1 ] || fail "humanlayer must submit only once"
+  }
+done
+
+pass "humanlayer delayed confirmation, timeout override, missing evidence, draft refusal, and single submission"

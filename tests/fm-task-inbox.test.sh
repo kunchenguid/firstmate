@@ -712,3 +712,31 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+
+test_watcher_humanlayer_pending_input() {
+  local dir state rec out log pid action i=0
+  dir=$(setup_watch_case humanlayer-pending)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=humanlayer"
+  printf '> draft\n' > "$dir/pending.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/pending.capture" \
+    FM_FAKE_TMUX_AGENT=humanlayer FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  action=
+  while [ "$i" -lt 100 ]; do
+    action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+    [ "$action" = quiet ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$action" = quiet ] || fail "the watcher did not attempt the due HumanLayer doorbell: $(cat "$out")"
+  [ ! -s "$log" ] || fail "the watcher typed a doorbell into pending HumanLayer input"
+  [ -f "$rec" ] || fail "the pending instruction must remain queued"
+  pass "watcher: HumanLayer re-rings preserve pending composer input"
+}
+test_watcher_humanlayer_pending_input

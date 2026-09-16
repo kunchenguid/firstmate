@@ -278,6 +278,14 @@ fm_backend_tmux_foreground_pids() {  # <target>
       done
 }
 
+fm_backend_tmux_humanlayer_busy() {
+  local foreground snapshot
+  foreground=$(fm_backend_tmux_foreground_pids "$1")
+  [ -n "$foreground" ] || return 1
+  snapshot=$(LC_ALL=C ps -axo pid=,ppid=,pgid=,stat=,comm= 2>/dev/null) || return 1
+  printf '%s\n' "$snapshot" | fm_humanlayer_processes_active "$foreground"
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0

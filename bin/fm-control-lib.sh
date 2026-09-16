@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|humanlayer) return 0 ;;
   esac
   return 1
 }
@@ -83,6 +83,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
+    humanlayer) printf 'humanlayer' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -96,9 +97,9 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, and agy
-# are crewmate/scout adapters only: none has a primary supervision protocol,
-# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and
+# humanlayer are crewmate/scout adapters only: none has a primary supervision
+# protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -106,7 +107,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|humanlayer) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -121,10 +122,15 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
 # through Herdr).
+# humanlayer's Escape is a no-op while a turn runs (verified live, humanlayer
+# 0.31.0); a single Ctrl+C interrupts the running turn, printing
+# `[Done] Agent interrupted` with an idle bare-`>` composer and no repollution.
+# The same Ctrl+C key exits the agent when delivered at its idle composer, so
+# its exit entry is a KEY, not a composer command - see fm_control_exit_key.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|humanlayer) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -134,7 +140,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|humanlayer) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -155,7 +161,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|humanlayer) ;;
     *) return 1 ;;
   esac
 }
@@ -170,16 +176,36 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|humanlayer) printf 'none' ;;
     *) return 1 ;;
   esac
 }
 
 # The command that exits the agent from its own composer.
+# humanlayer has no verified exit COMMAND: typed `/quit` and `/exit` are
+# delivered to the model as ordinary chat (verified live, humanlayer 0.31.0 -
+# the agent replied "Goodbye!" and stayed alive), so its exit is a KEY
+# instead - a single Ctrl+C at its idle composer exits the process (verified
+# live). fm_control_exit_key owns that key; this table returns nonzero for
+# humanlayer so the text path refuses rather than typing chat.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The key that exits the agent, for the adapters whose verified exit is a
+# key rather than a composer command - today only humanlayer, whose single
+# Ctrl+C exits at the idle composer and interrupts a running turn first
+# (the same key, so do_exit's interrupt-then-exit sequence is two presses
+# for a busy agent and one for an idle one). Prints nothing and returns
+# nonzero for every adapter whose exit is a composer command owned by
+# fm_control_exit_command.
+fm_control_exit_key() {  # <harness>
+  case "${1-}" in
+    humanlayer) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }

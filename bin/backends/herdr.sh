@@ -3408,17 +3408,6 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_busy_state: semantic busy state from herdr's native
-# agent-state detection (agent.get), the "first backend where fm_session_busy_state
-# gets real semantics" per the design report. See
-# fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
-# mapping.
-#
-# A `busy` verdict is proven at process level before it is reported: a
-# lingering `working` registration over a shell-only pane (an agent killed
-# mid-turn, issue #4115) reads `unknown`, never busy, so the recovery classifier
-# cannot report a shell-only pane as working. Only the busy case pays the extra
-# process read; idle and unknown are never trusted as busy by any consumer.
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }

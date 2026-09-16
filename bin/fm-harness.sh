@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|humanlayer|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -227,6 +227,18 @@ harness_process_verdict() {  # <pid>
     # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
+    # humanlayer (HumanLayer CLI) publishes no harness-identity marker of its
+    # own, and its tool children inherit the launching environment unchanged
+    # (verified live on humanlayer 0.31.0: a codelayer tool subprocess carried
+    # the launching shell's PI_CODING_AGENT and AI_AGENT with no HUMANLAYER_*
+    # or CODELAYER_* variable added), so like muse it is detected by ancestry
+    # alone. The installed launcher is a node shim (~/.local/bin/humanlayer)
+    # that execs a platform-native child whose process name is exactly
+    # `humanlayer` (.../@humanlayer/cli-darwin-arm64/bin/humanlayer), so the
+    # native child is matched at comm strength here and the node shim through
+    # its script path in the args arm below. Anchored, never *humanlayer*, so
+    # unrelated commands cannot be misread as this harness.
+    humanlayer) echo "comm humanlayer"; return ;;
     agy) echo "comm agy"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
@@ -236,6 +248,13 @@ harness_process_verdict() {  # <pid>
         return
       fi
       case "$args" in
+        # humanlayer precedes codex deliberately: every humanlayer launch
+        # carries `codelayer --provider codex`, so the codex fragment is a
+        # substring of the humanlayer shim's own args and a later *codex* arm
+        # would rename it (tests/fm-humanlayer-harness.test.sh pins this).
+        # The comm arm above needs no such ordering: the native child's name
+        # is exactly `humanlayer` and never contains the codex fragment.
+        *humanlayer*) echo "args humanlayer"; return ;;
         *claude*) echo "args claude"; return ;;
         *codex*) echo "args codex"; return ;;
         *opencode*) echo "args opencode"; return ;;
