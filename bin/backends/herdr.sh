@@ -352,7 +352,12 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 # precedence over everything below. Otherwise, a non-empty
 # `config/herdr-workspace-label` (docs/configuration.md) overrides the label
 # with its own trimmed contents, letting the captain name a primary home's
-# workspace (e.g. "Mate Raiz"). Absent both, the PRIMARY home resolves to the
+# workspace (e.g. "Mate Raiz"). The override must be a SINGLE line: the label
+# is recorded as one `parent_label=` line of the exact-binding projection
+# journal, whose validated version:line-count pairing an embedded newline
+# would break, so a multi-line file is refused and falls through to the
+# default rather than emitting a label no journal can round-trip. Absent
+# both, the PRIMARY home resolves to the
 # constant "firstmate", byte-identical to every pre-existing task's recorded
 # label - no forced migration. Read fresh from FM_HOME on every call rather
 # than cached at source time: FM_HOME is the home's own durable identity, not
@@ -372,8 +377,9 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   if [ -f "$label_file" ]; then
-    custom=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$label_file" 2>/dev/null)
-    if [ -n "$custom" ]; then
+    custom=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/./,$!d' "$label_file" 2>/dev/null)
+    if [ -n "$custom" ] \
+      && [ "$(printf '%s' "$custom" | wc -l | tr -d '[:space:]')" -eq 0 ]; then
       printf '%s' "$custom"
       return 0
     fi
