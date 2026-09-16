@@ -237,6 +237,38 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
 
+# --- ambient-home poison guard -----------------------------------------------
+#
+# Every FM_HOME-consuming script resolves `${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}`,
+# where FM_ROOT is the checkout the invoked bin/ script physically lives in. In
+# production that fallback is correct: firstmate's tracked bin/ lives inside its
+# own FM_HOME, so an unset FM_HOME lands on the right home. A test process runs
+# the SAME `$ROOT/bin/*.sh` scripts, often directly out of the operator's real,
+# live firstmate checkout, so the identical fallback lands on the operator's
+# real FM_HOME - real backlog, real secondmate parent channels - the moment a
+# fixture invokes a publisher script (fm-pr-check.sh, fm-inactive-reconcile.sh,
+# fm-teardown.sh, fm-captain-hold.sh, fm-pr-merge.sh, fm-secondmate-report.sh,
+# fm-pending-reply-lib.sh, and anything else that reports through
+# fm-parent-channel-lib.sh or fm-classify-lib.sh) without an explicit per-call
+# FM_HOME. A fixture that did exactly this once published a fabricated
+# PR-ready status into a live secondmate's parent channel.
+#
+# The fix is structural rather than a per-test-file review: FM_HOME is pinned
+# here, once, to a fresh empty per-process directory, so every script this
+# suite drives resolves FM_HOME (and, through STATE's own
+# `${FM_STATE_OVERRIDE:-$FM_HOME/state}` fallback, STATE) to that empty
+# directory by default. A fixture that legitimately needs a home seeds and
+# exports its OWN FM_HOME, which simply overrides this default; a fixture that
+# forgets now fails against missing fixture state inside an empty scratch
+# directory instead of silently writing into the operator's real checkout.
+# tests/fm-ambient-home-guard.test.sh pins this behavior and proves a sentinel
+# "live home" stays byte-identical across a run that never sets FM_HOME.
+FM_TEST_AMBIENT_GUARD=$(fm_test_tmproot fm-ambient-guard) || return 1
+printf 'do-not-use: catches a forgotten FM_HOME override; see tests/lib.sh ambient-home poison guard\n' \
+  > "$FM_TEST_AMBIENT_GUARD/.fm-ambient-guard" || return 1
+FM_HOME="$FM_TEST_AMBIENT_GUARD"
+export FM_HOME
+
 # --- live-capability gate ---------------------------------------------------
 #
 # fm_live_gate <policy> <vars> [tool ...]
