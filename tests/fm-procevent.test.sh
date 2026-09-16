@@ -748,11 +748,12 @@ pass "pending dock prompts survive destructive poll failure and bounded capture"
 
 # --- primary watcher automatically registers Lavish sessions ---------------
 HAUTOLAVISH="$TMP_ROOT/hauto-lavish"; new_home "$HAUTOLAVISH"
+HOTHERLAVISH="$TMP_ROOT/hother-lavish"; new_home "$HOTHERLAVISH"
 AUTO_LAVISH_ROOT="$TMP_ROOT/auto-lavish-primary"
 AUTO_LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/auto-lavish-stub")
 AUTO_LAVISH_STORE="$TMP_ROOT/auto-lavish-store"
-AUTO_LAVISH_ART="$TMP_ROOT/auto-lavish-board.html"
-mkdir -p "$AUTO_LAVISH_ROOT" "$AUTO_LAVISH_STORE"
+AUTO_LAVISH_ART="$HAUTOLAVISH/.lavish/auto-lavish-board.html"
+mkdir -p "$AUTO_LAVISH_ROOT" "$AUTO_LAVISH_STORE" "$HAUTOLAVISH/.lavish"
 ln -s "$ROOT/bin" "$AUTO_LAVISH_ROOT/bin"
 git -C "$AUTO_LAVISH_ROOT" init -q
 printf '# Primary test home\n' > "$AUTO_LAVISH_ROOT/AGENTS.md"
@@ -796,6 +797,12 @@ auto_lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$AUTO_LAVISH_ART"
 fm_test_track_procevent_home "$HAUTOLAVISH"
 export AUTO_LAVISH_ART
 PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$AUTO_LAVISH_STORE" \
+  FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HOTHERLAVISH" \
+  FM_STATE_OVERRIDE="$HOTHERLAVISH/state" \
+  bash -c '. "$1/bin/fm-watch.sh"; procevent_reconcile_tick' _ "$ROOT"
+assert_absent "$HOTHERLAVISH/state/procevent/$auto_lavish_id.source" \
+  "another primary home claimed the Studio Lavish session"
+PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$AUTO_LAVISH_STORE" \
   FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HAUTOLAVISH" \
   FM_STATE_OVERRIDE="$HAUTOLAVISH/state" \
   bash -c '. "$1/bin/fm-watch.sh"; procevent_reconcile_tick' _ "$ROOT"
@@ -812,7 +819,32 @@ assert_grep 'automatic dock delivery' "$AUTO_LAVISH_RESULT" \
 [ "$(wake_payloads "$HAUTOLAVISH" | grep -c "procevent lavish $auto_lavish_id 1" || true)" = 1 ] \
   || fail "automatic registration did not use exactly one process-event wake"
 unset AUTO_LAVISH_ART
-pass "primary watcher auto-registers Lavish feedback on the process-event path"
+pass "Studio watcher exclusively auto-registers Lavish feedback"
+
+HFAILLAVISH="$TMP_ROOT/hfail-lavish"; new_home "$HFAILLAVISH"
+FAIL_LAVISH_STORE="$TMP_ROOT/fail-lavish-store"
+mkdir -p "$FAIL_LAVISH_STORE"
+printf '{broken\n' > "$FAIL_LAVISH_STORE/state.json"
+for _ in 1 2; do
+  PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$FAIL_LAVISH_STORE" \
+    FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HFAILLAVISH" \
+    FM_STATE_OVERRIDE="$HFAILLAVISH/state" \
+    bash -c '. "$1/bin/fm-watch.sh"; procevent_reconcile_tick' _ "$ROOT"
+done
+FAIL_LAVISH_WAKES=$(wake_payloads "$HFAILLAVISH")
+[ "$(printf '%s\n' "$FAIL_LAVISH_WAKES" | grep -c '^check: Lavish auto-discovery failed:' || true)" = 1 ] \
+  || fail "Lavish discovery failure was not reported once per episode"
+printf '%s\n' "$FAIL_LAVISH_WAKES" | awk 'length($0) > 600 { exit 1 }' \
+  || fail "Lavish discovery failure wake was not bounded"
+assert_present "$HFAILLAVISH/state/.lavish-discovery-failed"
+printf '{"sessions":{}}\n' > "$FAIL_LAVISH_STORE/state.json"
+PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$FAIL_LAVISH_STORE" \
+  FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HFAILLAVISH" \
+  FM_STATE_OVERRIDE="$HFAILLAVISH/state" \
+  bash -c '. "$1/bin/fm-watch.sh"; procevent_reconcile_tick' _ "$ROOT"
+assert_absent "$HFAILLAVISH/state/.lavish-discovery-failed" \
+  "successful Lavish discovery did not clear the failure episode"
+pass "Lavish discovery failures produce one bounded wake per episode"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still

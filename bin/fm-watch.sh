@@ -1846,16 +1846,47 @@ event_wait_or_sleep() {
   esac
 }
 
+report_lavish_discovery_failure() {
+  local detail=$1 marker="$STATE/.lavish-discovery-failed" nonce tmp
+
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ]
+    return
+  fi
+  detail=$(printf '%s' "$detail" | LC_ALL=C tr '\t\r\n' '   ' | LC_ALL=C cut -c 1-512)
+  [ -n "$detail" ] || detail="unknown error"
+  nonce="${RANDOM}${RANDOM}"
+  tmp=$(umask 077; mktemp "$STATE/.lavish-discovery-failed.XXXXXX") || return 1
+  if ! printf '%s\n' "$nonce" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fm_wake_append check "procevent:lavish:discover-failed:$nonce" \
+    "check: Lavish auto-discovery failed: $detail"; then
+    rm -f -- "$marker"
+    return 1
+  fi
+}
+
 procevent_reconcile_tick() {
+  local discovery_error status=0
+
   if ! fm_root_is_secondmate_home "$FM_ROOT" \
     && fm_primary_scope_matches "$FM_ROOT" "$STATE"; then
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-procevent-lavish.sh" discover >/dev/null 2>&1 || true
+    if discovery_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-procevent-lavish.sh" discover "$FM_HOME" 2>&1 >/dev/null); then
+      rm -f -- "$STATE/.lavish-discovery-failed" || status=1
+    else
+      report_lavish_discovery_failure "$discovery_error" || status=1
+    fi
   fi
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
+  return "$status"
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a

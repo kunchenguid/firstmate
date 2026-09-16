@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
-#   fm-procevent-lavish.sh discover
+#   fm-procevent-lavish.sh discover <artifact-root>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -177,21 +177,26 @@ registration_matches() {
 }
 
 cmd_discover() {
-  local store artifacts artifact real id status=0
-  [ "$#" -eq 0 ] || usage
+  local scope=${1-} store artifacts artifact real id status=0
+  [ -n "$scope" ] || usage
+  [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  scope=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$scope" 2>/dev/null) \
+    || die "cannot resolve the artifact root: $scope"
+  [ -d "$scope" ] || die "artifact root is not a directory: $scope"
   store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
   if [ ! -e "$store" ] && [ ! -L "$store" ]; then
     return 0
   fi
   [ -f "$store" ] && [ ! -L "$store" ] || die "Lavish state store must be a regular file"
-  artifacts=$(python3 - "$store" <<'PY'
+  artifacts=$(python3 - "$store" "$scope" <<'PY'
 import json
 import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as fh:
     data = json.load(fh)
+scope = sys.argv[2]
 sessions = data.get("sessions", {})
 if not isinstance(sessions, dict):
     raise SystemExit("Lavish sessions must be an object")
@@ -209,7 +214,11 @@ for session in sessions.values():
     if not isinstance(path, str) or not path or any(c in path for c in "\0\r\n"):
         continue
     real = os.path.realpath(path)
-    if os.path.isfile(real):
+    try:
+        owned = os.path.commonpath((scope, real)) == scope
+    except ValueError:
+        owned = False
+    if owned and os.path.isfile(real):
         paths.add(real)
 for path in sorted(paths):
     print(path)
