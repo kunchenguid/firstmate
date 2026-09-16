@@ -2686,6 +2686,7 @@ test_device_rerecord_serializes_direct_rearm() {
     sleep 0.02
   done
   [ "$FM_PR_META_URL" = "$url_b" ] || fail "direct re-arm did not rewrite metadata before publication"
+  sleep 1
   process_is_live_non_zombie "$rearm_pid" || fail "direct re-arm did not wait for poll publication"
   cmp -s "$dir/published.pr-poll" "$state/task-a.pr-poll" \
     || fail "blocked direct re-arm replaced the published sidecar"
@@ -2735,6 +2736,7 @@ SH
     sleep 0.02
   done
   [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record"
+  sleep 1
   process_is_live_non_zombie "$watcher_pid" || fail "watcher did not wait for poll publication"
   [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \
     || fail "blocked watcher rewrote a device-shifted registration"
