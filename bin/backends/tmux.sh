@@ -258,9 +258,10 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
-# The foreground group's full command lines. Needed because a node-bundle
-# harness carries its identity in argv[1] rather than in its command name or
-# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
+# The foreground group's full command lines. Needed because some harnesses
+# carry their identity in argv[1] rather than in their command name or argv[0]:
+# gemini's node bundle (bin/fm-gemini-lib.sh owns what counts as evidence) and
+# omp's bun launcher (fm_omp_args_are_omp in bin/fm-session-lock-lib.sh).
 fm_backend_tmux_foreground_args() {  # <target>
   local target=$1 tty pid pgid tpgid comm args
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
@@ -386,6 +387,10 @@ EOF
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if fm_gemini_args_are_gemini "$name"; then
+      printf 'alive'
+      return 0
+    fi
+    if fm_omp_args_are_omp "$name"; then
       printf 'alive'
       return 0
     fi
