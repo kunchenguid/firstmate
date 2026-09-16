@@ -151,7 +151,7 @@ class Azure:
                 and isinstance(pr.get("closedDate"), str) and bool(pr["closedDate"]),
                 "Azure PR completion is not confirmed")
         sha(pr.get("lastMergeCommit", {}).get("commitId"))
-        return sha(pr["lastMergeSourceCommit"]["commitId"])
+        return sha(pr["lastMergeCommit"]["commitId"])
 
     def latest_iteration(self):
         iterations = self.listing("pullRequestIterations")

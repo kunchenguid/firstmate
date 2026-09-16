@@ -42,39 +42,43 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch other than the local no-mistakes
-# mirror (a fork counts as a remote, so upstream-contribution PRs pushed to a
-# fork satisfy this in any mode; the mirror is not a forge), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
-# base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
-# Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
-# cherry, and merge-tree containment each fail to prove content landed without also
-# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or whitespace-exact patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
-# A merge-tree option or execution error reports the content-landed proof as
-# unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
-# Uncommitted changes are never landed. Before return, the dirty check explicitly
-# requests all untracked files, even when status.showUntrackedFiles hides them.
-# Dirty refusals distinguish untracked-only leftovers from tracked edits and list
-# at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
-# untracked work and the clean return control.
+# hard-resets/removes the worktree and kills its processes. Except for the Azure
+# prerequisite below, committed work is accepted when reachable from any
+# remote-tracking branch other than the local no-mistakes mirror (a fork counts
+# as a remote, so upstream-contribution PRs pushed to a fork satisfy this in any
+# mode; the mirror is not a forge), OR - for a normal ship task whose commits are
+# not so reachable - when the forge confirms a merged PR whose landed result
+# contains the local work, or the up-to-date default branch contains it. A task
+# whose meta records base_branch= (bin/fm-spawn.sh) runs that branch content
+# check against origin's copy of its base instead of the default branch.
+# GitHub supplies the PR's actual merge commit; Forgejo exposes only the merged
+# PR head, which is then the result checked. A landed result proves containment
+# by ancestry or by the shared bin/fm-content-containment.py proof; the
+# branch-content fallback uses that same helper. Its header owns the raw-history,
+# final-content and location obligations, including restorations, and the
+# ambiguity/resource limits. This recognizes rebased and squash-merged work
+# without accepting unmatched later local changes; patch-id matches and
+# merge/apply heuristics never override a failed proof.
+# PR discovery uses recorded pr= first, or looks up the local branch on GitHub
+# when no PR was recorded; either route requires a confirmed merge. Missing
+# result objects are fetched by SHA, then via the PR head ref or default branch
+# as available; the source head itself is never substituted for GitHub's actual
+# merge result. A forge lookup error falls back to the branch-content proof; an
+# inconclusive proof refuses cleanup, and a proof the helper could not complete
+# is reported as unavailable rather than as unlanded work.
+# Azure PR tasks instead require a registered canonical URL and confirmed
+# completion from bin/fm-azure-pr.py before any remote-reachability shortcut.
+# They then prove local work contained in the completed merge result or the
+# branch-content fallback above. An active, abandoned or unreadable Azure PR
+# cannot use that fallback to bypass completion. With no pr=, a non-local-only
+# task whose origin identifies Azure (HTTPS or SSH) refuses; an unreadable origin
+# classification also refuses. This prerequisite still applies when the task's
+# worktree is absent but an Azure PR URL is recorded.
+# Uncommitted changes are never landed, including in initialized nested
+# submodules even when ignore settings hide them. Before return, the dirty check
+# explicitly requests all untracked files, even when status.showUntrackedFiles
+# hides them. Dirty refusals distinguish untracked-only leftovers from tracked
+# edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1646,12 +1650,10 @@ azure_work_is_landed() {
   local head current
   head=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" landed "$PR_URL") || return 1
   [ -d "$WT" ] || return 0
-  if ! git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null; then
-    git -C "$WT" fetch --quiet origin "$head" >/dev/null 2>&1 || return 1
-  fi
+  ensure_commit_object "$PR_URL" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
-    || content_in_commit "$head" all || content_in_default
+    || content_in_commit "$head" || content_in_default
 }
 
 azure_remote_origin_requires_pr() {
@@ -1663,11 +1665,10 @@ import sys
 from urllib.parse import urlsplit
 
 url = sys.argv[1]
+scp = re.fullmatch(r"((?:[^@/:]+@)?[^@/:]+):(?!//)(.*)", url)
+if scp:
+    url = f"ssh://{scp[1]}/{scp[2]}"
 parsed = urlsplit(url)
-normalized = url.lower()
-if not parsed.scheme and re.fullmatch(r"[^@/:]+@[^/:]+:.*", normalized):
-    normalized = "ssh://" + normalized
-    parsed = urlsplit(normalized)
 host = (parsed.hostname or "").lower()
 kind = "non-azure"
 if parsed.scheme in ("http", "https") and host == "dev.azure.com":
@@ -1702,84 +1703,42 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n name
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$commit" >/dev/null 2>&1 || true
+  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  if n=$(pr_number_from_target "$target"); then
+    git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || true
+    git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  fi
+  name=$(default_branch) || return 1
+  git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
+# One raw-object, history/location-aware proof for PR and default-branch paths.
+# The helper owns its exact evidence, ambiguity and resource-bound contract.
+# Its unknown result (exit 2) names an unavailable proof in
+# CONTENT_LANDED_PROOF_ERROR, so the refusal does not claim the work is unlanded.
 content_in_commit() {
-  local ref=$1 mode=${2:-unpushed} commits merge_base status path rc=0 paths_file ref_tree_file head_tree_file
-  case "$mode" in
-    all)
-      merge_base=$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null) || return 1
-      commits=$(git -C "$WT" rev-list --reverse "$merge_base..HEAD" 2>/dev/null) || return 1
-      ;;
-    unpushed)
-      commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- 2>/dev/null) || return 1
-      ;;
-    *) return 1 ;;
+  local rc=0
+  python3 "$SCRIPT_DIR/fm-content-containment.py" "$WT" "$1" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) ;;
+    *) CONTENT_LANDED_PROOF_ERROR="the final-content containment proof could not complete (exit $rc)" ;;
   esac
-  [ -n "$commits" ] || return 1
-  paths_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-paths.XXXXXX") || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    git -C "$WT" -c core.quotePath=false -c diff.ignoreSubmodules=none \
-      diff-tree --ignore-submodules=none --no-commit-id --name-status -r -z -m "$commit" -- \
-      >> "$paths_file" || {
-        rm -f -- "$paths_file"
-        return 1
-      }
-  done <<EOF
-$commits
-EOF
-  if [ ! -s "$paths_file" ]; then
-    rm -f -- "$paths_file"
-    return 0
-  fi
-  ref_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-ref.XXXXXX") || {
-    rm -f -- "$paths_file"
-    return 1
-  }
-  head_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-head.XXXXXX") || {
-    rm -f -- "$paths_file" "$ref_tree_file"
-    return 1
-  }
-  exec 3< "$paths_file"
-  while IFS= read -r -d '' status <&3; do
-    case "$status" in
-      R*|C*)
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        ;;
-      *)
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        ;;
-    esac
-  done
-  exec 3<&-
-  rm -f -- "$paths_file" "$ref_tree_file" "$head_tree_file"
-  [ "$rc" -eq 0 ]
+  return 1
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
-# forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
-# non-zero when the PR is not merged, the current work is not contained in the
-# PR head, no PR is found, or any forge read error occurs - the caller then
-# falls back to the content check.
+# forge for both the PR state and landed result: a recorded Forgejo URL is read
+# through tea (fm_pr_forgejo_read_record), and everything else through GitHub's
+# actual merge commit. Returns non-zero when the PR is not merged, the result
+# does not contain current local work, no PR is found, or any forge read error
+# occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1795,7 +1754,7 @@ pr_is_merged() {
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
   else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    view=$(cd "$WT" && gh pr view "$target" --json state,mergeCommit,url -q '.state + "\t" + (.mergeCommit.oid // "") + "\t" + .url' 2>/dev/null) || return 1
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
     [ "$state" != "$view" ] || return 1
@@ -1823,15 +1782,9 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, a merge conflict,
-# or a Git error), so the caller refuses rather than guesses.
-# CONTENT_LANDED_PROOF_ERROR names a merge-tree option or execution failure
-# separately from a conflict or differing tree.
+# Fetch current recorded-base (or default) content, then use exactly the same
+# final-content proof as the PR path. No alternate merge/apply heuristic may
+# override a refusal. Returns non-zero when inconclusive, so the caller refuses.
 content_in_default() {
   local name=${BASE_BRANCH:-} ref
   CONTENT_LANDED_PROOF_ERROR=
@@ -1844,14 +1797,11 @@ content_in_default() {
   else
     return 1
   fi
-  content_in_commit "$ref" all
+  content_in_commit "$ref"
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# when neither proof establishes that the work landed.
+# The script header owns the landed-work decision; an unknown proof is a refusal,
+# not evidence that the local work is absent or safe to discard.
 work_is_landed() {
   local branch=$1
   [ "${TEARDOWN_AZURE_LANDED:-0}" != 1 ] || return 0
@@ -2181,7 +2131,7 @@ teardown_note_dirty_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
+  local dirty_raw dirty submodule_dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -2224,6 +2174,17 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+  # Each initialized level gets an explicit ignore override. A parent's status
+  # alone can hide a dirty nested module through that module's own configuration.
+  # shellcheck disable=SC2016 # These variables belong to each submodule's shell.
+  if ! submodule_dirty=$(git -C "$WT" submodule foreach --quiet --recursive '
+    changes=$(git -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none) || exit 1
+    [ -z "$changes" ] || printf "%s\n" "submodule has uncommitted changes"
+  ' 2>/dev/null); then
+    echo "REFUSED: cannot inspect initialized submodules for uncommitted changes." >&2
+    return 1
+  fi
+  [ -z "$submodule_dirty" ] || dirty="${dirty:+$dirty$'\n'}$submodule_dirty"
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2267,7 +2228,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
-        echo "Restore or upgrade Git and retry the content check." >&2
+        echo "Restore the missing history or tools (Git, python3) and retry the content check." >&2
       else
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       fi
