@@ -945,7 +945,7 @@ Final current-session smoke procedure:
 
 1. Generate a non-default session with `LAB=$(bin/fm-herdr-lab.sh name launch-smoke)`, provision it with `bin/fm-herdr-lab.sh provision "$LAB"`, and create a disposable `FM_HOME`, project clone, scout brief, and task id inside the lab fixture.
 2. From a Firstmate pane in that named lab, launch the scout with `FM_HOME=<lab-home> bin/fm-spawn.sh <task-id> <lab-project> --scout --harness codex --backend herdr`; do not set model or effort overrides.
-3. Read the task's recorded `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id`, then use `bin/fm-herdr-lab.sh run "$LAB" workspace list --json` and `bin/fm-herdr-lab.sh run "$LAB" agent get <pane-id>` to confirm that the new Codex agent is native to the launcher's current workspace and appears in that workspace's sidebar.
+3. Read the task's recorded Herdr endpoint, session, `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id`, then run `herdr agent get <pane-id> --session <session>` against that endpoint to confirm that the new Codex agent is native to the launcher's current workspace and appears in that workspace's sidebar.
 4. Run `FM_HOME=<lab-home> bin/fm-send.sh <task-id> '<unique smoke token>'`, confirm the worker acknowledges the token, and run `FM_HOME=<lab-home> bin/fm-peek.sh <task-id>` to confirm the same pane renders the acknowledgement.
 5. After the scout report and decision gate are complete, run `FM_HOME=<lab-home> bin/fm-teardown.sh <task-id>`, verify the recorded pane no longer exists, and finish with `bin/fm-herdr-lab.sh teardown "$LAB"`; the guarded helper must report that the default-session fleet-state tripwire is unchanged.
 
