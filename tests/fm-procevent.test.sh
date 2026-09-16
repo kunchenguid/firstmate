@@ -672,6 +672,7 @@ with open(store, "w", encoding="utf-8") as fh:
     json.dump({"sessions": {"recovery": {
         "file": artifact,
         "status": "feedback",
+        "session_ended": True,
         "prompts": [{
             "uid": "",
             "prompt": "survive destructive poll",
@@ -725,6 +726,8 @@ assert_grep 'status: feedback' "$RECOVERY_RESULT" \
   "the bounded recovery result retains its feedback lifecycle"
 assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "a truncated capture does not acknowledge the complete recovery snapshot"
+assert_present "$HRECOVERY/state/procevent/$recovery_id.source" \
+  "a truncated terminal capture retains its recovery source"
 PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] \
   || fail "complete recovery polled the already-cleared source again"
@@ -738,6 +741,8 @@ assert_contains "$recovery_read" "/tmp/recovered.png" \
   "the recovered presentation retains attachment metadata"
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "durable capture retires the recovery snapshot"
+assert_absent "$HRECOVERY/state/procevent/$recovery_id.source" \
+  "a complete terminal recovery retires its source"
 [ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 3" || true)" = 1 ] \
   || fail "the complete recovered reply did not use the process-event wake owner"
 printf 'obsolete snapshot\n' > "$HRECOVERY/state/procevent/$recovery_id.lavish-pending"

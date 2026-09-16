@@ -728,7 +728,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 capture_complete=0
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -1009,7 +1009,10 @@ EOF
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
-  if [ "$extension_owner" -eq 0 ] && [ "$truncated" -eq 0 ] && [ "$rc" -eq 0 ]; then
+  if [ "$truncated" -eq 0 ] && [ "$rc" -eq 0 ]; then
+    capture_complete=1
+  fi
+  if [ "$extension_owner" -eq 0 ] && [ "$capture_complete" -eq 1 ]; then
     adapter_capture_committed "$adapter" "$id" "$durable" || true
   fi
 
@@ -1061,7 +1064,7 @@ EOF
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
   fi
-  if adapter_result_is_terminal "$adapter" "$durable"; then
+  if [ "$capture_complete" -eq 1 ] && adapter_result_is_terminal "$adapter" "$durable"; then
     if retire_owned_terminal_source "$id"; then
       printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
     else
