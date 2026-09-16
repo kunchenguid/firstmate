@@ -88,9 +88,10 @@ if [ -f "$BRIEF" ]; then
 fi
 if [ -n "$RECORDED_BRANCH" ]; then
   BRANCH=$RECORDED_BRANCH
-elif ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
-  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
+else
+  BRANCH=$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  BRANCH=${BRANCH#refs/heads/}
+  [ -n "$BRANCH" ] || { echo "error: task $ID has no Crew branch contract and worktree $WT is detached" >&2; exit 1; }
 fi
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
   || { echo "error: $BRIEF records an invalid crew branch: $BRANCH" >&2; exit 1; }

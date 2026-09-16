@@ -190,6 +190,10 @@ if [ -n "$RECORDED_BASE" ]; then
   elif ! git -C "$PROMOTE_PROJ" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
     echo "error: $MODE promotion requires recorded base '$RECORDED_BASE' on origin; a local-only base cannot be a pull-request target" >&2
     exit 1
+  elif ! git -C "$PROMOTE_PROJ" fetch --quiet origin \
+    "+refs/heads/$RECORDED_BASE:refs/remotes/origin/$RECORDED_BASE"; then
+    echo "error: $MODE promotion could not refresh recorded base '$RECORDED_BASE' from origin; refusing to continue with a stale base" >&2
+    exit 1
   fi
   RETURN_BASE=$RECORDED_BASE
   [ "$MODE" = local-only ] || RETURN_BASE="origin/$RECORDED_BASE"

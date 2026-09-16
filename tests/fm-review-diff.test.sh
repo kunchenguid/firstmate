@@ -153,7 +153,6 @@ test_legacy_brief_uses_symbolic_worktree_branch() {
   local case_dir out
   case_dir=$(make_case legacy-branch)
   git -C "$case_dir/wt" checkout -q -b legacy-crew
-  git -C "$case_dir/wt" branch -D fm/task-x1 >/dev/null
   printf 'legacy-crew\n' > "$case_dir/wt/legacy.txt"
   git -C "$case_dir/wt" add legacy.txt
   git -C "$case_dir/wt" commit -qm "legacy crew branch"

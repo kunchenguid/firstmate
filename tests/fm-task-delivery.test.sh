@@ -361,7 +361,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
-  local named_proj origin_only local_only_proj status stale_remote_sha
+  local named_proj origin_only local_only_proj status stale_remote_sha remote_sha
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -451,6 +451,23 @@ STUB
         "$mode promotion did not select the remote recorded base"
     fi
   done
+
+  stale_remote_sha=$(git -C "$named_proj" rev-parse refs/remotes/origin/develop)
+  git -C "$named_proj" -c user.email=t@t -c user.name=t commit --allow-empty -qm advance-remote-develop
+  remote_sha=$(git -C "$named_proj" rev-parse HEAD)
+  git -C "$named_proj" push -q origin HEAD:refs/heads/develop
+  git -C "$named_proj" update-ref refs/remotes/origin/develop "$stale_remote_sha"
+  id=promote-refreshes-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+    "$id" "$named_proj" "$named_proj" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "refresh-remote-base scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Refresh the remote base." "Require the current base tip."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "promotion refused a live recorded remote base: $out"
+  [ "$(git -C "$named_proj" rev-parse refs/remotes/origin/develop)" = "$remote_sha" ] \
+    || fail "promotion left refs/remotes/origin/develop stale"
 
   stale_remote_sha=$(git -C "$named_proj" rev-parse refs/remotes/origin/develop)
   git -C "$named_proj" push -q origin --delete develop
