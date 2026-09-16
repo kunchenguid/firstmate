@@ -118,6 +118,17 @@ harness_marker() {
     echo omp
     return
   fi
+  # dsh (DeepSeek Harness) publishes NO harness-identity marker of its own: a
+  # live DSH host is a node process (ps reports comm=node) whose only launcher
+  # evidence is its argv, and it hands tool and hook subprocesses no DSH_* or
+  # FM_* identity variable. FM_DSH_HARNESS=dsh is therefore a Firstmate-OWNED
+  # launch marker and a PRECEDENCE override, never evidence on its own: it wins
+  # over an inherited CLAUDECODE only when a genuine dsh process is in the
+  # ancestry, exactly as FM_OMP_HARNESS does above.
+  if [ "${FM_DSH_HARNESS:-}" = dsh ] && ancestry_names_dsh; then
+    echo dsh
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -153,6 +164,23 @@ ancestry_names_omp() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
+# True when a DSH host process sits within eight parents of this one. DSH runs
+# as a node process, so its comm is node and its launcher name is visible only
+# in argv; the match is anchored on the dsh launcher path, never a bare *dsh*
+# glob that an unrelated node command could satisfy.
+ancestry_names_dsh() {
+  local pid=$$ args
+  for _ in 1 2 3 4 5 6 7 8; do
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+    case "$args" in
+      */.bin/dsh\ *|*/.bin/dsh|*@deepseek-ai/dsh/lib/bin.js*|*apps/cli/src/bin.ts*) return 0 ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -239,6 +267,7 @@ harness_process_verdict() {  # <pid>
         *claude*) echo "args claude"; return ;;
         *codex*) echo "args codex"; return ;;
         *opencode*) echo "args opencode"; return ;;
+        */.bin/dsh\ *|*/.bin/dsh|*@deepseek-ai/dsh/lib/bin.js*|*apps/cli/src/bin.ts*) echo "args dsh"; return ;;
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
       esac ;;

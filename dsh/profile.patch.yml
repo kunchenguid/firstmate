@@ -1,0 +1,24 @@
+# Firstmate captain profile patch for DeepSeek Harness.
+#
+# Mounts the Claude-dialect hook bridge (DSH implements that dialect, so
+# firstmate's existing hook scripts are reused with corrected matchers), raises
+# the instruction budget so firstmate's 81 KB AGENTS.md is injected whole, and
+# selects the sandbox mode this supervisor needs: firstmate's health model is
+# built on `ps` process inspection, which workspace-write denies.
+#
+# Applied over a base+web-app profile whose bundle list also carries this
+# checkout's own bundles. Set FM_ROOT to the firstmate checkout before boot.
+- insert:
+    - id: hooks-claude-code
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: !!js (process.env.FM_ROOT || process.cwd()) + '/dsh/hooks.json'
+        projectDir: !!js process.env.FM_ROOT || process.cwd()
+
+- id: agent-instructions
+  config:
+    maxBytes: 262144
+
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
