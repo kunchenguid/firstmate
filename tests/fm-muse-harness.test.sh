@@ -527,7 +527,7 @@ EOF
     status=$?
     expect_code 0 "$status" "muse $key send should succeed: $out"
     assert_grep "$key" "$keylog" "$key never reached the muse pane"
-    assert_grep 'C-u' "$keylog" "muse $key did not clear the restored composer"
+    assert_grep 'C-c' "$keylog" "muse $key did not clear the restored composer"
     [ "$(grep -c . "$keylog")" -ge 2 ] || fail "expected both the interrupt and the clear for $key"
     head -1 "$keylog" | grep -q "$key" || fail "the clear was sent before the $key interrupt"
   done
@@ -544,7 +544,7 @@ EOF
   : > "$keylog"
   run_send_key "$home" "$fakebin" "$id" Escape "$keylog" >/dev/null
   assert_grep 'Escape' "$keylog" "Escape never reached the codex pane"
-  assert_no_grep 'C-u' "$keylog" "a non-muse interrupt sent a composer clear it does not need"
+  assert_no_grep 'C-c' "$keylog" "a non-muse interrupt sent a composer clear it does not need"
   pass "the composer clear is scoped to muse and does not touch other adapters"
 }
 
@@ -560,7 +560,7 @@ EOF
   : > "$keylog"
   pane=$(muse_session_fixture "$case_dir" "$home" "$id" "work")
   out=$(FM_FAKE_PANE="$pane" FM_SEND_RESTORE_WAIT=1 \
-    FM_FAKE_KEY_FAIL='-t fm-send:0 C-u' run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
+    FM_FAKE_KEY_FAIL='-t fm-send:0 C-c' run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
   status=$?
   [ "$status" -ne 0 ] || fail "a failed muse composer clear was reported as success"
   assert_contains "$out" "could not be cleared" "the failed clear did not explain the pane state"
