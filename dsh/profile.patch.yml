@@ -6,6 +6,13 @@
 # selects the sandbox mode this supervisor needs: firstmate's health model is
 # built on `ps` process inspection, which workspace-write denies.
 #
+# Install the bridge at the version matching the running dsh-base. The
+# sub-packages' npm `latest` tag is stale (0.0.1-rc.x), and an old bridge reads
+# `session.events` synchronously - deprecated after that release - which makes
+# every tool call fail with "agent.session.events is not iterable":
+#
+#   dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@<dsh-base version>
+#
 # Applied over a base+web-app profile whose bundle list also carries this
 # checkout's own bundles. Set FM_ROOT to the firstmate checkout before boot.
 - insert:

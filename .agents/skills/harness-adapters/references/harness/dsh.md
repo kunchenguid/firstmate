@@ -36,6 +36,12 @@ The captain profile raises `maxBytes` to 262144.
 - **Lowercase `bash` matchers.** DSH's matcher subject is the harness tool name, and its shell tool is `bash`; Claude's `Bash` never matches. The catch-all `.*` group is unaffected.
 - **No `asyncRewake`.** DSH parses command hooks only and runs them synchronously with the configured timeout, so firstmate's Stop-owned auto-arm has no equivalent. `bin/fm-turnend-guard-dsh.sh` calls the shared guard with `--dsh`, which owns a session-scoped block budget instead of trusting `stop_hook_active`, and watcher continuity rides a background job per `docs/supervision-protocols/dsh.md`.
 
-**PreToolUse is BLOCKED as of 2026-09-16.** Mounting the bridge's PreToolUse hooks makes every tool call fail with `Error: agent.session.events is not iterable`. The bridge's `lastTurn()` reads the `turnBoundary` session projection through `ctx.sessionProjections.stateOf(agent.session, ...)`, and that read throws BEFORE any hook is matched, so the tool never runs. Reproduced in a `base + sdk-app` profile and in a `base + headless` profile, with and without `@deepseek-ai/dsh-session-turn-outline` mounted alongside. The captain composition (base + web-app + hooks) has NOT been tested. Until this is resolved the three PreToolUse rows are inert AND tool-breaking; the Stop guard and the UserPromptSubmit digest are unaffected.
+**PreToolUse works, but the bridge version must match the runtime.** The sub-packages' npm `latest` dist-tag is stale (`0.0.1-rc.5` against a `0.1.5-rc.2` runtime), and that old bridge reads `session.events` synchronously - a read DSH deprecated after rc.5. Under the mismatch the bridge's `lastTurn()` throws before any hook is matched and EVERY tool call fails with `Error: agent.session.events is not iterable`, so the guards are both inert and tool-breaking. Install the matching build explicitly:
+
+```sh
+dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@0.1.5-rc.2
+```
+
+With the matched build, `UserPromptSubmit`, the `bash`-matcher PreToolUse rows, and the `.*` row all fire (verified 2026-09-16).
 
 `--claude` is passed to the PreToolUse guards deliberately: it selects the deny-output dialect, not Claude-specific behavior, and DSH honours that dialect.
