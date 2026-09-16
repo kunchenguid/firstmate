@@ -331,15 +331,25 @@ fm_send_clear_restored_prompt() { # <family> <clear-key>
   wait=${FM_SEND_RESTORE_WAIT:-2}
   case "$wait" in '' | *[!0-9]*) wait=2 ;; esac
   content=
+  readable=0
   i=$((wait * 5))
   while [ "$i" -gt 0 ]; do
-    content=$(fm_backend_composer_content "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null) || content=
+    if content=$(fm_backend_composer_content "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null); then
+      readable=1
+    else
+      content=
+    fi
     [ -n "$content" ] && [ "$content" = "$last" ] && break
     last=$content
     i=$((i - 1))
     [ "$i" -gt 0 ] && sleep 0.2
   done
-  [ -n "$content" ] || return 0
+  if [ -z "$content" ]; then
+    if [ "$readable" -eq 0 ]; then
+      echo "fm-send: the composer for $T is unreadable, so the restored prompt cannot be proven; the muse composer was left untouched" >&2
+    fi
+    return 0
+  fi
   case "$prompt" in
   *"$content") ;;
   *)

@@ -326,7 +326,27 @@ test_muse_interrupt_empty_composer_needs_no_clear() {
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "an empty composer needs no clear"
   assert_not_contains "$(cat "$log")" "arg=C-u" "an empty composer should not be cleared"
+  assert_not_contains "$(cat "$err")" "unreadable" "a provably empty composer skips the clear silently"
   pass "fm-send --key Escape: an empty muse composer is left alone"
+}
+
+test_muse_interrupt_unreadable_composer_warns() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-unreadable"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museunreadable); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" 'launch brief')
+  # No provable composer shape anywhere in the capture, so the composer read
+  # fails for the whole poll: the clear must be skipped loudly, not silently.
+  printf 'transcript row\nplain scrollback with no composer shape\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an unreadable composer skips the clear without failing the delivered interrupt"
+  assert_not_contains "$(cat "$log")" "arg=C-u" "an unreadable composer must never be cleared"
+  assert_contains "$(cat "$err")" "unreadable" "the skipped clear should say the composer was unreadable"
+  assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say the composer was left untouched"
+  pass "fm-send --key Escape: an unreadable muse composer skips the clear with a warning"
 }
 
 test_exact_lane_id_send_still_works
@@ -341,3 +361,4 @@ test_muse_interrupt_clears_the_restored_prompt
 test_muse_interrupt_preserves_fresh_input
 test_muse_interrupt_skips_clear_when_unprovable
 test_muse_interrupt_empty_composer_needs_no_clear
+test_muse_interrupt_unreadable_composer_warns
