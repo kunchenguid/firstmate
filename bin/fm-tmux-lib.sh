@@ -165,6 +165,17 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   printf '%s' "$verdict"
 }
 
+# fm_tmux_composer_content: the composer's normalized text content - what a
+# human typed or the harness restored - for callers that must compare content,
+# not just classify it (fm-send.sh's post-interrupt clear proof). Extraction is
+# cursorless (fm_composer_extract_selected_content picks the bottom-most
+# shape), so the tmux cursor row is deliberately not consulted here.
+fm_tmux_composer_content() {  # <target>
+  local target=$1 pane
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$pane"
+}
+
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
 # a genuine Cursor Agent CLI process. Cursor runs as a bundled node script, so
 # tmux's own #{pane_current_command} reports a bare `node`; identity therefore

@@ -451,7 +451,20 @@ make_send_case() {  # <name> <harness>
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  display-message) printf 'fakepane\n'; exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_PANE:-}" ] && [ -f "$FM_FAKE_PANE" ]; then
+      cat "$FM_FAKE_PANE"
+    else
+      printf 'transcript row\n'
+    fi
+    exit 0 ;;
   has-session) exit 0 ;;
   list-panes|list-windows) printf 'fm-send:0\n'; exit 0 ;;
   send-keys)
@@ -470,6 +483,27 @@ SH
   printf '%s\n' "$case_dir|$home|$fakebin|$id"
 }
 
+# muse_session_fixture <case-dir> <home> <id> <prompt>: bind the case to a
+# fake muse session log carrying a run whose started prompt is <prompt>, and
+# point the fake pane's capture at a screen showing that prompt restored in
+# the composer. The post-interrupt clear is proof-gated on this binding
+# (fm_busy_muse_restored_prompt_verdict): without it the clear is skipped.
+muse_session_fixture() {
+  local case_dir=$1 home=$2 id=$3 prompt=$4
+  local root="$case_dir/muse-sessions" log pane
+  log="$root/2026/08/08/session-1/session.jsonl"
+  pane="$case_dir/pane"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$case_dir\"}}}" \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session\",\"payload\":{\"kind\":\"run\",\"run_id\":\"run-1\",\"event\":{\"kind\":\"started\",\"prompt\":$(printf '%s' "$prompt" | jq -Rsa .)}}}" \
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' > "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+    "$root" "$case_dir" > "$home/state/$id.muse-session"
+  printf 'transcript row\n\342\235\257 %s\n' "$prompt" > "$pane"
+  printf '%s\n' "$pane"
+}
+
 run_send_key() {  # <home> <fakebin> <id> <key> <keylog>
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
     FM_FAKE_KEY_LOG="$5" PATH="$2:$PATH" \
@@ -477,7 +511,7 @@ run_send_key() {  # <home> <fakebin> <id> <key> <keylog>
 }
 
 test_muse_escape_aliases_clear_the_composer() {
-  local entry name key rec case_dir home fakebin id keylog out status
+  local entry name key rec case_dir home fakebin id keylog out status pane
   for entry in exact:Escape lower:escape short:Esc short-lower:esc; do
     name=${entry%%:*}
     key=${entry#*:}
@@ -487,11 +521,13 @@ $rec
 EOF
     keylog="$case_dir/keys.log"
     : > "$keylog"
-    out=$(run_send_key "$home" "$fakebin" "$id" "$key" "$keylog")
+    pane=$(muse_session_fixture "$case_dir" "$home" "$id" "work")
+    out=$(FM_FAKE_PANE="$pane" FM_SEND_RESTORE_WAIT=1 \
+      run_send_key "$home" "$fakebin" "$id" "$key" "$keylog")
     status=$?
     expect_code 0 "$status" "muse $key send should succeed: $out"
     assert_grep "$key" "$keylog" "$key never reached the muse pane"
-    assert_grep 'C-u' "$keylog" "muse $key did not clear the restored composer"
+    assert_grep 'C-c' "$keylog" "muse $key did not clear the restored composer"
     [ "$(grep -c . "$keylog")" -ge 2 ] || fail "expected both the interrupt and the clear for $key"
     head -1 "$keylog" | grep -q "$key" || fail "the clear was sent before the $key interrupt"
   done
@@ -508,21 +544,23 @@ EOF
   : > "$keylog"
   run_send_key "$home" "$fakebin" "$id" Escape "$keylog" >/dev/null
   assert_grep 'Escape' "$keylog" "Escape never reached the codex pane"
-  assert_no_grep 'C-u' "$keylog" "a non-muse interrupt sent a composer clear it does not need"
+  assert_no_grep 'C-c' "$keylog" "a non-muse interrupt sent a composer clear it does not need"
   pass "the composer clear is scoped to muse and does not touch other adapters"
 }
 
 # A silent clear failure would leave the restored prompt in place and corrupt
 # the next steer, so the failure has to be loud.
 test_failed_clear_is_reported() {
-  local rec case_dir home fakebin id keylog out status
+  local rec case_dir home fakebin id keylog out status pane
   rec=$(make_send_case clearfail muse)
   IFS='|' read -r case_dir home fakebin id <<EOF
 $rec
 EOF
   keylog="$case_dir/keys.log"
   : > "$keylog"
-  out=$(FM_FAKE_KEY_FAIL='-t fm-send:0 C-u' run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
+  pane=$(muse_session_fixture "$case_dir" "$home" "$id" "work")
+  out=$(FM_FAKE_PANE="$pane" FM_SEND_RESTORE_WAIT=1 \
+    FM_FAKE_KEY_FAIL='-t fm-send:0 C-c' run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
   status=$?
   [ "$status" -ne 0 ] || fail "a failed muse composer clear was reported as success"
   assert_contains "$out" "could not be cleared" "the failed clear did not explain the pane state"

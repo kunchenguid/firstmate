@@ -91,6 +91,11 @@
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
+# bin/fm-composer-lib.sh is sourced for fm_composer_normalize_spaces_var,
+# which fm_busy_muse_restored_prompt_verdict needs; composer-lib is pure.
+
+# shellcheck source=bin/fm-composer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 FM_BUSY_LIB_VERSION=v1
 
@@ -361,17 +366,28 @@ function metadataWorkspace(file) {
     descriptor = fs.openSync(file, "r");
     const buffer = Buffer.alloc(65536);
     const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
-    const newline = buffer.indexOf(10, 0);
-    if (newline < 0 || newline >= length) return null;
-    const record = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-    return record?.payload?.record?.workspace_root ?? null;
+    // The workspace-binding metadata record is one of the first records but
+    // not always the first LINE: muse 1.3.0 prepends a retained_frame wrapper
+    // record ahead of it (0.1.0 wrote metadata on line 1). Scan the bounded
+    // prefix for the first top-level metadata record.
+    const prefix = buffer.subarray(0, length).toString("utf8");
+    for (const line of prefix.split("\n").slice(0, 8)) {
+      if (!line.includes('"kind":"metadata"')) continue;
+      try {
+        const record = JSON.parse(line);
+        const root = record?.payload?.record?.workspace_root;
+        if (record?.payload?.kind === "metadata" && typeof root === "string") return root;
+      } catch {
+        continue;
+      }
+    }
+    return null;
   } catch {
     return null;
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
   }
 }
-
 for (const year of directories(root)) {
   for (const month of directories(year)) {
     for (const day of directories(month)) {
@@ -609,6 +625,125 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
       print terminal
     }
   '
+}
+
+# fm_busy_muse_last_run_prompt: the prompt text of the LAST run started event
+# in <session-log> - the text muse restores into its composer when Escape
+# cancels that run (docs/verification/muse.md). JSON-parsed rather than
+# prefix-matched because the prompt is an escaped JSON string; the same
+# payload.kind=="run" + event.kind=="started" anchoring as
+# fm_busy_muse_run_events keeps nested decoy records out.
+fm_busy_muse_last_run_prompt() {  # <session-log>
+  [ -f "$1" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  node - "$1" <<'NODE'
+const fs = require("fs");
+let prompt = "";
+try {
+  for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+    if (!line.includes('"kind":"run"')) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    const event = record?.payload?.event;
+    if (record?.payload?.kind === "run" && event?.kind === "started" && typeof event.prompt === "string") {
+      prompt = event.prompt;
+    }
+  }
+} catch {
+  process.exit(1);
+}
+if (prompt === "") process.exit(1);
+process.stdout.write(prompt);
+NODE
+}
+
+# fm_busy_muse_restored_prompt_verdict: whether the composer of <target> on
+# <backend> provably holds the prompt muse restored after an interrupt. Prints
+# exactly one verdict line:
+#   restored            a stable composer read whose content, normalized
+#                       exactly like the recorded prompt (whitespace runs
+#                       collapsed and line boundaries joined to spaces, so a
+#                       wrapped multiline restore still proves), is a suffix
+#                       of the last run's recorded started prompt (a suffix
+#                       because a long prompt can outgrow the bounded
+#                       capture window)
+#   other               composer provably holds text that is NOT the restored
+#                       prompt - fresh input survives an interrupt
+#                       (docs/verification/muse.md), so this is the captain's
+#                       typing and must never be cleared
+#   empty               composer provably holds nothing; no clear needed
+#   unprovable: <why>   the restored prompt cannot be proven (no session log,
+#                       no recorded prompt or an empty one, or a composer
+#                       that is unreadable, never stabilizes, or mixes
+#                       readable and failed samples)
+# Callers decide the consequence: fm-send warns and skips the clear, while
+# fm-control dies rather than leave a possibly-restored prompt where the next
+# lifecycle line would concatenate onto it.
+# Requires fm_backend_composer_content (bin/fm-backend.sh) and
+# fm_composer_normalize_spaces_var (bin/fm-composer-lib.sh) to be sourced by
+# the caller; both are already on every plane that delivers an interrupt.
+fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
+  local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
+  local log prompt content last='' readable=0 failed=0 stable=0 i
+  log=$(fm_busy_muse_session_log "$state" "$id" 2>/dev/null) || {
+    printf 'unprovable: no muse session log resolves for %s' "$id"
+    return 0
+  }
+  prompt=$(fm_busy_muse_last_run_prompt "$log" 2>/dev/null) || {
+    printf 'unprovable: no run prompt is recorded in %s' "$log"
+    return 0
+  }
+  fm_composer_normalize_spaces_var prompt
+  prompt=$(printf '%s\n' "$prompt" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  [ -n "$prompt" ] || {
+    printf 'unprovable: the recorded run prompt in %s is empty' "$log"
+    return 0
+  }
+  # The restore lands with the cancel; a short stability poll covers render
+  # lag without ever clearing a composer that is still changing under the
+  # captain's hands.
+  case "$wait" in '' | *[!0-9]*) wait=2 ;; esac
+  i=$((wait * 5)); [ "$i" -gt 0 ] || i=1
+  content=
+  while [ "$i" -gt 0 ]; do
+    if content=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null); then
+      readable=1
+    else
+      failed=1
+      i=$((i - 1))
+      [ "$i" -gt 0 ] && sleep 0.2
+      continue
+    fi
+    if [ -n "$content" ] && [ "$content" = "$last" ]; then
+      stable=1
+      break
+    fi
+    last=$content
+    i=$((i - 1))
+    [ "$i" -gt 0 ] && sleep 0.2
+  done
+  if [ "$failed" -eq 1 ] && [ "$readable" -eq 1 ]; then
+    printf 'unprovable: the composer for %s had an unreadable sample' "$target"
+    return 0
+  fi
+  if [ -z "$content" ]; then
+    if [ "$readable" -eq 0 ]; then
+      printf 'unprovable: the composer for %s is unreadable' "$target"
+    else
+      printf 'empty'
+    fi
+    return 0
+  fi
+  if [ "$stable" -eq 0 ]; then
+    printf 'unprovable: the composer for %s never stabilized' "$target"
+    return 0
+  fi
+  fm_composer_normalize_spaces_var content
+  content=$(printf '%s\n' "$content" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  case "$prompt" in
+    *"$content") printf 'restored' ;;
+    *) printf 'other' ;;
+  esac
 }
 
 # cursor conversation-transcript busy source
