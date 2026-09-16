@@ -63,8 +63,24 @@
       - path: !!js (process.env.FM_ROOT || process.cwd()) + '/.dsh/agent-presets'
         trust: system
 
+# A patch replaces the row's whole config, so dsh-base's preset table is
+# restated verbatim with the default: without it dsh-permission-presets falls
+# back to its schema default, which has no read-only preset. The copy drifts on
+# a DSH upgrade the same way the firstmate preset copy does; the live guard
+# compares it with dsh-base's own table, and bin/fm-dsh-preflight.sh checks only
+# the default preset, not the rest of the table.
 - id: permission
   config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
     defaultPreset: danger-full-access
 
 # The sandbox mode hooks run under. Pinned literally so it travels with the

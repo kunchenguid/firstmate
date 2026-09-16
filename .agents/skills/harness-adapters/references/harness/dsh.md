@@ -33,6 +33,7 @@ Hooks are not session tool calls: `dsh-hooks-claude-code` runs them with no sess
 Under the preset alone every firstmate hook is denied `ps`, and the session-start digest reads READ-ONLY with an unknown harness.
 `.dsh/profile.patch.yml` therefore pins that row to `danger-full-access` literally, so the mode travels with the composed configuration instead of living in an environment variable a caller can forget to export.
 It is set alongside `permission.defaultPreset` because the mode alone leaves the composed sandbox and approval defaults matching no preset, which `dsh-permission-presets` refuses at load.
+A patch replaces a row's whole config, so the tracked `permission` row restates `dsh-base`'s preset table verbatim beside that default; without it DSH falls back to a schema default with no `read-only` preset. The copy drifts on a DSH upgrade like the `firstmate` preset copy, the live guard compares it with `dsh-base`'s table, and the preflight checks only the default preset.
 `bin/fm-dsh-launch.sh` applies the tracked patch itself, so the documented launch needs no manual install step, and exports `DSH_PERMISSION_MODE=danger-full-access` as well, which matters only to a later `--patch` overlay that hands the row back to `dsh-base`'s expression.
 
 `bin/fm-dsh-preflight.sh` cannot probe `ps` under either sandbox: it runs in the launching shell before DSH starts, where nothing is sandboxed, so a `ps` there always succeeds.

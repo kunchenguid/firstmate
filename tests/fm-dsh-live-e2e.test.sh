@@ -31,6 +31,9 @@
 #      tracked patch applied once. DSH refuses a parent --patch before `web`, and
 #      a doubled bridge insert throws "duplicate loader entry id" only when the
 #      tree loads, so a config dump through the preflight passed both unnoticed.
+#   7. The tracked patch keeps every permission preset dsh-base offers. A patch
+#      replaces a row's whole config, so a permission row carrying only its
+#      default silently drops the read-only preset from every picker.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -132,10 +135,12 @@ cat > "$PROFILE_DIR/cordis.patch.yml" <<SH
 SH
 
 # --- 1. the bridge pin is what the preflight expects -------------------------
-# Invoked with the tracked patch, because that is what the launcher passes: the
-# patch is the install step for the bridge mount, the instruction budget and the
-# hook sandbox mode, none of which the throwaway profile carries on its own.
-if ! "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
+# Invoked with the tracked patch, because that is what the launcher passes. The
+# throwaway profile already mounts the bridge, raises the budget and sets the
+# default permission preset; the hook sandbox mode comes only from the tracked
+# patch's literal pin. DSH_PERMISSION_MODE is unset, so the check cannot pass on
+# dsh-base's expression over a variable inherited from a launcher-started shell.
+if ! env -u DSH_PERMISSION_MODE "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
     --patch "$ROOT/.dsh/profile.patch.yml" >/dev/null 2>&1; then
   fail "fm-dsh-preflight.sh rejected the freshly pinned profile '$PROFILE' with the tracked patch (dsh-base $BASE_VERSION)"
 fi
@@ -255,3 +260,36 @@ out=$(launch_web --help) \
 out=$(launch_web --patch "$ROOT/.dsh/profile.patch.yml" --help) \
   || fail "live dsh $BASE_VERSION: a web launch naming the tracked patch did not load its plugin tree: $(printf '%s\n' "$out" | tail -3)"
 pass "live dsh $BASE_VERSION: the launcher's web exec loads the plugin tree with the tracked patch applied once"
+
+# --- 8. the tracked patch keeps dsh-base's permission presets ----------------
+# Composed with DSH's own layer composer and resolved through the permission
+# plugin's own config schema, over the disposable web profile, once as the
+# profile boots bare and once with the tracked patch applied last.
+presets=$(cd "$ROOT" && env -u DSH_PERMISSION_MODE FM_ROOT="$ROOT" node --input-type=module -e '
+const [scope, root, dshHome] = process.argv.slice(1);
+const { pathToFileURL } = await import("node:url");
+const boot = await import(pathToFileURL(scope + "/dsh-app-boot/lib/index.js").href);
+const { PermissionPresetService } = await import(pathToFileURL(scope + "/dsh-permission-presets/lib/index.js").href);
+const profile = boot.loadProfile("dsh", "web", scope + "/dsh/package.json", dshHome);
+const find = (rows) => {
+  for (const row of rows) {
+    if (row.id === "permission") return row;
+    const nested = Array.isArray(row.config) ? find(row.config) : undefined;
+    if (nested !== undefined) return nested;
+  }
+};
+const resolve = (layers) => PermissionPresetService.Config(find(boot.composeEntries(layers))?.config ?? {});
+const bare = resolve([profile.layers.flatMap((layer) => layer.patches), profile.patches]);
+const patched = resolve([profile.layers.flatMap((layer) => layer.patches), profile.patches, boot.loadOverlayPatches("dsh", root + "/.dsh/profile.patch.yml")]);
+if (JSON.stringify(patched.presets) !== JSON.stringify(bare.presets)) {
+  console.log("the tracked patch offers " + JSON.stringify(patched.presets) + " where dsh-base offers " + JSON.stringify(bare.presets));
+} else if (patched.defaultPreset !== "danger-full-access") {
+  console.log("the tracked patch defaults new sessions to " + patched.defaultPreset);
+} else {
+  console.log("ok " + Object.keys(patched.presets).join(" "));
+}
+' "$SCOPE_DIR" "$ROOT" "$WEBHOME" 2>&1) || true
+case "$presets" in
+  "ok "*) pass "live dsh $BASE_VERSION: the tracked patch keeps dsh-base's permission presets (${presets#ok })" ;;
+  *) fail "live dsh $BASE_VERSION: $presets" ;;
+esac

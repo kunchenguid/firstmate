@@ -327,14 +327,21 @@ Run the portable suite and the live guard after any DSH upgrade, because the lau
 ```sh
 bash tests/fm-dsh-harness.test.sh
 FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
-bin/fm-dsh-preflight.sh --profile <name>
+bin/fm-dsh-preflight.sh --profile <name> --patch .dsh/profile.patch.yml
 ```
+
+Run the preflight on its own with the tracked patch, as `bin/fm-dsh-launch.sh` passes it.
+The launcher applies `.dsh/profile.patch.yml` with `--patch` and never copies it into the profile, so without it the preflight composes a configuration the host never boots with: sessions on DSH's `standard` preset, an inferred permission preset and dsh-base's unpinned hook sandbox mode, each reported as a failure whose remedy the launch does not need.
 
 As measured on 2026-09-17, the portable suite passes 46 cases.
 Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
-The five-contract run predates the preflight's hook sandbox-mode check, so it is not evidence that the first contract still passes.
+The five-contract run predates the preflight's hook sandbox-mode check, so on its own it is not evidence that the first contract still passes.
+On 2026-09-16, after `.dsh/profile.patch.yml` pinned the `sandbox-policy` row, the guard was run again with `DSH_PERMISSION_MODE` unset and passed all six contracts: the first contract's preflight read the composed hook sandbox mode as `danger-full-access` from the pin alone, and the documented `web` launch rendered `AGENTS.md` whole through the `firstmate` preset at budget 262144.
+That is the evidence for the first contract after the sandbox check; the guard now also unsets the variable for that contract itself, so a pin removed from the tracked patch cannot pass on a value inherited from a launcher-started shell.
 Its seventh contract, that the launcher's own `web` exec composes the tracked patch and loads the plugin tree with it applied once, was added after both; its commands were run on their own against dsh 0.1.5-rc.1 in a disposable `DSH_HOME`, where they pass and the previous launcher failed them with the parent-option refusal and `duplicate loader entry id`, and the whole guard has not been rerun since.
+Its eighth contract, that the tracked patch keeps every permission preset `dsh-base` offers, was added with the restated preset table: a patch replaces a row's whole config, and the earlier `permission` row carrying only `defaultPreset` left DSH offering `workspace-write` and `danger-full-access` but no `read-only`.
+Its composition, through DSH's own layer composer and the permission plugin's own config schema over dsh-base 0.1.5-rc.2, was run on its own: without the table the tracked patch resolved to those two presets, and with it to all three, matching `dsh-base`.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

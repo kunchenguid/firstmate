@@ -659,15 +659,23 @@ test_dsh_preflight_checks_the_permission_preset_sessions_default_to() {
 test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
   local home rc out
   # The hooks bridge runs a hook with no session, so the hook gets the host's
-  # sandbox-policy mode, not the session's permission preset. dsh-base computes
-  # that mode from DSH_PERMISSION_MODE at host start, so a preflight run outside
-  # the launcher's environment, or a profile pinning another mode, must fail.
+  # sandbox-policy mode, not the session's permission preset. The tracked patch
+  # pins that mode literally, which must pass with no DSH_PERMISSION_MODE at all;
+  # dsh-base's own row computes it from that variable, so left unpinned it must
+  # fail without it, as must a profile pinning another mode.
   home=$(make_dsh_home "$TMP_ROOT/pre-hookmode" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
   rc=0
   out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
     "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
   [ "$rc" -eq 3 ] || fail "hooks defaulting to workspace-write must fail the preflight, got rc=$rc: $out"
   assert_contains "$out" "hooks run under sandbox mode 'workspace-write'" "the hook sandbox mode was not named"
+  { sandbox_row danger-full-access; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  rc=0
+  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a literally pinned danger-full-access mode must pass with no DSH_PERMISSION_MODE, got rc=$rc: $out"
+  assert_contains "$out" "hooks run under the danger-full-access sandbox mode" "the pinned hook mode was not reported"
   { sandbox_row workspace-write; permission_row danger-full-access
     printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   run_preflight "$home"

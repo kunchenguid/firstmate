@@ -139,7 +139,7 @@ entry_state() {
 }
 
 SETTINGS_FILE="$DSH_HOME_DIR/settings.yaml"
-PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
+TRACKED_PATCH="$FM_HOME_DIR/.dsh/profile.patch.yml"
 
 # Print <key>'s value under top-level <section> of the harness settings
 # document, where a user's choice outranks the composition's default.
@@ -200,7 +200,7 @@ elif [ -n "$DUMP" ]; then
     fi
   else
     ROW_SOURCE="profile $PROFILE"
-    ROW_FILE=$PATCH_FILE
+    ROW_FILE="$TRACKED_PATCH (or a later --patch overlay that overrides that row)"
     ROW=$(printf '%s\n' "$DUMP" | entry_lines agent-instructions)
   fi
   if [ -n "$ROW_SOURCE" ]; then
@@ -213,10 +213,10 @@ elif [ -n "$DUMP" ]; then
         "enable the agent-instructions row in $ROW_FILE: a disabled row renders nothing, and $OMIT_NOTE"
     elif ! [ "$MAX_BYTES" -gt 0 ] 2>/dev/null; then
       fail "could not read the effective agent-instructions maxBytes from $ROW_SOURCE" \
-        "raise the agent-instructions entry's maxBytes to a plain number in $ROW_FILE, and on every DSH home: $OMIT_NOTE"
+        "raise the agent-instructions entry's maxBytes to a plain number in $ROW_FILE: $OMIT_NOTE"
     elif [ "$CHAIN_BYTES" -gt "$MAX_BYTES" ]; then
       fail "the rendered instruction chain is about $CHAIN_BYTES bytes but $ROW_SOURCE's maxBytes is $MAX_BYTES" \
-        "raise the agent-instructions entry's maxBytes in $ROW_FILE, and on every DSH home: $OMIT_NOTE"
+        "raise the agent-instructions entry's maxBytes in $ROW_FILE: $OMIT_NOTE"
     else
       ok "instruction budget $MAX_BYTES fits the rendered instruction chain (about $CHAIN_BYTES bytes) in $ROW_SOURCE"
     fi
@@ -239,7 +239,7 @@ if [ -n "$DUMP" ]; then
     ok "new sessions default to the danger-full-access permission preset ($PERMISSION_FROM)"
   else
     fail "new sessions default to permission preset '${PERMISSION_PRESET:-<inferred from the sandbox knobs>}' ($PERMISSION_FROM), not danger-full-access" \
-      "set the permission entry's defaultPreset to danger-full-access in $PATCH_FILE and clear any permission defaultPreset in $SETTINGS_FILE: any other sandbox denies ps, so harness ancestry, the PID-strict watcher lock and away-mode ownership degrade silently (sandbox-policy.mode alone is refused at load)"
+      "clear any permission defaultPreset in $SETTINGS_FILE, which outranks the composition, and keep the permission entry's defaultPreset at danger-full-access as $TRACKED_PATCH sets it, dropping any later --patch overlay that overrides that row: any other sandbox denies ps, so harness ancestry, the PID-strict watcher lock and away-mode ownership degrade silently (sandbox-policy.mode alone is refused at load)"
   fi
 
   # Hooks are not session tool calls: the hooks bridge runs them with no
