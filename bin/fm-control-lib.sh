@@ -141,10 +141,16 @@ fm_control_interrupt_repeat() {  # <harness>
 
 # The key that must follow the interrupt key to leave the composer empty, or
 # nothing when the adapter needs none. muse is the one verified adapter that
-# RESTORES the cancelled prompt into its composer as real bright text, so an
-# interrupt is not complete until Ctrl+U has cleared it; leaving it there would
-# make the next submitted line - a steer, or this plane's own exit command -
-# concatenate onto it. cursor was checked for exactly that behaviour and does
+# RESTORES the cancelled prompt into its composer as real bright text, and
+# only when its composer was empty at cancel time, so fresh typed input
+# survives the interrupt untouched. An interrupt is not complete until the
+# composer is proven free of the restored prompt: callers send Ctrl+C only
+# on a proven restore (fm_busy_muse_restored_prompt_verdict in
+# bin/fm-busy-lib.sh), never onto the captain's typing. Leaving a restored
+# prompt there would make the next submitted line - a steer, or this plane's
+# own exit command - concatenate onto it.
+# Muse 1.3 Ctrl+U clears only the current line; Ctrl+C clears all rows.
+# cursor was checked for exactly that behaviour and does
 # NOT repollute: after a single Escape its composer shows only the `Add a
 # follow-up` placeholder, so it needs no clear key. gemini was checked the
 # same way and also does not repollute: after a single Escape it prints
@@ -154,7 +160,7 @@ fm_control_interrupt_repeat() {  # <harness>
 # above.
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
-    muse) printf 'C-u' ;;
+    muse) printf 'C-c' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) ;;
     *) return 1 ;;
   esac

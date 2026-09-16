@@ -1971,6 +1971,21 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 
+On 2026-09-14 against omp 18.1.22 on macOS 26 arm64 the launcher shape changed: `~/.bun/bin/omp` is a `#!/usr/bin/env bun` script, so `ps -o comm=` reports `bun` and the argv carries the launcher path, while omp sets `OMPCODE=1` for its child/tool processes alongside `CLAUDECODE=1` for compatibility (both absent from the launching shell).
+Identity is therefore the anchored launcher in either shape - the bare `omp` name or bun running a script whose final path component is exactly `omp` - plus the `OMPCODE=1` marker, which is tested before `CLAUDECODE`.
+`tests/fm-omp-harness.test.sh` pins the argv rule, the marker ordering, and lock acquisition from bun-launcher ancestry.
+
+```text
+$ file ~/.bun/bin/omp
+/Users/Morley/.bun/bin/omp: a /usr/bin/env bun script text executable, ASCII text
+$ ps -o pid=,comm=,args= -p 3122
+3122 bun bun /Users/Morley/.bun/bin/omp
+$ ps eww -p 3048 | tr ' ' '\n' | grep -E '^(CLAUDECODE|OMPCODE)='
+(no output: the launching shell carries neither marker)
+$ printf 'CLAUDECODE=%s OMPCODE=%s\n' "$CLAUDECODE" "$OMPCODE"
+CLAUDECODE=1 OMPCODE=1
+```
+
 ### Composer
 
 Under the captain's `unicode` symbol preset the idle screen through Herdr was a bare `❯` (U+276F) row followed directly by the status row:

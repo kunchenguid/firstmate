@@ -277,7 +277,7 @@ These conclusions are deliberately limited to the named versions and supported s
 They do not claim that a harness can never add the missing renderer API, and the Claude Code row is the first that changed for exactly that reason.
 For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
+Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod and OMP extension change drawings only; every producer and non-Pi transport remains unchanged.
 
 ## Regression coverage
 
@@ -743,4 +743,22 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ⏺ The three words are alpha, beta, and gamma.
 
 ✻ Sautéed for 8s · done 11:07 AM
+```
+
+## 2026-09-16 OMP 18.2.0 standalone global plugin verification
+
+The OMP Calm extension ships as the self-contained `extensions/fm-calm-omp` package (including `lib/fm-calm-working-ship.ts`).
+`bin/fm-omp-calm-install.sh` copies it to `~/.local/share/fm-calm-omp` and runs `omp plugin link`, which symlinks that copy into `~/.omp/plugins/node_modules/fm-calm-omp` and records it enabled in `omp-plugins.lock.json`; its `package.json` `omp.extensions` entry then loads in every omp session regardless of working directory.
+OMP de-duplicates extension entries by resolved absolute path rather than realpath, so the package deliberately lives outside `.omp/extensions/` and the installer retires the legacy project-local copy.
+Verified on this host with OMP 18.2.0: `omp plugin doctor` reported `fm-calm-omp@0.1.0` healthy with no orphan warnings.
+
+```text
+$ tests/fm-omp-calm-install.test.sh
+ok - install links package into user plugin scope
+ok - reinstall is idempotent
+ok - identical legacy copy removed
+ok - divergent legacy copy preserved as .bak
+ok - failed legacy retirement aborts before linking
+ok - failed legacy removal aborts before linking
+ok - manifest entry resolves through link
 ```

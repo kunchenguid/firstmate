@@ -90,6 +90,7 @@
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
+#   FM_CONTROL_RESTORE_WAIT      bounded muse composer poll proving the restored prompt before the post-interrupt clear decision (2)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -352,9 +353,10 @@ require_state_verified_backend() {  # <verb>
 }
 
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
-# of times, then the composer-clear key when the adapter needs one. Refuses
-# before sending anything when the backend cannot deliver either key, because
-# an interrupt that cancels the turn but leaves the restored prompt in the
+# of times, then the composer-clear key when the adapter needs one AND the
+# composer provably holds the prompt the interrupt restored. Refuses before
+# sending anything when the backend cannot deliver either key, because an
+# interrupt that cancels the turn but leaves the restored prompt in the
 # composer would make the next submitted line concatenate onto it.
 send_interrupt_keys() {
   local key repeat clear i=0
@@ -371,8 +373,39 @@ send_interrupt_keys() {
     i=$((i + 1))
     [ "$i" -ge "$repeat" ] || sleep 0.2
   done
-  [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
-    || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
+  [ -n "$clear" ] && send_interrupt_clear "$clear"
+}
+
+# send_interrupt_clear: send the composer-clear key only when the composer
+# provably holds the prompt the interrupt restored. muse restores the
+# cancelled prompt only when the composer was empty at cancel time; fresh
+# typed input survives the interrupt untouched (docs/verification/muse.md),
+# so a blind clear would clobber a message the captain was typing. The proof
+# is fm_busy_muse_restored_prompt_verdict (bin/fm-busy-lib.sh), shared with
+# fm-send's --key Escape path. This plane's contract differs from fm-send's:
+# a composer that cannot be proven free of the restored prompt dies loudly
+# rather than skipping, because the next lifecycle line would concatenate
+# onto whatever is there; only provably-fresh input skips the clear, with a
+# warning, since there is then nothing restored to remove.
+send_interrupt_clear() { # <clear-key>
+  local clear=$1 family verdict
+  family=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+  [ "$family" = muse ] \
+    || die "harness $HARNESS needs $clear to clear its composer after an interrupt, but this plane cannot prove the restored prompt for that adapter; refusing to leave the composer unverified - clear it before the next lifecycle action"
+  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$ID" "$BACKEND" "$T" "$LABEL" "${FM_CONTROL_RESTORE_WAIT:-2}")
+  case "$verdict" in
+    restored) ;;
+    empty) return 0 ;;
+    other)
+      echo "fm-control: task $ID's muse composer holds text other than the restored prompt (fresh input survives an interrupt); left untouched - clear or submit it before the next lifecycle action" >&2
+      return 0
+      ;;
+    unprovable:*)
+      die "interrupt key reached task $ID, but ${verdict#unprovable: }, so the restored prompt cannot be proven; refusing to leave the composer unverified - clear it before the next lifecycle action"
+      ;;
+  esac
+  fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
+    || die "interrupt key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
 prepare_interrupt_ack() {
@@ -428,7 +461,7 @@ verify_interrupt_running() {
     after=$(agent_state)
     [ "$after" = alive ] \
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
-    proof=agent-alive
+    proof="agent-alive"
   fi
   printf '%s' "$proof"
 }
