@@ -51,6 +51,19 @@ DIGEST=$("$ROOT/bin/fm-session-start.sh" --source startup 2>/dev/null) || true
 # so emptiness is the only signal that nothing was produced.
 [ -n "$DIGEST" ] || exit 0
 
+# A terminal alarm the guard raised in an earlier session is durable state. A
+# session that died before the agent relayed it must still surface here, so the
+# notice is prepended rather than lost. The guard's own healthy-reset owns
+# clearing the latch; this read never removes it, or a genuine lapse would be
+# reported once and then forgotten.
+ALARM="$STATE/.dsh-turnend-fail-open"
+if [ -e "$ALARM" ]; then
+  DASHED=$(sed -n 's/^blocked //p' "$ALARM" 2>/dev/null || true)
+  DIGEST=$(printf '%s\n\n%s' \
+    "●  FIRSTMATE SUPERVISION ALARM: a previous turn-end spent this home's DSH Stop-hook block budget (raised ${DASHED:-unknown}), so that session ended unsupervised. Verify watcher supervision before relying on unattended operation." \
+    "$DIGEST")
+fi
+
 # Durable record before delivery, the ordering firstmate uses everywhere else.
 printf '%s\n' "$SESSION_ID" > "$MARKER" 2>/dev/null || true
 

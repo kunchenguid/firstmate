@@ -64,8 +64,17 @@ With the matched build, `UserPromptSubmit`, the `bash`-matcher PreToolUse rows, 
 
 The `--dsh` block budget is an **episode**, not a session lifetime: the ledger is discarded once it is
 older than `FM_DSH_TURNEND_BUDGET_WINDOW` (default 900s), so one exhausted lapse cannot leave a
-long-lived session permanently fail-open. A budget lock that cannot be acquired fails open with the
-same attended banner rather than falling through to an unbounded block, and the incremented count is
-written before the stop is decided so a killed hook cannot lose a consumed continuation.
+long-lived session permanently blocked, and the incremented count is written before the stop is
+decided so a killed hook cannot lose a consumed continuation.
+
+**The terminal state is one alarm turn, then allow.** DSH's bridge logs and DROPS a non-blocking
+`systemMessage` ("not yet surfaced (ignored)"), so the Claude path's `terminal_fail_open` — which is
+loud there — produced no operator-visible record at all on DSH. The only channel DSH surfaces is a
+blocking `Stop` decision whose reason is model-visible steering, so the alarm rides that exactly once
+per episode and every later stop is allowed. The block bound is therefore `budget + 1`. The alarm is
+also latched durably at `state/.dsh-turnend-fail-open`, which the session-start digest prepends when
+present, so a session that dies before the agent relays it still reports it; the guard's healthy-reset
+owns clearing that latch, so a recovered home can alarm again on a later lapse. A budget lock that
+cannot be acquired raises the same alarm rather than falling through to an unbounded block.
 
 `--claude` is passed to the PreToolUse guards deliberately: it selects the deny-output dialect, not Claude-specific behavior, and DSH honours that dialect.

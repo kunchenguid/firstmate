@@ -175,7 +175,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     dsh)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by arming bin/fm-watch.sh as a DSH background job (run_in_background), never shell &; the Stop guard blocks a blind turn end until it is armed.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by arming bin/fm-watch-arm.sh as a DSH background job (run_in_background), never bin/fm-watch.sh directly and never shell &; the Stop guard blocks a blind turn end until it is armed.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'

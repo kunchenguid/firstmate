@@ -477,6 +477,26 @@ on 2026-09-16, because a one-shot headless run cannot exercise an idle session:
 | An actionable event wakes an IDLE captain | prompt the session to arm `sleep 12; echo FM-WAKE-PROBE-FIRED` as a background job and end its turn, then hold the notification subscription open | The agent reported idle 5.0s in, stayed idle through 13.0s, and resumed at 19.0s when the job settled - the completion opened a turn on the idle session. |
 | The block budget cannot loop without limit | mount the real hooks over an SDK profile in the firstmate checkout with one task in flight and no live watcher, then run a tool-free turn to completion | The guard ran four times: three blocking continuations and one attended fail-open, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4`, after which the session settled instead of re-blocking. |
 
+### DSH Phase 1a corrections, 2026-09-16
+
+The full-repository audit (180 bin scripts, 30 docs, 21 skills, 16 AGENTS.md sections, 7 harness
+integrations) invalidated four claims this record previously carried. Each is now fixed and
+regression-tested; `tests/fm-dsh-harness.test.sh` holds 20 cases and 276 tests pass across the
+affected suites.
+
+| Claim | Reality found | Fix |
+| --- | --- | --- |
+| "Detection done" | `bin/fm-session-lock-lib.sh` keeps its own registry with no dsh arm, so `state/.lock` could never be acquired and every session ran read-only | dsh matched by anchored launcher path in the lock registry, with false-positive cases pinned |
+| "`FM_DSH_HARNESS=dsh`" | The marker had NO producer; every test set it by hand | `bin/fm-dsh-launch.sh` is the launch boundary: marker, explicit `FM_HOME`, pinned locale, cleared foreign markers |
+| "Digest adapter done" | It discarded `bin/fm-session-start.sh`'s stdout, which owns the read-only and STARTUP TRUNCATED banners, and emitted only the operating block - so the agent got instructions without the diagnosis governing them | The digest is delivered whole; the once-per-session gate is recorded only after a digest was produced, so a refused or empty startup retries |
+| "One loud attended fail-open" | `systemMessage` is logged and DROPPED by the bridge, so the terminal state was silent | One alarm turn carrying the reason as steering, then allow (`budget + 1`), plus a durable latch the next digest surfaces |
+
+The shipped supervision protocol also contradicted the arm seatbelt: it told the agent to run
+`bin/fm-watch.sh`, which `bin/fm-arm-command-policy.mjs` denies as `watcher-direct`. Both the
+protocol and the renderer's repair line now name `bin/fm-watch-arm.sh` - the script whose own header
+documents `run_in_background` as its designed mechanism - and a cross-file test keeps the protocol,
+the repair line and the seatbelt in agreement.
+
 ### DSH PreToolUse resolution, 2026-09-16
 
 PreToolUse initially appeared broken: registering any PreToolUse hook made every

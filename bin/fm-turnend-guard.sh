@@ -191,6 +191,9 @@ dsh_budget_reset() {
   [ "$DSH_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$DSH_BUDGET_LOCK" || return 0
   rm -f "$DSH_BUDGET_FILE" 2>/dev/null || true
+  # The alarm latch belongs to the same episode: a recovered home must be able
+  # to alarm again on a later lapse.
+  rm -f "$STATE/.dsh-turnend-fail-open" 2>/dev/null || true
   fm_lock_release "$DSH_BUDGET_LOCK"
 }
 
@@ -288,8 +291,28 @@ if [ "$DSH_MODE" -eq 1 ]; then
   case "$DSH_BUDGET" in ''|*[!0-9]*|0) DSH_BUDGET=3 ;; esac
   DSH_WINDOW=${FM_DSH_TURNEND_BUDGET_WINDOW:-900}
   case "$DSH_WINDOW" in ''|*[!0-9]*|0) DSH_WINDOW=900 ;; esac
-  dsh_fail_open() {
-    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s task(s) in flight, no live watcher holds this home lock, and the DSH Stop-hook block budget (%s) is exhausted or unreadable. Keep this session attended and repair watcher supervision before relying on unattended supervision."}\n' "${FM_SUP_IN_FLIGHT:-0}" "$DSH_BUDGET"
+  DSH_ALARM="$STATE/.dsh-turnend-fail-open"
+  # The terminal state is ONE ALARM TURN, then allow.
+  #
+  # DSH's bridge logs and DROPS a non-blocking \`systemMessage\` ("not yet
+  # surfaced (ignored)"), so exiting 0 with one - what the Claude path does,
+  # where systemMessage IS surfaced - produced no operator-visible record at
+  # all. The only channel DSH surfaces is a blocking Stop decision whose reason
+  # is model-visible steering, so the alarm rides that exactly once per episode
+  # and every later stop is allowed. The bound is therefore budget+1 blocks, and
+  # the durable latch below survives a session that dies before it is read.
+  dsh_conclude() {
+    local detail=$1
+    if [ ! -e "$DSH_ALARM" ]; then
+      printf 'blocked %s\n' "$(date +%s)" > "$DSH_ALARM" 2>/dev/null || true
+      {
+        printf '●  FIRSTMATE SUPERVISION IS GENUINELY DOWN\n'
+        printf '●  %s\n' "$detail"
+        printf '●  The DSH Stop-hook block budget (%s) is spent, so this session is no longer supervised.\n' "$DSH_BUDGET"
+        printf '●  Tell the captain now that supervision is down, then end the turn.\n'
+      } >&2
+      exit 2
+    fi
     exit 0
   }
   DSH_COUNT=
@@ -308,9 +331,9 @@ if [ "$DSH_MODE" -eq 1 ]; then
     printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$DSH_COUNT" > "$DSH_BUDGET_FILE" 2>/dev/null || true
     fm_lock_release "$DSH_BUDGET_LOCK"
   else
-    dsh_fail_open
+    dsh_conclude "the block budget could not be read: its lock is held and the consumed continuations are unprovable."
   fi
-  [ "$DSH_COUNT" -le "$DSH_BUDGET" ] || dsh_fail_open
+  [ "$DSH_COUNT" -le "$DSH_BUDGET" ] || dsh_conclude "$(printf '%s task(s) in flight, no live watcher holds this home lock' "${FM_SUP_IN_FLIGHT:-0}")"
   block_stop
 fi
 

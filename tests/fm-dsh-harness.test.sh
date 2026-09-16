@@ -112,6 +112,22 @@ run_digest() {  # <home> <session-id> -> stdout in $DIGEST_OUT
       "$ROOT/bin/fm-dsh-sessionstart.sh" 2>/dev/null)
 }
 
+test_dsh_guard_healthy_reset_clears_the_alarm_latch() {
+  local home rc
+  home=$(make_guard_home guard-latch)
+  printf 'task\n' > "$home/state/t1.meta"
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an exhausted budget must alarm"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] || fail "the alarm was not latched"
+  rm -f "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "a stop needing no supervision is allowed"
+  [ -e "$home/state/.dsh-turnend-fail-open" ] \
+    && fail "a recovered home kept its alarm latch and could never alarm again" || true
+  pass "fm-turnend-guard --dsh: recovery clears the alarm latch with the budget"
+}
+
 test_dsh_digest_delivers_session_start_stdout_whole() {
   local home
   # The digest IS fm-session-start.sh's stdout: a refused-lock banner, the
@@ -128,6 +144,22 @@ test_dsh_digest_delivers_session_start_stdout_whole() {
   [ -f "$home/state/.dsh-sessionstart-delivered" ] \
     || fail "a delivered digest did not record its once-per-session gate"
   pass "fm-dsh-sessionstart.sh: the whole session-start stdout is delivered"
+}
+
+test_dsh_digest_surfaces_a_durable_alarm() {
+  local home
+  # A session that died before the agent relayed the guard's alarm must still
+  # report it: the latch is durable and the next digest carries it.
+  home=$(make_digest_home alarm 'DIGEST-BODY')
+  printf 'blocked 1789557000\n' > "$home/state/.dsh-turnend-fail-open"
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "FIRSTMATE SUPERVISION ALARM" \
+    "a durable alarm was not surfaced in the next session-start digest"
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" \
+    "the alarm replaced the digest instead of preceding it"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] \
+    || fail "the adapter cleared a latch the guard's healthy-reset owns"
+  pass "fm-dsh-sessionstart.sh: a durable alarm is surfaced, not lost"
 }
 
 test_dsh_digest_gate_is_per_session() {
@@ -155,38 +187,64 @@ test_dsh_digest_retries_when_nothing_was_produced() {
   pass "fm-dsh-sessionstart.sh: an empty digest leaves the gate unset and retries"
 }
 
-test_dsh_guard_fails_open_when_the_budget_lock_is_unavailable() {
+test_dsh_guard_alarms_when_the_budget_lock_is_unavailable() {
   local home rc
   # An unacquirable budget lock is not proof that budget remains. Falling
   # through to block_stop made the loop unbounded exactly when the guard could
-  # prove the least.
+  # prove the least; silently allowing lost the alarm instead.
   home=$(make_guard_home guard-lockheld)
   printf 'task\n' > "$home/state/t1.meta"
   mkdir -p "$home/state/.turnend-dsh-blocks.lock"
   printf '%s\n' "$$" > "$home/state/.turnend-dsh-blocks.lock/pid"
   rc=0; run_dsh_stop "$home" s1 || rc=$?
-  expect_code 0 "$rc" "an unacquirable budget lock must fail open, never re-block"
-  assert_contains "$(cat "$home/stderr.txt")" "" "the fail-open banner rides stdout, not stderr"
-  pass "fm-turnend-guard --dsh: an unavailable budget lock fails open"
+  expect_code 2 "$rc" "an unprovable budget must raise the alarm, never re-block silently"
+  assert_contains "$(cat "$home/stderr.txt")" "SUPERVISION IS GENUINELY DOWN" \
+    "the unprovable-budget alarm did not name the condition"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "and then allow, so the loop stays bounded"
+  pass "fm-turnend-guard --dsh: an unavailable budget lock alarms once, then allows"
 }
 
 test_dsh_guard_budget_is_an_episode_not_a_session() {
   local home rc
   home=$(make_guard_home guard-episode)
   printf 'task\n' > "$home/state/t1.meta"
-  # An exhausted ledger whose episode is older than the window must start over,
-  # so one lapse cannot leave a long-lived session permanently fail-open.
+  # An exhausted ledger whose episode is older than the window starts over, so
+  # one lapse cannot leave a long-lived session permanently alarming.
   printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
   touch -t 202001010000 "$home/state/.turnend-dsh-blocks"
   rc=0; run_dsh_stop "$home" s1 || rc=$?
   expect_code 2 "$rc" "an expired episode must start a fresh budget and block"
   assert_grep 'count=1' "$home/state/.turnend-dsh-blocks" \
     "the expired episode did not restart its count"
-  # The same ledger inside the window keeps its count and fails open.
+  # The same ledger inside the window keeps its count: one alarm, then allow.
   printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
   rc=0; run_dsh_stop "$home" s1 || rc=$?
-  expect_code 0 "$rc" "an exhausted ledger inside the window must fail open"
+  expect_code 2 "$rc" "an exhausted ledger inside the window must alarm once"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "and then allow"
   pass "fm-turnend-guard --dsh: the budget is an episode window, not a session lifetime"
+}
+
+test_dsh_protocol_and_seatbelt_agree_on_the_arm_command() {
+  local policy line
+  # Three owners must name the same entry point: the shipped protocol, the
+  # repair line an agent is actually shown, and the PreToolUse seatbelt. Naming
+  # bin/fm-watch.sh in the protocol would be denied as watcher-direct, making
+  # the shipped instructions unrunnable.
+  grep -q 'bin/fm-watch-arm.sh' "$ROOT/docs/supervision-protocols/dsh.md" \
+    || fail "the DSH protocol must arm through bin/fm-watch-arm.sh"
+  policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch-arm.sh')
+  [ "$policy" = allow ] \
+    || fail "the protocol's arm command must pass the seatbelt, got '$policy'"
+  # ...and the direct form it replaced must still be denied, which is why the
+  # protocol cannot name it.
+  policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch.sh')
+  case "$policy" in deny*watcher-direct*) : ;; *) fail "a direct bin/fm-watch.sh must stay denied, got '$policy'" ;; esac
+  line=$(FM_DSH_HARNESS=dsh "$ROOT/bin/fm-supervision-instructions.sh" --afk 0 --x-mode 0 --repair-line 2>/dev/null | tail -1)
+  assert_contains "$line" "bin/fm-watch-arm.sh" \
+    "the dsh repair line must name the blessed arm script"
+  pass "dsh protocol, repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
 }
 
 test_dsh_ancestry_detects_the_launcher_path() {
@@ -270,7 +328,7 @@ run_dsh_stop() {  # <home> <session-id> -> exit code, stderr in $STOP_ERR
       "$home/bin/fm-turnend-guard.sh" --dsh 2>"$STOP_ERR" )
 }
 
-test_dsh_guard_blocks_under_budget_then_fails_open() {
+test_dsh_guard_blocks_then_alarms_then_allows() {
   local home rc
   home=$(make_guard_home guard-budget)
   printf 'task\n' > "$home/state/t1.meta"
@@ -282,9 +340,20 @@ test_dsh_guard_blocks_under_budget_then_fails_open() {
   expect_code 2 "$rc" "the second stop must still block under budget"
   rc=0; run_dsh_stop "$home" s1 || rc=$?
   expect_code 2 "$rc" "the third stop must still block under budget"
+  # A spent budget raises ONE model-visible alarm rather than silently allowing:
+  # DSH's bridge logs and drops a non-blocking systemMessage, so exiting 0 here
+  # produced no operator-visible record at all.
   rc=0; run_dsh_stop "$home" s1 || rc=$?
-  expect_code 0 "$rc" "an exhausted budget must fail open instead of re-blocking"
-  pass "fm-turnend-guard --dsh: blocks under budget, then fails open"
+  expect_code 2 "$rc" "a spent budget must raise one visible alarm turn"
+  assert_contains "$(cat "$home/stderr.txt")" "SUPERVISION IS GENUINELY DOWN" \
+    "the alarm turn did not carry the alarm text"
+  assert_contains "$(cat "$home/stderr.txt")" "Tell the captain" \
+    "the alarm did not tell the agent to inform the captain"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] \
+    || fail "the alarm was not latched durably"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "after the alarm the guard must stop blocking"
+  pass "fm-turnend-guard --dsh: blocks under budget, alarms once, then allows"
 }
 
 test_dsh_guard_budget_is_session_scoped() {
@@ -343,15 +412,18 @@ test_dsh_ancestry_detects_the_installed_bin_js
 test_dsh_ancestry_rejects_unrelated_node_commands
 test_dsh_marker_requires_real_ancestry
 test_dsh_marker_outranks_an_inherited_claudecode
-test_dsh_guard_blocks_under_budget_then_fails_open
+test_dsh_guard_blocks_then_alarms_then_allows
 test_dsh_guard_budget_is_session_scoped
 test_dsh_guard_clears_the_budget_when_supervision_is_not_needed
 test_dsh_guard_fails_open_on_unusable_input
 test_dsh_stop_wrapper_fails_open_without_a_root
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
+test_dsh_digest_surfaces_a_durable_alarm
 test_dsh_digest_delivers_session_start_stdout_whole
 test_dsh_digest_gate_is_per_session
 test_dsh_digest_retries_when_nothing_was_produced
-test_dsh_guard_fails_open_when_the_budget_lock_is_unavailable
+test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
 test_dsh_guard_budget_is_an_episode_not_a_session
+test_dsh_guard_healthy_reset_clears_the_alarm_latch
+test_dsh_protocol_and_seatbelt_agree_on_the_arm_command
