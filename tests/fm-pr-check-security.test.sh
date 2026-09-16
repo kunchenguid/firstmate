@@ -21,7 +21,6 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
-REAL_CHMOD=$(command -v chmod)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
@@ -262,9 +261,7 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1 '
   'https://github.com/o /r/pull/1'
   $'https://github.com/o/r/pull/1\t'
-  $'https://github.com/o/r/pull/1\r'
   $'https://github.com/o/r/pull/1\nnext'
-  $'https://github.com/o/r/pull/1\r\nnext'
   $'https://github.com/o/r/pull/1\001'
   $'https://github.com/o/r/pull/1\033'
   $'https://github.com/o/r/pull/1\177'
@@ -328,6 +325,15 @@ INVALID_URLS=(
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
 )
+# A lone or leading \r silently vanishes when spelled directly inside a
+# $'...' word in a compound array assignment on some bash builds (observed
+# with MSYS2/Git-Bash on Windows), so build these two carriage-return cases
+# through scalar variables and append them instead of embedding \r inline
+# above, where the byte would be dropped before fm_pr_url_parse ever saw it.
+FM_PR_CHECK_CR_URL=$'https://github.com/o/r/pull/1\r'
+FM_PR_CHECK_CRLF_URL=$'https://github.com/o/r/pull/1\r\nnext'
+INVALID_URLS+=("$FM_PR_CHECK_CR_URL" "$FM_PR_CHECK_CRLF_URL")
+unset FM_PR_CHECK_CR_URL FM_PR_CHECK_CRLF_URL
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
 INVALID_IDS=(
@@ -829,7 +835,15 @@ SH
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
-  local artifact kind dir state destination
+  local artifact kind dir state destination sentinel_fakebin
+  # The regular/directory fixture kinds assert an exact external mode below,
+  # which only means something if the mode set here is the mode later
+  # observed. On a proven mode-inert host the real chmod is a no-op, so both
+  # the fixture setup and its assertion route through a capable-simulation
+  # fakebin shared across every iteration.
+  sentinel_fakebin="$TMP_ROOT/symlink-mode-fakebin"
+  mkdir -p "$sentinel_fakebin"
+  install_mode_probe_fakebin "$sentinel_fakebin" capable
   for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
     for kind in regular dangling directory; do
       dir=$(make_case "poll-path-${artifact//./-}-$kind")
@@ -837,12 +851,12 @@ test_poll_publication_refuses_unsafe_destinations() {
       fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
         || fail "could not stage poll symlink refusal fixture"
       destination="$state/$artifact"
-      make_private_symlink "$dir" "$destination" "$kind"
+      PATH="$sentinel_fakebin:$BASE_PATH" make_private_symlink "$dir" "$destination" "$kind"
       if fm_pr_poll_publish_prepared; then
         fail "poll publication accepted a private destination symlink"
       fi
       fm_pr_poll_cleanup
-      assert_private_symlink_unchanged "$destination"
+      PATH="$sentinel_fakebin:$BASE_PATH" assert_private_symlink_unchanged "$destination"
       [ ! -e "$state/task-a.pr-poll" ] || [ "$artifact" = task-a.pr-poll ] \
         || fail "check destination refusal published the sidecar"
     done
@@ -865,7 +879,7 @@ test_poll_publication_refuses_unsafe_destinations() {
 }
 
 test_live_artifact_single_link_and_privacy_validation() {
-  local artifact dir state alias rc
+  local artifact dir state alias rc fakebin
   for artifact in check.sh pr-poll pr-poll-registration; do
     dir=$(make_case "single-link-live-${artifact//./-}")
     state="$dir/home/state"
@@ -915,26 +929,146 @@ test_live_artifact_single_link_and_privacy_validation() {
   fm_custom_check_snapshot_cleanup
   [ -e "$alias" ] || fail "custom-check hard-link refusal removed the external alias"
 
+  # This sub-case asserts real bit-level rejection, which only means something
+  # on a device that can represent POSIX mode bits, so it forces that class
+  # with the capable fakebin rather than trusting the ambient test host.
   dir=$(make_case private-custom-check-source)
   state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  install_mode_probe_fakebin "$fakebin" capable
+  FM_PR_MODE_CAPABLE_CACHE=
   printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
-  chmod 0755 "$state/custom.check.sh"
+  PATH="$fakebin:$BASE_PATH" chmod 0755 "$state/custom.check.sh"
   set +e
-  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  FM_HOME="$dir/home" PATH="$fakebin:$BASE_PATH" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
   [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
-  chmod 0700 "$state/custom.check.sh"
-  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+  PATH="$fakebin:$BASE_PATH" chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" PATH="$fakebin:$BASE_PATH" "$REGISTER" custom >/dev/null \
     || fail "could not register private custom check fixture"
-  chmod 0755 "$state/custom.check.sh"
-  ! fm_custom_check_registered "$state" custom \
+  PATH="$fakebin:$BASE_PATH" chmod 0755 "$state/custom.check.sh"
+  ! PATH="$fakebin:$BASE_PATH" fm_custom_check_registered "$state" custom \
     || fail "registered custom check remained authenticated after becoming non-private"
-  ! fm_custom_check_snapshot_prepare "$state" custom \
+  ! PATH="$fakebin:$BASE_PATH" fm_custom_check_snapshot_prepare "$state" custom \
     || fail "watcher snapshot accepted a non-private custom check source"
   fm_custom_check_snapshot_cleanup
+  FM_PR_MODE_CAPABLE_CACHE=
   pass "live poll and custom-check artifacts require private single-link files"
+}
+
+# Simulate the two mount classes fm_pr_device_mode_capable must tell apart:
+# a "capable" fake chmod writes each requested mode into a ".fakemode"
+# sidecar, while an "inert" fake chmod fixes the sidecar on first touch and
+# ignores every later request, mirroring a noacl/posix=0 or drvfs/9p mount
+# where chmod reports success but never changes the observed mode. The fake
+# stat only intercepts the "-c %a" mode query when a sidecar exists for that
+# exact path, so device and link-count queries (and every other command)
+# still hit the real filesystem, keeping those invariants genuinely enforced.
+install_mode_probe_fakebin() {  # <fakebin-dir> <capable|inert>
+  local fakebin=$1 kind=$2
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -c ] && [ "\$2" = %a ] && [ -f "\$3.fakemode" ]; then
+  cat "\$3.fakemode"
+  exit 0
+fi
+exec "$REAL_STAT" "\$@"
+SH
+  if [ "$kind" = capable ]; then
+    cat > "$fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+mode=$1
+shift
+for f in "$@"; do
+  printf '%s\n' "${mode#0}" > "$f.fakemode"
+done
+SH
+  else
+    cat > "$fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+shift
+for f in "$@"; do
+  [ -f "$f.fakemode" ] || printf '644\n' > "$f.fakemode"
+done
+SH
+  fi
+  chmod +x "$fakebin/stat" "$fakebin/chmod"
+}
+
+test_mode_capable_device_enforces_exact_bits() {
+  local dir state fakebin device strict_target loose_target
+  dir=$(make_case mode-capable-device)
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  install_mode_probe_fakebin "$fakebin" capable
+  FM_PR_MODE_CAPABLE_CACHE=
+  strict_target="$state/private-fixture"
+  loose_target="$state/exposed-fixture"
+  : > "$strict_target"
+  : > "$loose_target"
+  device=$(fm_pr_file_device "$state")
+  PATH="$fakebin:$BASE_PATH" chmod 0600 "$strict_target"
+  PATH="$fakebin:$BASE_PATH" chmod 0640 "$loose_target"
+  PATH="$fakebin:$BASE_PATH" fm_pr_device_mode_capable "$state" "$device" \
+    || fail "a simulated honor-capable device was not detected as mode-capable"
+  PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$strict_target" 600 "$device" \
+    || fail "a correctly private file was rejected on a mode-capable device"
+  ! PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$loose_target" 600 "$device" \
+    || fail "a group-readable file was accepted on a mode-capable device"
+  FM_PR_MODE_CAPABLE_CACHE=
+  pass "a device that honors chmod still gets the exact-mode private-file check"
+}
+
+test_mode_inert_device_skips_bit_check_but_keeps_other_invariants() {
+  local dir state fakebin device target symlink_target link_alias
+  dir=$(make_case mode-inert-device)
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  install_mode_probe_fakebin "$fakebin" inert
+  FM_PR_MODE_CAPABLE_CACHE=
+  target="$state/private-fixture"
+  : > "$target"
+  device=$(fm_pr_file_device "$state")
+  PATH="$fakebin:$BASE_PATH" chmod 0600 "$target"
+  ! PATH="$fakebin:$BASE_PATH" fm_pr_device_mode_capable "$state" "$device" \
+    || fail "a simulated chmod-inert device was reported as mode-capable"
+  PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$target" 600 "$device" \
+    || fail "a regular single-link file was rejected on a proven mode-inert device"
+  ! PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$target" 600 999999 \
+    || fail "mode-inert handling accepted a file on the wrong device"
+  symlink_target="$dir/outside-target"
+  printf 'external\n' > "$symlink_target"
+  link_alias="$state/private-fixture-link"
+  ln -s "$symlink_target" "$link_alias"
+  ! PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$link_alias" 600 "$device" \
+    || fail "mode-inert handling accepted a symlink"
+  ln "$target" "$dir/hardlink-alias"
+  ! PATH="$fakebin:$BASE_PATH" fm_pr_private_file_valid "$target" 600 "$device" \
+    || fail "mode-inert handling accepted a file with an external hard link"
+  rm -f "$dir/hardlink-alias"
+  FM_PR_MODE_CAPABLE_CACHE=
+  pass "a proven mode-inert device satisfies the private-file check without weakening its other invariants"
+}
+
+test_poll_prepare_and_publish_succeed_on_simulated_mode_inert_device() {
+  local dir state fakebin
+  dir=$(make_case poll-mode-inert)
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  install_mode_probe_fakebin "$fakebin" inert
+  FM_PR_MODE_CAPABLE_CACHE=
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  PATH="$fakebin:$BASE_PATH" fm_pr_poll_prepare "$state" task-a github \
+    https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    || fail "poll preparation failed on a simulated mode-inert device"
+  PATH="$fakebin:$BASE_PATH" fm_pr_poll_publish_prepared \
+    || fail "poll publication failed on a simulated mode-inert device"
+  PATH="$fakebin:$BASE_PATH" fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published poll artifacts failed validation on a simulated mode-inert device"
+  FM_PR_MODE_CAPABLE_CACHE=
+  pass "PR poll recording succeeds end to end on a device that cannot represent POSIX mode bits"
 }
 
 install_final_publication_fault() {
@@ -949,11 +1083,28 @@ case "${FM_TEST_FINAL_ACTION:?}" in
     rm -f -- "$last"
     ln -s "${FM_TEST_FAULT_LINK_TARGET:?}" "$last"
     ;;
-  mode) "${FM_TEST_REAL_CHMOD:?}" 0644 "$last" ;;
+  mode) chmod 0644 "$last" ;;
   content) printf 'faulted final bytes\n' > "$last" ;;
   device) : > "${FM_TEST_FAULT_GATE:?}" ;;
   *) exit 2 ;;
 esac
+SH
+  # The mode fault asserts that a real post-rename permission corruption gets
+  # detected and rolled back, which only means something if the requested
+  # chmod is a chmod this run can actually observe. On a proven mode-inert
+  # host neither request nor readback would move, so the mv fault calls plain
+  # chmod, which PATH resolves to this capable-simulation chmod rather than
+  # the real one, and this stat mirrors install_mode_probe_fakebin's sidecar
+  # readback for the exact final path so fm_pr_device_mode_capable's own
+  # probe (on a scratch file here) and the production mode check both see the
+  # simulated bits.
+  cat > "$dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+mode=$1
+shift
+for f in "$@"; do
+  printf '%s\n' "${mode#0}" > "$f.fakemode"
+done
 SH
   cat > "$dir/fakebin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -963,9 +1114,13 @@ if [ "$last" = "${FM_TEST_FINAL_PATH:-}" ] && [ -e "${FM_TEST_FAULT_GATE:-/nonex
     *" %d "*) printf '%s\n' 999999; exit 0 ;;
   esac
 fi
+if [ "$1" = -c ] && [ "$2" = %a ] && [ -f "$last.fakemode" ]; then
+  cat "$last.fakemode"
+  exit 0
+fi
 exec "${FM_TEST_REAL_STAT:?}" "$@"
 SH
-  chmod +x "$dir/fakebin/mv" "$dir/fakebin/stat"
+  chmod +x "$dir/fakebin/mv" "$dir/fakebin/chmod" "$dir/fakebin/stat"
 }
 
 assert_no_final_poll() {
@@ -979,7 +1134,7 @@ assert_no_final_poll() {
 }
 
 test_postrename_poll_validation_revokes_and_retries() {
-  local artifact action dir state destination link_target gate
+  local artifact action dir state destination link_target gate sentinel_fakebin
   for artifact in data registration check; do
     for action in type mode device content; do
       # The device fault is injected by a fake stat on PATH; on Darwin the
@@ -1004,19 +1159,38 @@ test_postrename_poll_validation_revokes_and_retries() {
       esac
       link_target="$dir/external-sentinel"
       gate="$dir/device-fault"
+      # The external target's mode is verified below, which only means
+      # something if the mode we set is the mode we can later observe. On this
+      # proven mode-inert host the real chmod is a no-op, so both the setup
+      # and the assertion route through a dedicated capable-simulation
+      # fakebin, kept separate from install_final_publication_fault's own
+      # fakebin so the two never collide.
+      sentinel_fakebin="$dir/sentinel-fakebin"
+      mkdir -p "$sentinel_fakebin"
+      install_mode_probe_fakebin "$sentinel_fakebin" capable
       printf 'external sentinel\n' > "$link_target"
-      chmod 0644 "$link_target"
+      PATH="$sentinel_fakebin:$BASE_PATH" chmod 0644 "$link_target"
       install_final_publication_fault "$dir"
+      # Reset the capability cache so this device's status is decided fresh
+      # under the fault-injecting fakebin below: an earlier real-host probe
+      # from the plain fm_pr_poll_prepare calls above would otherwise still
+      # be cached and skip the mode fault's own capable-simulated probe.
+      FM_PR_MODE_CAPABLE_CACHE=
       if FM_TEST_FINAL_PATH="$destination" FM_TEST_FINAL_ACTION="$action" \
         FM_TEST_FAULT_LINK_TARGET="$link_target" FM_TEST_FAULT_GATE="$gate" \
-        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" \
         PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared; then
         fail "post-rename $artifact $action fault was reported as success"
       fi
+      # Drop the cache entry the simulated probe above just wrote before any
+      # further real (non-fakebin) use of this same device below.
+      # shellcheck disable=SC2034 # Read by fm_pr_device_mode_capable in the sourced fm-pr-lib.sh.
+      FM_PR_MODE_CAPABLE_CACHE=
       fm_pr_poll_cleanup
       assert_no_final_poll "$state"
       [ "$(cat "$link_target")" = 'external sentinel' ] || fail "poll type fault changed an external target"
-      [ "$(file_mode "$link_target")" = 644 ] || fail "poll type fault changed an external target mode"
+      [ "$(PATH="$sentinel_fakebin:$BASE_PATH" file_mode "$link_target")" = 644 ] \
+        || fail "poll type fault changed an external target mode"
 
       fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
         || fail "could not prepare poll retry"
@@ -2445,6 +2619,9 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_mode_capable_device_enforces_exact_bits
+test_mode_inert_device_skips_bit_check_but_keeps_other_invariants
+test_poll_prepare_and_publish_succeed_on_simulated_mode_inert_device
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
