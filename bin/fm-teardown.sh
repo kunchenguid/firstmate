@@ -3227,9 +3227,7 @@ case "$KIND" in
         exit 1
       }
     else
-      PRESERVATION_WT=
-      [ "$KIND" != ship ] || PRESERVATION_WT=$WT
-      if ! fm_preservation_verify "$STATE" "$ID" final "$PRESERVATION_WT"; then
+      if ! fm_preservation_verify "$STATE" "$ID" final "$WT" "$KIND"; then
         echo "$FM_PRESERVATION_VERIFY_ERROR" >&2
         echo "Publish a final AgentLab checkpoint and record its receipt with bin/fm-preservation-record.sh, then retry; or get the captain's explicit words and retry with --preservation-waived-by-captain \"<verbatim words>\"." >&2
         exit 1

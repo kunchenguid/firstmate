@@ -121,14 +121,76 @@ fm_preservation_record_waiver() {
   printf 'note: preservation gate waived by captain: %s\n' "$words" >> "$status" 2>/dev/null || true
 }
 
-# fm_preservation_verify <state_dir> <id> <kind> [<worktree>]
-# kind is initial|update|final. worktree, when given and kind=final, additionally
-# requires the receipt's app_head to equal the worktree's current HEAD.
+# _fm_preservation_epoch <timestamp>: prints a receipt timestamp (ISO 8601,
+# optional sub-second precision) as epoch seconds, or returns 1 if unparseable.
+_fm_preservation_epoch() {
+  local ts=$1
+  ts=$(printf '%s' "$ts" | sed -E 's/\.[0-9]+Z$/Z/')
+  date -u -d "$ts" +%s 2>/dev/null \
+    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null \
+    || return 1
+}
+
+# _fm_preservation_mtime <path>: prints a file's mtime as epoch seconds, or
+# returns 1 if the file cannot be stat'd.
+_fm_preservation_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# _fm_preservation_not_stale_against <id> <receipt_epoch> <file>...
+# Refuses (sets FM_PRESERVATION_VERIFY_ERROR, returns 1) if any given file
+# exists and was modified after the receipt's own recorded timestamp.
+_fm_preservation_not_stale_against() {
+  local id=$1 receipt_epoch=$2; shift 2
+  local f mt
+  for f in "$@"; do
+    [ -e "$f" ] || continue
+    mt=$(_fm_preservation_mtime "$f") || continue
+    if [ "$mt" -gt "$receipt_epoch" ]; then
+      # shellcheck disable=SC2034 # Output global consumed by sourcing callers.
+      FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is stale: $f was modified after the checkpoint's own recorded timestamp; publish an updated final checkpoint before teardown"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# _fm_preservation_default_branch_head <dir>: prints the commit at <dir>'s
+# default branch tip (origin/HEAD's branch, else a local main, else master),
+# or returns 1 if none can be resolved.
+_fm_preservation_default_branch_head() {
+  local dir=$1 ref branch
+  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && git -C "$dir" rev-parse --verify --quiet "${ref}^{commit}" 2>/dev/null; then
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch" \
+      && git -C "$dir" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# fm_preservation_verify <state_dir> <id> <kind> [<worktree>] [<task_kind>]
+# kind is initial|update|final. worktree, when given and kind=final, checks the
+# receipt's app_head for staleness against it; task_kind (ship|scout|secondmate,
+# default ship) selects which staleness rule applies:
+#   ship (default): app_head is required and must equal worktree's current HEAD.
+#   scout: app_head may be empty (a scout has no code-review head to record);
+#     when given, it must equal worktree's current HEAD; the receipt's own
+#     timestamp must additionally be no older than the newest data/<id>/*.md
+#     report and the task's own status file.
+#   secondmate: app_head is required and must equal worktree's (the secondmate
+#     home's own checkout) current default-branch head; the receipt's own
+#     timestamp must additionally be no older than that home's
+#     data/backlog.md and data/captain.md.
 # Sets FM_PRESERVATION_VERIFY_ERROR (a "REFUSED: preservation ..." line) and
 # returns 1 on any failure; sets FM_PRESERVATION_VERIFY_RECEIPT (the matched
 # receipt JSON) and returns 0 on success.
 fm_preservation_verify() {
-  local state_dir=$1 id=$2 kind=$3 worktree=${4:-}
+  local state_dir=$1 id=$2 kind=$3 worktree=${4:-} task_kind=${5:-ship}
   local fm_home=${FM_HOME:-$FM_ROOT}
   local record_path agentlab_root receipt commit path branch app_head validator
   local tmp_checkpoint rc offline_flag
@@ -213,14 +275,56 @@ fm_preservation_verify() {
   # can actually be read - rather than refusing on a path that is legitimately
   # gone or not a git checkout at all.
   if [ "$kind" = final ] && [ -n "$worktree" ]; then
-    local current_head
-    if current_head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null); then
-      if [ -z "$app_head" ] || [ "$app_head" != "$current_head" ]; then
-        # shellcheck disable=SC2034 # Output global consumed by sourcing callers.
-        FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is stale: its recorded app head '${app_head:-<none>}' does not match the current branch head $current_head at $worktree; publish an updated final checkpoint before teardown"
-        return 1
-      fi
-    fi
+    case "$task_kind" in
+      scout)
+        local current_head
+        if current_head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null); then
+          if [ -n "$app_head" ] && [ "$app_head" != "$current_head" ]; then
+            FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is stale: its recorded app head '$app_head' does not match the current branch head $current_head at $worktree; publish an updated final checkpoint before teardown"
+            return 1
+          fi
+        fi
+        local receipt_ts receipt_epoch
+        receipt_ts=$(_fm_preservation_field "$receipt" timestamp)
+        receipt_epoch=$(_fm_preservation_epoch "$receipt_ts") || {
+          FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id has an unparseable timestamp '$receipt_ts'"
+          return 1
+        }
+        _fm_preservation_not_stale_against "$id" "$receipt_epoch" \
+          "$fm_home/data/$id"/*.md "$state_dir/$id.status" || return 1
+        ;;
+      secondmate)
+        if [ -z "$app_head" ]; then
+          FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is missing app_head; a secondmate final checkpoint must record the secondmate home's current default-branch head"
+          return 1
+        fi
+        local secondmate_head
+        if secondmate_head=$(_fm_preservation_default_branch_head "$worktree"); then
+          if [ "$app_head" != "$secondmate_head" ]; then
+            FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is stale: its recorded app head '$app_head' does not match the secondmate home's current default-branch head $secondmate_head at $worktree; publish an updated final checkpoint before teardown"
+            return 1
+          fi
+        fi
+        local receipt_ts receipt_epoch
+        receipt_ts=$(_fm_preservation_field "$receipt" timestamp)
+        receipt_epoch=$(_fm_preservation_epoch "$receipt_ts") || {
+          FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id has an unparseable timestamp '$receipt_ts'"
+          return 1
+        }
+        _fm_preservation_not_stale_against "$id" "$receipt_epoch" \
+          "$worktree/data/backlog.md" "$worktree/data/captain.md" || return 1
+        ;;
+      *)
+        local current_head
+        if current_head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null); then
+          if [ -z "$app_head" ] || [ "$app_head" != "$current_head" ]; then
+            # shellcheck disable=SC2034 # Output global consumed by sourcing callers.
+            FM_PRESERVATION_VERIFY_ERROR="REFUSED: preservation final checkpoint for task $id is stale: its recorded app head '${app_head:-<none>}' does not match the current branch head $current_head at $worktree; publish an updated final checkpoint before teardown"
+            return 1
+          fi
+        fi
+        ;;
+    esac
   fi
 
   # shellcheck disable=SC2034 # Output global consumed by sourcing callers.

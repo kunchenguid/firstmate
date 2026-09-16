@@ -14,6 +14,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 PRESERVATION_LIB="$ROOT/bin/fm-preservation-lib.sh"
+PRESERVATION_RECORD="$ROOT/bin/fm-preservation-record.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -58,35 +59,37 @@ commit_checkpoint() {
   git -C "$dir/src" rev-parse HEAD
 }
 
-# write_receipt <state_dir> <id> <kind> <commit> [<app_head>]
+# write_receipt <state_dir> <id> <kind> <commit> [<app_head>] [<timestamp>]
 write_receipt() {
-  local state_dir=$1 id=$2 kind=$3 commit=$4 app_head=${5:-}
+  local state_dir=$1 id=$2 kind=$3 commit=$4 app_head=${5:-} timestamp=${6:-}
   mkdir -p "$state_dir"
   node -e '
     const fs = require("node:fs");
-    const [p, id, kind, commit, appHead] = process.argv.slice(1);
+    const [p, id, kind, commit, appHead, ts] = process.argv.slice(1);
     const now = new Date().toISOString();
     fs.appendFileSync(p, JSON.stringify({
       kind, task: id, home: "gate-home", commit,
       path: "checkpoints/gate-home/task-x1/001--fixture--final.md",
       branch: "main", app_branch: "", app_head: appHead || "",
-      timestamp: now, recorded_at: now,
+      timestamp: ts || now, recorded_at: now,
     }) + "\n");
-  ' "$state_dir/$id.preservation" "$id" "$kind" "$commit" "$app_head"
+  ' "$state_dir/$id.preservation" "$id" "$kind" "$commit" "$app_head" "$timestamp"
 }
 
-# run_verify <agentlab_dir> <state_dir> <id> <kind> [<worktree>]
-# Prints "PASS" or "FAIL: <error>".
+# run_verify <agentlab_dir> <state_dir> <id> <kind> [<worktree>] [<task_kind>]
+# Prints "PASS" or "FAIL: <error>". FM_HOME is pinned to agentlab_dir's parent
+# so a scout/secondmate task_kind's data/<id> and status-file freshness checks
+# resolve against the fixture, not the real firstmate home.
 run_verify() {
-  local agentlab_dir=$1 state_dir=$2 id=$3 kind=$4 wt=${5:-}
-  FM_PRESERVATION_AGENTLAB_ROOT="$agentlab_dir/src" bash -c '
+  local agentlab_dir=$1 state_dir=$2 id=$3 kind=$4 wt=${5:-} task_kind=${6:-}
+  FM_PRESERVATION_AGENTLAB_ROOT="$agentlab_dir/src" FM_HOME="$agentlab_dir" bash -c '
     . "$1"
-    if fm_preservation_verify "$2" "$3" "$4" "$5"; then
+    if fm_preservation_verify "$2" "$3" "$4" "$5" "$6"; then
       printf "PASS\n"
     else
       printf "FAIL: %s\n" "$FM_PRESERVATION_VERIFY_ERROR"
     fi
-  ' _ "$PRESERVATION_LIB" "$state_dir" "$id" "$kind" "$wt"
+  ' _ "$PRESERVATION_LIB" "$state_dir" "$id" "$kind" "$wt" "$task_kind"
 }
 
 # --- fm_preservation_verify: the library's own contract ---------------------
@@ -236,6 +239,116 @@ test_verify_only_matches_the_requested_kind_and_task() {
     FAIL:*absent*) pass "verify never lets an initial receipt satisfy a final check" ;;
     *) fail "an initial-kind receipt must not satisfy a final check, got: $out" ;;
   esac
+}
+
+test_verify_scout_allows_empty_app_head_when_report_is_fresh() {
+  local dir="$TMP_ROOT/verify-scout-fresh" wt sha out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "scout final content")
+  wt="$dir/appwt"
+  fm_git_init_commit "$wt"
+  mkdir -p "$dir/data/task-x1"
+  printf 'report\n' > "$dir/data/task-x1/report.md"
+  fm_touch_epoch 1700000000 "$dir/data/task-x1/report.md"
+  write_receipt "$dir/state" task-x1 final "$sha" "" "2023-11-15T00:00:00Z"
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" scout)
+  [ "$out" = PASS ] || fail "expected an empty app_head with a fresh report to pass for a scout, got: $out"
+  pass "verify allows a scout final receipt with an empty app_head when its report predates it"
+}
+
+test_verify_scout_refuses_when_report_is_newer_than_the_receipt() {
+  local dir="$TMP_ROOT/verify-scout-stale" wt sha out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "scout final content")
+  wt="$dir/appwt"
+  fm_git_init_commit "$wt"
+  mkdir -p "$dir/data/task-x1"
+  printf 'report\n' > "$dir/data/task-x1/report.md"
+  fm_touch_epoch 1700000000 "$dir/data/task-x1/report.md"
+  write_receipt "$dir/state" task-x1 final "$sha" "" "2020-01-01T00:00:00Z"
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" scout)
+  case "$out" in
+    FAIL:*"is stale"*) pass "verify refuses a scout final receipt whose report was edited after the checkpoint" ;;
+    *) fail "expected a stale-report refusal for a scout, got: $out" ;;
+  esac
+}
+
+test_verify_secondmate_requires_app_head() {
+  local dir="$TMP_ROOT/verify-secondmate-no-head" wt sha out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "secondmate final content")
+  wt="$dir/home"
+  fm_git_init_commit "$wt"
+  write_receipt "$dir/state" task-x1 final "$sha" ""
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" secondmate)
+  case "$out" in
+    FAIL:*"missing app_head"*) pass "verify refuses a secondmate final receipt with no app_head" ;;
+    *) fail "expected a missing-app_head refusal for a secondmate, got: $out" ;;
+  esac
+}
+
+test_verify_secondmate_passes_with_matching_head_and_fresh_backlog() {
+  local dir="$TMP_ROOT/verify-secondmate-fresh" wt sha head out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "secondmate final content")
+  wt="$dir/home"
+  fm_git_init_commit "$wt"
+  head=$(git -C "$wt" rev-parse HEAD)
+  mkdir -p "$wt/data"
+  printf 'backlog\n' > "$wt/data/backlog.md"
+  printf 'captain\n' > "$wt/data/captain.md"
+  fm_touch_epoch 1700000000 "$wt/data/backlog.md" "$wt/data/captain.md"
+  write_receipt "$dir/state" task-x1 final "$sha" "$head" "2023-11-15T00:00:00Z"
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" secondmate)
+  [ "$out" = PASS ] || fail "expected a matching head with a fresh backlog/captain to pass, got: $out"
+  pass "verify passes a secondmate final receipt whose head and backlog/captain predate it"
+}
+
+test_verify_secondmate_refuses_when_backlog_is_newer_than_the_receipt() {
+  local dir="$TMP_ROOT/verify-secondmate-stale" wt sha head out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "secondmate final content")
+  wt="$dir/home"
+  fm_git_init_commit "$wt"
+  head=$(git -C "$wt" rev-parse HEAD)
+  mkdir -p "$wt/data"
+  printf 'backlog\n' > "$wt/data/backlog.md"
+  printf 'captain\n' > "$wt/data/captain.md"
+  fm_touch_epoch 1700000000 "$wt/data/backlog.md" "$wt/data/captain.md"
+  write_receipt "$dir/state" task-x1 final "$sha" "$head" "2020-01-01T00:00:00Z"
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" secondmate)
+  case "$out" in
+    FAIL:*"is stale"*) pass "verify refuses a secondmate final receipt whose backlog was edited after the checkpoint" ;;
+    *) fail "expected a stale-backlog refusal for a secondmate, got: $out" ;;
+  esac
+}
+
+test_verify_secondmate_refuses_a_head_mismatch() {
+  local dir="$TMP_ROOT/verify-secondmate-head-mismatch" wt sha out
+  build_gate_fixture "$dir"
+  sha=$(commit_checkpoint "$dir" "secondmate final content")
+  wt="$dir/home"
+  fm_git_init_commit "$wt"
+  write_receipt "$dir/state" task-x1 final "$sha" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "2023-11-15T00:00:00Z"
+  out=$(run_verify "$dir" "$dir/state" task-x1 final "$wt" secondmate)
+  case "$out" in
+    FAIL:*"is stale"*) pass "verify refuses a secondmate final receipt whose app head does not match the home's default branch" ;;
+    *) fail "expected a head-mismatch refusal for a secondmate, got: $out" ;;
+  esac
+}
+
+# --- bin/fm-preservation-record.sh: real receipt ingestion ------------------
+
+test_record_accepts_a_pre_worktree_receipt_with_no_app_head() {
+  local dir="$TMP_ROOT/record-no-app-head" out status
+  mkdir -p "$dir/state"
+  out=$(printf '%s' '{"kind":"initial","task":"task-x1","commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","path":"checkpoints/gate-home/task-x1/001--fixture--initial.md","timestamp":"2026-09-17T00:00:00Z"}' \
+    | FM_STATE_OVERRIDE="$dir/state" "$PRESERVATION_RECORD" task-x1 --home gate-home 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "fm-preservation-record.sh should accept an app_head-less initial receipt (rc=$status): $out"
+  assert_grep '"app_head":""' "$dir/state/task-x1.preservation" \
+    "an app_head-less receipt was not recorded with an empty app_head"
+  pass "fm-preservation-record.sh records a pre-worktree initial receipt that omits app_head"
 }
 
 # --- captain waiver ----------------------------------------------------------
@@ -553,6 +666,13 @@ test_verify_refuses_when_app_head_moved
 test_verify_passes_when_app_head_matches
 test_verify_tolerates_a_gone_worktree
 test_verify_only_matches_the_requested_kind_and_task
+test_verify_scout_allows_empty_app_head_when_report_is_fresh
+test_verify_scout_refuses_when_report_is_newer_than_the_receipt
+test_verify_secondmate_requires_app_head
+test_verify_secondmate_passes_with_matching_head_and_fresh_backlog
+test_verify_secondmate_refuses_when_backlog_is_newer_than_the_receipt
+test_verify_secondmate_refuses_a_head_mismatch
+test_record_accepts_a_pre_worktree_receipt_with_no_app_head
 test_waiver_records_words_and_lets_verify_stay_refused
 test_teardown_refuses_without_a_final_receipt
 test_teardown_force_does_not_bypass_preservation
