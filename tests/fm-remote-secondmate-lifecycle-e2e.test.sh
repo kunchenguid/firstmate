@@ -659,6 +659,12 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+# The steering inbox the charter names must be the one on THIS host, not the
+# parent's state path: a remote steer is delivered host-locally, so a mate that
+# navigates to the path its own brief names would otherwise find nothing.
+assert_grep "durable message files in '$REMOTE_HOME/state/parent-route/ios.inbox'." "$REMOTE_HOME/data/charter.md" "remote charter did not name its host-local steering inbox"
+assert_grep "mv '$REMOTE_HOME/state/parent-route/ios.inbox'/NNN.msg '$REMOTE_HOME/state/parent-route/ios.inbox'/handled/" "$REMOTE_HOME/data/charter.md" "remote charter's acknowledgement command did not name its host-local steering inbox"
+assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox path"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
@@ -895,6 +901,12 @@ assert_no_grep 'report the build result' "$HERDR_LOG" "the steer payload was typ
 assert_grep 'Firstmate instruction waiting' "$HERDR_LOG" "the remote doorbell never rang"
 CORR=$(newest_remote_inbox_corr)
 [ -n "$CORR" ] || fail "remote send did not carry a correlation token"
+# Tie the charter's named inbox to the directory the real steer just wrote into,
+# so the path assertion above cannot drift away from actual delivery.
+delivered_record=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' | sort | tail -1)
+[ -f "$delivered_record" ] || fail "no delivered steering record to bind the charter's inbox path to"
+assert_grep "durable message files in '$(dirname "$delivered_record")'." "$REMOTE_HOME/data/charter.md" \
+  "the charter names an inbox the remote steer was not delivered into"
 assert_grep "FM_PENDING_REPLY_EXISTING_CORR=$CORR" "$TMP_ROOT/send.err" "ambiguous remote send did not print its correlation-reusing command"
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = delivery_unknown ] || fail "ambiguous remote send did not preserve its pending expectation"

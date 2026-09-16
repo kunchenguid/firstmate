@@ -190,6 +190,7 @@ An unreachable or unreadable remote read is unknown, not evidence that the endpo
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
+It also names that home's own host-local steering inbox rather than the parent's state path, so the inbox a mate is told to read is the one its steers are delivered into (`bin/fm-remote-secondmate-control.sh` owns that directory).
 The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
