@@ -121,8 +121,8 @@ The tool displays its literal windows and semantics beside separately labeled he
 ## Scorecard interpretation
 
 The scorecard groups attempt-route observations by category, task shape, harness, provider, effective model, effective effort, authentication category, context tier, and service tier.
-When provider, effective model, or effective effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
-Multi-model native results use an explicit whole-session label.
+Outside whole-session observations, an unavailable provider, effective model, or effective effort uses an explicit `requested-only:` label that is never pooled with observed route evidence.
+Multi-model and multi-route native results use explicit whole-session labels, while an ambiguous whole-session route stays explicitly unknown.
 Task count reports unique task IDs, while task-incarnation count separately reports observed lifecycle incarnations.
 The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual execution-only partial observation for every task incarnation and attempt.
 Each individual observation includes its raw before/after quota snapshots, native freshness and semantics status, attempt bracketing, attribution, concurrency, reset caveats, and supported per-window delta in JSON, plus a concise non-aggregated rendering in Markdown.
