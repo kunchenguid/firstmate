@@ -58,6 +58,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-preservation-lib.sh` | Shared AgentLab evidence-preservation receipt log and `fm_preservation_verify` gate called by `fm-spawn.sh`, `fm-promote.sh`, and `fm-teardown.sh` |
+| `fm-preservation-record.sh` | Ingest a publisher `CHECKPOINT_RECEIPT` into a task's durable preservation receipt log |
+| `fm-session-id.sh`       | Resolve a home's active Claude Code session ID and resume URL for the evidence-preservation identification blocks |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
