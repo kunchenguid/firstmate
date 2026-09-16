@@ -176,21 +176,25 @@ fi
 # the --yes ban is the delivery hole this file used to leave open.
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
 PROMOTE_PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
-[ -n "$PROMOTE_PROJ" ] || PROMOTE_PROJ=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+PROMOTE_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$PROMOTE_PROJ" ] || PROMOTE_PROJ=$PROMOTE_WT
+[ -n "$PROMOTE_WT" ] || PROMOTE_WT=$PROMOTE_PROJ
+PROMOTE_TARGET=$PROMOTE_PROJ
+[ "$MODE" = local-only ] || PROMOTE_TARGET=$PROMOTE_WT
 if [ -n "$RECORDED_BASE" ]; then
-  if [ -z "$PROMOTE_PROJ" ] || ! git -C "$PROMOTE_PROJ" rev-parse --git-dir >/dev/null 2>&1; then
+  if [ -z "$PROMOTE_TARGET" ] || ! git -C "$PROMOTE_TARGET" rev-parse --git-dir >/dev/null 2>&1; then
     echo "error: promotion cannot verify recorded base '$RECORDED_BASE' because the task has no usable project or worktree git directory" >&2
     exit 1
   fi
   if [ "$MODE" = local-only ]; then
-    if ! git -C "$PROMOTE_PROJ" show-ref --verify --quiet "refs/heads/$RECORDED_BASE"; then
+    if ! git -C "$PROMOTE_TARGET" show-ref --verify --quiet "refs/heads/$RECORDED_BASE"; then
       echo "error: local-only promotion requires recorded base '$RECORDED_BASE' as a local branch (refs/heads/$RECORDED_BASE); a base that exists only on origin cannot be landed locally" >&2
       exit 1
     fi
-  elif ! git -C "$PROMOTE_PROJ" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
+  elif ! git -C "$PROMOTE_TARGET" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
     echo "error: $MODE promotion requires recorded base '$RECORDED_BASE' on origin; a local-only base cannot be a pull-request target" >&2
     exit 1
-  elif ! git -C "$PROMOTE_PROJ" fetch --quiet origin \
+  elif ! git -C "$PROMOTE_TARGET" fetch --quiet origin \
     "+refs/heads/$RECORDED_BASE:refs/remotes/origin/$RECORDED_BASE"; then
     echo "error: $MODE promotion could not refresh recorded base '$RECORDED_BASE' from origin; refusing to continue with a stale base" >&2
     exit 1

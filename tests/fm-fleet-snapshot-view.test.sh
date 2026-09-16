@@ -538,6 +538,8 @@ test_backlog_tasks_axi_forms_and_overrides() {
   Captain decision:
   Land the local change.
   local-landing:release/v1.2
+- [x] retained-local-landing - Retained Local Landing (repo: delta, done 2026-07-11) (kind: ship)
+  Deliverable of the finished work: local-landing:develop
 - [x] done-title-main - Investigate local main (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-title-prose - Investigate local develop (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-title-suffix - Investigate local develop - local branch (repo: delta, done 2026-07-11) (kind: ship)
@@ -668,6 +670,12 @@ EOF
       and .local_note == "local release/v1.2"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "released local landing note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "retained-local-landing")
+    | .title == "Retained Local Landing"
+      and .local_note == "local develop"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "retained local landing note did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-title-main")
     | .title == "Investigate local main" and .local_note == null
