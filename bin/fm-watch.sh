@@ -2182,6 +2182,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -2225,6 +2226,25 @@ while :; do
         fi
       fi
       if [ -n "$out" ]; then
+        if [ "$(basename "$c")" = contributions.check.sh ]; then
+          contribution_check_output=
+          contribution_check_diagnostics=
+          while IFS= read -r contribution_check_line; do
+            case "$contribution_check_line" in
+              'contribution-wake: check: contributions '*)
+                contribution_check_output="${contribution_check_output}${contribution_check_line#contribution-wake: }"$'\n'
+                ;;
+              *) contribution_check_diagnostics="${contribution_check_diagnostics}${contribution_check_line}"$'\n' ;;
+            esac
+          done <<EOF
+$out
+EOF
+          if [ -n "$contribution_check_diagnostics" ]; then
+            out=${contribution_check_diagnostics%$'\n'}
+          elif [ -n "$contribution_check_output" ]; then
+            continue
+          fi
+        fi
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if ! fm_merge_authority_read "$STATE" "$id" \
@@ -2270,6 +2290,9 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    if [ -n "$contribution_check_output" ]; then
+      wake "$contribution_check_output"
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

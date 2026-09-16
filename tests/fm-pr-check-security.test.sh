@@ -150,6 +150,10 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
         ;;
+      *headRefOid,reviewDecision*)
+        printf '%s\n' "{\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"reviewDecision\":\"APPROVED\"}"
+        exit 0
+        ;;
     esac
     ;;
   "pr merge")
@@ -158,6 +162,21 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *" api repos/"*"/issues/"*"/comments?per_page=100 "*|*" api repos/"*"/pulls/"*"/reviews?per_page=100 "*|*" api repos/"*"/pulls/"*"/comments?per_page=100 "*)
+    printf '%s\n' '[[]]'
+    ;;
+  *" api repos/"*"/commits/"*"/check-runs?filter=all&per_page=100 "*)
+    printf '%s\n' '[{"check_runs":[]}]'
+    ;;
+  *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
+    printf '%s\n' '[[]]'
+    ;;
+  *" api repos/"*"/pulls/"*)
+    printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
+    ;;
+  *" api repos/"*)
+    printf '%s\n' '{"permissions":{"push":false}}'
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
