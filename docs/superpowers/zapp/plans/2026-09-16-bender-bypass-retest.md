@@ -267,3 +267,53 @@ So deleting the repo ruleset would *strengthen* branch protection here, not weak
 it: it would add deletion and force-push protection, pin the required checks to
 Cycode's own App, and remove the two settings that break auto-merge. That is a
 stronger argument for Chase's position than he made.
+
+## Run 2 — same block, and it is provably not the test's fault
+
+Closed #69 and reopened as [#70](https://github.com/bankrate/platform-cicd-v2-demo/pull/70)
+on the theory that Wiz held a stuck scan record keyed to the `pr-69` image tag.
+It failed identically on `pr-70`. Six failures total.
+
+**The controlled test that settles it:** PR #50's Wiz scan **succeeded at 15:33:46
+UTC**. Re-running that exact run, with no code change, **now fails with the same
+error** (request id `04ead449-93d1-4db3-8eb3-a086f7a18651`, 16:36 UTC).
+
+So the failure is not the probe branch, not the image tag, and not the change. The
+demo repo's image scan broke somewhere between 15:33 and 15:37 UTC and stays broken.
+Wiz itself is healthy — `conductor-api` scanned clean at 16:13, 16:15 and 16:20 UTC.
+
+Two supporting facts:
+
+The Dockerfile copies only `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+`.npmrc*`, `prisma`, `tsconfig.json` and `src`. It never copies `.github/`, so the
+probe's one-line `dependabot.yaml` comment produces a **byte-identical image** to
+`main`. There was never an image difference to blame.
+
+The error is `failed to finalize scan: oops! an internal error has occurred` with a
+Wiz request id. Finalize is the results-upload step against Wiz's API, not image
+analysis — nothing in this repo can fix it.
+
+## Why there is no way around it
+
+`Build and scan image` is required by zapp's `ciBaseline.whenLanguage.Dockerfile`,
+and the demo repo has a Dockerfile.
+
+* Gate 11's waiver excuses an `absent` check only — `ci-baseline.ts` returns early
+  unless `status === 'absent'`. This check is failing, not absent.
+* Gate 12 has no waiver at all. `gates.ts:276` is a plain
+  `gate(notGreen.length === 0, …)`.
+* `signalChecks` is a per-repo override, but it governs which checks the **risk
+  signals** wait for, not gate 12's required set (`enrollment.ts:226-239`).
+* The scan workflow triggers on every `pull_request` with no path filter, so no
+  change shape avoids it.
+
+Arming auto-merge by hand is not an option either: that has to happen as bender, and
+bender's private key lives in `/zapp/github-actor`. Reading it out to drive the API
+manually is not something to do for a test.
+
+**Conclusion: the rig is correct and complete. The test finishes the moment the demo
+repo's Wiz scan passes once.** No design change needed.
+
+**Also worth knowing operationally:** while this lasts, nothing can merge through zapp
+on `platform-cicd-v2-demo` at all — gate 12 fails for every pull request on the repo,
+not just the probe.
