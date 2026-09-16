@@ -295,8 +295,8 @@ safe_doc_path() {
 # this tag. Deduplication spans the WHOLE delta, so one document offered by
 # several lines is fetched, and named in one escalation, exactly once.
 extract_document_pointers() { # <payload-file>
-  LC_ALL=C grep -Eo '(^|[^A-Za-z0-9_.-])report=data/[A-Za-z0-9._/-]+\.md' "$1" 2>/dev/null \
-    | sed 's/.*report=//' \
+  LC_ALL=C grep -Eo '(^|[^A-Za-z0-9._/-])report=data/[A-Za-z0-9._/-]+\.md($|[^A-Za-z0-9._/-])' "$1" 2>/dev/null \
+    | sed -E 's|.*report=||; s|[^A-Za-z0-9._/-]$||' \
     | awk '!seen[$0]++'
 }
 

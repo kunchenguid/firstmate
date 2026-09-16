@@ -378,6 +378,17 @@ document_decision_open() {
   status_open_decisions "$PARENT/state/ios.status" | grep -q '^remote-reply-document-ios	'
 }
 
+printf '# valid report behind a malformed pointer\n' > "$REMOTE/data/reply/result.md"
+mirror_lines 'working [key=malformed-report]: malformed offer report=data/reply/result.md.bak'
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/result.md" \
+  "a valid prefix of a malformed report pointer was fetched"
+assert_grep 'report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
+  "a valid prefix of a malformed report pointer was rewritten"
+assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
+  "a malformed report pointer raised a document transfer obligation"
+mirrored_cursor_is_current "a malformed report pointer prevented the cursor from advancing"
+pass "a structured pointer must end at its token boundary"
+
 # A line may name a path under ANOTHER home's mirror tree; that document is
 # provably not this mate's to serve, and prose naming it is not an offer.
 mirror_lines 'working [key=cross-home]: the sibling relayed data/remote-secondmates/other/data/reply/report.md and its own data/reply/prose-only.md earlier'
