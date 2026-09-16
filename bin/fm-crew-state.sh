@@ -11,9 +11,16 @@
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 #
-# The determinism lives entirely here - only run-step / pane / log reads plus
-# fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
-# token-tight line firstmate can read every heartbeat:
+# The determinism lives entirely here - run-step / pane / log reads, fixed
+# mapping logic, and terminal passed-run PR detail from bounded evidence only,
+# with no heuristics and no LLM.
+# For a terminal passed no-mistakes run, a matching merge-poll retirement
+# receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
+# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
+# An absent or unreadable PR identity yields an honest unknown, never an
+# optimistic merged claim.
+# Output is one stable, parseable, token-tight line firstmate can read every
+# heartbeat:
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
@@ -108,6 +115,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -271,6 +282,116 @@ nm_run() {  # <args...>
 RUN_OUT=""
 nm_field() {  # <key>
   fm_nm_field "$RUN_OUT" "$1"
+}
+
+pr_read_record_bounded() {  # <owner> <repo> <number>
+  local record state merged
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  if ! record=$(fm_run_timed 5 bash -c '
+    . "$1"
+    fm_pr_github_read_record "$2" "$3" "$4" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+    return 1
+  fi
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  [ -n "$state" ] || return 1
+  [ "$merged" = true ] || [ "$merged" = false ] || return 1
+  FM_PR_RECORD_STATE=$state
+  FM_PR_RECORD_MERGED=$merged
+}
+
+mr_read_record_bounded() {  # <host> <path> <number>
+  local record state merged
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  if ! record=$(fm_run_timed 5 bash -c '
+    . "$1"
+    fm_pr_gitlab_read_record "$2" "$3" "$4" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+    return 1
+  fi
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  [ -n "$state" ] || return 1
+  [ "$merged" = true ] || [ "$merged" = false ] || return 1
+  FM_PR_RECORD_STATE=$state
+  FM_PR_RECORD_MERGED=$merged
+}
+
+passed_pr_detail() {
+  local provider url host path number owner repo raw_pr state_lc
+  raw_pr=$(strip_quotes "$(nm_field pr)")
+  if fm_pr_url_parse "$raw_pr"; then
+    provider=$FM_PR_PROVIDER
+    url=$FM_PR_URL
+    host=$FM_PR_HOST
+    path=$FM_PR_PATH
+    number=$FM_PR_NUMBER
+  elif fm_pr_metadata_identity_parse "$META"; then
+    provider=$FM_PR_META_PROVIDER
+    url=$FM_PR_META_URL
+    host=$FM_PR_META_HOST
+    path=$FM_PR_META_PATH
+    number=$FM_PR_META_NUMBER
+  else
+    printf 'run passed: PR state unknown (no PR identity)'
+    return
+  fi
+  if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
+    && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
+    && [ "$FM_PR_RETIRE_URL" = "$url" ] \
+    && [ "$FM_PR_RETIRE_HOST" = "$host" ] \
+    && [ "$FM_PR_RETIRE_PATH" = "$path" ] \
+    && [ "$FM_PR_RETIRE_NUMBER" = "$number" ]; then
+    printf 'run passed: PR merged'
+    return
+  fi
+  if [ "${FM_CREW_STATE_NO_FORGE:-0}" = 1 ]; then
+    printf 'run passed: PR state unknown (forge read skipped)'
+    return
+  fi
+
+  case "$provider" in
+    github)
+      owner=${path%%/*}
+      repo=${path#*/}
+      if ! pr_read_record_bounded "$owner" "$repo" "$number"; then
+        printf 'run passed: PR state unknown (unreadable)'
+        return
+      fi
+      if [ "$FM_PR_RECORD_MERGED" = true ]; then
+        printf 'run passed: PR merged'
+        return
+      fi
+      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+      case "$state_lc" in
+        open)   printf 'run passed: PR open' ;;
+        closed) printf 'run passed: PR closed' ;;
+        *)      printf 'run passed: PR state %s' "$state_lc" ;;
+      esac
+      ;;
+    gitlab)
+      if ! mr_read_record_bounded "$host" "$path" "$number"; then
+        printf 'run passed: PR state unknown (unreadable)'
+        return
+      fi
+      if [ "$FM_PR_RECORD_MERGED" = true ]; then
+        printf 'run passed: PR merged'
+        return
+      fi
+      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+      case "$state_lc" in
+        open|opened) printf 'run passed: PR open' ;;
+        closed)      printf 'run passed: PR closed' ;;
+        *)           printf 'run passed: PR state %s' "$state_lc" ;;
+      esac
+      ;;
+    *)
+      printf 'run passed: PR state unknown (unreadable: %s)' "$url"
+      ;;
+  esac
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -661,7 +782,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
