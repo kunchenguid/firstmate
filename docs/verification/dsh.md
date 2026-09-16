@@ -33,14 +33,14 @@ $ ps -o pid=,comm=,args= -p <host>
 `bin/fm-dsh-lib.sh` is the single owner of the launcher path shapes, in both a shell `case` spelling (`fm_dsh_args_evidence`) and a POSIX ERE (`fm_dsh_args_ere`), kept in one file so the two cannot drift.
 `bin/fm-harness.sh` gained a source line, a `FM_DSH_HARNESS` marker arm and an interpreter-arm delegate; `bin/fm-session-lock-lib.sh` composes its `FM_HARNESS_RE` from `fm_dsh_args_ere`, and `dsh` is deliberately **absent** from `FM_HARNESS_NAMES` there.
 Every pattern is an anchored path shape, never a bare `*dsh*` glob, so `bin/fm-dsh-sessionstart.sh` and an unrelated `dshish.js` cannot claim the identity.
-`tests/fm-dsh-harness.test.sh` pins every accepted shape, both false positives, and the precedence rule that `FM_DSH_HARNESS=dsh` is honored **only** when a genuine dsh process is in the ancestry — the marker is an override, never evidence on its own.
+`tests/fm-dsh-harness.test.sh` pins every accepted shape, three false positives in each matcher (a firstmate `fm-dsh-*` path or a node command that merely mentions dsh, a `dshish.js`, and a `dshish.js` under a `bin/` directory the global-install shape must not claim), and the precedence rule that `FM_DSH_HARNESS=dsh` is honored **only** when a genuine dsh process is in the ancestry — the marker is an override, never evidence on its own.
 
 That precedence is load-bearing rather than a fast path: the dsh ancestry verdict is only `args` strength, so a DSH host launched from a Claude pane retains `CLAUDECODE`, which would otherwise rename the session.
 A `FM_DSH_HARNESS` that no producer set was the state of the world before this work — every test set it by hand, and the home loaded `unknown.md`.
 
 ## Launch: one boundary for values a tool call cannot set
 
-Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh` and an explicit `FM_HOME`, pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, runs the preflight, and `exec`s `dsh`.
+Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, runs the preflight with the profile and any `--patch` overlays it was given, and `exec`s `dsh`.
 
 ```
 bin/fm-dsh-launch.sh web --port 3080
@@ -62,13 +62,15 @@ Measured against synthetic homes:
 | Bridge `0.0.1-rc.5` against `dsh-base` `0.1.5-rc.2` | FAIL, naming both versions and the reinstall command |
 | Bridge absent from the profile | FAIL, naming the install command at the running version |
 | `AGENTS.md` larger than `maxBytes` (65536, the `dsh-base` default) | FAIL, naming the patch file to raise |
+| Another plugin entry raises its `maxBytes` while `agent-instructions` stays at the default | FAIL: only the `agent-instructions` entry sets the budget |
+| Profile raise, home-level `$DSH_HOME/cordis.patch.yml` default, then a `--patch` raise | FAIL naming the home layer without the overlay, pass from the overlay with it: layers compose profile, then home, then overlays |
 | `ps` denied by the sandbox | FAIL, naming the permission preset |
 | Conforming home | pass, all required checks |
 | `lsof` absent | warning, not failure: teardown's stale-lock proof and orphan reap refuse rather than proceed |
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
 
 Each of the three is silent in production, and all three were written into documentation before they were measured.
-The instruction budget is the clearest case: `AGENTS.md` is 81929 bytes as of this writing, so the shipped 65536 either truncates it or, if raised, must be monitored; the captain profile sets 262144 and the preflight compares that against the live file size rather than a constant.
+The instruction budget is the clearest case: `AGENTS.md` is 82128 bytes as of this writing, so the shipped 65536 either truncates it or, if raised, must be monitored; the captain profile sets 262144 and the preflight compares that against the live file size rather than a constant.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -130,7 +132,7 @@ Three earlier "no hook fired" readings were test-harness faults, not adapter fau
 The registration is `.dsh/hooks.json`, mounted by `.dsh/profile.patch.yml`.
 Exactly one mounted hook config per profile is required, because DSH has no host-stamp key: a bundle config plus a project `hooks.json` would double-run every event.
 The `.*` catch-all group is a single point of failure for all three guards, and each command is a self-verifying wrapper: it re-checks that this file still registers that very script and that the resolved root looks like a firstmate checkout, and exits 0 when either is untrue, so a mis-mounted or double-mounted copy fails safe instead of running a guard against the wrong home.
-`tests/fm-dsh-harness.test.sh` proves dispatch **through the tracked file** rather than trusting its shape: the delegation guard denies a delegation tool with exit 2, allows an ordinary tool, and is a silent no-op for a wrong root and for an empty payload.
+`tests/fm-dsh-harness.test.sh` proves dispatch **through the tracked file** rather than trusting its shape: the delegation guard denies a delegation tool with exit 2 and allows an ordinary tool, the `Stop` wrapper blocks a blind turn end in a fixture home with exit 2, and every registered wrapper is a silent no-op for a wrong root and for an empty payload.
 
 ## The bounded Stop guard
 
@@ -284,7 +286,7 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 33 cases, and the live guard passes all five of its contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 37 cases, and the live guard passes all five of its contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

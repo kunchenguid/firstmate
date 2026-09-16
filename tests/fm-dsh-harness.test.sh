@@ -345,20 +345,21 @@ test_dsh_preflight_reads_only_the_agent_instructions_entry() {
 test_dsh_preflight_honors_the_later_patch_layers() {
   local home overlay
   # DSH composes the profile patch, then $DSH_HOME/cordis.patch.yml, then each
-  # --patch overlay; a raise in a later layer is a real raise, and a later
-  # default undoes an earlier raise.
-  home=$(make_dsh_home "$TMP_ROOT/pre-homelayer" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
-  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$home/cordis.patch.yml"
+  # --patch overlay, and the last layer to set the entry wins. Every layer here
+  # sets maxBytes to a different verdict, so reading them in any other order
+  # reaches the wrong one.
+  home=$(make_dsh_home "$TMP_ROOT/pre-layers" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 65536\n' > "$home/cordis.patch.yml"
   run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a raise in the home-level patch must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  home=$(make_dsh_home "$TMP_ROOT/pre-overlay" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a home-level default must override the profile's raise, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "set in $home/cordis.patch.yml" "the failing budget did not name the home layer that set it"
   overlay="$home/overlay.yml"
-  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 65536\n' > "$overlay"
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$overlay"
   PREFLIGHT_RC=0
   PREFLIGHT_OUT=$(DSH_HOME="$home" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" --patch "$overlay" 2>&1) || PREFLIGHT_RC=$?
-  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a --patch overlay lowering the budget must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "$overlay" "the failing budget did not name the layer that set it"
-  pass "fm-dsh-preflight.sh: the home-level patch and --patch overlays compose in DSH's order"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a --patch overlay must override the home layer, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "from $overlay" "the passing budget did not name the overlay that set it"
+  pass "fm-dsh-preflight.sh: profile, home-level patch and --patch overlays compose in DSH's order"
 }
 
 test_dsh_preflight_passes_a_conforming_home() {
