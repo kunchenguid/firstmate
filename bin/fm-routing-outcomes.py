@@ -405,10 +405,12 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
     receipt = need_object(receipt, "native_receipt.path")
     model_usage = receipt.get("modelUsage")
     models: list[dict[str, Any]] = []
+    if model_usage is not None and not isinstance(model_usage, dict):
+        fail("native Claude result modelUsage must be an object")
     if isinstance(model_usage, dict):
         for model, usage in sorted(model_usage.items()):
             if not isinstance(usage, dict):
-                continue
+                fail(f"native Claude result modelUsage.{model} must be an object")
             row = token_row(usage.get("canonicalModel") or model, "anthropic" if usage.get("provider") == "firstParty" else usage.get("provider"), usage, {
                 "input": "inputTokens", "output": "outputTokens",
                 "cache_read": "cacheReadInputTokens", "cache_write": "cacheCreationInputTokens",
@@ -689,7 +691,8 @@ def validate_grading(value: Any, outcome: str, task_id: str, spawn_gen: str, att
             fail(f"grading.receipts[{index}] check artifact acceptance criteria binding does not match")
         if artifact.get("passed") is not cleaned["passed"]:
             fail(f"grading.receipts[{index}] check artifact result does not match")
-        if artifact.get("exit_code") != (0 if cleaned["passed"] else artifact.get("exit_code")):
+        exit_code = artifact.get("exit_code")
+        if cleaned["passed"] and (not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code != 0):
             fail(f"grading.receipts[{index}] passing check artifact must have exit_code 0")
         cleaned["artifact_sha256"] = sha
         cleaned_receipts.append(cleaned)
@@ -773,6 +776,9 @@ def apply_prices(native: dict[str, Any], route: dict[str, Any], finished_at: str
     if path_value is None:
         return {"api_equivalent_usd": None, "price_catalog_sha256": None, "price_sources": [], "unpriced_models": sorted({row.get("model") or "unknown" for row in native["models"]})}
     catalog, catalog_digest = load_prices(path_value)
+    if not native["models"]:
+        return {"api_equivalent_usd": None, "price_catalog_sha256": catalog_digest,
+                "price_sources": [], "unpriced_models": ["unknown"]}
     at = parse_time(finished_at, "finished_at")
     total = 0.0
     sources = []

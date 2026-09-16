@@ -494,6 +494,28 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(score["observations"][0]["outcome"], "unresolved")
         self.assertEqual(score["observations"][0]["outcome_authority"], "operator-observation")
 
+    def test_claude_result_rejects_malformed_model_usage_rows(self):
+        receipt = self.dir / "claude-malformed-model-usage.json"
+        self.write_json(receipt, {
+            "type": "result", "session_id": "claude-malformed", "num_turns": 1,
+            "modelUsage": {
+                "claude-sonnet-5": {"canonicalModel": "claude-sonnet-5", "provider": "firstParty",
+                                    "inputTokens": 10, "outputTokens": 3,
+                                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                                    "thinkingTokens": 1},
+                "malformed": ["not", "an", "object"],
+            },
+        })
+        manifest = self.manifest(receipt={"kind": "claude-result", "path": str(receipt),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"}, outcome="unresolved")
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("modelUsage.malformed must be an object", json.loads(result.stdout)["error"])
+
     def test_mixed_claude_session_models_are_rejected(self):
         receipt = self.dir / "claude-session.jsonl"
         rows = [
@@ -623,6 +645,25 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIsNone(billing["api_equivalent_usd"])
         self.assertEqual(self.latest_record()["native"]["native_reported_cost_usd"], 0.5)
 
+    def test_empty_native_usage_keeps_api_equivalent_cost_unknown(self):
+        receipt = self.dir / "claude-empty-usage.json"
+        prices = self.dir / "empty-usage-prices.json"
+        self.write_json(receipt, {"type": "result", "session_id": "claude-empty",
+                                  "num_turns": 0, "modelUsage": {}})
+        self.write_json(prices, {"schema": "fm-routing-prices.v1",
+                                 "observed_at": "2030-01-01T00:00:00Z", "entries": []})
+        manifest = self.manifest(receipt={"kind": "claude-result", "path": str(receipt),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"}, outcome="unresolved")
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        self.import_manifest(manifest, prices=prices)
+        billing = self.latest_record()["billing"]
+        self.assertIsNone(billing["api_equivalent_usd"])
+        self.assertEqual(billing["unpriced_models"], ["unknown"])
+
     def test_independent_grade_and_actual_receipt_are_required_for_acceptance(self):
         manifest = self.manifest()
         manifest["grading"]["independent"] = False
@@ -632,6 +673,15 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["grading"]["receipts"] = []
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("passing receipt", json.loads(result.stdout)["error"])
+        manifest = self.manifest()
+        grading_receipt = manifest["grading"]["receipts"][0]
+        artifact_path = Path(grading_receipt["artifact_path"])
+        artifact = json.loads(artifact_path.read_text())
+        artifact["exit_code"] = False
+        self.write_json(artifact_path, artifact)
+        grading_receipt["sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("must have exit_code 0", json.loads(result.stdout)["error"])
         manifest = self.manifest()
         manifest["grading"]["receipts"][0]["sha256"] = "0" * 64
         result = self.import_manifest(manifest, ok=False)
