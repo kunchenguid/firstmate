@@ -100,7 +100,11 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 - A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
-- Never author a `reconcile` option or depend on `allow_freeform` when the final effective option list has multiple choices. `build` supplies both controls in that case; set `allow_freeform` only to opt in a card with fewer effective choices. [`docs/captain-hold-lifecycle.md`](../../../docs/captain-hold-lifecycle.md#bearings-board-controls) owns their authority boundary, and recommendations must name an authored option.
+- Never author a `reconcile` option.
+  `build` supplies it on every decision card.
+  Do not depend on `allow_freeform` when the final effective option list has multiple choices because `build` enables it in that case.
+  Set `allow_freeform` only to opt in a card with fewer effective choices.
+  [`docs/captain-hold-lifecycle.md`](../../../docs/captain-hold-lifecycle.md#bearings-board-controls) owns their authority boundary, and recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
