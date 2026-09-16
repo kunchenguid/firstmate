@@ -1450,6 +1450,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_MISSING=0
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1484,10 +1485,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
+  if [ "$RELAUNCH_STATE" = missing ] && [ "$BACKEND" = herdr ] \
+      && [ "${FM_CONTROL_RELAUNCH_MISSING:-0}" = 1 ] \
+      && [ -f "$STATE/$ID.control-relaunch" ] \
+      && grep -Fqx 'phase=exited' "$STATE/$ID.control-relaunch" \
+      && grep -Fqx 'exit_result=already-missing' "$STATE/$ID.control-relaunch"; then
+    # Control has positively observed that the recorded Herdr pane is gone and
+    # checkpointed the task before asking this launch owner to recreate it.
+    RELAUNCH_MISSING=1
+  elif [ "$RELAUNCH_STATE" != dead ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
-  }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -2937,7 +2946,7 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_MISSING" -eq 0 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
   # terminal, no second worktree, and every uncommitted change left exactly
@@ -2989,7 +2998,23 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    if [ "$RELAUNCH_MISSING" -eq 1 ]; then
+      [ "$(fm_backend_herdr_server_running_state "$HERDR_SES")" = running ] || {
+        echo "error: task $ID's recorded Herdr session '$HERDR_SES' is not positively running; refusing endpoint recreation" >&2
+        exit 1
+      }
+      [ "$(fm_backend_herdr_workspace_presence_state "$HERDR_SES" "$HERDR_WORKSPACE_ID")" = present ] || {
+        echo "error: task $ID's recorded Herdr workspace '$HERDR_WORKSPACE_ID' is not positively present; refusing endpoint recreation" >&2
+        exit 1
+      }
+      HERDR_CONTAINER_RAW="$HERDR_SES:$HERDR_WORKSPACE_ID"
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$HERDR_CONTAINER_RAW" "$W" "$PROJ_ABS" "") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+      HERDR_PROJECTED=1
+    fi
+    if [ "$RELAUNCH_MISSING" -eq 0 ] && [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
