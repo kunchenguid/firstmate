@@ -19,10 +19,13 @@
 #      CLAUDE.md pointer and a budget marker the operator never sees. Under
 #      dsh-web-app the host row is disabled and the session's agent preset
 #      carries the budget, so a raise on the host row there is not a budget.
-#   3. PROCESS INSPECTION. `ps` is denied under the `workspace-write` sandbox.
+#   3. PERMISSION PRESET. `ps` is denied under the `workspace-write` sandbox.
 #      Harness ancestry, the PID-strict watcher lock and away-mode daemon
 #      ownership then read "unknown" or "down" rather than reporting a
-#      misconfiguration, so the home looks broken instead of unsandboxed.
+#      misconfiguration, so the home looks broken instead of unsandboxed. This
+#      preflight runs in the launching shell before DSH starts, where nothing
+#      is sandboxed, so it cannot probe `ps` itself; it asserts the permission
+#      preset new sessions are seeded with instead.
 #
 # Usage: fm-dsh-preflight.sh [--profile <name>] [--home <firstmate-home>] [--patch <path>]... [--quiet]
 # Exit: 0 all required checks passed; 3 at least one required check failed.
@@ -87,7 +90,7 @@ else
   ok "hooks bridge $BRIDGE_VERSION matches dsh-base $BASE_VERSION"
 fi
 
-# --- 2. the session agent's instruction budget fits the rendered chain -------
+# --- the composition sessions boot with -------------------------------------
 # Print the lines of composition entry <id> read from stdin, indentation
 # stripped, so its own keys (config included) can be read with entry_value.
 entry_lines() {  # <id>
@@ -122,11 +125,31 @@ entry_state() {
   esac
 }
 
+SETTINGS_FILE="$DSH_HOME_DIR/settings.yaml"
+PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
+
+# Print <key>'s value under top-level <section> of the harness settings
+# document, where a user's choice outranks the composition's default.
+settings_value() {  # <section> <key>
+  awk -v section="$1:" '/^[^[:space:]#]/ { inside = ($1 == section) } inside && /^[[:space:]]/' "$SETTINGS_FILE" 2>/dev/null \
+    | sed 's/^[[:space:]]*//' | entry_value "$2"
+}
+
+# The composition is DSH's own dump of the bundle, profile, home-level and
+# --patch layers, not a re-derivation of its layer order.
+DUMP=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null) || DUMP=
+if [ -z "$DUMP" ]; then
+  fail "could not read the composed configuration: dsh --profile $PROFILE --dump-config failed" \
+    "run that command to see why; neither the instruction budget nor the permission preset new sessions default to can be checked without it"
+fi
+
+# --- 2. the session agent's instruction budget fits the rendered chain -------
 AGENTS_MD="$FM_HOME_DIR/AGENTS.md"
 FM_PRESET_ID=firstmate
 FM_PRESET="$FM_HOME_DIR/.dsh/agent-presets/$FM_PRESET_ID/agent.cordis.yml"
-SETTINGS_FILE="$DSH_HOME_DIR/settings.yaml"
-if [ -f "$AGENTS_MD" ]; then
+if [ ! -f "$AGENTS_MD" ]; then
+  warn "no AGENTS.md at $AGENTS_MD" "the digest will carry no operating contract for this home"
+elif [ -n "$DUMP" ]; then
   # DSH budgets the whole rendered chain, not AGENTS.md: every instruction file
   # it discovers (the harness-home AGENTS.md, then this workspace's AGENTS.md,
   # CLAUDE.md and their .local overlays) plus the frame it wraps them in, which
@@ -136,27 +159,19 @@ if [ -f "$AGENTS_MD" ]; then
     "$FM_HOME_DIR/AGENTS.local.md" "$FM_HOME_DIR/CLAUDE.local.md"; do
     [ -f "$f" ] && CHAIN_BYTES=$((CHAIN_BYTES + $(wc -c < "$f")))
   done
-  PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
   OMIT_NOTE="over budget, DSH omits AGENTS.md whole and only the model sees its one-line budget marker"
-  # The composition is DSH's own dump of the bundle, profile, home-level and
-  # --patch layers, not a re-derivation of its layer order. Which row it names
-  # depends on the profile: where an enabled agent-presets row exists
-  # (dsh-web-app), the host agent-instructions row is disabled and each session
-  # renders with its default preset's row, which no profile layer reaches;
-  # otherwise the host row governs.
+  # Which row governs depends on the profile: where an enabled agent-presets
+  # row exists (dsh-web-app), the host agent-instructions row is disabled and
+  # each session renders with its default preset's row, which no profile layer
+  # reaches; otherwise the host row governs.
   ROW_SOURCE=
   ROW=
-  DUMP=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null) || DUMP=
   PRESETS=$(printf '%s\n' "$DUMP" | entry_lines agent-presets)
-  if [ -z "$DUMP" ]; then
-    fail "could not read the effective agent-instructions maxBytes: dsh --profile $PROFILE --dump-config failed" \
-      "run that command to see why; $OMIT_NOTE"
-  elif [ -n "$PRESETS" ] && [ "$(printf '%s\n' "$PRESETS" | entry_state)" = unknown ]; then
+  if [ -n "$PRESETS" ] && [ "$(printf '%s\n' "$PRESETS" | entry_state)" = unknown ]; then
     fail "profile $PROFILE's agent-presets row is not provably enabled or disabled" \
       "make its disabled field a literal boolean, so the composition sessions render with can be checked"
   elif [ -n "$PRESETS" ] && [ "$(printf '%s\n' "$PRESETS" | entry_state)" = enabled ]; then
-    PRESET_ID=$(awk '/^[^[:space:]#]/ { section = $0 } section ~ /^agent-presets:/ && /^[[:space:]]+default:/' "$SETTINGS_FILE" 2>/dev/null \
-      | sed 's/^[[:space:]]*//' | entry_value default)
+    PRESET_ID=$(settings_value agent-presets default)
     PRESET_FROM="$SETTINGS_FILE"
     if [ -z "$PRESET_ID" ]; then
       PRESET_ID=$(printf '%s\n' "$PRESETS" | entry_value default)
@@ -193,16 +208,26 @@ if [ -f "$AGENTS_MD" ]; then
       ok "instruction budget $MAX_BYTES fits the rendered instruction chain (about $CHAIN_BYTES bytes) in $ROW_SOURCE"
     fi
   fi
-else
-  warn "no AGENTS.md at $AGENTS_MD" "the digest will carry no operating contract for this home"
 fi
 
-# --- 3. process inspection survives the sandbox ------------------------------
-if ps -o comm= -p $$ >/dev/null 2>&1; then
-  ok "process inspection works (ps)"
-else
-  fail "ps is denied in this profile" \
-    "harness ancestry, the PID-strict watcher lock and away-mode ownership all degrade silently; select the danger-full-access permission preset (sandbox-policy.mode alone is refused at load)"
+# --- 3. new sessions default to a sandbox that permits ps --------------------
+# A new session is seeded with the settings document's default permission
+# preset, else the profile's. That proves the default, not any one session: a
+# resumed session keeps the preset it recorded, and the per-session /permission
+# control can still downgrade a session after launch.
+if [ -n "$DUMP" ]; then
+  PERMISSION_PRESET=$(settings_value permission defaultPreset)
+  PERMISSION_FROM="$SETTINGS_FILE"
+  if [ -z "$PERMISSION_PRESET" ]; then
+    PERMISSION_PRESET=$(printf '%s\n' "$DUMP" | entry_lines permission | entry_value defaultPreset)
+    PERMISSION_FROM="profile $PROFILE"
+  fi
+  if [ "$PERMISSION_PRESET" = danger-full-access ]; then
+    ok "new sessions default to the danger-full-access permission preset ($PERMISSION_FROM)"
+  else
+    fail "new sessions default to permission preset '${PERMISSION_PRESET:-<inferred from the sandbox knobs>}' ($PERMISSION_FROM), not danger-full-access" \
+      "set the permission entry's defaultPreset to danger-full-access in $PATCH_FILE and clear any permission defaultPreset in $SETTINGS_FILE: any other sandbox denies ps, so harness ancestry, the PID-strict watcher lock and away-mode ownership degrade silently (sandbox-policy.mode alone is refused at load)"
+  fi
 fi
 
 # lsof is required by teardown's stale-lock proof and its orphan reap, both of

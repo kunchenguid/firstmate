@@ -28,9 +28,13 @@ DSH denies `ps` under its default `workspace-write` sandbox (`/bin/ps: Operation
 The captain profile therefore selects the shipped `danger-full-access` permission preset, which bundles that sandbox mode with its approval policy.
 Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox and approval defaults then match no preset, and `dsh-permission-presets` refuses the profile at load with "configure defaultPreset explicitly".
 
+`bin/fm-dsh-preflight.sh` cannot probe `ps` under that sandbox: it runs in the launching shell before DSH starts, and DSH sandboxes only the tool subprocesses of a live session, so a `ps` there always succeeds.
+It asserts what launch can observe instead: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row, and it fails unless that is `danger-full-access`.
+That proves the default, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
+
 ## Instruction budget
 
-`dsh-agent-instructions` budgets the whole rendered instruction chain with `maxBytes`, which `dsh-base` and every agent preset DSH ships set to 65536.
+`dsh-agent-instructions` budgets the whole rendered instruction chain with `maxBytes`, which `dsh-base` sets to 65536, as do the shipped agent presets that render instructions (`standard`, `ptc`, `cordis`); `minimal` has no `agent-instructions` row and renders none.
 It discovers both `AGENTS.md` and `CLAUDE.md` at the workspace root, and firstmate tracks `CLAUDE.md` only as an `@AGENTS.md` pointer, which the renderer does not expand.
 When the rendered chain is over budget, DSH does not cut bytes: it omits the broadest file whole, which here is `AGENTS.md`, so the agent receives only the `CLAUDE.md` pointer and a model-visible marker (`Workspace instruction budget 65536 bytes: omitted AGENTS.md`), and the operator sees nothing.
 
@@ -52,20 +56,23 @@ A disabled row is never reported as a budget.
 
 DeepSeek Harness publishes no identity marker of its own, so the values that identify a DSH primary
 exist only at process start — a tool call cannot set them and hook subprocesses inherit whatever the
-host was given. `bin/fm-dsh-launch.sh` is that boundary: it exports `FM_DSH_HARNESS=dsh` and an
-explicit `FM_HOME`, pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes
-a byte cap and slices UTF-8), and clears the foreign harness markers so a session started from
-another harness's pane cannot inherit its identity.
+host was given. `bin/fm-dsh-launch.sh` is that boundary: it exports `FM_DSH_HARNESS=dsh`, an
+explicit `FM_HOME` and `FM_ROOT` as its own checkout, starts the host from that checkout (DSH takes
+the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the hooks file
+and the `firstmate` preset root from `FM_ROOT`), pins `LC_ALL`/`LC_CTYPE` (unset,
+`bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), and clears the foreign
+harness markers so a session started from another harness's pane cannot inherit its identity.
 
 Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
 launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.
 
 It runs `bin/fm-dsh-preflight.sh` before exec'ing dsh, because three DSH misconfigurations are silent
 and total: a hooks bridge whose version differs from the running dsh-base (every tool call then fails
-with `agent.session.events is not iterable` while the guards go inert), an `agent-instructions`
-`maxBytes` below the size of `AGENTS.md` (DSH then omits it whole; see Instruction budget), and a sandbox that
-denies `ps` (harness ancestry, the PID-strict watcher lock and away-mode ownership read "unknown" or
-"down" rather than reporting a misconfiguration). Each check names its own remedy;
+with `agent.session.events is not iterable` while the guards go inert), an instruction budget
+too small for the rendered instruction chain in the row sessions render with (DSH then omits
+`AGENTS.md` whole; see Instruction budget), and a default permission preset whose sandbox denies
+`ps` (harness ancestry, the PID-strict watcher lock and away-mode ownership read "unknown" or "down"
+rather than reporting a misconfiguration; see Sandbox requirement). Each check names its own remedy;
 `FM_DSH_SKIP_PREFLIGHT=1` is the escape hatch for a deliberately degraded home.
 
 ## Primary integration

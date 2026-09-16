@@ -248,13 +248,21 @@ test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command() {
   pass "dsh repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
 }
 
+# The composed permission row, with the preset new sessions default to, or
+# none when DSH would infer it from the sandbox knobs.
+permission_row() {  # <default preset|->
+  printf -- '- id: permission\n  name: "@deepseek-ai/dsh-permission-presets"\n  config:\n    presets:\n      workspace-write:\n        sandbox: workspace-write\n        approval: ask\n'
+  [ "$1" = - ] || printf -- '    defaultPreset: %s\n' "$1"
+}
+
 # The composed tree `dsh --dump-config` prints, reduced to the entries the
-# budget check has to tell apart.
-write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>]
+# checks have to tell apart.
+write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>] [<default permission preset|->]
   {
     printf '# == @deepseek-ai/dsh-base\n'
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: %s\n' "$2"
     [ -z "${3:-}" ] || printf -- '- id: other-plugin\n  name: other-plugin\n  config:\n    maxBytes: %s\n' "$3"
+    permission_row "${4:-danger-full-access}"
     printf -- '- id: skill\n  name: "@deepseek-ai/dsh-skill"\n'
   } > "$1"
 }
@@ -268,6 +276,7 @@ write_web_dump() {  # <file> <default preset>
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n'
     printf '# == @deepseek-ai/dsh-web-app\n'
     printf -- '- id: agent-presets\n  name: "@deepseek-ai/dsh-agent-presets"\n  config:\n    default: %s\n    roots:\n      - path: !!js process.cwd() + "/.dsh/agent-presets"\n        trust: system\n' "$2"
+    permission_row danger-full-access
   } > "$1"
 }
 
@@ -462,12 +471,38 @@ test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget() {
   home=$(make_dsh_home "$TMP_ROOT/pre-unknown" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "a failed config dump must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "could not read the effective agent-instructions maxBytes" "a failed dump was not named"
+  assert_contains "$PREFLIGHT_OUT" "could not read the composed configuration" "a failed dump was not named"
   printf -- '- id: agent-instructions\n  config:\n    maxBytes: !!js Number(process.env.FM_BUDGET)\n' > "$home/dump.yml"
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "a computed maxBytes must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
   assert_contains "$PREFLIGHT_OUT" "could not read the effective agent-instructions maxBytes" "an unreadable budget was not named"
   pass "fm-dsh-preflight.sh: a budget DSH cannot report fails loud"
+}
+
+test_dsh_preflight_checks_the_permission_preset_sessions_default_to() {
+  local home
+  # The preflight runs in the launching shell before DSH starts, where nothing
+  # is sandboxed, so probing ps there always succeeded. What launch can see is
+  # the permission preset a new session is seeded with: the harness settings'
+  # default, else the profile's. Anything but danger-full-access denies ps.
+  home=$(make_dsh_home "$TMP_ROOT/pre-permission" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  write_dump "$home/dump.yml" 262144 "" workspace-write
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a workspace-write default must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "permission preset 'workspace-write' (profile p)" "the profile's sandboxing default was not named"
+  write_dump "$home/dump.yml" 262144 "" -
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an inferred default preset must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  write_dump "$home/dump.yml" 262144
+  printf 'permission:\n  defaultPreset: workspace-write\n' > "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a settings default must outrank the profile's, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "permission preset 'workspace-write' ($home/settings.yaml)" "the settings default was not named"
+  rm -f "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a danger-full-access default must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "new sessions default to the danger-full-access permission preset" "the passing default was not reported"
+  pass "fm-dsh-preflight.sh: the permission preset new sessions default to must permit ps"
 }
 
 test_dsh_preflight_passes_a_conforming_home() {
@@ -886,6 +921,7 @@ test_dsh_preflight_checks_the_preset_sessions_compose_from
 test_dsh_preflight_reads_only_the_agent_instructions_entry
 test_dsh_preflight_reads_the_budget_dsh_composes
 test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget
+test_dsh_preflight_checks_the_permission_preset_sessions_default_to
 test_dsh_preflight_passes_a_conforming_home
 test_dsh_launcher_roots_the_host_in_its_checkout
 test_dsh_ancestry_detects_the_launcher_path

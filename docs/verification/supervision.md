@@ -510,7 +510,7 @@ three misconfigurations that fail silently. Measured against synthetic homes:
 | Bridge absent from the profile | FAIL, naming the install command at the running version |
 | AGENTS.md 81127 bytes against maxBytes 65536 | FAIL, naming the patch file to raise |
 | Conforming home | pass, all required checks |
-| `ps` denied by the sandbox | FAIL, naming the permission preset (`sandbox-policy.mode` alone is refused at load) |
+| `ps` denied by the sandbox | FAIL, naming the permission preset (`sandbox-policy.mode` alone is refused at load); measured with a fake `ps` only, and superseded: the preflight runs before DSH sandboxes anything, so it now asserts the default permission preset instead ([DSH record](dsh.md#preflight-three-silent-misconfigurations-asserted-rather-than-documented)) |
 
 `lsof` absence is a warning rather than a failure: teardown's stale-lock proof and orphan reap refuse
 rather than proceed without it. An absent `jq` or `node` is a failure, because every guard that needs

@@ -69,7 +69,8 @@ Measured against synthetic homes:
 | A `web` composition (host row disabled) whose default agent preset, from the profile or `$DSH_HOME/settings.yaml`, is not `firstmate` | FAIL, naming the preset sessions compose from |
 | A `web` composition defaulting to the tracked `firstmate` preset | pass, from that preset's row; FAIL if the preset's row is absent or disabled |
 | `dsh --dump-config` fails, or reports no plain-number `agent-instructions` `maxBytes` | FAIL, naming the command to run and the patch file to set |
-| `ps` denied by the sandbox | FAIL, naming the permission preset |
+| New sessions default to a permission preset other than `danger-full-access`, from the profile or from `$DSH_HOME/settings.yaml`, which outranks it | FAIL, naming the preset and where it came from |
+| No explicit default permission preset, so DSH would infer one from the sandbox knobs | FAIL |
 | Conforming home | pass, all required checks |
 | `lsof` absent | warning, not failure: teardown's stale-lock proof and orphan reap refuse rather than proceed |
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
@@ -84,6 +85,11 @@ The fix is the tracked `firstmate` agent preset, described in the [harness refer
 The preflight now checks the effective composition instead: the default preset's row where an enabled `agent-presets` row exists, the host row otherwise, and never a disabled row.
 Measured on 2026-09-16 against the real dsh 0.1.5-rc.1 in a disposable `DSH_HOME`: the `web` composition with the tracked patch passes on the `firstmate` preset at 262144; without the patch it fails on `standard`; a `$DSH_HOME/settings.yaml` default of `minimal` fails; and `sdk` passes on its host row.
 `dsh-agent-presets`' own discovery reports the tracked preset healthy, and DSH's renderer at its budget omits nothing; the live guard's sixth contract repeats those `web` assertions.
+
+The sandbox check was the other assurance that could not fail.
+It ran `ps` inside the preflight, but the preflight runs in the launching shell before DSH starts and DSH sandboxes only a live session's tool subprocesses, so it always reported ok; its earlier row in this table was measured with a fake `ps`.
+A runtime probe is not possible before exec, so the preflight now asserts what launch can observe: the permission preset a new session is seeded with, read from `$DSH_HOME/settings.yaml`'s `permission.defaultPreset` (written by DSH's settings page, and outranking the profile) or else the composed profile row, failing unless it is `danger-full-access`.
+That proves the default, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -300,7 +306,7 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 40 cases, and the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 41 cases, and the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.

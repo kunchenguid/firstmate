@@ -24,8 +24,9 @@
 # the locale are set at process start: a tool call cannot set them, and hook
 # subprocesses inherit whatever the host was given. That wrapper also runs
 # bin/fm-dsh-preflight.sh, which asserts this pin, the budget of the row the
-# session actually renders with, and that the sandbox still permits ps - all
-# three fail silently otherwise.
+# session actually renders with, and that new sessions default to the
+# danger-full-access permission preset, whose sandbox permits ps - all three
+# fail silently otherwise.
 #
 # Applied over a base+web-app profile whose bundle list also carries this
 # checkout's own bundles. The launcher exports FM_ROOT as this checkout and
