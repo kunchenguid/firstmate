@@ -36,7 +36,7 @@ It is set alongside `permission.defaultPreset` because the mode alone leaves the
 `bin/fm-dsh-launch.sh` applies the tracked patch itself, so the documented launch needs no manual install step, and exports `DSH_PERMISSION_MODE=danger-full-access` as well, which matters only to a later `--patch` overlay that hands the row back to `dsh-base`'s expression.
 
 `bin/fm-dsh-preflight.sh` cannot probe `ps` under either sandbox: it runs in the launching shell before DSH starts, where nothing is sandboxed, so a `ps` there always succeeds.
-It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, whose `!!js` expression it evaluates in the environment it was invoked with, the one the launcher hands the host.
+It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, which the tracked patch pins literally; only a `!!js` expression left by a layer that does not pin the row is evaluated, in the environment the preflight was invoked with, the one the launcher hands the host.
 A profile that does not pin the row therefore still fails when the caller has not supplied that environment, which is what a bare `dsh web` launch is.
 That proves the defaults, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
 
@@ -67,8 +67,10 @@ A session created before `firstmate` was the default, or seated on another prese
 DeepSeek Harness publishes no identity marker of its own, so the values that identify a DSH primary
 exist only at process start — a tool call cannot set them and hook subprocesses inherit whatever the
 host was given. `bin/fm-dsh-launch.sh` is that boundary: it exports `FM_DSH_HARNESS=dsh`, an
-explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the
-sandbox every hook runs under; see Sandbox requirement), starts the host from that checkout (DSH takes
+explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (only a
+fallback: the tracked patch's literal `sandbox-policy` pin sets the sandbox every hook runs under, and
+the export matters only to a later overlay that hands that row back to `dsh-base`'s expression; see
+Sandbox requirement), starts the host from that checkout (DSH takes
 the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the hooks file
 and the `firstmate` preset root from `FM_ROOT`), pins `LC_ALL`/`LC_CTYPE` (unset,
 `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), and clears the foreign
