@@ -176,6 +176,31 @@ class RoutingOutcomesTest(unittest.TestCase):
         again = self.import_manifest(self.manifest())
         self.assertEqual(json.loads(again.stdout)["action"], "noop")
         self.assertEqual(len(self.store.read_text().splitlines()), 1)
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        quota = score["observations"][0]["quota"]
+        self.assertEqual(quota["attribution"], "exclusive")
+        self.assertFalse(quota["concurrent_activity"])
+        self.assertEqual(quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
+        markdown = self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "markdown").stdout
+        self.assertIn("attribution=exclusive; concurrent=false; reset_crossed=false", markdown)
+        self.assertIn("weekly: 100 -> 95; consumption=5 pp; reset_crossed=false", markdown)
+
+    def test_attempt_phase_and_pi_request_alias_are_rejected(self):
+        shadow_attempt = self.manifest()
+        shadow_attempt["phase"] = "shadow"
+        result = self.import_manifest(shadow_attempt, ok=False)
+        self.assertIn("phase must be measurement", json.loads(result.stdout)["error"])
+
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        request = next(row for row in rows if row.get("customType") == "fm-routing-request")
+        request["data"]["requestedModel"] = request["data"].pop("selectedModel")
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("unsupported requestedModel", json.loads(result.stdout)["error"])
 
     def test_concurrent_duplicate_import_is_one_revision(self):
         manifest = self.manifest()
@@ -503,6 +528,33 @@ class RoutingOutcomesTest(unittest.TestCase):
             score["routes"][0]["route"],
             "agy/google/requested-only:gemini-3.8-flash-medium/requested-only:medium "
             "[auth=oauth, context=all, service=standard]")
+
+    def test_agy_effort_is_bound_to_latest_model_resolution(self):
+        receipt = self.dir / "agy-mixed-resolution.json"
+        log = self.dir / "agy-mixed-resolution.log"
+        self.write_json(receipt, {"conversation_id": "agy-three", "duration_seconds": 1,
+                                  "num_turns": 1, "status": "SUCCESS",
+                                  "usage": {"input_tokens": 2, "output_tokens": 1,
+                                            "thinking_tokens": 0, "cache_read_tokens": 0,
+                                            "total_tokens": 3}})
+        log.write_text(
+            "Resolving model gemini-a\n"
+            "Propagating selected model override to backend: label=\"Gemini A (Medium)\"\n"
+            "Resolving model gemini-b\n",
+            encoding="utf-8")
+        manifest = self.manifest(receipt={"kind": "agy-result", "path": str(receipt),
+                                         "native_log_path": str(log),
+                                         "requested_model": "gemini-b", "requested_effort": "high"})
+        manifest["route"].update({"harness": "agy", "provider": "google",
+                                  "auth_category": "oauth", "requested_model": "gemini-b",
+                                  "requested_effort": "high"})
+        manifest["requirements"] = {"effective_model": "gemini-b"}
+        manifest["outcome"] = "unresolved"
+        self.bind_task("task-one", harness="agy")
+        self.import_manifest(manifest)
+        native = self.latest_record()["native"]
+        self.assertEqual(native["effective_model"], "gemini-b")
+        self.assertIsNone(native["effective_effort"])
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"

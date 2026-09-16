@@ -108,7 +108,7 @@ EVENT_SCHEMA = "fm-routing-outcome-event.v1"
 SHADOW_SCHEMA = "fm-routing-shadow.v1"
 SHADOW_EVENT_SCHEMA = "fm-routing-shadow-event.v1"
 PRICE_SCHEMA = "fm-routing-prices.v1"
-PHASES = {"measurement", "shadow"}
+PHASES = {"measurement"}
 OUTCOMES = {"accepted", "unresolved", "failed", "abandoned"}
 RESULTS = {"pass", "fail", "unknown"}
 AUTH_CATEGORIES = {"subscription", "oauth", "api-key", "unknown"}
@@ -116,8 +116,8 @@ TIME_KEYS = ("queue", "model", "tool", "review", "retry", "handoff", "human")
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write", "reasoning", "total")
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-AGY_MODEL_RE = re.compile(r'Propagating selected model override to backend: label="([^"]+)"')
-AGY_REQUESTED_RE = re.compile(r"Resolving model ([A-Za-z0-9._:/-]+)\s*$", re.MULTILINE)
+AGY_MODEL_RE = re.compile(r'^Propagating selected model override to backend: label="([^"]+)"\s*$')
+AGY_REQUESTED_RE = re.compile(r"^Resolving model ([A-Za-z0-9._:/-]+)\s*$")
 
 
 class RoutingError(Exception):
@@ -336,9 +336,11 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
             "cache_write": "cacheWrite", "reasoning": "reasoning", "total": "totalTokens",
         }))
     request_data = [row["data"] for row in requests]
+    if any("requestedModel" in item for item in request_data):
+        fail("native Pi request uses unsupported requestedModel; expected selectedModel")
     task_id = one_observed((item.get("taskId") for item in request_data), "task identity")
     spawn_gen = one_observed((item.get("spawnGen") for item in request_data), "task incarnation")
-    requested_model = one_observed((item.get("selectedModel") or item.get("requestedModel") for item in request_data), "requested model")
+    requested_model = one_observed((item.get("selectedModel") for item in request_data), "requested model")
     selected_effort = one_observed((item.get("selectedThinkingLevel") for item in request_data), "selected effort")
     payload_model = one_observed((item.get("payloadModel") for item in request_data), "effective model")
     payload_effort = one_observed((item.get("payloadReasoningEffort") for item in request_data), "effective effort")
@@ -477,12 +479,16 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
     log_digest = None
     if source.get("native_log_path") is not None:
         log, log_digest = read_private(source.get("native_log_path"), "native_receipt.native_log_path")
-        requested = AGY_REQUESTED_RE.findall(log)
-        labels = AGY_MODEL_RE.findall(log)
-        effective_model = requested[-1] if requested else None
-        if labels:
-            suffix = re.search(r"\((Low|Medium|High)\)$", labels[-1])
-            effective_effort = suffix.group(1).lower() if suffix else None
+        for line in log.splitlines():
+            requested = AGY_REQUESTED_RE.fullmatch(line)
+            if requested:
+                effective_model = requested.group(1)
+                effective_effort = None
+                continue
+            label = AGY_MODEL_RE.fullmatch(line)
+            if label and effective_model is not None:
+                suffix = re.search(r"\((Low|Medium|High)\)$", label.group(1))
+                effective_effort = suffix.group(1).lower() if suffix else None
     model_row = token_row(effective_model, "google", usage, {
         "input": "input_tokens", "output": "output_tokens", "cache_read": "cache_read_tokens",
         "reasoning": "thinking_tokens", "total": "total_tokens",
@@ -861,7 +867,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     attempt_id = need_id(manifest.get("attempt_id"), "attempt_id")
     phase = manifest.get("phase")
     if phase not in PHASES:
-        fail("phase must be measurement or shadow")
+        fail("phase must be measurement")
     category = need_text(manifest.get("category"), "category")
     task_shape = need_text(manifest.get("task_shape"), "task_shape")
     task_binding = bind_task(task_id, manifest.get("task_binding"))
@@ -1094,6 +1100,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                      "fixed_subscription_usd": record["billing"].get("fixed_subscription_usd"),
                      "execution_api_equivalent_usd": record["billing"].get("api_equivalent_usd"),
                      "grader_overhead": record["grading"]["overhead"],
+                     "quota": copy.deepcopy(record.get("quota")),
                      "aggregation_status": "individual-attempt-only"}
                     for record in sorted(records, key=lambda item: (item["task_id"], item["spawn_gen"], item["attempt_id"]))]
     task_count = len({record["task_id"] for record in records})
@@ -1136,6 +1143,23 @@ def format_optional(value: Any) -> str:
     return "unknown" if value is None else str(value)
 
 
+def format_quota_movement(quota: Any) -> str:
+    if not isinstance(quota, dict):
+        return "unknown"
+    caveats = (f"attribution={format_optional(quota.get('attribution'))}; "
+               f"concurrent={format_optional(quota.get('concurrent_activity')).lower()}; "
+               f"reset_crossed={format_optional(quota.get('reset_crossed')).lower()}")
+    windows = []
+    for row in quota.get("window_deltas") or []:
+        windows.append(
+            f"{format_optional(row.get('window_id'))}: "
+            f"{format_optional(row.get('before_percent_remaining'))} -> "
+            f"{format_optional(row.get('after_percent_remaining'))}; "
+            f"consumption={format_optional(row.get('attributed_consumption_percent_points'))} pp; "
+            f"reset_crossed={format_optional(row.get('reset_crossed')).lower()}")
+    return f"{caveats}; " + ("; ".join(windows) if windows else "windows=unknown")
+
+
 def render_markdown(scorecard: dict[str, Any]) -> str:
     lines = ["# Model-routing scorecard", "", f"Attempts: {scorecard['attempt_count']} across {scorecard['task_count']} tasks and {scorecard['task_incarnation_count']} task incarnations.", "",
              "## Route and whole-session observations", "", "| Category | Task shape | Route / scope | n | Native-bound accepted | Input tokens | Output tokens | Actual incremental | Fixed subscription | Execution API-equivalent | End-to-end | Grader time | Uncertainty |",
@@ -1151,8 +1175,8 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
     if not scorecard["routes"]:
         lines.append("| - | - | - | 0 | 0 | unknown | unknown | unknown | unknown | unknown | unknown | unknown | no samples |")
     lines.extend(["", "## Individual task-linked observations", "",
-                  "| Task | Incarnation | Attempt | Route | Outcome | Outcome authority | Attribution | Scope | Elapsed | Execution API-equivalent | Grader time |",
-                  "|---|---|---|---|---|---|---|---|---:|---:|---:|"])
+                  "| Task | Incarnation | Attempt | Route | Outcome | Outcome authority | Attribution | Scope | Elapsed | Execution API-equivalent | Grader time | Quota movement |",
+                  "|---|---|---|---|---|---|---|---|---:|---:|---:|---|"])
     for row in scorecard["observations"]:
         lines.append("| " + " | ".join([
             row["task_id"], row["spawn_gen"], row["attempt_id"], row["route"], row["outcome"],
@@ -1160,9 +1184,10 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
             "unknown" if row["elapsed_ms"] is None else f"{row['elapsed_ms']:g} ms",
             "unknown" if row["execution_api_equivalent_usd"] is None else f"{row['execution_api_equivalent_usd']:g} USD",
             "unknown" if row["grader_overhead"].get("duration_ms") is None else f"{row['grader_overhead']['duration_ms']:g} ms",
+            format_quota_movement(row.get("quota")),
         ]) + " |")
     if not scorecard["observations"]:
-        lines.append("| - | - | - | - | - | - | - | - | unknown | unknown | unknown |")
+        lines.append("| - | - | - | - | - | - | - | - | unknown | unknown | unknown | unknown |")
     lines.extend(["", f"Accepted journey aggregation: {scorecard['accepted_journey_aggregation']}."])
     lines.extend(["", "## Shadow recommendations", ""])
     if scorecard["shadow_recommendations"]:
