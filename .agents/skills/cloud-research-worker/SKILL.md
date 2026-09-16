@@ -112,7 +112,10 @@ Multiple matches, truncation, provider unavailability, or any non-zero match ref
 
 `bin/fm-procevent-ida.sh` owns marker reconciliation, first submission, provider observation, normalized artifact capture, result/report generation, acknowledgement, and re-arming.
 An idle or provider-running session is healthy and remains supervised.
-Provider readback failure is `unavailable`, an unrecognized state is `ambiguous`, and terminal reports preserve `available`, exact `zero`, `unavailable`, and `error` as distinct result states.
+Recognized provider rate limits, timeouts, and unavailability remain supervised with bounded transient retries.
+A local CLI execution or invalid-response failure stops only the current waiter, reports the task as blocked under `ida-readback-local`, preserves its exact remote identity and nonterminal outcome, and must be resumed with `bin/fm-remote-agent-ida.sh adopt <id>` after the local fault is repaired.
+Do not recreate, cancel, or switch the task for that blocker; a healthy task-bound read clears it, while another provider-transient response or a response missing the bound task does not.
+An unrecognized provider state is `ambiguous`, and terminal reports preserve `available`, exact `zero`, `unavailable`, and `error` as distinct result states.
 iDA does not inherit AIME's Feishu-document contract: its durable return is the self-contained `data/<id>/report.md` and recorded provider/session identity.
 
 iDA provider cancellation is destructive.

@@ -101,6 +101,7 @@ fm_ida_provider_state_validate() {
     and (.provider_state.agent_name == null or (.provider_state.agent_name | type == "string" and length <= 240))
     and (.provider_state.model == null or (.provider_state.model | type == "string" and length <= 160))
     and (.provider_state.provider_status == null or (.provider_state.provider_status | type == "string" and length <= 120))
+    and (.provider_state.local_readback_blocked == null or (.provider_state.local_readback_blocked | type == "boolean"))
   ' "$file" >/dev/null 2>&1
 }
 
@@ -140,6 +141,56 @@ fm_ida_status_kind() {
 
 fm_ida_structured_success() {
   jq -e '.status == "success" and .error == null and (.data | type != "null")' "$1" >/dev/null 2>&1
+}
+
+# Read-only CLI calls preserve local failure categories without exposing stderr.
+# Recognized transient stderr is classified in place and never persisted.
+fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty means success
+  local out=$1 err=$2 rc=$3 class
+  case "$rc" in
+    126) printf 'cli-not-executable\n'; return ;;
+    127) printf 'cli-not-found\n'; return ;;
+    124) printf 'timeout\n'; return ;;
+  esac
+  if [ -s "$err" ]; then
+    class=$(fm_remote_error_classify "$err")
+    case "$class" in
+      rate-limited|timeout|unavailable) printf '%s\n' "$class"; return ;;
+    esac
+  fi
+  if ! [ -s "$out" ]; then
+    printf 'response-empty\n'
+  elif ! jq -e -s 'length == 1' "$out" >/dev/null 2>&1; then
+    printf 'response-invalid-json\n'
+  elif jq -e 'type == "object" and .status == "error"
+      and (.error | type == "object")
+      and (.error.code | type == "string")
+      and (.error.message | type == "string")' "$out" >/dev/null 2>&1; then
+    fm_remote_error_classify "$out"
+  elif [ "$rc" -ne 0 ]; then
+    printf 'cli-exit-error\n'
+  elif ! jq -e 'type == "object" and .status == "success"
+      and .error == null and (.data | type == "object")' "$out" >/dev/null 2>&1; then
+    printf 'response-invalid-structure\n'
+  fi
+}
+
+fm_ida_session_response_error() { # <successful-response> <expected-session-id>
+  if ! jq -e '(.data.session | type == "object")
+      and (.data.session.id | tostring | test("^[0-9]+$"))
+      and (.data.messages | type == "array")
+      and all(.data.messages[]; type == "object")' "$1" >/dev/null 2>&1; then
+    printf 'response-invalid-structure\n'
+  elif [ "$(jq -r '.data.session.id | tostring' "$1")" != "$2" ]; then
+    printf 'session-identity-mismatch\n'
+  fi
+}
+
+fm_ida_local_read_error() { # <error-class>
+  case "$1" in
+    cli-not-executable|cli-not-found|cli-exit-error|response-empty|response-invalid-json|response-invalid-structure|session-identity-mismatch) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_ida_normalize_error() {

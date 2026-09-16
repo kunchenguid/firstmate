@@ -236,7 +236,9 @@ cmd_state() (
   status=$(jq -r '.provider_status // ""' "$observation"); kind=$(fm_ida_status_kind "$status")
   availability=$(jq -r '.result_availability' "$observation"); class=$(jq -r '.error_class // ""' "$observation")
   if jq -e '.ambiguous==true' "$observation" >/dev/null; then state=blocked
-  elif jq -e '.terminal==false' "$observation" >/dev/null; then [ "$availability" = error ] && state=unknown || state=working
+  elif jq -e '.terminal==false' "$observation" >/dev/null; then
+    if fm_ida_local_read_error "$class"; then state=blocked
+    else [ "$availability" = error ] && state=unknown || state=working; fi
   else case "$kind" in success) state='done' ;; *) state=failed ;; esac; fi
   printf 'state: %s · source: remote-readback · provider=ida phase=%s provider-status=%s terminal=%s result=%s error=%s\n' \
     "$state" "$REMOTE_STATE_PHASE" "${status:-unknown}" "$(jq -r '.terminal' "$observation")" "$availability" "${class:-none}"

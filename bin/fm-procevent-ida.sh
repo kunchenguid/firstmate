@@ -37,6 +37,11 @@
 # The retry delay defaults to 5000 ms, doubles to a 60000 ms cap, and is tuned
 # only through FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS and
 # FM_IDA_TRANSIENT_BACKOFF_MAX_MS.
+# Local CLI or invalid-response failures end only the current waiter, publish
+# an ida-readback-local blocker, and preserve remote identity and nonterminal
+# state. After repairing local readback, adopt retries the same task; a healthy
+# observation resolves the blocker. provider_state.local_readback_blocked is
+# the durable recovery marker, retained across retries until that observation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,13 +89,16 @@ run_ida_json() { # <stdout> <stderr> <args...>
   shift 2
   : >"$out"; : >"$err"
   if fm_ida_run_bytedcli --json --as user ida --region sg "$@" >"$out" 2>"$err"; then IDA_RC=0; else IDA_RC=$?; fi
+  IDA_READ_ERROR=$(fm_ida_read_error_classify "$out" "$err" "$IDA_RC")
 }
 
-error_observation() { # <id> <kind> <class>
+error_observation() { # <id> <kind> <class> [known-session-id] [known-task-id]
   jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$1" --arg marker "$IDA_STATE_MARKER" \
-    --arg kind "$2" --arg class "$3" '
+    --arg kind "$2" --arg class "$3" --arg session "${4:-}" --arg task "${5:-}" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
-       session_id:null,task_id_remote:null,agent_id:null,agent_name:null,model:null,provider_status:null,
+       session_id:(if $session=="" then null else $session end),
+       task_id_remote:(if $task=="" then null else $task end),
+       agent_id:null,agent_name:null,model:null,provider_status:null,
        terminal:false,ambiguous:false,result_availability:"error",result_kind:null,answer:null,
        artifact_reference:null,error_class:$class,observed_at:(now|todateiso8601)}'
 }
@@ -113,18 +121,16 @@ list_marker() { # <id> <root> ; sets LIST_* and leaves normalized list in root
   if [ -z "$agent_id" ]; then
     run_ida_json "$out" "$err" agent get
     agent_id=$(jq -r 'if .status=="success" and .error==null and .data.deep_research_enabled==true then .data.id // empty else empty end | tostring' "$out" 2>/dev/null)
-    if [ "$IDA_RC" -ne 0 ] || ! fm_ida_numeric_id "$agent_id"; then
-      fm_ida_normalize_error "$out" "$err" "$normalized"
-      LIST_OK=false; LIST_CLASS=$(fm_remote_error_classify "$normalized"); LIST_COUNT=0; LIST_TRUNCATED=true
+    if [ -n "$IDA_READ_ERROR" ] || ! fm_ida_numeric_id "$agent_id"; then
+      LIST_OK=false; LIST_CLASS=${IDA_READ_ERROR:-response-invalid-structure}; LIST_COUNT=0; LIST_TRUNCATED=true
       return 1
     fi
   fi
   run_ida_json "$out" "$err" session raw list --agent-id "$agent_id" --page-size "$IDA_PAGE_SIZE"
-  if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$out" \
+  if [ -n "$IDA_READ_ERROR" ] \
       || ! jq -e '.data.sessions.sessionList | type == "array"' "$out" >/dev/null 2>&1; then
-    fm_ida_normalize_error "$out" "$err" "$normalized"
     LIST_OK=false
-    LIST_CLASS=$(fm_remote_error_classify "$normalized")
+    LIST_CLASS=${IDA_READ_ERROR:-response-invalid-structure}
     LIST_COUNT=0
     LIST_TRUNCATED=true
     return 1
@@ -150,17 +156,15 @@ list_marker() { # <id> <root> ; sets LIST_* and leaves normalized list in root
     if [ "$name" != "$IDA_STATE_MARKER" ]; then
       get="$root/get-$session_id.out"
       run_ida_json "$get" "$err" session get --session-id "$session_id"
-      if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$get" \
-          || ! jq -e --arg sid "$session_id" --arg prefix "$prefix" '
-            (.data.session.id | tostring) == $sid
-            and ([.data.messages[]? | select(.type == 0 and (.text | type == "string")) | .text]
+      [ -n "$IDA_READ_ERROR" ] || IDA_READ_ERROR=$(fm_ida_session_response_error "$get" "$session_id")
+      if [ -n "$IDA_READ_ERROR" ]; then
+        LIST_OK=false; LIST_CLASS=$IDA_READ_ERROR; LIST_COUNT=0; LIST_TRUNCATED=true
+        return 1
+      fi
+      if ! jq -e --arg prefix "$prefix" '
+            ([.data.messages[]? | select(.type == 0 and (.text | type == "string")) | .text]
               | any(. == $prefix or startswith($prefix + "\n")))
           ' "$get" >/dev/null 2>&1; then
-        if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$get"; then
-          fm_ida_normalize_error "$get" "$err" "$normalized"
-          LIST_OK=false; LIST_CLASS=$(fm_remote_error_classify "$normalized"); LIST_COUNT=0; LIST_TRUNCATED=true
-          return 1
-        fi
         continue
       fi
     fi
@@ -184,17 +188,16 @@ session_payload_has_marker() { # <structured session get>
 
 session_observation() { # <id> <session-id> <kind> [recorded-task-id]
   local id=$1 session_id=$2 kind=$3 expected_task_id=${4:-$IDA_STATE_TASK_ID}
-  local root out err normalized task_summary task_id task_count task_found task_status status_kind allow_untagged
+  local root out err task_summary task_id task_count task_found task_status status_kind allow_untagged
   local answer answer_file availability terminal ambiguous=false class="" agent_id agent_name
   local result_kind="" artifact_reference=null structured structured_state=empty
-  root=$(temp_root); out="$root/get.out"; err="$root/get.err"; normalized="$root/error.json"
+  root=$(temp_root); out="$root/get.out"; err="$root/get.err"
   run_ida_json "$out" "$err" session get --session-id "$session_id"
-  if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$out" \
-      || [ "$(jq -r '.data.session.id // "" | tostring' "$out" 2>/dev/null)" != "$session_id" ]; then
-    fm_ida_normalize_error "$out" "$err" "$normalized"
-    class=$(fm_remote_error_classify "$normalized")
+  class=$IDA_READ_ERROR
+  [ -n "$class" ] || class=$(fm_ida_session_response_error "$out" "$session_id")
+  if [ -n "$class" ]; then
     rm -rf -- "$root"
-    error_observation "$id" "$kind" "$class"
+    error_observation "$id" "$kind" "$class" "$session_id" "$expected_task_id"
     return 0
   fi
   if ! session_payload_has_marker "$out"; then
@@ -648,6 +651,12 @@ cmd_handle_locked() {
   patch=$(jq -c '{session_id:.session_id,task_id:.task_id_remote,agent_id:.agent_id,agent_name:.agent_name,model:.model,provider_status:.provider_status,result_kind:.result_kind} | with_entries(select(.value != null))' "$result")
   availability=$(jq -r '.result_availability' "$result")
   class=$(jq -r '.error_class // ""' "$result")
+  if jq -e '.provider_state.local_readback_blocked == true' "$REMOTE_STATE_FILE" >/dev/null \
+      && jq -e '.ambiguous == false and (.error_class == null or .terminal == true)' "$result" >/dev/null; then
+    fm_remote_status_append "$id" "resolved [key=ida-readback-local]: iDA readback recovered for the original task" \
+      || die "cannot resolve iDA readback blocker"
+    patch=$(printf '%s' "$patch" | jq '. + {local_readback_blocked:false}')
+  fi
   if jq -e '.ambiguous == true' "$result" >/dev/null; then
     fm_remote_state_transition "$id" ambiguous submission-acceptance-unknown "$class" reconcile-ambiguous interrupted "$availability" "$artifact" "" "$patch" || die "cannot checkpoint ambiguous iDA state"
     fm_remote_status_append "$id" "blocked [key=ida-submission-ambiguous]: iDA session identity is ambiguous; reconcile or adopt before any retry" || die "cannot append iDA blocker"
@@ -655,6 +664,16 @@ cmd_handle_locked() {
     if [ "$availability" = error ]; then
       next_phase="result-unavailable"
       case "$REMOTE_STATE_PHASE" in submission-not-started|submission-unknown) next_phase=$REMOTE_STATE_PHASE ;; esac
+      if fm_ida_local_read_error "$class"; then
+        patch=$(printf '%s' "$patch" | jq '. + {local_readback_blocked:true}')
+        fm_remote_state_transition "$id" "$next_phase" unavailable "$class" provider-readback-blocked interrupted "$availability" "$artifact" "" "$patch" \
+          || die "cannot checkpoint local iDA readback failure"
+        fm_remote_status_append "$id" "blocked [key=ida-readback-local]: iDA local readback failed ($class); repair CLI execution or response validation, then use adopt for this task; remote outcome is unconfirmed" \
+          || die "cannot append iDA readback blocker"
+        "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null || die "cannot acknowledge local iDA readback failure"
+        printf 'handled: %s readback-blocked=%s\n' "$id" "$class"
+        return 0
+      fi
       fm_remote_state_transition "$id" "$next_phase" unavailable "$class" provider-readback-unavailable rearming "$availability" "$artifact" "" "$patch" || die "cannot checkpoint unavailable iDA readback"
     else
       fm_remote_state_transition "$id" running "" "" provider-running rearming "$availability" "$artifact" "" "$patch" || die "cannot checkpoint running iDA state"
@@ -713,13 +732,22 @@ cmd_autohandle() {
   cmd_handle "$id" "$2" "$3"
 }
 
+cmd_terminal() {
+  [ "$#" -eq 1 ] || usage
+  jq -e '.schema=="fm-ida-observation.v1"' "$1" >/dev/null 2>&1 || return 1
+  jq -e '.terminal==true or .ambiguous==true' "$1" >/dev/null 2>&1 && return 0
+  # Ending a failed local waiter never asserts a remote terminal outcome.
+  jq -e '.terminal==false and .result_availability=="error"' "$1" >/dev/null 2>&1 \
+    && fm_ida_local_read_error "$(jq -r '.error_class // ""' "$1")"
+}
+
 case "${1-}" in
   arm) shift; cmd_arm "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; source_observe_with_backoff "$1" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; observe_or_submit "$1" false ;;
   handle) shift; cmd_handle "$@" ;;
   autohandle) shift; cmd_autohandle "$@" ;;
-  terminal) shift; [ "$#" -eq 1 ] || usage; jq -e '.schema=="fm-ida-observation.v1" and (.terminal==true or .ambiguous==true)' "$1" >/dev/null 2>&1 ;;
+  terminal) shift; cmd_terminal "$@" ;;
   retire) shift; [ "$#" -eq 1 ] || usage; "$SCRIPT_DIR/fm-procevent.sh" retire "$(fm_remote_source_id ida "$1")" ;;
   -h|--help|'') usage ;;
   *) usage ;;
