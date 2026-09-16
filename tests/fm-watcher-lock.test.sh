@@ -480,6 +480,75 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# Regression for the watcher segfault: a lockdir under a write-denied parent
+# (a sandboxed filesystem, permission denial, disk full) makes every attempt
+# to prepare our own candidate fail even though nothing holds the lock. Before
+# the fix, fm_lock_try_acquire read that as ordinary stale-owner contention
+# and recursed into an ever-longer ".steal.steal..." chain that never
+# terminated, overflowing bash's call stack and crashing with SIGSEGV - hit in
+# production via bin/fm-watch.sh's inline `fm-procevent.sh reconcile` call
+# against a machine-wide claim lock the watcher's sandbox could not write.
+# The fix must fail the attempt outright instead, since there is nothing to
+# steal.
+test_lock_create_hard_failure_fails_fast_without_recursion() {
+  local dir state lockdir pid rc out steal_count
+  dir=$(make_case lock-create-hard-failure)
+  state="$dir/state"
+  mkdir -p "$state/locks"
+  lockdir="$state/locks/.test.lock"
+  chmod 0500 "$state/locks"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" > "$dir/out" 2> "$dir/err" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  rc=$?
+  chmod 0700 "$state/locks"
+  [ "$rc" -eq 0 ] \
+    || fail "a lock-creation failure with nothing to steal did not return cleanly and promptly (rc=$rc); see $dir/err"
+  out=$(cat "$dir/out")
+  [ "$out" = "rc=1 held=" ] \
+    || fail "lock creation under a write-denied parent was not reported as a clean, unheld failure: $out"
+  steal_count=$(find "$state" -name '*.steal*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$steal_count" -eq 0 ] \
+    || fail "a hard lock-creation failure recursed into stealing anyway ($steal_count artifacts under $state)"
+  pass "a lock-creation failure with nothing to steal fails fast instead of recursing"
+}
+
+# Structural backstop: even genuine stale-owner contention must not recurse
+# through an arbitrarily deep chain of nested .steal locks. Build a chain of
+# already-stale, already-dead-pid lock directories deeper than a small
+# configured bound and confirm the walk refuses past that bound instead of
+# reclaiming an unbounded distance.
+test_lock_steal_recursion_is_depth_bounded() {
+  local dir state lockdir dead path i max out
+  dir=$(make_case lock-steal-depth-bound)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  max=3
+  path="$lockdir"
+  i=0
+  while [ "$i" -le $((max + 2)) ]; do
+    mkdir "$path" || fail "could not build fixture chain level $i"
+    printf '%s\n' "$dead" > "$path/pid"
+    path="$path.steal"
+    i=$((i + 1))
+  done
+  out=$(FM_LOCK_STALE_AFTER=0 FM_LOCK_STEAL_MAX_DEPTH=$max FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "steal recursion reclaimed a chain deeper than the configured bound: $out" ;;
+  esac
+  pass "steal recursion halts at the configured depth bound instead of reclaiming an arbitrarily deep chain"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -1209,6 +1278,8 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_create_hard_failure_fails_fast_without_recursion
+test_lock_steal_recursion_is_depth_bounded
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

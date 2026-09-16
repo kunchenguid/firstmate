@@ -9,6 +9,11 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# Hard bound on fm_lock_try_acquire's .steal-of-.steal recursion (see its
+# depth argument below). A live reclaim chain never needs more than one or
+# two levels; this is a structural backstop against any future cause of
+# unbounded regress, not a value callers are expected to tune.
+FM_LOCK_STEAL_MAX_DEPTH="${FM_LOCK_STEAL_MAX_DEPTH:-8}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -935,14 +940,51 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
-fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
+  local lockdir=$1 depth=${2:-0} pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  steal="$lockdir.steal"
+  if { [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; } \
+    && { [ ! -e "$steal" ] && [ ! -L "$steal" ]; }; then
+    # Creation failed even though nothing currently holds this lock OR its
+    # steal mutex: either a hard, non-contention failure preparing our own
+    # candidate (permission denied, a sandboxed filesystem, disk full), or a
+    # benign race where the prior holder released between
+    # fm_lock_try_create's existence check and now. Either way there is
+    # nothing here to reclaim or wait on, so recursing into the .steal path
+    # below cannot help - it hits the identical failure on a longer path and
+    # did, unbounded, turn a persistent hard failure into runaway
+    # ".steal.steal..." recursion and a stack-overflow crash. Fail this
+    # attempt outright: a benign race is retried by the caller's own loop
+    # (fm_lock_acquire_wait) next cycle, while a persistent hard failure now
+    # fails fast on every cycle instead of crashing, letting a bounded
+    # caller's own timeout fire and report cleanly.
+    #
+    # When the steal mutex DOES exist, another acquirer is actively resolving
+    # a claim race on this exact lock (for example it won the create, lost
+    # fm_lock_claim to an in-progress steal, and rolled its own candidate
+    # back - see fm_lock_claim's cleanup - leaving $lockdir absent but
+    # $lockdir.steal live). That is genuine, bounded contention to wait on
+    # through the ordinary recursion below, not a hard failure.
+    FM_LOCK_HELD_PID=
+    return 1
+  fi
+
+  if [ "$depth" -ge "$FM_LOCK_STEAL_MAX_DEPTH" ]; then
+    # Structural backstop: even genuine stale-owner contention should never
+    # need to reclaim a .steal lock this many levels deep. Bail rather than
+    # keep recursing, so any other unforeseen cause of runaway regress (for
+    # example a long-abandoned chain of .steal.steal... artifacts left by a
+    # prior crash of this same bug) fails bounded instead of unbounded.
+    FM_LOCK_HELD_PID=
+    return 1
   fi
 
   fm_current_pid current || return 1
@@ -972,8 +1014,7 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$((depth + 1))"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
