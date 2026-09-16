@@ -94,6 +94,10 @@ Each home atomically publishes that bounded home summary with freshness epoch me
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 `bin/fm-tasks.sh` adds the compact task table and uses `bin/fm-callsigns-lib.sh` for private atomic `t1`-`t99` references and concise editable two-to-four-token names; the table remains a projection of backlog and current-state authority rather than a second status list.
+Its JSON projection preserves numeric-reference ordering and exposes `started_at` only from task metadata written by the spawn transition owner.
+On Pi, `.pi/extensions/fm-tasks.ts` owns `/tasks` as a session-local live widget that starts hidden, refreshes that projection on bounded event and fallback cadences, and advances elapsed display locally without writing conversation history; the separate `task-list` skill retains natural-language transcript output.
+The widget renders below the editor while Calm's transient step and sailing components render above it, so either toggle leaves the other's keyed components and visibility controls untouched.
+It caps rows against the terminal height and renders a `+N more` summary in short terminals.
 Done rows remain actionable there as `Ready to close`.
 `bin/fm-task.sh` composes that same current identity owner with the canonical fleet snapshot, task instructions, metadata, artifacts, and finalized closure records into one stable detail card; it records no duplicate task summary and leaves absent lifecycle dates unknown.
 `bin/fm-next.sh` ranks that current task and worker truth into one captain action, excludes routine autonomous work, and falls back to one Done item only when no captain or autonomous forward action remains.

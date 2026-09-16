@@ -286,7 +286,7 @@ family_for_basename() {
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-pi-tasks-widget.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -352,7 +352,7 @@ family_for_basename() {
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
-    fm-pi-branch-responsiveness-live-e2e.test.sh|\
+    fm-pi-branch-responsiveness-live-e2e.test.sh|fm-pi-tasks-herdr-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
     fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
@@ -733,6 +733,8 @@ tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
+tests/fm-pi-tasks-herdr-live-e2e.test.sh 100
+tests/fm-pi-tasks-widget.test.sh 1000
 tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pi-windows-shell-invocation.test.sh 5121
 tests/fm-pr-check-security.test.sh 172215
@@ -1414,6 +1416,10 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
+    .pi/extensions/fm-tasks.ts)
+      printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
       # The portable suites that actually load these files, named one by one.
@@ -1509,9 +1515,16 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
-    bin/fm-home-summary-refresh.sh)
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh|bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-fleet-snapshot.sh)
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
+      ;;
+    bin/fm-tasks.sh)
+      printf '%s\n' __script__:fm-callsigns.test.sh
+      printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit

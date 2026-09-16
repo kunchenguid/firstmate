@@ -152,19 +152,13 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
-test_pi_tasks_command_preserves_rendered_table() {
+test_pi_task_lifecycle_commands_preserve_script_output() {
   local repo home plugin out status
-  repo="$TMP_ROOT/pi-tasks-root"
-  home="$TMP_ROOT/pi-tasks-home"
+  repo="$TMP_ROOT/pi-task-lifecycle-root"
+  home="$TMP_ROOT/pi-task-lifecycle-home"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-tasks.sh" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = t7 ] || { printf 'wrong selector: %s\n' "${1:-}" >&2; exit 2; }
-[ "${COLUMNS:-}" = 50 ] || { printf 'wrong width: %s\n' "${COLUMNS:-unset}" >&2; exit 2; }
-printf '┌─────┐\n│ t7  │\n└─────┘\n'
-SH
   cat > "$repo/bin/fm-next.sh" <<'SH'
 #!/usr/bin/env bash
 [ "$#" -eq 0 ] || exit 2
@@ -190,7 +184,7 @@ else
   exit 2
 fi
 SH
-  chmod +x "$repo/bin/fm-tasks.sh" "$repo/bin/fm-next.sh" "$repo/bin/fm-task.sh" "$repo/bin/fm-close.sh" "$repo/bin/fm-history.sh"
+  chmod +x "$repo/bin/fm-next.sh" "$repo/bin/fm-task.sh" "$repo/bin/fm-close.sh" "$repo/bin/fm-history.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
@@ -206,7 +200,7 @@ const pi = {
 Object.defineProperty(process.stdout, "columns", { value: 52, configurable: true });
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-for (const name of ["tasks", "next", "task", "close", "history"]) {
+for (const name of ["next", "task", "close", "history"]) {
   if (!handlers.has(name)) throw new Error(`Pi ${name} command was not registered`);
 }
 const context = {
@@ -217,11 +211,7 @@ const context = {
     },
   },
 };
-await handlers.get("tasks")("t7", context);
-const expected = "┌─────┐\n│ t7  │\n└─────┘";
-if (notification?.message !== expected || notification?.type !== "info") {
-  throw new Error(`rendered table was not returned verbatim: ${JSON.stringify(notification)}`);
-}
+if (handlers.has("tasks")) throw new Error("watch extension retained competing /tasks ownership");
 await handlers.get("next")("", context);
 if (notification?.message !== "Ref: t7 - detailed-task\nRecommendation: Close it." || notification?.type !== "info") {
   throw new Error(`next card was not returned verbatim: ${JSON.stringify(notification)}`);
@@ -247,7 +237,7 @@ EOF
   status=$?
   expect_code 0 "$status" "Pi task lifecycle commands must return their script output verbatim"
   [ -z "$out" ] || fail "Pi task lifecycle command test printed output: $out"
-  pass "Pi /tasks, /next, /task, /close, and /history return their script output without reformatting"
+  pass "Pi watch extension leaves /tasks ownership separate while /next, /task, /close, and /history preserve script output"
 }
 
 test_pi_tool_returns_agent_tool_result() {
@@ -4073,7 +4063,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
-test_pi_tasks_command_preserves_rendered_table
+test_pi_task_lifecycle_commands_preserve_script_output
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

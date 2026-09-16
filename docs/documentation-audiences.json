@@ -141,7 +141,7 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/tasks/SKILL.md",
+      "path": ".agents/skills/task-list/SKILL.md",
       "audience": "agent-runtime"
     },
     {

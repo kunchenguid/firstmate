@@ -95,6 +95,7 @@ EOF
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
+    "started_at=2026-07-07T08:09:10Z" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   # A working ship task proves it through its own semantic busy-state record
@@ -165,6 +166,7 @@ test_fixture_snapshot_json() {
     .tasks[] | select(.id == "ship-task")
     | .current_state.state == "working"
       and .current_state.source == "pane"
+      and .started_at == "2026-07-07T08:09:10Z"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
@@ -173,6 +175,7 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")
     | .paths.report.present == true
+      and .started_at == null
       and .hints.scout_report_present == true
   ' >/dev/null || fail "scout report pointer missing"
   printf '%s' "$out" | jq -e '

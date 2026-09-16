@@ -852,6 +852,21 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Pi live task widget
+
+Measured 2026-09-16 on macOS aarch64 with Pi 0.85.1 and Herdr 0.9.0.
+The opt-in guard launched a real Pi TUI in a named non-default Herdr lab, toggled the live task table with Calm off and on, observed two elapsed-second increments without transcript growth, changed the fixture's structured task row and observed the refresh, hid the table, reloaded Pi, and proved the hidden session started no further refresh process.
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  FM_PI_TASKS_HERDR_LIVE_E2E=1 \
+  tests/fm-pi-tasks-herdr-live-e2e.test.sh
+```
+
+```text
+ok - real Pi 0.85.1 in isolated Herdr 0.9.0 toggled one live task widget, advanced elapsed time twice without transcript growth, refreshed task data, coexisted with Calm on and off, hid cleanly, and stayed hidden without work after reload
+```
+
 ### fm-remote server birth and login-keychain access
 
 Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.

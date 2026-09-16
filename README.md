@@ -187,7 +187,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/quiet`           | Enter quiet supervision mode: the same token-saving sub-supervisor tradeoff as `/afk`, for a captain who is staying and chatting - ordinary messages do not exit it, only an explicit `/quiet off` does |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
-| `/tasks`           | Show a compact Ref, Name, Status, and Current outcome table; completed rows remain actionable as `Ready to close` |
+| `/tasks`           | Toggle a live Ref, Name, Status, Elapsed, and Current outcome task table; it starts hidden and completed rows remain actionable as `Ready to close` |
 | `/next`            | Show the single highest-value captain action that can restart work, falling back to one completed task ready for `/close` only when no work can move forward |
 | `/task <selector>` | Show one current, recent, or closed task's purpose, lifecycle dates, outcome, delivery state, artifacts, blocker or decision, and next action before choosing `/close` |
 | `/close`           | Review or close completed work, preserving its private task material and moving it from `/tasks` into durable history |

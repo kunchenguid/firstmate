@@ -5,6 +5,8 @@
 #        fm-tasks.sh resolve <task-selector>
 # The table consumes the canonical fleet snapshot and never maintains a second
 # current-state list. Reference and name assignments live in private state.
+# JSON rows are ordered by numeric short reference then canonical id and include
+# the spawn owner's authoritative started_at timestamp when one is available.
 # Table width follows a positive COLUMNS value, then `tput cols`, then 120;
 # widths below 33 use the smallest aligned layout and may exceed the terminal.
 set -u
@@ -119,6 +121,7 @@ MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg se
     | (if ($c.name // "") != "" then $c.name else $id end) as $name
     | (row_status($r; $t)) as $status
     | {id:$id, ref:($c.ref // "-"), name:$name, status:$status,
+       started_at:($t.started_at // null),
        outcome:(outcome($r; $t; $status) | trunc(100))};
   . as $snapshot
   | def task($id): ([$snapshot.tasks[]? | select(.id == $id)] | first) // {};

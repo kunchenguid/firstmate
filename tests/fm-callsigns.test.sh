@@ -147,11 +147,11 @@ json_wide=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=120 "$TASKS" --jso
 json_narrow=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=40 "$TASKS" --json) || fail "narrow JSON command failed"
 [ "$json_wide" = "$json_narrow" ] || fail "terminal width changed JSON output"
 expected='[
-  {"id":"active-task","ref":"t1","name":"active-task","status":"unknown","outcome":"current state unavailable"},
-  {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","outcome":"external wait"},
-  {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","outcome":"waiting on active-task"},
-  {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","outcome":"captain input needs a decision about production behavior and careful rollout sequencing"},
-  {"id":"done-task","ref":"t5","name":"done-task","status":"done","outcome":"Ready to close"}
+  {"id":"active-task","ref":"t1","name":"active-task","status":"unknown","started_at":null,"outcome":"current state unavailable"},
+  {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","started_at":null,"outcome":"external wait"},
+  {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","started_at":null,"outcome":"waiting on active-task"},
+  {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","started_at":null,"outcome":"captain input needs a decision about production behavior and careful rollout sequencing"},
+  {"id":"done-task","ref":"t5","name":"done-task","status":"done","started_at":null,"outcome":"Ready to close"}
 ]'
 [ "$(printf '%s' "$json_wide" | jq -Sc .)" = "$(printf '%s' "$expected" | jq -Sc .)" ] \
   || fail "status normalization or JSON contract changed: $json_wide"
@@ -196,6 +196,7 @@ project=sample
 harness=claude
 kind=ship
 mode=local-only
+started_at=2026-09-15T10:11:12Z
 EOF
 ready_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home_ready/state" local-ready)
 "$ROOT/bin/fm-busy-event.sh" apply "$home_ready/state" local-ready idle --gen "$ready_gen" \
@@ -207,7 +208,8 @@ printf '%s\n' "$ready_json" | jq -e '
   length == 1
     and .[0].status == "ready"
     and .[0].outcome == "ready in branch fm/local-ready; awaiting landing approval"
-    and (.[0] | keys | sort) == ["id","name","outcome","ref","status"]
+    and .[0].started_at == "2026-09-15T10:11:12Z"
+    and (.[0] | keys | sort) == ["id","name","outcome","ref","started_at","status"]
 ' >/dev/null || fail "completed local branch was not a useful ready row: $ready_json"
 pass "completed local branches are ready while waiting remains an external-delay state"
 
