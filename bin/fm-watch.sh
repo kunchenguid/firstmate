@@ -1629,6 +1629,25 @@ scan_signals() {
   return 0
 }
 
+# Collapse the pre-grace and post-grace scans to one row per signal file.
+# Preserve first-seen file order, but retain the later signature so the marker
+# commits exactly the file state that classification observed after the grace.
+coalesce_signal_rows() {
+  awk -F '\t' '
+    NF >= 3 {
+      key = $3
+      if (!(key in seen)) {
+        seen[key] = 1
+        order[++count] = key
+      }
+      row[key] = $0
+    }
+    END {
+      for (i = 1; i <= count; i++) print row[order[i]]
+    }
+  '
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -2359,7 +2378,7 @@ EOF
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)" | coalesce_signal_rows)
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
