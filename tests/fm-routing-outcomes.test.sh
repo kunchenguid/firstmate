@@ -453,6 +453,46 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIsNone(self.latest_record()["native"]["effective_effort"])
         self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"], "complete")
 
+    def test_accepted_pi_requires_complete_native_route_identity(self):
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        request = next(row for row in rows if row.get("customType") == "fm-routing-request")
+        assistant = next(row for row in rows if row.get("type") == "message")
+        cases = {
+            "provider": lambda: (request["data"].update({"provider": None}),
+                                  assistant["message"].update({"provider": None})),
+            "effective model": lambda: (request["data"].update({"payloadModel": None}),
+                                         assistant["message"].update({"model": None})),
+            "effective effort": lambda: request["data"].update(
+                {"payloadReasoningEffort": None}),
+        }
+        for field, remove_identity in cases.items():
+            with self.subTest(field=field):
+                current = copy.deepcopy(rows)
+                request = next(row for row in current
+                               if row.get("customType") == "fm-routing-request")
+                assistant = next(row for row in current if row.get("type") == "message")
+                remove_identity()
+                self.pi.write_text("".join(json.dumps(row) + "\n" for row in current),
+                                   encoding="utf-8")
+                manifest = self.manifest()
+                manifest["requirements"] = None
+                result = self.import_manifest(manifest, ok=False)
+                self.assertIn("complete native provider, effective model, and effective effort",
+                              json.loads(result.stdout)["error"])
+
+        request["data"].update({"provider": None, "payloadModel": None,
+                                "payloadReasoningEffort": None})
+        assistant["message"].update({"provider": None, "model": None})
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in current), encoding="utf-8")
+        unresolved = self.manifest(outcome="unresolved")
+        unresolved["requirements"] = None
+        self.import_manifest(unresolved)
+        record = self.latest_record()
+        self.assertEqual(record["outcome"], "unresolved")
+        self.assertIsNone(record["native"]["provider"])
+        self.assertIsNone(record["native"]["effective_model"])
+        self.assertIsNone(record["native"]["effective_effort"])
+
     def test_mixed_pi_route_evidence_is_rejected(self):
         self.write_pi(self.pi, extra_request={"payloadReasoningEffort": None})
         result = self.import_manifest(self.manifest(), ok=False)

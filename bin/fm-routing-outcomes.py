@@ -994,6 +994,10 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     if native.get("kind") == "pi-session" and outcome == "accepted" and (
             native.get("task_id_receipt") is None or native.get("spawn_gen_receipt") is None):
         fail("accepted Pi outcome requires native task incarnation evidence")
+    if native.get("kind") == "pi-session" and outcome == "accepted" and any(
+            not isinstance(native.get(field), str) or not native.get(field)
+            for field in ("provider", "effective_model", "effective_effort")):
+        fail("accepted Pi outcome requires complete native provider, effective model, and effective effort evidence; record this receipt as unresolved")
     if native.get("kind") != "pi-session" and outcome == "accepted":
         fail("accepted outcome requires native task incarnation evidence; record this receipt as an unresolved observation")
     record = {
