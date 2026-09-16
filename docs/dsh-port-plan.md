@@ -268,6 +268,29 @@ contract are done; 1b.3 deny verification and 1b.4 the doc/skill rows remain.)
 15. Teardown decomposed per §3, including the DSH-only state files in the volatile-state matrix and
     the git-exclude rule for any file the adapter writes into a worktree.
 
+**Phase 2 findings (verified 2026-09-16).** A scout crewmate was dispatched end to end from a
+DSH-hosted environment with `treehouse` v2.0.1 installed: `fm-spawn.sh` created a treehouse worktree,
+launched a tmux pane, delivered the brief, and the crewmate produced `data/<id>/report.md` with the
+correct answer. Three things this run established that no amount of reading would have:
+
+1. **The dispatch path works unchanged.** Crewmates are external CLI processes in tmux panes, so
+   nothing about the crew layer depends on DSH. The captain's DSH ancestry does not leak into a
+   tmux pane: a pane is a child of the tmux server, so the worker resolves its own harness (verified:
+   `FM_DSH_HARNESS` is not in the tmux session environment).
+2. **The default Claude launch wedges on a dialog, and the readiness gate calls it success.** With
+   `--dangerously-skip-permissions` (the default when `config/claude-permission-mode` is absent),
+   Claude Code parks on its Bypass Permissions warning on any machine where it has not been accepted
+   before. Its cursor sits on **"No, exit"**, and firstmate's key plane carries only Enter/Escape/C-c
+   with no arrow navigation, so the dialog is unanswerable from the guard. `fm-claude-trust.sh`
+   pre-registers `hasTrustDialogAccepted`, which is the folder-trust dialog, not this one. The
+   spawn still reported `spawned`.
+   **Workaround, verified:** `printf 'auto\n' > config/claude-permission-mode`, which launches with
+   `--permission-mode auto`; the worker then started its brief immediately. The readiness gate not
+   noticing a blocking dialog is the part worth fixing.
+3. **The primary checkout must be on its default branch.** The spawn warned `WORKTREE TANGLE` because
+   this adapter is being developed on `feat/dsh-primary-adapter` in the primary checkout. Advisory
+   here, but it is the intended check working.
+
 **Phase 3 — delivery and toolchain.**
 16. Toolchain: `treehouse`, `no-mistakes`, `gh-axi`, `tasks-axi`, `quota-axi`, `lavish-axi`.
 17. Delivery modes end to end; merge gate and merge poll semantics; backlog + captain holds (needs
