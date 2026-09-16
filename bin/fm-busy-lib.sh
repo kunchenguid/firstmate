@@ -678,7 +678,7 @@ NODE
 # the caller; both are already on every plane that delivers an interrupt.
 fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
   local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
-  local log prompt content last='' readable=0 stable=0 i
+  local log prompt content last='' readable=0 failed=0 stable=0 i
   log=$(fm_busy_muse_session_log "$state" "$id" 2>/dev/null) || {
     printf 'unprovable: no muse session log resolves for %s' "$id"
     return 0
@@ -703,7 +703,10 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     if content=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null); then
       readable=1
     else
-      content=
+      failed=1
+      i=$((i - 1))
+      [ "$i" -gt 0 ] && sleep 0.2
+      continue
     fi
     if [ -n "$content" ] && [ "$content" = "$last" ]; then
       stable=1
@@ -713,6 +716,10 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     i=$((i - 1))
     [ "$i" -gt 0 ] && sleep 0.2
   done
+  if [ "$failed" -eq 1 ] && [ "$readable" -eq 1 ]; then
+    printf 'unprovable: the composer for %s had an unreadable sample' "$target"
+    return 0
+  fi
   if [ -z "$content" ]; then
     if [ "$readable" -eq 0 ]; then
       printf 'unprovable: the composer for %s is unreadable' "$target"
