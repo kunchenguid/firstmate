@@ -842,11 +842,28 @@ assert_contains "$DOCTOR_OUT" "check herdr-server=human: the herdr server for se
   "a perl that cannot compile the supervisor was not reported as a human gap with its exit status"
 
 new_case Darwin with-herdr gui
+CASE_LOGIN_SHELL="$CASE_DIR/login-shell"
+printf '#!/bin/sh\nexec /bin/sleep 30\n' > "$CASE_LOGIN_SHELL"
+chmod +x "$CASE_LOGIN_SHELL"
+SECONDS=0
+doctor
+elapsed=$SECONDS
+expect_code 1 "$DOCTOR_RC" "a host whose login shell stalls at startup was reported ready"
+[ "$elapsed" -lt 20 ] || fail "a stalled login shell blocked doctor for ${elapsed}s"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl that compiles $SUPERVISOR, and '$CASE_LOGIN_SHELL -l -c' did not finish running perl -c on it within 5s" \
+  "a login shell that stalls at startup was not reported as an unverified interpreter within the bound"
+assert_contains "$DOCTOR_OUT" "action: herdr-server: inspect what makes '$CASE_LOGIN_SHELL -l' slow or block at startup on that account" \
+  "a stalled login shell's action does not point at its startup"
+assert_contains "$DOCTOR_OUT" 'the perl there is unverified rather than missing' \
+  "a stalled login shell's action does not say the interpreter is unverified"
+assert_not_contains "$DOCTOR_OUT" 'install perl' "a stalled login shell was prescribed a perl install"
+
+new_case Darwin with-herdr gui
 login_shell_with_path "$TMP_ROOT/empty-bin:/usr/bin:/bin"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "a login shell whose PATH has a working perl was not ready"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "a login shell whose PATH has a working perl did not get its server started"
-pass "a login shell without a perl that compiles the supervisor is a human gap the readiness gate preserves, and --fix never loops on it"
+pass "a login shell without a perl that compiles the supervisor is a human gap the readiness gate preserves, a stalled one is an unverified gap, and --fix never loops on either"
 
 # --- a non-zsh login shell is rendered with separate -l and -c --------------
 

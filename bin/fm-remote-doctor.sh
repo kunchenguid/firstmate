@@ -273,7 +273,8 @@ launch_agent_supervisor_path() {
 
 # Asks the resolved login shell, the way the launch agent runs the guard
 # (`-l -c`), whether a perl on its PATH compiles the supervisor; prints why
-# not, or nothing when one does. Bounded, because a login shell can stall.
+# not and returns the probe's status, 124 when the bound was hit because the
+# login shell stalled, or prints nothing and returns 0 when one does.
 supervisor_interpreter_gap() { # <resolved-login-shell>
   local shell=$1 supervisor rc
   supervisor=$(launch_agent_supervisor_path)
@@ -287,14 +288,20 @@ supervisor_interpreter_gap() { # <resolved-login-shell>
   else
     printf '%s' "the launch agent starts a server only through a perl that compiles $supervisor, and '$shell -l -c' found none (exit $rc)"
   fi
+  return "$rc"
 }
 
 # A server gap --fix would close through the launch agent is fixable only when
 # the guard can start a server there; otherwise it is the interpreter gap.
 record_herdr_server_gap() { # <resolved-login-shell> <gap> <fix-action>
-  local shell=$1 gap=$2 action=$3 why=''
+  local shell=$1 gap=$2 action=$3 why='' rc=0
   if [ "$PLATFORM" = darwin ]; then
-    why=$(supervisor_interpreter_gap "$shell")
+    why=$(supervisor_interpreter_gap "$shell") || rc=$?
+  fi
+  if [ "$rc" -eq 124 ]; then
+    record herdr-server "human: $gap; $why" \
+      "inspect what makes '$shell -l' slow or block at startup on that account, such as a profile that waits on the network or for input, resolve it, then rerun this command; the perl there is unverified rather than missing, so do not install one for this"
+    return 0
   fi
   if [ -n "$why" ]; then
     record herdr-server "human: $gap; $why" \
