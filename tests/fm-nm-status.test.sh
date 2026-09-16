@@ -34,27 +34,27 @@ case "$id" in
   RUNFIXING)
     review=fixing
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    review,fixing,12m3s,8s,8s,44121,"fix 1"'
+    review,fixing,12m3s,8s,"8s ago: pi producing output",44121,fix 1'
     ;;
   RUNFIXING2)
     review=fixing
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    review,fixing,12m3s,8s,8s,44121,"fix 2"'
+    review,fixing,12m3s,8s,"8s ago: pi producing output",44121,fix 2'
     ;;
   RUNROUND2 | RUNROUND2LANDED)
     review=running
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    review,running,12m3s,8s,8s,44121,"round 2"'
+    review,running,12m3s,8s,"8s ago: pi producing output",44121,round 2'
     ;;
   RUNSTARTING)
     review=running
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    review,running,12m3s,8s,8s,44121,"starting"'
+    review,running,12m3s,8s,"8s ago: pi producing output",44121,starting'
     ;;
   RUNMANYFIX)
     teststep=fixing
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    test,fixing,12m3s,8s,8s,44121,"auto-fix 1/3"'
+    test,fixing,12m3s,8s,"8s ago: pi producing output",44121,auto-fix 1/3'
     ;;
 esac
 block=run

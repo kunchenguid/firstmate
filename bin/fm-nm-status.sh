@@ -81,7 +81,9 @@ while IFS= read -r line; do
     done
   elif ((in_active)) && [[ $line =~ ^\ \ \ \ ([a-z]+),([a-z_-]+),([^,]+), ]]; then
     a_step=${BASH_REMATCH[1]}; a_elapsed=${BASH_REMATCH[3]}
-    a_round=""; [[ $line =~ \"([^\"]+)\"$ ]] && a_round=${BASH_REMATCH[1]}
+    # The round label is the row's last column; TOON leaves space-bearing values
+    # unquoted, so strip quotes only if the encoder added them.
+    a_round=${line##*,}; a_round=${a_round#\"}; a_round=${a_round%\"}
     for i in "${!keys[@]}"; do
       [[ ${keys[i]} == "$a_step" ]] || continue
       active_fors[i]=$a_elapsed; active_rounds[i]=$a_round
