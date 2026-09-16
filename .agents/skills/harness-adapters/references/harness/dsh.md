@@ -30,9 +30,11 @@ Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox a
 
 ## Instruction budget
 
-`dsh-agent-instructions` bounds the injected chain with `maxBytes`, which `dsh-base` ships as 65536.
-Firstmate's `AGENTS.md` is larger than that default, and the cut is silent and mid-section: measured with `head -c 65536 AGENTS.md`, it stops partway through §8 Supervision protocol, inside the away-mode and quiet-mode stub, so the rest of §8 (from the stuck-worker trigger on), §9 Escalation and captain etiquette, §10 through §14 (Backlog contract, Crewmate briefs, Self-update, Agent-only reference skills, Relay) and the captain-precedence and maintenance sections never reach the agent.
-The captain profile raises `maxBytes` to 262144, and `bin/fm-dsh-preflight.sh` compares the composed budget against the live size of `AGENTS.md` at every launch rather than trusting a recorded figure.
+`dsh-agent-instructions` budgets the whole rendered instruction chain with `maxBytes`, which `dsh-base` ships as 65536.
+It discovers both `AGENTS.md` and `CLAUDE.md` at the workspace root, and firstmate tracks `CLAUDE.md` only as an `@AGENTS.md` pointer, which the renderer does not expand.
+When the rendered chain is over budget, DSH does not cut bytes: it omits the broadest file whole, which here is `AGENTS.md`, so the agent receives only the `CLAUDE.md` pointer and a model-visible marker (`Workspace instruction budget 65536 bytes: omitted AGENTS.md`), and the operator sees nothing.
+The captain profile raises `maxBytes` to 262144, which delivers `AGENTS.md` whole.
+`bin/fm-dsh-preflight.sh` reads the effective value from `dsh --profile <name> --dump-config` at every launch, so DSH's own layer composition decides it, and compares that with the live size of `AGENTS.md`. That is `AGENTS.md` alone, a few hundred bytes smaller than the rendered chain DSH budgets, so the two are not equivalent near the boundary; the 262144 raise is far from it.
 
 ## Launch boundary
 
@@ -49,7 +51,7 @@ launch boundary; a marker that nothing sets leaves the home identified as whatev
 It runs `bin/fm-dsh-preflight.sh` before exec'ing dsh, because three DSH misconfigurations are silent
 and total: a hooks bridge whose version differs from the running dsh-base (every tool call then fails
 with `agent.session.events is not iterable` while the guards go inert), an `agent-instructions`
-`maxBytes` below the size of `AGENTS.md` (the later sections simply disappear), and a sandbox that
+`maxBytes` below the size of `AGENTS.md` (DSH then omits it whole; see Instruction budget), and a sandbox that
 denies `ps` (harness ancestry, the PID-strict watcher lock and away-mode ownership read "unknown" or
 "down" rather than reporting a misconfiguration). Each check names its own remedy;
 `FM_DSH_SKIP_PREFLIGHT=1` is the escape hatch for a deliberately degraded home.

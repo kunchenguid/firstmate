@@ -12,10 +12,11 @@
 #      while the guards go inert. The sub-packages' npm `latest` tag is stale,
 #      so a bare `dsh plugin add @deepseek-ai/dsh-hooks-claude-code` installs
 #      the wrong build.
-#   2. INSTRUCTION BUDGET. `dsh-agent-instructions` truncates the injected chain
-#      at `maxBytes`, which dsh-base ships as 65536. firstmate's AGENTS.md is
-#      larger, so the default silently drops its later sections - including the
-#      crewmate-brief and backlog contracts.
+#   2. INSTRUCTION BUDGET. `dsh-agent-instructions` budgets the whole rendered
+#      instruction chain at `maxBytes`, which dsh-base ships as 65536. Over
+#      budget it omits the broadest file whole, and firstmate's AGENTS.md is
+#      larger than that default, so the agent receives only the CLAUDE.md
+#      pointer and a budget marker the operator never sees.
 #   3. PROCESS INSPECTION. `ps` is denied under the `workspace-write` sandbox.
 #      Harness ancestry, the PID-strict watcher lock and away-mode daemon
 #      ownership then read "unknown" or "down" rather than reporting a
@@ -28,7 +29,7 @@ set -u
 PROFILE=web
 FM_HOME_OVERRIDE=
 QUIET=0
-PATCH_OVERLAYS=()
+PATCH_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
@@ -41,7 +42,7 @@ while [ "$#" -gt 0 ]; do
     --home=*) FM_HOME_OVERRIDE=${1#--home=}; shift ;;
     --patch)
       [ "$#" -gt 1 ] || { printf 'error: --patch requires a path\n' >&2; exit 2; }
-      PATCH_OVERLAYS+=("$2"); shift 2 ;;
+      PATCH_ARGS+=(--patch "$2"); shift 2 ;;
     --quiet) QUIET=1; shift ;;
     *) printf 'usage: %s [--profile <name>] [--home <path>] [--patch <path>]... [--quiet]\n' "$(basename -- "$0")" >&2; exit 2 ;;
   esac
@@ -88,39 +89,40 @@ fi
 AGENTS_MD="$FM_HOME_DIR/AGENTS.md"
 if [ -f "$AGENTS_MD" ]; then
   AGENTS_BYTES=$(wc -c < "$AGENTS_MD" | tr -d ' ')
-  # The user layers compose in DSH's order - the profile's patch, then the
-  # home-level patch, then each --patch overlay - so the last layer that sets
-  # the agent-instructions entry's maxBytes wins. Only that entry counts: another
-  # plugin's maxBytes says nothing about AGENTS.md. The dsh-base default applies
-  # when no layer raises it, and that default is what silently truncates.
-  MAX_BYTES=65536
-  MAX_SOURCE=
   PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
-  for layer in "$PATCH_FILE" "$DSH_HOME_DIR/cordis.patch.yml" ${PATCH_OVERLAYS[@]+"${PATCH_OVERLAYS[@]}"}; do
-    [ -f "$layer" ] || continue
-    FOUND=$(awk '
-      /^[[:space:]]*(#|$)/ { next }
-      {
-        indent = match($0, /[^[:space:]]/) - 1
-        line = substr($0, indent + 1)
-        if (line ~ /^-[[:space:]]+id:/ || line ~ /^id:/) {
-          id = line; sub(/^-?[[:space:]]*id:[[:space:]]*/, "", id); gsub(/["'\'']|[[:space:]].*$/, "", id)
-          entry = id; entry_indent = indent; next
-        }
-        if (line ~ /^-/ && indent <= entry_indent) entry = ""
-        if (entry == "agent-instructions" && line ~ /^maxBytes:[[:space:]]*[0-9]+[[:space:]]*(#.*)?$/) {
-          value = line; sub(/^maxBytes:[[:space:]]*/, "", value); sub(/[^0-9].*$/, "", value)
-        }
+  # DSH composes the bundle, profile, home-level and --patch layers, and its
+  # config dump is the tree the host boots, so the effective value is read from
+  # there rather than re-deriving DSH's layer order and shipped default. Only
+  # the agent-instructions entry counts: another plugin's maxBytes says nothing
+  # about AGENTS.md. This compares AGENTS.md alone, while DSH budgets the whole
+  # rendered chain - AGENTS.md, the CLAUDE.md pointer and their frame - which
+  # is a few hundred bytes larger; the captain profile's 262144 is far from
+  # that margin.
+  MAX_BYTES=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null | awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      indent = match($0, /[^[:space:]]/) - 1
+      line = substr($0, indent + 1)
+      if (line ~ /^-[[:space:]]+id:/ || line ~ /^id:/) {
+        id = line; sub(/^-?[[:space:]]*id:[[:space:]]*/, "", id); gsub(/["'\'']|[[:space:]].*$/, "", id)
+        entry = id; entry_indent = indent; next
       }
-      END { if (value != "") print value }
-    ' "$layer")
-    [ -n "$FOUND" ] && { MAX_BYTES=$FOUND; MAX_SOURCE=$layer; }
-  done
-  if [ "$AGENTS_BYTES" -gt "$MAX_BYTES" ]; then
-    fail "AGENTS.md is $AGENTS_BYTES bytes but maxBytes is $MAX_BYTES${MAX_SOURCE:+ (set in $MAX_SOURCE)}" \
-      "raise the agent-instructions entry's maxBytes in ${MAX_SOURCE:-$PATCH_FILE}, and on every DSH home: this truncation is silent"
+      if (line ~ /^-/ && indent <= entry_indent) entry = ""
+      if (entry == "agent-instructions" && line ~ /^maxBytes:[[:space:]]*[0-9]+[[:space:]]*(#.*)?$/) {
+        value = line; sub(/^maxBytes:[[:space:]]*/, "", value); sub(/[^0-9].*$/, "", value)
+      }
+    }
+    END { if (value != "") print value }
+  ')
+  OMIT_NOTE="over budget, DSH omits AGENTS.md whole and only the model sees its one-line budget marker"
+  if [ -z "$MAX_BYTES" ]; then
+    fail "could not read the effective agent-instructions maxBytes from dsh --profile $PROFILE --dump-config" \
+      "run that command to see why, and raise the agent-instructions entry's maxBytes to a plain number in $PATCH_FILE, and on every DSH home: $OMIT_NOTE"
+  elif [ "$AGENTS_BYTES" -gt "$MAX_BYTES" ]; then
+    fail "AGENTS.md is $AGENTS_BYTES bytes but the effective maxBytes is $MAX_BYTES" \
+      "raise the agent-instructions entry's maxBytes in $PATCH_FILE, and on every DSH home: $OMIT_NOTE"
   else
-    ok "instruction budget $MAX_BYTES fits AGENTS.md ($AGENTS_BYTES bytes)${MAX_SOURCE:+ from $MAX_SOURCE}"
+    ok "instruction budget $MAX_BYTES fits AGENTS.md ($AGENTS_BYTES bytes)"
   fi
 else
   warn "no AGENTS.md at $AGENTS_MD" "the digest will carry no operating contract for this home"

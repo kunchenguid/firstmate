@@ -61,16 +61,19 @@ Measured against synthetic homes:
 |---|---|
 | Bridge `0.0.1-rc.5` against `dsh-base` `0.1.5-rc.2` | FAIL, naming both versions and the reinstall command |
 | Bridge absent from the profile | FAIL, naming the install command at the running version |
-| `AGENTS.md` larger than `maxBytes` (65536, the `dsh-base` default) | FAIL, naming the patch file to raise |
+| `AGENTS.md` larger than the effective `maxBytes` that `dsh --dump-config` reports (65536, the `dsh-base` default) | FAIL, naming the patch file to raise |
 | Another plugin entry raises its `maxBytes` while `agent-instructions` stays at the default | FAIL: only the `agent-instructions` entry sets the budget |
-| Profile raise, home-level `$DSH_HOME/cordis.patch.yml` default, then a `--patch` raise | FAIL naming the home layer without the overlay, pass from the overlay with it: layers compose profile, then home, then overlays |
+| A `--patch` overlay given to the launcher raises the budget | forwarded to `dsh --dump-config`, so the checked value is the one the host boots with |
+| `dsh --dump-config` fails, or reports no plain-number `agent-instructions` `maxBytes` | FAIL, naming the command to run and the patch file to set |
 | `ps` denied by the sandbox | FAIL, naming the permission preset |
 | Conforming home | pass, all required checks |
 | `lsof` absent | warning, not failure: teardown's stale-lock proof and orphan reap refuse rather than proceed |
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
 
 Each of the three is silent in production, and all three were written into documentation before they were measured.
-The instruction budget is the clearest case: `AGENTS.md` is larger than the shipped 65536, which cuts it partway through §8 Supervision protocol (inside the away-mode and quiet-mode stub) and drops the rest of §8, §9 through §14, and the captain-precedence and maintenance sections without any signal; the captain profile sets 262144 and the preflight compares that against the live file size rather than a recorded constant.
+The instruction budget is the clearest case: over budget, DSH omits `AGENTS.md` whole, as the [harness reference](../../.agents/skills/harness-adapters/references/harness/dsh.md#instruction-budget) states.
+Reproduced by calling the installed `@deepseek-ai/dsh-agent-instructions` 0.1.5-rc.2's own `discoverBaselineInstructionFiles` and `loadBaselineInstructions` with this checkout as the workspace: discovery returned `AGENTS.md` and `CLAUDE.md`; at `maxBytes` 65536 it omitted `AGENTS.md`, truncated nothing, and rendered a 455-byte `<system-reminder>` holding only the budget marker, the intro and the unexpanded `@AGENTS.md` pointer; at 262144 it omitted nothing.
+The captain profile sets 262144, and the preflight reads the effective value from `dsh --dump-config` and compares it against the live file size rather than a recorded constant.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -286,7 +289,7 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 37 cases, and the live guard passes all five of its contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 38 cases, and the live guard passes all five of its contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

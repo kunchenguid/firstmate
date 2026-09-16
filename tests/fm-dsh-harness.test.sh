@@ -248,10 +248,25 @@ test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command() {
   pass "dsh repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
 }
 
-# A synthetic DSH home: <root>/profiles/node_modules holds dsh-base, and the
-# named profile holds its own node_modules and cordis.patch.yml.
+# The composed tree `dsh --dump-config` prints, reduced to the entries the
+# budget check has to tell apart.
+write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>]
+  {
+    printf '# == @deepseek-ai/dsh-base\n'
+    printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: %s\n' "$2"
+    [ -z "${3:-}" ] || printf -- '- id: other-plugin\n  name: other-plugin\n  config:\n    maxBytes: %s\n' "$3"
+    printf -- '- id: skill\n  name: "@deepseek-ai/dsh-skill"\n'
+  } > "$1"
+}
+
+# A synthetic DSH home: <root>/profiles/node_modules holds dsh-base and the
+# named profile holds its own node_modules. A stand-in `dsh` on <root>/fakebin
+# answers `--profile p --dump-config` with <root>/dump.yml, or with
+# <root>/dump-patched.yml when a --patch overlay is forwarded, and fails for any
+# other profile or a missing dump; any other invocation records the environment
+# it booted with in <root>/dsh-env.
 make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
-  local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5
+  local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5 fakebin
   mkdir -p "$dir/profiles/node_modules/@deepseek-ai/dsh-base" "$dir/profiles/p" "$dir/fmhome"
   printf '{"name":"@deepseek-ai/dsh-base","version":"%s"}\n' "$base" \
     > "$dir/profiles/node_modules/@deepseek-ai/dsh-base/package.json"
@@ -260,37 +275,46 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
     printf '{"name":"@deepseek-ai/dsh-hooks-claude-code","version":"%s"}\n' "$bridge" \
       > "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json"
   fi
-  if [ "$maxb" != - ]; then
-    printf -- '- id: agent-instructions\n  config:\n    maxBytes: %s\n' "$maxb" > "$dir/profiles/p/cordis.patch.yml"
-  fi
+  [ "$maxb" = - ] || write_dump "$dir/dump.yml" "$maxb"
   head -c "$agents" /dev/zero | tr '\0' 'x' > "$dir/fmhome/AGENTS.md"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/dsh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --dump-config "*) ;;
+  *) printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'; exit 0 ;;
+esac
+case " \$* " in *" --profile p "*) ;; *) exit 1 ;; esac
+dump='$dir/dump.yml'
+case " \$* " in *" --patch "*) dump='$dir/dump-patched.yml' ;; esac
+[ -f "\$dump" ] && cat "\$dump"
+SH
+  chmod +x "$fakebin/dsh"
   printf '%s\n' "$dir"
 }
 
-run_preflight() {  # <dsh-home> -> stdout in $PREFLIGHT_OUT, exit in $PREFLIGHT_RC
-  PREFLIGHT_OUT=$(DSH_HOME="$1" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$1/fmhome" 2>&1)
-  PREFLIGHT_RC=$?
+run_preflight() {  # <dsh-home> [preflight args...] -> stdout in $PREFLIGHT_OUT, exit in $PREFLIGHT_RC
+  local home=$1
+  shift
+  PREFLIGHT_RC=0
+  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" "$@" 2>&1) || PREFLIGHT_RC=$?
 }
 
 test_dsh_launcher_roots_the_host_in_its_checkout() {
-  local dir fakebin elsewhere rc
+  local dir elsewhere rc
   # .dsh/profile.patch.yml resolves the bridge's configPath and projectDir from
   # FM_ROOT or the cwd, and DSH takes the cwd as its workspace root. Launched
   # from anywhere else, the bridge finds no hooks file and runs with no guards,
   # so the launcher must hand the host this checkout whatever the caller's cwd.
-  # The preflight is driven through the launcher too, so a --patch overlay the
-  # host will compose is one the preflight reads.
-  dir=$(make_dsh_home "$TMP_ROOT/launch" 0.1.5-rc.2 0.1.5-rc.2 - 1)
-  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$dir/overlay.yml"
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/dsh" <<SH
-#!/usr/bin/env bash
-printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'
-SH
-  chmod +x "$fakebin/dsh"
+  # The preflight is driven through the launcher too, so the --patch overlay the
+  # host boots with is one the budget DSH reports accounts for.
+  dir=$(make_dsh_home "$TMP_ROOT/launch" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  : > "$dir/overlay.yml"
   elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
   rc=0
-  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$fakebin:$PATH" \
+  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
       "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
   [ "$rc" -eq 0 ] || fail "the launcher must pass a preflight whose budget is raised by --patch, got rc=$rc"
   assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
@@ -321,45 +345,56 @@ test_dsh_preflight_rejects_a_missing_bridge() {
 
 test_dsh_preflight_rejects_a_truncating_budget() {
   local home
-  # The dsh-base default silently drops the later sections of AGENTS.md.
+  # Over the dsh-base default, DSH omits AGENTS.md whole and leaves the agent
+  # only the CLAUDE.md pointer.
   home=$(make_dsh_home "$TMP_ROOT/pre-budget" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
   run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a truncating budget must fail the preflight, got rc=$PREFLIGHT_RC"
-  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the truncation was not named"
-  pass "fm-dsh-preflight.sh: a truncating instruction budget fails loud"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an over-budget AGENTS.md must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the insufficient budget was not named"
+  pass "fm-dsh-preflight.sh: an insufficient instruction budget fails loud"
 }
 
 test_dsh_preflight_reads_only_the_agent_instructions_entry() {
   local home
-  # Another plugin's larger maxBytes says nothing about AGENTS.md: with
-  # agent-instructions left at the default, the chain is still truncated.
-  home=$(make_dsh_home "$TMP_ROOT/pre-otherentry" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
-  printf -- '- id: other-plugin\n  config:\n    maxBytes: 262144\n- id: agent-instructions\n  config:\n    maxBytes: 65536\n' \
-    > "$home/profiles/p/cordis.patch.yml"
+  # Another plugin's larger maxBytes says nothing about AGENTS.md, wherever it
+  # sits in the composed tree.
+  home=$(make_dsh_home "$TMP_ROOT/pre-otherentry" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  write_dump "$home/dump.yml" 65536 262144
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "another entry's maxBytes must not satisfy the budget, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the truncating agent-instructions budget was not named"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the insufficient agent-instructions budget was not named"
   pass "fm-dsh-preflight.sh: only the agent-instructions entry sets the budget"
 }
 
-test_dsh_preflight_honors_the_later_patch_layers() {
-  local home overlay
-  # DSH composes the profile patch, then $DSH_HOME/cordis.patch.yml, then each
-  # --patch overlay, and the last layer to set the entry wins. Every layer here
-  # sets maxBytes to a different verdict, so reading them in any other order
-  # reaches the wrong one.
-  home=$(make_dsh_home "$TMP_ROOT/pre-layers" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
-  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 65536\n' > "$home/cordis.patch.yml"
+test_dsh_preflight_reads_the_budget_dsh_composes() {
+  local home
+  # DSH owns the composition of its bundle, profile, home-level and --patch
+  # layers, so the preflight asks it for the effective value with the same
+  # profile and overlays the host boots with instead of re-deriving the order.
+  home=$(make_dsh_home "$TMP_ROOT/pre-composed" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  write_dump "$home/dump-patched.yml" 262144
   run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a home-level default must override the profile's raise, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "set in $home/cordis.patch.yml" "the failing budget did not name the home layer that set it"
-  overlay="$home/overlay.yml"
-  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$overlay"
-  PREFLIGHT_RC=0
-  PREFLIGHT_OUT=$(DSH_HOME="$home" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" --patch "$overlay" 2>&1) || PREFLIGHT_RC=$?
-  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a --patch overlay must override the home layer, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "from $overlay" "the passing budget did not name the overlay that set it"
-  pass "fm-dsh-preflight.sh: profile, home-level patch and --patch overlays compose in DSH's order"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "without the overlay DSH reports the default, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  : > "$home/overlay.yml"
+  run_preflight "$home" --patch "$home/overlay.yml"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the overlay's composed raise must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "instruction budget 262144 fits" "the passing budget was not the value DSH composed"
+  pass "fm-dsh-preflight.sh: the budget is the one DSH composes for this profile and overlay"
+}
+
+test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget() {
+  local home
+  # An unreadable budget is not a passing one: a failed dump, or a maxBytes
+  # that is not a plain number, must fail rather than assume a default.
+  home=$(make_dsh_home "$TMP_ROOT/pre-unknown" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a failed config dump must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "could not read the effective agent-instructions maxBytes" "a failed dump was not named"
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: !!js Number(process.env.FM_BUDGET)\n' > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a computed maxBytes must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "could not read the effective agent-instructions maxBytes" "an unreadable budget was not named"
+  pass "fm-dsh-preflight.sh: a budget DSH cannot report fails loud"
 }
 
 test_dsh_preflight_passes_a_conforming_home() {
@@ -774,7 +809,8 @@ test_dsh_preflight_rejects_a_mismatched_bridge
 test_dsh_preflight_rejects_a_missing_bridge
 test_dsh_preflight_rejects_a_truncating_budget
 test_dsh_preflight_reads_only_the_agent_instructions_entry
-test_dsh_preflight_honors_the_later_patch_layers
+test_dsh_preflight_reads_the_budget_dsh_composes
+test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget
 test_dsh_preflight_passes_a_conforming_home
 test_dsh_launcher_roots_the_host_in_its_checkout
 test_dsh_ancestry_detects_the_launcher_path
