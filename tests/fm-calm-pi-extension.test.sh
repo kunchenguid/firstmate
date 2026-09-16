@@ -2,6 +2,10 @@
 # Focused rendering, lifecycle, persistence, and interactive TUI checks for /calm.
 set -u
 
+# Node 23 emits an ExperimentalWarning before executing TypeScript fixtures directly;
+# fixture stderr is reserved for Calm diagnostics asserted by these tests.
+export NODE_NO_WARNINGS=1
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -202,6 +206,7 @@ function registerCalm() {
       if (name === "calm") calmCommand = command;
     },
     registerEntryRenderer() {},
+    registerMarkdownTransformer() {},
     registerTool() {},
     getAllTools() {
       return [];
@@ -305,18 +310,6 @@ test_pi_compat_degraded_adapter() {
     node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
-const packageRoot = process.env.PI_PACKAGE_DIR;
-const { AssistantMessageComponent } = await import(
-  pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href
-);
-const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
-if (typeof originalUpdateContent !== "function") {
-  throw new Error(
-    "fixture precondition failed: installed Pi lacks AssistantMessageComponent.prototype.updateContent",
-  );
-}
-delete AssistantMessageComponent.prototype.updateContent;
-
 const diagnostics = [];
 const originalConsoleError = console.error;
 console.error = (...args) => diagnostics.push(args.join(" "));
@@ -354,27 +347,20 @@ if (!calmCommand || !handlers.has("session_start")) {
     "Calm command/session lifecycle did not register when only one presentation adapter was unavailable",
   );
 }
-if (typeof AssistantMessageComponent.prototype.updateContent !== "undefined") {
-  throw new Error(
-    "the degraded adapter path patched updateContent anyway despite the missing API, which would claim false success",
-  );
-}
 const sawClearSkipReason = diagnostics.some(
-  (line) => line.includes("collapsed-thinking") && /unavailable|skip/i.test(line),
+  (line) => line.includes("assistant-markdown") && line.includes("registerMarkdownTransformer") && /unavailable|skip/i.test(line),
 );
 if (!sawClearSkipReason) {
   throw new Error(
-    `missing a clear skip reason for the degraded collapsed-thinking adapter; saw: ${JSON.stringify(diagnostics)}`,
+    `missing a clear skip reason for the degraded assistant-markdown adapter; saw: ${JSON.stringify(diagnostics)}`,
   );
 }
-
-AssistantMessageComponent.prototype.updateContent = originalUpdateContent;
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm degraded-adapter path failed: $out"
   [ -z "$out" ] || fail "Pi calm degraded-adapter test printed output: $out"
-  pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
+  pass "a missing Markdown-transform presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
 }
 
 test_pi_compat_missing_adapter_exports() {
@@ -407,7 +393,8 @@ const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
 
 for (const [name, install, expected] of [
-  ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
+  ["assistant-markdown", () => assistant.installCalmAssistantLayout({}), "registerMarkdownTransformer"],
+  ["tool-row", assistant.installCalmToolLayout, "ToolExecutionComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
 ]) {
   let reason;
@@ -427,7 +414,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
   [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
-  pass "missing Pi presentation class exports reach the independent adapter degradation path"
+  pass "missing Pi presentation APIs reach the independent adapter degradation path"
 }
 
 test_builtin_gate_load_time() {
@@ -477,6 +464,7 @@ function fakePi() {
     },
     registerCommand() {},
     registerEntryRenderer() {},
+    registerMarkdownTransformer() {},
     registerTool(tool) {
       tools.push(tool);
     },
@@ -487,34 +475,23 @@ function fakePi() {
   return { pi, tools, handlers };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
-process.env.FM_HOME = process.env.HOME_OFF;
-const offRun = fakePi();
-const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
-extensionOff.default(offRun.pi);
-if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
-}
-
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
-process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
-const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
-extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
-const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+// Tool suppression now owns Pi's one ToolExecutionComponent render boundary rather
+// than replacing built-in definitions. Neither preference may claim a tool name.
+for (const [label, home] of [["off", process.env.HOME_OFF], ["on", process.env.HOME_ON]]) {
+  process.env.FM_HOME = home;
+  const run = fakePi();
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?gate-${label}=${Date.now()}`);
+  extension.default(run.pi);
+  if (run.tools.length !== 0) {
+    throw new Error(`Calm claimed built-in names with config/calm=${label}: ${run.tools.map((tool) => tool.name).join(",")}`);
+  }
 }
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Calm claims no built-in tool names in either state because one reload-stable ToolExecution render boundary owns old and new rows"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -600,6 +577,7 @@ const pi = {
     if (name === "calm") calmCommand = command;
   },
   registerEntryRenderer() {},
+  registerMarkdownTransformer() {},
   // Mirrors Pi's own arbitration: first registrant for a name keeps it, silently.
   registerTool(tool) {
     if (!registry.has(tool.name)) {
@@ -622,114 +600,99 @@ try {
   threw = true;
 }
 if (threw) throw new Error("Calm's own factory threw while config/calm was absent and another extension already owned bash");
-if (registry.size !== 1) {
-  throw new Error(`Calm registered built-ins at load time despite config/calm being absent: ${JSON.stringify(Array.from(registry.keys()))}`);
+if (registry.size !== 1 || registry.get("bash")?.tool !== foreignBash) {
+  throw new Error(`Calm changed the foreign tool registry at load: ${JSON.stringify(Array.from(registry.keys()))}`);
 }
 if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("Calm did not finish registering its command and session handler");
 }
-
-// A row constructed before Calm's first-ever activation this session: this is the
-// captain-accepted, documented bound on the gate-at-load fix (see fm-calm.ts's file
-// header and docs/calm.md) - Pi gives no way to re-point an already-constructed
-// ToolExecutionComponent at a definition registered later, so this row can never
-// retroactively collapse. Lock that in explicitly rather than let it regress further.
+// This arbitrary foreign-tool row is constructed while Calm is off, exactly like
+// restored history before a first same-session activation. The component boundary,
+// not a same-name definition wrapper, must hide it retroactively.
 const renderUi = { requestRender() {} };
 const preToggleReadArgs = { path: "sample.txt" };
 const preToggleRead = new ToolExecutionComponent(
-  "read",
-  "pre-toggle-read",
+  "bash",
+  "pre-toggle-bash",
   preToggleReadArgs,
   { showImages: false },
-  registry.get("read")?.tool,
+  foreignBash,
   renderUi,
   process.cwd(),
 );
 preToggleRead.markExecutionStarted();
 preToggleRead.setArgsComplete();
 preToggleRead.updateResult({ content: [{ type: "text", text: "PRE_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
-const preToggleRenderedBefore = preToggleRead.render(100);
-if (preToggleRenderedBefore.length === 0) {
-  throw new Error("a tool row rendered as hidden before Calm was ever activated");
+if (preToggleRead.render(100).length === 0) {
+  throw new Error("the tool-component adapter changed Pi's stock rendering while Calm was off");
 }
 
+let toolsExpanded = false;
+const rows = [preToggleRead];
 const ctx = {
   ui: {
     getEditorText: () => "",
-    getToolsExpanded: () => false,
+    getToolsExpanded: () => toolsExpanded,
     onTerminalInput: () => () => {},
     setHiddenThinkingLabel() {},
     setStatus() {},
-    setToolsExpanded() {},
+    setToolsExpanded(value) {
+      toolsExpanded = value;
+      for (const row of rows) row.setExpanded(value);
+    },
     setWorkingVisible() {},
+    setWidget() {},
     notify(message, type) {
       notifications.push({ message, type });
     },
   },
 };
-console.error = (...args) => diagnostics.push(args.join(" "));
+await handlers.get("session_start")({ reason: "startup" }, ctx);
 await calmCommand.handler("", ctx);
 console.error = originalConsoleError;
 
 const bashEntry = registry.get("bash");
 if (bashEntry.tool !== foreignBash) {
-  throw new Error("Calm replaced the foreign extension's bash registration instead of leaving it alone");
+  throw new Error("Calm replaced the earlier foreign bash registration instead of leaving it alone");
 }
 const bashResult = await bashEntry.tool.execute();
 if (bashResult.content[0]?.text !== FOREIGN_MARKER) {
   throw new Error("the foreign extension's bash tool no longer executes its own real behavior");
 }
-for (const name of ["read", "edit", "write", "grep", "find", "ls"]) {
-  const entry = registry.get(name);
-  if (!entry || entry.ownerPath !== extPath) {
-    throw new Error(`Calm failed to claim the uncontested built-in "${name}" on first activation`);
-  }
+if (diagnostics.some((line) => line.includes("bash") && line.includes("Calm"))) {
+  throw new Error(`component-level Calm incorrectly reported a tool-definition collision: ${JSON.stringify(diagnostics)}`);
+}
+if (preToggleRead.render(100).length !== 0) {
+  throw new Error("the first Calm activation left a pre-activation built-in row visible");
 }
 
-// Part C: a single, prominent, user-facing warning naming the contested tool, not
-// merely a console diagnostic.
-if (notifications.length !== 1) {
-  throw new Error(`expected exactly one contested-tool notification, saw ${JSON.stringify(notifications)}`);
-}
-if (notifications[0].type !== "warning") {
-  throw new Error(`contested-tool notification was not type "warning": ${JSON.stringify(notifications[0])}`);
-}
-if (!notifications[0].message.includes("bash") || !notifications[0].message.toLowerCase().includes("calm")) {
-  throw new Error(`contested-tool notification did not name the tool clearly: ${JSON.stringify(notifications[0])}`);
-}
-const sawBashDiagnostic = diagnostics.some((line) => line.includes("bash"));
-if (!sawBashDiagnostic) {
-  throw new Error(`expected a console diagnostic naming the skipped built-in too; saw: ${JSON.stringify(diagnostics)}`);
-}
-
-// The documented bound itself: still non-empty after Calm is now active, because it
-// was constructed before Calm ever claimed anything.
-if (preToggleRead.render(100).length === 0) {
-  throw new Error("a pre-activation tool row retroactively hid after Calm turned on; the documented bound regressed");
-}
-
-// A row for the same tool constructed after activation behaves normally: it does hide.
 const postToggleRead = new ToolExecutionComponent(
-  "read",
-  "post-toggle-read",
+  "bash",
+  "post-toggle-bash",
   preToggleReadArgs,
   { showImages: false },
-  registry.get("read")?.tool,
+  foreignBash,
   renderUi,
   process.cwd(),
 );
+rows.push(postToggleRead);
 postToggleRead.markExecutionStarted();
 postToggleRead.setArgsComplete();
 postToggleRead.updateResult({ content: [{ type: "text", text: "POST_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
 if (postToggleRead.render(100).length !== 0) {
   throw new Error("a tool row constructed after Calm's activation did not hide");
 }
+
+await calmCommand.handler("", ctx);
+if (preToggleRead.render(100).length === 0 || postToggleRead.render(100).length === 0) {
+  throw new Error("turning Calm off did not restore stock rendering for both old and new tool rows");
+}
 JS
   status=$?
   out=$(cat "$output_file")
-  [ "$status" -eq 0 ] || fail "Pi calm activation/collision/regression-bound path failed: $out"
-  [ -z "$out" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
-  pass "Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse"
+  [ "$status" -eq 0 ] || fail "Pi calm activation/collision path failed: $out"
+  [ -z "$out" ] || fail "Pi calm activation/collision test printed output: $out"
+  pass "Calm claims no tool definitions, retroactively collapses arbitrary rows constructed while off, restores them off, and leaves a foreign bash tool intact and callable"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -811,6 +774,7 @@ setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 const tools = [];
 const handlers = new Map();
 const entryRenderers = new Map();
+const markdownTransformers = [];
 const eventListeners = new Map();
 let calmCommand;
 const pi = {
@@ -835,6 +799,9 @@ const pi = {
   registerEntryRenderer(customType, renderer) {
     entryRenderers.set(customType, renderer);
   },
+  registerMarkdownTransformer(transformer) {
+    markdownTransformers.push(transformer);
+  },
   registerTool(tool) {
     const existingIndex = tools.findIndex((existing) => existing.name === tool.name);
     if (existingIndex === -1) tools.push(tool);
@@ -855,15 +822,9 @@ extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
-// Registration is gated on config/calm at load (see fm-calm.ts's file header); this
-// fixture has no config/calm file, so nothing is registered yet. Every render-
-// equivalence assertion below needs the wrapped definitions the way a user who kept
-// Calm on across a previous session would already have them, so force that here via
-// the same /calm command path a real activation uses, then round-trip back off so the
-// rest of this fixture's own off/on toggle sequence still observes its usual starting
-// state. This does not touch the calm-off/toggle-on assertions further down: those
-// exercise activateBuiltInsIfNeeded's own contested-name skip and warning through the
-// dedicated fixture below, not this one.
+// Built-in wrappers register synchronously in both states so rows restored while off
+// can obey the first toggle. Round-trip on and back off before the equivalence checks
+// to prove those same definitions retain Pi's stock Calm-off rendering.
 const earlyActivationUi = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
@@ -877,10 +838,8 @@ const earlyActivationUi = {
 await calmCommand.handler("", { ui: earlyActivationUi });
 await calmCommand.handler("", { ui: earlyActivationUi });
 
-const names = tools.map((tool) => tool.name);
-const expectedNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
-  throw new Error(`unexpected wrapped built-ins: ${names.join(",")}`);
+if (tools.length !== 0) {
+  throw new Error(`Calm registered tool definitions instead of owning the transcript component: ${tools.map((tool) => tool.name).join(",")}`);
 }
 if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("calm command or session lifecycle handler was not registered");
@@ -980,9 +939,8 @@ const cases = [
 const renderUi = { requestRender() {} };
 const rows = [];
 for (const [name, args, result] of cases) {
-  const wrapped = tools.find((tool) => tool.name === name);
   const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
-  const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
+  const actual = new ToolExecutionComponent(name, `actual-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
     row.setArgsComplete();
@@ -1086,7 +1044,7 @@ const imageRow = new ToolExecutionComponent(
   "read-image-row",
   { path: "pixel.png" },
   { showImages: true },
-  tools.find((tool) => tool.name === "read"),
+  stockDefinitions.read(process.cwd()),
   renderUi,
   process.cwd(),
 );
@@ -1128,14 +1086,21 @@ const assistantBase = {
 const assistantTextOnly = new AssistantMessageComponent({
   ...assistantBase,
   content: [{ type: "text", text: "VISIBLE_ASSISTANT_TEXT" }],
-}, true);
+}, true, undefined, "Thinking...", 1, markdownTransformers);
 const assistantThinkingText = new AssistantMessageComponent({
   ...assistantBase,
   content: [
     { type: "thinking", thinking: "HIDDEN_FINAL_THINKING" },
     { type: "text", text: "VISIBLE_ASSISTANT_TEXT" },
   ],
-}, true);
+}, true, undefined, "Thinking...", 1, markdownTransformers);
+const assistantExpandedThinking = new AssistantMessageComponent({
+  ...assistantBase,
+  content: [
+    { type: "thinking", thinking: "RAW_EXPANDED_THINKING" },
+    { type: "text", text: "VISIBLE_EXPANDED_ASSISTANT_TEXT" },
+  ],
+}, false, undefined, "Thinking...", 1, markdownTransformers);
 const assistantThinkingTool = new AssistantMessageComponent({
   ...assistantBase,
   content: [
@@ -1143,7 +1108,7 @@ const assistantThinkingTool = new AssistantMessageComponent({
     { type: "toolCall", id: "assistant-layout-tool", name: "read", arguments: { path: "sample.txt" } },
   ],
   stopReason: "toolUse",
-}, true);
+}, true, undefined, "Thinking...", 1, markdownTransformers);
 const assistantProgressMessage = {
   ...assistantBase,
   content: [
@@ -1153,7 +1118,14 @@ const assistantProgressMessage = {
   ],
   stopReason: "toolUse",
 };
-const assistantProgress = new AssistantMessageComponent(assistantProgressMessage, true);
+const assistantProgress = new AssistantMessageComponent(
+  assistantProgressMessage,
+  true,
+  undefined,
+  "Thinking...",
+  1,
+  markdownTransformers,
+);
 const nextAssistantProgressMessage = {
   ...assistantProgressMessage,
   content: [
@@ -1166,7 +1138,17 @@ if (!assistantThinkingText.render(100).join("\n").includes("Thinking...")) {
   throw new Error("stock collapsed-thinking fixture did not render before Calm was active");
 }
 
-const assistantComponents = [assistantTextOnly, assistantThinkingText, assistantThinkingTool, assistantProgress];
+if (!assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
+  throw new Error("stock expanded-thinking fixture did not render before Calm was active");
+}
+
+const assistantComponents = [
+  assistantTextOnly,
+  assistantThinkingText,
+  assistantExpandedThinking,
+  assistantThinkingTool,
+  assistantProgress,
+];
 let expanded = true;
 let editorText = "";
 let terminalInputHandler;
@@ -1250,6 +1232,9 @@ assistantProgress.updateContent(assistantProgressMessage, true);
 await handlers.get("message_update")[0]({ message: assistantProgressMessage }, commandContext);
 let progressText = renderedWidget("firstmate-calm-current-step");
 let commentaryText = assistantProgress.render(100).join("\n");
+if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
+  throw new Error("Calm's public Markdown transformer left expanded raw thinking visible");
+}
 if (
   !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
   !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT") ||
@@ -1367,7 +1352,7 @@ async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    getToolDefinition: (name) => tools.find((tool) => tool.name === name) ?? stockDefinitions[name]?.(process.cwd()),
     theme,
     cwd: process.cwd(),
   });
@@ -1397,13 +1382,8 @@ await assertStockHtmlRendering("/export calm.html", "\r");
 getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
-const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
-  theme,
-  cwd: process.cwd(),
-});
-if (unmatchedRenderer.renderCall("unmatched-submit", "grep", { pattern: "alpha", path: "." })) {
-  throw new Error("ordinary non-submit input activated HTML export rendering");
+if (visibility.calmStockExportRenderingIsActive()) {
+  throw new Error("ordinary non-submit input activated stock export presentation");
 }
 editorText = "";
 await assertStockHtmlRendering("/share", "\x1bs");
@@ -1413,15 +1393,11 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} left residual tool rows while calm mode was on: ${JSON.stringify(rendered)}`);
   }
 }
-const calmImageOutput = imageRow.render(100).join("\n");
-if (!calmImageOutput.includes("\x1b]1337;File=")) {
-  throw new Error("calm mode hid the disclosed built-in read image boundary");
+if (imageRow.render(100).length !== 0) {
+  throw new Error("Calm left a tool image or its call shell visible");
 }
-if (calmImageOutput.includes("pixel.png")) {
-  throw new Error("calm mode left the built-in read call shell beside the disclosed image output");
-}
-if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
-  throw new Error("calm mode incorrectly claimed or applied generic custom-tool coverage");
+if (customRow.render(100).length !== 0) {
+  throw new Error("Calm left an arbitrary custom-tool call or result visible");
 }
 if (watchActual.render(100).length !== 0) {
   throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
@@ -1476,6 +1452,9 @@ if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get
 if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
   throw new Error("turning Calm off resurrected a superseded step title");
 }
+if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
+  throw new Error("turning Calm off resurrected raw thinking already owned by Calm");
+}
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "off\n") {
   throw new Error("Calm did not persist the inactive choice in the effective Firstmate home");
 }
@@ -1502,15 +1481,8 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
 }
 await calmCommand.handler("", commandContext);
 
-const readWrapper = tools.find((tool) => tool.name === "read");
-const originalRead = createReadToolDefinition(process.cwd());
-const executeContext = { cwd: process.cwd() };
-const [originalResult, wrappedResult] = await Promise.all([
-  originalRead.execute("original-read", { path: "sample.txt" }, undefined, undefined, executeContext),
-  readWrapper.execute("wrapped-read", { path: "sample.txt" }, undefined, undefined, executeContext),
-]);
-if (JSON.stringify(wrappedResult) !== JSON.stringify(originalResult)) {
-  throw new Error("calm wrapper changed built-in read execution or result data");
+if (tools.some((tool) => ["read", "bash", "edit", "write", "grep", "find", "ls"].includes(tool.name))) {
+  throw new Error("Calm changed the executable built-in tool registry");
 }
 JS
   status=$?
@@ -1611,6 +1583,7 @@ async function loadCalmExtension() {
       if (name === "calm") calmCommand = command;
     },
     registerEntryRenderer() {},
+    registerMarkdownTransformer() {},
     registerTool(tool) {
       registeredTools.push(tool.name);
     },
@@ -1729,7 +1702,7 @@ const requireHidden = (name, needle, context) => {
 
 let calm = await loadCalmExtension();
 if (calm.registeredTools.length !== 0) {
-  throw new Error("Calm claimed built-in tools with no persisted preference");
+  throw new Error(`Calm registered ${calm.registeredTools.length} tool definitions while off`);
 }
 await calm.sessionStart({ reason: "startup" }, context);
 const stockRows = snapshot();
@@ -1872,9 +1845,9 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
   requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "scrambled live state");
   calm = await loadCalmExtension();
-  if (calm.registeredTools.length !== 7) {
+  if (calm.registeredTools.length !== 0) {
     throw new Error(
-      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} built-in tools instead of 7`,
+      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} tool definitions`,
     );
   }
   for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
@@ -3132,6 +3105,7 @@ const pi = {
     if (name === "calm") calmCommand = command;
   },
   registerEntryRenderer() {},
+  registerMarkdownTransformer() {},
   registerTool() {},
   getAllTools() {
     return [];
@@ -3742,7 +3716,7 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
-  printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
+  printf '%s\n' '{"hideThinkingBlock":false}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
@@ -3771,10 +3745,10 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
-  assert_not_contains "$(cat "$default_snapshot")" "first internal reasoning block" \
-    "initial collapsed transcript unexpectedly expanded historical planning"
-  assert_contains "$(cat "$default_snapshot")" "Thinking..." \
-    "reasoning fixture did not render Pi's collapsed thinking label before Calm owned it"
+  assert_contains "$(cat "$default_snapshot")" "first internal reasoning block" \
+    "expanded-thinking fixture did not reproduce Pi's raw historical planning before Calm owned it"
+  assert_not_contains "$(cat "$default_snapshot")" "Thinking..." \
+    "expanded-thinking fixture unexpectedly rendered Pi's collapsed thinking label"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
@@ -3787,8 +3761,8 @@ JSON
   wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
     || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
-  assert_not_contains "$(cat "$expanded_snapshot")" "first internal reasoning block" \
-    "Ctrl+O expansion resurrected a superseded step title while Calm was off"
+  assert_contains "$(cat "$expanded_snapshot")" "first internal reasoning block" \
+    "Calm-off Ctrl+O expansion did not retain Pi's stock raw thinking"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -3806,6 +3780,10 @@ JSON
     # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
     # on screen through this whole redraw rather than disappearing with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
+      ! grep -Fq "first internal reasoning block" "$hidden_snapshot" &&
+      ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
+      ! grep -Fq "CALM_EXPORT_GREP" "$hidden_snapshot" &&
+      ! grep -Fq "CALM_EXPORT_FIND" "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
       ! grep -Fq "fm_watch_arm_pi" "$hidden_snapshot" &&
       ! grep -Fq "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "$hidden_snapshot" &&
@@ -3817,21 +3795,16 @@ JSON
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  # This session's built-in tool rows (bash/grep/find) were all rendered during the
-  # initial session restore, before Calm's first-ever activation in this session had
-  # claimed any built-in name; they keep their stock presentation for the rest of the
-  # session. This is the captain-accepted, documented bound on the collision fix (see
-  # fm-calm.ts's file header and docs/calm.md): the alternative was letting Calm
-  # silently disable a differently loaded extension's own bash/read/etc override. A
-  # fresh built-in tool call made after this same activation does hide correctly;
-  # that path is covered by this file's own test_calm_activation_collision_and
-  # _regression_bound against real Pi rendering components, not repeated here.
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "a pre-activation built-in tool row unexpectedly hid; the documented bound regressed"
+  # The built-in tool rows were restored before this session's first Calm activation.
+  # They must still collapse on that activation: toggling Calm cannot leave an older
+  # command, argument, result, timing, or collapsed placeholder behind.
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left a pre-activation built-in tool result visible"
   assert_not_contains "$(cat "$hidden_snapshot")" "calm transcript" "/calm added a persistent Calm status row"
   [ "$(cat "$home/config/calm")" = on ] || fail "/calm did not persist its active choice"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a pre-activation grep row unexpectedly hid; the documented bound regressed"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a pre-activation find row unexpectedly hid; the documented bound regressed"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "/calm left pre-activation grep arguments or results visible"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "/calm left pre-activation find arguments or results visible"
   assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "first internal reasoning block" "/calm left raw thinking in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "/calm left a synthetic Firstmate user-role presentation in the transcript"
@@ -4063,9 +4036,8 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
-  # CALM_E2E_OUTPUT is not a useful redraw signal here: it is the pre-activation
-  # bash row covered by the documented bound above, so it never leaves the screen
-  # again this session regardless of this toggle.
+  # Wait on the persisted choice rather than any transcript token: this cycle must
+  # suppress the same pre-activation tool rows again after Calm was toggled off.
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
     if ! grep -Fq "/calm" "$working_snapshot" &&

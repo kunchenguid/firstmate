@@ -36,49 +36,48 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensio
 cat >"$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts" <<'TS'
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
-type LegacyPatch = {
-  hidesThinking: () => boolean;
-  hidesWorkingNote: () => boolean;
+type LegacyController = {
+  render: (
+    component: PiAssistantMessageComponent,
+    message: AssistantMessage,
+    isStreaming: boolean,
+  ) => void;
+  originalUpdateContent: PiAssistantMessageComponent["updateContent"];
+  presentations: WeakMap<object, unknown>;
+  ownedThinkingMessages: WeakSet<object>;
 };
-const LEGACY_PATCH = Symbol.for("firstmate:calm-assistant-layout:pi-0.81.1");
+const LEGACY_CONTROLLER = Symbol.for(
+  "firstmate:calm-assistant-layout-controller:pi-0.81.1",
+);
+
+// Reproduce the controller shape retained by the immediately preceding Calm source.
+// The current module must upgrade this exact wrapper in place after Pi's real /reload.
+export function installCalmToolLayout(): void {}
 
 export function installCalmAssistantLayout(): void {
-  const registry = globalThis as typeof globalThis & { [key: symbol]: LegacyPatch | undefined };
-  const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
-  const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
-  const installed = registry[LEGACY_PATCH];
-  if (installed) {
-    installed.hidesThinking = hidesThinking;
-    installed.hidesWorkingNote = hidesWorkingNote;
-    return;
-  }
-  const patch = { hidesThinking, hidesWorkingNote };
-  const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
-  const original = AssistantMessageComponent.prototype.updateContent;
-  AssistantMessageComponent.prototype.updateContent = function (message: AssistantMessage): void {
-    const state = this as unknown as {
-      hiddenThinkingLabel: string;
-      hideThinkingBlock: boolean;
-      lastMessage?: AssistantMessage;
-    };
-    const midTurn = message.stopReason === "toolUse";
-    const hideThinking =
-      state.hiddenThinkingLabel === "" && state.hideThinkingBlock && patch.hidesThinking();
-    const presentation = hideThinking || (midTurn && patch.hidesWorkingNote())
-      ? {
-          ...message,
-          content: message.content.filter((block) =>
-            !(hideThinking && block.type === "thinking") &&
-            !(midTurn && patch.hidesWorkingNote() && block.type === "text")),
-        }
-      : message;
-    original.call(this, presentation);
-    if (presentation !== message) state.lastMessage = message;
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: LegacyController | undefined;
   };
-  registry[LEGACY_PATCH] = patch;
+  if (registry[LEGACY_CONTROLLER]) return;
+  const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
+  const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
+  const controller: LegacyController = {
+    render: (component, message, isStreaming) => {
+      originalUpdateContent.call(component, message, isStreaming);
+    },
+    originalUpdateContent,
+    presentations: new WeakMap(),
+    ownedThinkingMessages: new WeakSet(),
+  };
+  registry[LEGACY_CONTROLLER] = controller;
+  AssistantMessageComponent.prototype.updateContent = function (
+    message: AssistantMessage,
+    isStreaming = false,
+  ): void {
+    controller.render(this, message, isStreaming);
+  };
 }
 TS
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
@@ -261,6 +260,10 @@ for i in $(seq 1 200); do
   final_text=$(pane_text)
   step_count=$( (printf '%s\n' "$final_text" | grep -Eo 'Step [0-9]+:' || true) | wc -l | tr -d ' ')
   [ "$step_count" -le 1 ] || fail "live frame $i rendered $step_count numbered rows"
+  printf '%s\n' "$final_text" | grep -Fq 'Thinking...' \
+    && fail "live frame $i rendered Pi's thinking placeholder"
+  printf '%s\n' "$final_text" | grep -Fq 'calm live fixture' \
+    && fail "live frame $i rendered the read tool result"
   if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_ONE'; then
     seen_plan_one=1
     plan_step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_ONE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
@@ -305,6 +308,8 @@ printf '%s' "$final_text" | grep -Fq 'Step ' \
   && fail "final Pi response retained an intermediate-step row"
 printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_' \
   && fail "final Pi response retained planning narration"
+printf '%s' "$final_text" | grep -Fq 'calm live fixture' \
+  && fail "final Pi response retained the read tool result"
 for number in 1 2 3; do
   [ "$(printf '%s\n' "$final_text" | grep -Fc "COMMENTARY_$number")" -eq 1 ] \
     || fail "final Pi transcript did not retain COMMENTARY_$number exactly once"
@@ -318,4 +323,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr reloaded the current Calm adapter over the legacy process wrapper, kept each commentary row once across three replacing numbered steps, ordered commentary and the current step above the ship, and settled without a transient step\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once across three replacing numbered steps, hid thinking placeholders and read rows, ordered commentary and the current step above the ship, and settled with only the final answer\n' "$(pi --version)"

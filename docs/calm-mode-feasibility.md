@@ -15,21 +15,21 @@ Changing persisted context to remove hidden content, filtering provider context,
 [`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
 Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later reverification target.
 The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
-The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
-`tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
+Pi 0.85.1's display-only Markdown transformer is the authoritative assistant-content seam; the exported `AssistantMessageComponent`, `ToolExecutionComponent`, and `InteractiveMode` classes used for zero-height geometry remain undocumented internals with no stated version guarantee.
+`tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers newer synthetic versions, unavailable adapter seams, expanded and collapsed thinking, and the bundled native CLI path.
 This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the currently pinned version and the renderer comparison behind it.
 
-### Built-in tool override constraints
+### Tool rendering boundary
 
-[`calm.md`](calm.md#pi-compatibility) owns the current user-facing collision behavior and limitation.
-Inspection of Pi 0.80.10 and 0.82.0 established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
-Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously won those collisions even when its persisted preference was off.
-The losing definition's execution and render functions are both discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
+Inspection through Pi 0.85.1 established that every interactive model-tool row, including built-in and arbitrary custom definitions plus result images, ultimately renders through `ToolExecutionComponent`.
+The previous implementation instead replaced selected same-name built-in definitions.
+It looked correct in sessions that started with Calm on, while its tests explicitly accepted rows created before a first toggle as a non-retroactive boundary and treated custom tools and images as unsupported.
+That lifecycle diverged from the reported persisted-session shape: Calm started off, Pi restored stock tool components, and a later toggle could redraw but could not replace their captured definitions.
 
-Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
-It is also usable for reliable collision detection only after extension binding, which makes it suitable for the first same-session `/calm` activation but not for synchronous extension loading.
-Deferring registration to `session_start` is not an equivalent path: Pi constructs restored tool rows from an earlier tool-registry snapshot during reload, new-session, fork, and session switching, so those rows retain the definition captured before `session_start`.
-`tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while Calm is off, synchronous claims while it is already on, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
+Calm now owns the component's final display method through one reload-stable controller.
+It returns zero rows for every model-tool component while active and calls Pi's original renderer unchanged while off or during stock export rendering.
+This removes all same-name registrations and their collision surface, covers old and new rows plus custom renderers and images, and leaves tool execution, model context, storage, and HTML exports unchanged.
+`tests/fm-calm-pi-extension.test.sh` proves byte-identical off rendering, retroactive first-toggle suppression, arbitrary foreign-tool preservation, repeated cycles, restored history, image suppression, and native Pi 0.85.1 rendering.
 
 ## Pi 0.81.1 end-to-end reproduction
 
@@ -79,15 +79,12 @@ The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` 
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `AssistantMessageComponent.updateContent` method.
-The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
-Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
-The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
-Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
+The current fix uses one assistant presentation contract across Pi's display-only Markdown transformer and its exported component layout seam.
+The transformer suppresses raw expanded thinking for live, restored, reflowed, and bundled CLI rendering; the shallow thinking-free component projection removes the empty spacer that transformed Markdown alone would retain.
+Both paths preserve the original assistant message, provider context, tool execution, export data, and expansion history, and the reload-stable controller upgrades an already-installed prior wrapper in place.
+Collapsed thinking-only assistant messages render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and explicit expansion cannot reveal planning Calm already owned.
 
-The disconfirming checks deliberately retain supported boundaries.
-An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
-Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
+The disconfirming checks include an arbitrary third-party custom tool and a built-in read image; both now disappear with their complete tool component while Calm is active and return unchanged while off.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
 
 ## Duplicate-turn regression and semantic boundary
@@ -205,10 +202,10 @@ Every tool registered or supplied by Firstmate under `.pi/extensions` has this d
 
 | Tool | Registration surface | Calm disposition |
 | --- | --- | --- |
-| `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Calm wrappers for Pi's seven main-session built-ins | Their call and text-result shells hide while Calm is active; ordinary and stock export rendering delegate to Pi's original renderers. |
-| `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete self-rendered shell hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
-| `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active; when visible, the self-renderer reconstructs Pi's ordinary boxed fallback shell and probes Pi's rendered stock fallback to preserve that installed surface's collapsed or all-line output policy plus expanded state, while stock export rendering deliberately falls through to Pi's structured fallback. |
-| `fm_branch_processed` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active, exactly like `fm_branch_outcomes`; when visible, the self-renderer reconstructs Pi's ordinary boxed fallback shell around the one-line acknowledgement result, while stock export rendering deliberately falls through to Pi's structured fallback. |
+| `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Pi's unchanged seven main-session built-ins | Their complete `ToolExecutionComponent` rows hide while Calm is active; Calm registers no replacement definitions and off/export rendering stays stock. |
+| `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete `ToolExecutionComponent` hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
+| `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete `ToolExecutionComponent` hides while Calm is active; when visible, its own renderer retains the installed collapsed/all-line and expanded behavior, while stock export rendering remains structured. |
+| `fm_branch_processed` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete `ToolExecutionComponent` hides while Calm is active; when visible, its own renderer retains the ordinary one-line acknowledgement shell. |
 | `fm_branch_report` | Branch-session custom tool supplied directly to `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`; successful execution writes the outcome store and delivers a routine note or exact captain entry through the separately audited delivery path, so the tool cannot emit a dump-shaped row in the captain's transcript. |
 | branch-local `read` built-in | Branch-session built-in enabled through `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its file output cannot emit a row in the captain's transcript. |
 | branch-local `bash` override | Branch-session replacement supplied directly to `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its command output cannot emit a row in the captain's transcript. |
@@ -225,10 +222,10 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message that also carries a tool call | Visible through Pi's ordinary assistant component while streaming and after settlement, exactly once from the original message rather than a copied custom entry (verified on Pi 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the assistant component omits thinking from its shallow presentation copy and records ownership of that source message; owned thinking stays omitted through later Calm-off fallback, reload, and explicit expansion, while a keyed widget shows only the current live thinking line as one numbered `Step N:` row above the working ship; message data and stock export rendering retain the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
-| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
-| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the display-only Markdown transformer suppresses raw thinking across live, restored, reflowed, and bundled CLI paths, while a shallow component projection removes residual spacing and a keyed widget shows only the current live thinking line as one numbered `Step N:` row above the working ship; owned thinking stays omitted through Calm-off fallback, reload, and explicit expansion, while message data and stock export rendering retain the original reasoning. |
+| `assistant-tool-call` | `ToolExecutionComponent` | Every built-in and custom model-tool call, its arguments, timing, and collapsed shell render at zero height through the component boundary. |
+| `tool-result` | `ToolExecutionComponent` | Every built-in and custom model-tool result renders at zero height through the same boundary. |
+| `tool-image` | Image children appended by `ToolExecutionComponent` | Hidden with the complete owning component. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
 | `custom-message` | `CustomMessageComponent` when `display` is true | The session-start nudge and legacy Calm context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
@@ -244,8 +241,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
-The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0, Pi 0.84.4, and Pi 0.85.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
+The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, or chat-container API; the exported tool component supplies the complete generic model-tool boundary without replacing tool definitions.
+Pi 0.85.1 exposes the Markdown transformer and exports `AssistantMessageComponent`, `ToolExecutionComponent`, and `InteractiveMode`, so Calm uses reload-stable assistant/tool controllers plus the operational-user adapter while leaving message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for degradation behavior when a future Pi removes a seam.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -270,7 +267,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| Pi (currently verified on 0.85.1) | Partially feasible with a public Markdown transformer and three API-probed layout seams. | Public APIs control assistant Markdown, working visibility, collapsed labels, custom entries, and expansion redraws; exported assistant, tool, and interactive-mode classes remove residual thinking geometry, every model-tool row including images, and operational-user rows, while generic user and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -600,12 +597,12 @@ The complete Calm suite against installed Pi 0.85.1, with `FM_CHROME_BIN` naming
 $ FM_CHROME_BIN=<chrome> tests/fm-calm-pi-extension.test.sh
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
 ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
-ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
-ok - missing Pi presentation class exports reach the independent adapter degradation path
-ok - Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on
-ok - Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse
-ok - Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary on the transcript exactly once, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts
-ok - Pi Calm keeps assistant commentary on the ordinary transcript exactly once across step replacement, finalization, and reload; keeps only thinking as one transient step above the ship; preserves Calm-off, truncated, final-reply, and message-data behavior; ignores every /calm argument; and restores a legacy persisted max as ordinary Calm on
+ok - a missing Markdown-transform presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
+ok - missing Pi presentation APIs reach the independent adapter degradation path
+ok - Calm claims no built-in tool names in either state because one reload-stable ToolExecution render boundary owns old and new rows
+ok - Calm claims no tool definitions, retroactively collapses arbitrary rows constructed while off, restores them off, and leaves a foreign bash tool intact and callable
+ok - Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts
+ok - Pi Calm keeps assistant commentary exactly once across step replacement and finalization, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
 ok - Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow/red with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched
@@ -622,14 +619,14 @@ Calm therefore leaves assistant text in the original `AssistantMessageComponent`
 
 ```text
 $ FM_CALM_PI_HERDR_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-herdr-live-e2e.test.sh
-ok - real Pi 0.85.1 in Herdr reloaded the current Calm adapter over the legacy process wrapper, kept each commentary row once across three replacing numbered steps, ordered commentary and the current step above the ship, and settled without a transient step
+ok - real Pi 0.85.1 in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once across three replacing numbered steps, hid thinking placeholders and read rows, ordered commentary and the current step above the ship, and settled with only the final answer
 ```
 
 The deterministic test observed one externally read numbered thinking widget at a time around all three tool calls, verified that each assistant text block stayed on the ordinary transcript exactly once through later step replacement and finalization, and measured every commentary row above the current step with that step above the sailing ship.
 It also verified that settlement removed the transient step and planning thinking while retaining all three commentary rows, and that the original planning, commentary, and tool content remained in the persisted session transcript.
 The credentialed companion test uses the same four Firstmate extensions with the real `openai-codex/gpt-5.6-sol` model at `xhigh`, the existing authenticated user Pi configuration, and isolated Firstmate state plus session output.
 It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, proves commentary remains exactly once above the current step and ship, then reloads and performs two Calm off/on cycles with reasoning and tool expansion enabled.
-Every settled lifecycle frame must omit each captured historical title while retaining all three commentary rows and the final answer exactly once; Calm-off frames must also retain the real tool output.
+Every settled lifecycle frame must omit each captured historical title while retaining all three commentary rows and the final answer exactly once; Calm-off frames must restore the real tool output and each following Calm-on frame must suppress it again.
 
 ```text
 $ FM_CALM_PI_REAL_MODEL_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-real-model-live-e2e.test.sh
@@ -639,10 +636,13 @@ proof - working Step 3:  Step 3: Planning to arm watcher for continuation
 proof - working Step 4:  Step 4: Planning environment inspection with bash
 proof - retained REAL_COMMENTARY_ONE once above later Step 4 and above the ship
 proof - reload retained commentary/final output once and no historical step title
-proof - two Calm off/on cycles retained commentary, final answer, and tool output without historical step titles
+proof - two Calm off/on cycles restored tool output only while off and suppressed it again on, without historical step titles
 proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)
 proof - final:  REAL_MODEL_FINAL_RESPONSE
-ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across 4 steps, retained commentary exactly once, preserved final and tool output, and kept every superseded title hidden through reload plus two Calm off/on cycles
+ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across 4 steps, retained commentary and the final answer once, suppressed thinking placeholders and tool results whenever Calm was on, restored tools off, and kept every superseded title hidden through reload plus two Calm cycles
 ```
 
-The earlier live checks were false positives because both started fresh Pi processes after the latest source was already present; neither loaded a legacy process-global wrapper and then exercised `/reload`, which was the divergent captain-facing lifecycle.
+The earlier live checks were false positives for two separate lifecycle reasons.
+The reload check originally started a fresh Pi process after the latest source was already present, so it never upgraded the prior process-global controller that a long-lived session retained.
+The tool check started with Calm already on, while the deterministic first-toggle fixture explicitly accepted tool rows restored before activation as a non-retroactive boundary.
+The screenshot path instead restored history while off and toggled later; the current regressions now exercise both divergent paths, expanded rather than only collapsed thinking, the full Firstmate extension load order, reload, and two complete Calm cycles.

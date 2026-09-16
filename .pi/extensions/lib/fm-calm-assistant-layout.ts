@@ -1,13 +1,17 @@
-// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
-// updateContent method. installCalmAssistantLayout() probes that exact method and throws
-// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
-// instead of blocking Calm or Pi.
-// This layout removes live and historical step-source thinking from a shallow
-// presentation copy while leaving assistant text on Pi's ordinary transcript surface.
-// Toggling Calm cannot expose superseded steps, while the message itself, model context,
-// session storage, and export rendering are never touched.
-// ./fm-calm-visibility.ts owns which classes Calm hides.
-import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+// Calm's assistant presentation has one display-only contract with two Pi rendering
+// seams. The supported Markdown transformer covers live streaming, restored history,
+// terminal reflow, and bundled-class identity changes. The component projection removes
+// the otherwise-empty thinking spacer on Pi versions that export the class used by the
+// interactive UI. Both consume the same visibility state and only render shallow
+// presentation copies; messages, model context, session storage, and exports are never
+// changed.
+import type {
+  AssistantMessageComponent as PiAssistantMessageComponent,
+  ExtensionAPI,
+  MarkdownTransformContext,
+  MarkdownTransformer,
+  ToolExecutionComponent as PiToolExecutionComponent,
+} from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   calmPresentationHides,
@@ -32,22 +36,35 @@ type CalmAssistantLayoutController = {
     message: AssistantMessage,
     isStreaming: boolean,
   ) => void;
+  transform: MarkdownTransformer;
   originalUpdateContent: PiAssistantMessageComponent["updateContent"];
   presentations: WeakMap<object, CalmAssistantPresentation>;
   ownedThinkingMessages: WeakSet<object>;
+  ownedThinkingMarkdown: Set<string>;
 };
 
-// The original adapter used this symbol without a mutable implementation delegate.
-// A long-lived Pi process kept that first wrapper across /reload, so source updates only
-// refreshed its visibility callbacks and never installed later behavior. This second
-// generation controller is itself stable across reloads, while render is replaced by
-// every newly loaded extension factory. Capturing the then-current method also upgrades
-// a process that still has the first-generation wrapper without mutating its transcript.
+// Keep the original symbol so a Pi process hot-reloading from the previous Calm source
+// upgrades the implementation delegate captured by its already-installed wrapper.
 const CALM_ASSISTANT_LAYOUT_CONTROLLER = Symbol.for(
   "firstmate:calm-assistant-layout-controller:pi-0.81.1",
 );
 
-export function installCalmAssistantLayout(): void {
+type CalmToolLayoutController = {
+  originalRender: PiToolExecutionComponent["render"];
+  render: (component: PiToolExecutionComponent, width: number) => string[];
+};
+
+const CALM_TOOL_LAYOUT_CONTROLLER = Symbol.for(
+  "firstmate:calm-tool-layout-controller:pi-0.85.1",
+);
+
+export function installCalmAssistantLayout(
+  pi: Pick<ExtensionAPI, "registerMarkdownTransformer">,
+): void {
+  if (typeof pi.registerMarkdownTransformer !== "function") {
+    throw new Error("Firstmate Calm requires Pi registerMarkdownTransformer");
+  }
+
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmAssistantLayoutController | undefined;
   };
@@ -64,9 +81,11 @@ export function installCalmAssistantLayout(): void {
     }
     const newController: CalmAssistantLayoutController = {
       render: () => {},
+      transform: (markdown) => markdown,
       originalUpdateContent,
       presentations: new WeakMap(),
       ownedThinkingMessages: new WeakSet(),
+      ownedThinkingMarkdown: new Set(),
     };
     controller = newController;
     registry[CALM_ASSISTANT_LAYOUT_CONTROLLER] = newController;
@@ -79,10 +98,25 @@ export function installCalmAssistantLayout(): void {
   }
 
   const activeController = controller;
-  // Controllers installed by the prior source revision survive Pi's hot reload.
+  // Controllers created by the prior source revision survive /reload and lack the two
+  // Markdown fields. Upgrade them in place before replacing either delegate.
   activeController.ownedThinkingMessages ??= new WeakSet();
-  // This function is deliberately replaced on every extension load. The wrapper above
-  // survives /reload, but no implementation captured by an older source revision does.
+  activeController.ownedThinkingMarkdown ??= new Set();
+  activeController.transform = (
+    markdown: string,
+    context: MarkdownTransformContext,
+  ): string => {
+    if (context.messageType !== "assistant-thinking") return markdown;
+    if (calmStockExportRenderingIsActive()) return markdown;
+
+    const hiddenNow = calmPresentationHides("assistant-thinking");
+    if (hiddenNow) activeController.ownedThinkingMarkdown.add(markdown);
+    return hiddenNow || activeController.ownedThinkingMarkdown.has(markdown) ? "" : markdown;
+  };
+  pi.registerMarkdownTransformer((markdown, context) =>
+    activeController.transform(markdown, context),
+  );
+
   activeController.render = (component, message, isStreaming): void => {
     const prior = activeController.presentations.get(component);
     const sourceMessage = message === prior?.rendered ? prior.source : message;
@@ -110,5 +144,48 @@ export function installCalmAssistantLayout(): void {
     // private field Pi's own default argument reads, then pass the explicit value too.
     state.isStreaming = isStreaming;
     activeController.originalUpdateContent.call(component, renderedMessage, isStreaming);
+  };
+}
+
+// ToolExecutionComponent is Pi's single interactive row for model tool calls,
+// arguments, results, timing/collapsed shells, custom renderers, and result images.
+// Hiding at its render boundary covers live and restored rows regardless of which tool
+// definition created them, without changing execution, messages, storage, or exports.
+export function installCalmToolLayout(): void {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmToolLayoutController | undefined;
+  };
+  const ToolExecutionComponent = PiCodingAgent.ToolExecutionComponent;
+  if (typeof ToolExecutionComponent !== "function") {
+    throw new Error("Firstmate Calm requires Pi ToolExecutionComponent");
+  }
+
+  let controller = registry[CALM_TOOL_LAYOUT_CONTROLLER];
+  if (!controller) {
+    const originalRender = ToolExecutionComponent.prototype.render;
+    if (typeof originalRender !== "function") {
+      throw new Error("Firstmate Calm requires Pi ToolExecutionComponent.render");
+    }
+    const newController: CalmToolLayoutController = {
+      originalRender,
+      render: () => [],
+    };
+    controller = newController;
+    registry[CALM_TOOL_LAYOUT_CONTROLLER] = newController;
+    ToolExecutionComponent.prototype.render = function (width: number): string[] {
+      return newController.render(this, width);
+    };
+  }
+
+  const activeController = controller;
+  activeController.render = (component, width): string[] => {
+    if (
+      calmPresentationHides("assistant-tool-call") ||
+      calmPresentationHides("tool-result") ||
+      calmPresentationHides("tool-image")
+    ) {
+      return [];
+    }
+    return activeController.originalRender.call(component, width);
   };
 }

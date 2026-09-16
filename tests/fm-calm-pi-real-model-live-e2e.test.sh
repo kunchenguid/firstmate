@@ -9,7 +9,7 @@ fm_live_gate opt-in FM_CALM_PI_REAL_MODEL_E2E herdr jq pi python3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-toggle-history-regression)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-hide-thinking-tools-regression)
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-real-model-live-e2e)
 PROJECT="$TMP_ROOT/project"
 HOME_DIR="$TMP_ROOT/home"
@@ -87,6 +87,10 @@ for _ in $(seq 1 1200); do
   frame=$((frame + 1))
   printf '%s\n' "$text" >"$EVIDENCE/frame-$frame.txt"
   step_count=$( (printf '%s\n' "$text" | grep -Eo 'Step [0-9]+:' || true) | wc -l | tr -d ' ')
+  printf '%s\n' "$text" | grep -Fq 'Thinking...' \
+    && fail "external pane frame $frame showed Pi's thinking placeholder while Calm was on"
+  printf '%s\n' "$text" | grep -Fq 'REAL_TOOL_OUTPUT_' \
+    && fail "external pane frame $frame showed a tool result while Calm was on"
   if [ "$step_count" -gt 1 ]; then
     printf '%s\n' "$text" >&2
     fail "external pane frame $frame accumulated $step_count numbered step rows"
@@ -150,6 +154,8 @@ for word in ONE TWO THREE; do
 done
 printf '%s' "$final_text" | grep -Fq '╲▁▁▁╱' \
   && fail "settled real-model transcript retained the sailing animation"
+printf '%s' "$final_text" | grep -Fq 'REAL_TOOL_OUTPUT_' \
+  && fail "settled real-model transcript retained a tool result while Calm was on"
 
 assert_settled_history() { # <frame> <label> [require-tool-output]
   local history=$1 label=$2 require_tool_output=${3:-0} word marker title final_count
@@ -170,12 +176,17 @@ assert_settled_history() { # <frame> <label> [require-tool-output]
   final_count=$(printf '%s\n' "$history" | grep -Fc 'REAL_MODEL_FINAL_RESPONSE')
   [ "$final_count" -eq 1 ] \
     || { printf '%s\n' "$history" >&2; fail "$label retained the final response $final_count times instead of once"; }
-  if [ "$require_tool_output" -eq 1 ]; then
-    for marker in REAL_TOOL_OUTPUT_ALPHA REAL_TOOL_OUTPUT_BETA REAL_TOOL_OUTPUT_GAMMA; do
+  for marker in REAL_TOOL_OUTPUT_ALPHA REAL_TOOL_OUTPUT_BETA REAL_TOOL_OUTPUT_GAMMA; do
+    if [ "$require_tool_output" -eq 1 ]; then
       printf '%s\n' "$history" | grep -Fq "$marker" \
-        || fail "$label did not preserve visible tool output $marker"
-    done
-  fi
+        || fail "$label did not restore Calm-off tool output $marker"
+    else
+      printf '%s\n' "$history" | grep -Fq "$marker" \
+        && fail "$label showed Calm-on tool output $marker"
+    fi
+  done
+  printf '%s\n' "$history" | grep -Fq 'Thinking...' \
+    && fail "$label showed Pi's thinking placeholder"
 }
 
 # Exercise the exact divergent lifecycle against the authenticated, persisted model
@@ -213,7 +224,7 @@ for expected in off on off on; do
     assert_settled_history "$toggled_text" "real-model Calm-on redraw"
   fi
 done
-printf 'proof - two Calm off/on cycles retained commentary, final answer, and tool output without historical step titles\n'
+printf 'proof - two Calm off/on cycles restored tool output only while off and suppressed it again on, without historical step titles\n'
 
 session_file=$(find "$SESSIONS" -type f -name '*.jsonl' \
   -exec grep -l 'REAL_MODEL_FINAL_RESPONSE' {} + 2>/dev/null | head -1)
@@ -229,5 +240,5 @@ done
 
 printf 'proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)\n'
 printf 'proof - final: %s\n' "$(printf '%s\n' "$final_text" | grep -F 'REAL_MODEL_FINAL_RESPONSE' | tail -1)"
-printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary exactly once, preserved final and tool output, and kept every superseded title hidden through reload plus two Calm off/on cycles\n' \
+printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary and the final answer once, suppressed thinking placeholders and tool results whenever Calm was on, restored tools off, and kept every superseded title hidden through reload plus two Calm cycles\n' \
   "$(pi --version)" "$unique_steps"
