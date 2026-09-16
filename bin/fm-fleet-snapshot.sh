@@ -80,10 +80,12 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children for nonterminal working,
-#     parked, paused, and blocked children, including canonical child spawn_gen
-#     identity and started_at timing when available, plus decisions_open, holds, queued,
-#     landed, endpoints, counts, and omitted. provenance.summary_source
+#     Each structured-home record carries active_children for working children and
+#     endpoints for every bounded child. Both surfaces include canonical child
+#     spawn_gen identity and started_at timing when available, so parked, paused,
+#     and blocked children retain identity without being classified as active work.
+#     The record also carries decisions_open, holds, queued, landed, counts, and
+#     omitted. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -1040,9 +1042,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[]
-         | select(.id == $work.id
-                  and (.current_state.state as $state
-                       | ["working","parked","paused","blocked"] | index($state)) != null)
+         | select(.id == $work.id and .current_state.state == "working")
          | {id,spawn_gen,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
@@ -1119,8 +1119,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              + (map(select(.captain_actionable == true)) | newest_filed_first))
           | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
-        endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
-          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
+        endpoints:([$tasks[] as $task
+          | ([$owned_in_flight[] | select(.id == $task.id)][0] // {}) as $work
+          | {id:$task.id,spawn_gen:$task.spawn_gen,kind:$task.kind,
+             state:$task.current_state.state,source:$task.current_state.source,
+             repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
+             name:(($work.title // null) | if . == null then null else trunc(70) end),
+             started_at:($task.started_at // null),
+             doing:(($task.current_state.detail // "") | trunc(120)),
+             endpoint:($task.endpoint + {target:(($task.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
@@ -1379,6 +1386,9 @@ length == 1 and (.[0] |
     and (.started_at == null or ((.started_at | type) == "string" and (try (.started_at | fromdateiso8601) catch null) != null)))
   and (.holds | type) == "array" and (.queued | type) == "array"
   and (.landed | type) == "array" and (.endpoints | type) == "array"
+  and all(.endpoints[];
+    (.spawn_gen == null or ((.spawn_gen | type) == "string" and (.spawn_gen | length) > 0))
+    and (.started_at == null or ((.started_at | type) == "string" and (try (.started_at | fromdateiso8601) catch null) != null)))
   and (.counts | type) == "object" and (.omitted | type) == "array"
 )
 JQ

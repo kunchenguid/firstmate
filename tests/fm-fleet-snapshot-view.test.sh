@@ -525,17 +525,22 @@ EOF
   printf 'blocked: missing access\n' > "$home/state/blocked-child.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .counts.active_children == 1
+      and (.active_children | length) == 1
+      and (.active_children[0]
+        | .id == "working-child" and .spawn_gen == "gen-working-child"
+          and .state == "working" and .repo == "alpha"
+          and .started_at == "2026-09-15T11:00:00Z")
+  ' >/dev/null || fail "held child lifecycle was classified as active work: $out"
   for state in working parked paused blocked; do
     printf '%s' "$out" | jq -e --arg id "$state-child" --arg state "$state" '
-      .active_children[] | select(.id == $id)
+      .endpoints[] | select(.id == $id)
       | .state == $state and .spawn_gen == ("gen-" + $id)
         and .started_at == "2026-09-15T11:00:00Z"
     ' >/dev/null || fail "$state child lost canonical generation-bearing summary evidence: $out"
   done
-  printf '%s' "$out" | jq -e '
-    .counts.active_children == 4 and (.active_children | length) == 4
-  ' >/dev/null || fail "nonterminal child summary count omitted a held lifecycle state: $out"
-  pass "home-summary preserves generation for every nonterminal child lifecycle state"
+  pass "home-summary preserves nonterminal generations without misclassifying held children"
 }
 
 test_scout_reports_include_teardown_reports() {

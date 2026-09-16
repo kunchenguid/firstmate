@@ -160,9 +160,9 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
       | .id == "mate-one:child" and .spawn_gen == "child-gen-b" and .state == "blocked"
         and .started_at == "2026-09-15T12:30:00Z"' "$second" >/dev/null \
     || fail "replacement secondmate child generation was not preserved"
-  jq '(.secondmate_current.records[0].active_children[0].state)="parked"' "$FIXTURES/secondmate-generation-b.json" \
+  jq '(.secondmate_current.records[0].endpoints[0].state)="parked"' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$parked"
-  jq '(.secondmate_current.records[0].active_children[0].state)="paused"' "$FIXTURES/secondmate-generation-b.json" \
+  jq '(.secondmate_current.records[0].endpoints[0].state)="paused"' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$paused"
   jq -e '.projects[0].tasks[0]
       | .spawn_gen == "child-gen-b" and .state == "parked" and .lane == "waiting"' "$parked" >/dev/null \
@@ -170,7 +170,7 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   jq -e '.projects[0].tasks[0]
       | .spawn_gen == "child-gen-b" and .state == "paused" and .lane == "waiting"' "$paused" >/dev/null \
     || fail "paused secondmate child generation was not consumed by the cockpit"
-  jq 'del(.secondmate_current.records[0].active_children[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
+  jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven"
   jq -e '.projects[0].tasks[0]
       | .spawn_gen == null and .state == "unknown" and .state_source == "generation-unavailable"
