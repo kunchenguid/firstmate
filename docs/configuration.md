@@ -385,6 +385,10 @@ SSH_AUTH_SOCK
 ```
 
 Firstmate retains basic home, executable search, terminal, locale, temporary-directory, and backend routing variables, plus its explicit launch assignments, its ship and scout task marker, and enabled task trace.
+Those explicit assignments include the provider store Firstmate itself is authenticated against, because a long-lived terminal daemon does not inherit Firstmate's own environment and a bare worker command would otherwise fall back to that harness's default store.
+A Claude launch carries Firstmate's own `CLAUDE_CONFIG_DIR` and a Codex launch carries its own `CODEX_HOME`, each only when that variable is set in Firstmate's environment, and each shell-quoted so a store path containing a space still names one directory.
+Both reach a relaunch on the same terms, so replacing a worker keeps the seat Firstmate is currently on rather than the one the original launch used.
+Neither name needs an allowlist line, because a launch assignment is written into the command itself rather than read from the pane's ambient environment; the value written is a store directory path, never a credential.
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
@@ -397,7 +401,7 @@ Choose the minimum additions for the authentication method actually in use:
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
 | Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
-| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
+| Custom provider store | Its configured location variables, such as `GROK_HOME` or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude, Codex, and Muse store assignments still apply without an allowlist line. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |
