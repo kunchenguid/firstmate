@@ -31,7 +31,30 @@ Three dependencies this surfaced, all now installed on this machine:
 `treehouse` was installed to `/Users/stevemcqueen/Sandbox/dsh/tools` and is NOT on the default PATH;
 a real deployment must place it somewhere the spawn and teardown both resolve.
 
-**Phases 3–5 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
+**Phase 3 — toolchain complete, `local-only` delivery verified.** firstmate's own
+`fm-bootstrap.sh` diagnostic drove the install, and now reports no missing tools:
+
+| Tool | Version | Floor |
+| --- | --- | --- |
+| `treehouse` | 2.0.1 | — |
+| `no-mistakes` | 1.72.0 | ≥1.46.0 |
+| `gh-axi` | 0.1.35 | ≥0.1.29 |
+| `quota-axi` | 0.1.44 | ≥0.1.29 |
+| `lavish-axi` | 0.1.69 | ≥0.1.46 |
+| `chrome-devtools-axi` | 0.1.34 | — |
+| `tasks-axi` | 0.2.5 | ≥0.2.4 |
+
+`no-mistakes` was installed through its documented `curl | sh` script after reading it: 2.6 KB,
+installs to `$HOME/.no-mistakes/bin` and links into `~/.local/bin` without sudo. It does NOT verify a
+checksum, unlike firstmate's own pinned installers for `treehouse` and `herdr`.
+
+A **`local-only` ship ran end to end**: spawn (with the graded deviation notice, since the project's
+standing posture is `no-mistakes` and the flag carried less rigor) → worker branch `fm/<id>` with one
+clean commit → `fm-merge-local.sh` fast-forwarded the primary's `main` → teardown returned the
+worktree and cleared every record. `direct-PR` and `no-mistakes` remain untested because both need a
+GitHub remote, as does the merge-authority and `yolo` path.
+
+**Phases 4–5 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
 process-event sources, secondmates), the optional DSH crewmate, and upstreaming remain. They are
 larger than the work completed above, not smaller.
 
