@@ -107,11 +107,21 @@ fm_control_harness_family() {  # <recorded-harness>
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
+# config/unverified-secondmate-harness is the captain's written acceptance, for
+# THIS home, of an adapter that is not verified for the secondmate kind. It does
+# not make the adapter verified and closes none of the gaps above; it only records
+# that the captain accepts an unproven mate rather than none. It widens the
+# muse/gemini/agy row only, never rovo, matching what bin/fm-spawn.sh will
+# actually launch, so the two owners cannot disagree about what may start.
 fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|agy)
+      [ "$kind" != secondmate ] \
+        || [ -f "${FM_HOME:-$(pwd)}/config/unverified-secondmate-harness" ] \
+        || return 1 ;;
+    rovo) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }

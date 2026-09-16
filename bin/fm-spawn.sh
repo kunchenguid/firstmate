@@ -1954,9 +1954,20 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+# config/unverified-secondmate-harness is the captain's written acceptance, for
+# THIS home, of a secondmate on an adapter that is not verified for that kind. It
+# makes nothing verified and closes none of the gaps above - the mate still has no
+# primary supervision protocol to rely on and must be proven by hand once it is up.
+# It is a file rather than an environment variable on purpose: an automatic
+# liveness relaunch carries none of our environment, so a flag in the environment
+# would bring a dead mate back only when a human happened to be driving.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+  if [ -f "${FM_HOME:-$(pwd)}/config/unverified-secondmate-harness" ]; then
+    echo "warning: $HARNESS is NOT a verified secondmate adapter. Launching it only because config/unverified-secondmate-harness records the captain's explicit acceptance; this mate's supervision is unproven, so verify it by hand." >&2
+  else
+    echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
 fi
 
 # rovo carries the same primary-supervision gap as muse: no turn-end hook, no
