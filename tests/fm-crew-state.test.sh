@@ -103,9 +103,17 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# FM_FAKE_TMUX_MISSING: the window is authoritatively gone - every addressed
-# call fails, but the session inventory still answers successfully and simply
-# omits the window, which is what proves absence.
+# This fixture models REAL tmux, where an addressed call is not a presence
+# proof: `display-message -t <session>:<window>` resolves an unknown window
+# name to the session's active pane and exits 0. Only the session inventory
+# can prove a named window exists, so list-windows answers the true inventory
+# (the window= values the case's own metadata records) and omits it when the
+# window is genuinely gone.
+# FM_FAKE_TMUX_MISSING: the window is authoritatively gone - the session
+# inventory still answers successfully and simply omits it, while display-message
+# and capture-pane keep answering as real tmux would by resolving the active
+# pane. That is exactly the false-alive shape: only the inventory may be
+# believed.
 # FM_FAKE_TMUX_UNREADABLE: tmux itself cannot answer - it fails to execute (a
 # trimmed PATH) or errors non-definitively - so even the inventory fails, with
 # a message that is NOT one of the definitive no-session/no-server/no-socket
@@ -113,15 +121,28 @@ set -u
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
-    ;;
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 0
+    session=; prev=
+    for arg in "$@"; do
+      [ "$prev" = -t ] && session=$arg
+      prev=$arg
+    done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
+    [ -n "$session" ] || exit 0
+    for meta in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
+      [ -f "$meta" ] || continue
+      win=$(sed -n 's/^window=//p' "$meta")
+      case "$win" in
+        *:*:*) continue ;;
+        *:*)
+          [ "${win%%:*}" = "$session" ] && printf '%s\n' "${win#*:}" ;;
+      esac
+    done
+    exit 0 ;;
   display-message)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
   capture-pane)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -1777,6 +1798,44 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# Regression (2026-09-14 fleet-loss incident, the crew-state half): the cheap
+# presence read asked tmux about the recorded window and accepted tmux's silent
+# resolution of an unknown name to the session's ACTIVE pane, so a vanished
+# worker window kept reading as a live, busy crew. This fixture models that
+# fallback, so the fixture's addressed call answers for the vanished name while
+# its session inventory omits it - the exact false-alive shape - and the reader
+# must prove absence from the inventory rather than classify the wrong pane.
+test_vanished_window_reads_absent_despite_tmux_fallback() {
+  reset_fakes
+  local d gen out
+  d=$(new_case vanished-window)
+  make_repo_on_branch "$d/wt" fm/feat-vanished
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-vanished.meta" "window=fm:fm-feat-vanished" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  # The crew's own semantic record still says busy - a turn whose window was lost
+  # mid-flight. A fallback read of the active pane would report it as a working
+  # crew, which is precisely what the loss went unnoticed as.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-vanished)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-vanished busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+
+  # Anti-vacuity: the addressed call really does answer for the vanished window
+  # name, so this case cannot pass merely because tmux errored.
+  PATH="$d/fakebin:$PATH" tmux display-message -p -t fm:fm-feat-vanished '#{pane_id}' >/dev/null 2>&1 \
+    || fail "fixture drifted: display-message must still answer for the vanished window name"
+
+  out=$(run_crew_state "$d" feat-vanished)
+  assert_contains "$out" "state: unknown" "a vanished window must not read as a live crew state"
+  assert_contains "$out" "backend target gone" "a vanished window is positive absence evidence"
+  assert_not_contains "$out" "state: working" "a vanished window must never read as a busy working crew"
+  assert_not_contains "$out" "source: pane" "the active pane tmux silently substituted is not this crew's state"
+  pass "a vanished window reads absent even though tmux answers for its name via the active pane"
+}
+
 # Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
 # reached the same false-death path as herdr. A tmux that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
@@ -2539,6 +2598,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_vanished_window_reads_absent_despite_tmux_fallback
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

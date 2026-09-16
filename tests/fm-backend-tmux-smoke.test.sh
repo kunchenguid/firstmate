@@ -73,6 +73,99 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- endpoint presence: tmux's silent fallbacks ------------------------------
+#
+# Regression (2026-09-14 fleet-loss incident): tmux resolves an UNKNOWN window
+# name to the session's active window and exits 0, so an addressed
+# display-message call is not a presence proof. Assert that real behavior first -
+# if a future tmux stops doing this, this guard fails loudly and names the
+# version rather than letting the endpoint-presence contract rot silently - then
+# prove the probe trusts tmux's own answer: a vanished window name reads absent
+# while its session is genuinely alive, and the real window still reads present.
+if ! tmux display-message -p -t "$SESSION:no-such-window-xyz" '#{pane_id}' >/dev/null 2>&1; then
+  fail "real tmux ($(tmux -V 2>/dev/null || printf 'version unknown')) no longer silently resolves an unknown window name to the active window; re-verify the endpoint-presence contract"
+fi
+fm_backend_tmux_target_present "$TARGET" \
+  || fail "fm_backend_tmux_target_present must read a live window as present"
+if fm_backend_tmux_target_present "$SESSION:no-such-window-xyz"; then
+  fail "fm_backend_tmux_target_present must not read a name tmux silently resolved to the active window as present"
+fi
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must read a live window as present"
+if fm_backend_target_exists tmux "$SESSION:no-such-window-xyz"; then
+  fail "fm_backend_target_exists must not read a vanished window name as a live endpoint"
+fi
+# tmux's "=" exact-match modifier is not part of the window name, so both
+# spellings must resolve to the same live endpoint and refuse an absent one.
+if ! tmux display-message -p -t "=$SESSION:=$WINDOW" '#{pane_id}' >/dev/null 2>&1; then
+  fail "fixture drifted: real tmux must resolve the '=' exact-match target of a live window"
+fi
+fm_backend_target_exists tmux "$SESSION:=$WINDOW" \
+  || fail "an '=' exact-match window name must read as a live endpoint"
+fm_backend_target_exists tmux "=$SESSION:=$WINDOW" \
+  || fail "an '=' exact-match session and window name must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:=no-such-window-xyz"; then
+  fail "an '=' exact-match name tmux does not hold must not read as a live endpoint"
+fi
+if fm_backend_target_exists tmux "=$SESSION:=no-such-window-xyz"; then
+  fail "an '=' exact-match session and absent name must not read as a live endpoint"
+fi
+# The away-mode daemon addresses the supervisor PANE (its own $TMUX_PANE), so
+# the bare pane-id shape must keep reading present, while a missing pane id - for
+# which real tmux answers an empty pane_id and exit 0 - must not.
+PANE_ID=$(tmux display-message -p -t "$TARGET" '#{pane_id}')
+[ -n "$PANE_ID" ] || fail "real tmux: could not read the task pane id"
+fm_backend_target_exists tmux "$PANE_ID" \
+  || fail "the away-mode daemon's bare pane-id target must read as a live endpoint"
+if fm_backend_target_exists tmux '%999999'; then
+  fail "a missing pane id, which real tmux answers with an empty pane_id, must not read as live"
+fi
+# The away-mode supervisor fallback addresses the default window by INDEX
+# ("firstmate:0"), so a window index must be proved present from the session's
+# own inventory, and an index the session does not hold must read absent.
+tmux list-windows -t "$SESSION" -F '#{window_index}' | grep -qx '0' \
+  || fail "fixture drifted: the smoke session must hold window index 0"
+fm_backend_target_exists tmux "$SESSION:0" \
+  || fail "the away-mode supervisor index target '$SESSION:0' must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:999"; then
+  fail "a window index the session does not hold must not read as a live endpoint"
+fi
+FIRST_ID=$(tmux list-windows -t "$SESSION" -F '#{window_id}' | head -n1)
+[ -n "$FIRST_ID" ] || fail "real tmux: could not read a window id"
+fm_backend_target_exists tmux "$SESSION:$FIRST_ID" \
+  || fail "a window id the session holds must read as a live endpoint"
+if fm_backend_target_exists tmux "$SESSION:@999999"; then
+  fail "a window id the session does not hold must not read as a live endpoint"
+fi
+# A dotted name whose prefix window is live must still read absent: tmux reads
+# the trailing ".0" as a pane qualifier and resolves it to the prefix window.
+tmux new-window -d -t "$SESSION:" -n 'fm-prefix' \
+  || fail "real tmux: could not create the fm-prefix window"
+fm_backend_target_exists tmux "$SESSION:fm-prefix" \
+  || fail "the live prefix window must read as a live endpoint"
+tmux display-message -p -t "$SESSION:fm-prefix.0" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "fixture drifted: tmux must resolve the dotted name to its live prefix window"
+if fm_backend_target_exists tmux "$SESSION:fm-prefix.0"; then
+  fail "an absent dotted window whose live prefix window tmux resolved must not read as a live endpoint"
+fi
+# tmux also resolves a target-session by exact name, then by unique prefix, then
+# by glob, so a session that does not exist can still answer an inventory from a
+# live prefix sibling and make a vanished endpoint read present. The presence
+# proof forces tmux's exact session match, so the same window under a
+# prefix-only session name must read absent while the real session still reads
+# present.
+PREFIX_SESSION="${SESSION%?}"
+[ -n "$PREFIX_SESSION" ] && [ "$PREFIX_SESSION" != "$SESSION" ] \
+  || fail "fixture drifted: the smoke session name must have a strict prefix"
+tmux list-windows -t "$PREFIX_SESSION" -F '#{window_name}' >/dev/null 2>&1 \
+  || fail "fixture drifted: real tmux must resolve the unique session-name prefix '$PREFIX_SESSION'"
+if fm_backend_target_exists tmux "$PREFIX_SESSION:$WINDOW"; then
+  fail "a target whose session exists only as a unique prefix of a live session must not read as a live endpoint"
+fi
+fm_backend_target_exists tmux "$SESSION:$WINDOW" \
+  || fail "the exact session must still read as a live endpoint"
+pass "real tmux: endpoint presence is proved from tmux's own answer, never its silent fallback"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line

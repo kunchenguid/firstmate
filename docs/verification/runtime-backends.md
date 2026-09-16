@@ -131,6 +131,41 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Endpoint presence requires tmux's own session and window answer
+
+Verified on 2026-09-15 with tmux 3.6 on Linux x86_64 on a private socket.
+`tmux display-message -p -t <target>` answers for a window name that does not exist by resolving it to the addressed session's active window and exiting 0, and answers a missing pane id with an empty `#{pane_id}` and exit 0, so the addressed call alone cannot prove an endpoint exists.
+tmux also resolves an unknown target session by exact name, then by unique prefix, then by glob, so an absent session can answer an inventory from a live prefix sibling unless it is addressed with the `=` exact-match modifier.
+The `=` prefix does not change the window-name fallback, so the probe proves membership from the session inventory instead.
+
+```sh
+tmux new-session -d -s sess -n alpha
+tmux new-window -d -t sess: -n beta
+tmux display-message -p -t sess:no-such-window '#{pane_id}'
+tmux display-message -p -t sess:9 '#{pane_id}'
+tmux display-message -p -t '%999999' '#{pane_id}'
+tmux display-message -p -t '=sess:=no-such-window' '#{pane_id}'
+tmux display-message -p -t ses:alpha '#{session_name}'
+tmux list-windows -t ses -F '#{window_name}'
+tmux list-windows -t =ses -F '#{window_name}'
+```
+
+Observed output (the active pane's own id, `%0` on a fresh server):
+
+```text
+<active pane id>   sess:no-such-window answered anyway, exit 0
+<active pane id>   sess:9 resolved to the active window
+(empty)            %999999 answered a missing pane with no id
+<active pane id>   =sess:=no-such-window answered anyway, exit 0
+sess               ses:alpha resolved the prefix session to sess, exit 0
+alpha              list-windows -t ses answered sess's windows, exit 0
+beta
+can't find session: ses   list-windows -t =ses refused the prefix-only session, exit 1
+```
+
+Each of the first, second, and fourth calls reported the active window's own pane instead of failing, and the last three show that only the `=` exact-match form addresses the session that really exists.
+`tests/fm-backend-tmux-smoke.test.sh` asserts that fallback is still present in the installed tmux and that `fm_backend_target_exists` reads a vanished window name (and an absent index or `@id`) absent, a target whose session exists only as a unique prefix of a live session absent, and the live window, the live index/`@id`, the exact session, and a bare pane id present; run it to refresh this evidence.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

@@ -87,7 +87,30 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # The session's real window inventory: an explicit target is proved by
+    # finding its exact window name here, never by tmux silently resolving an
+    # unknown name to the session's active window. Every window this suite
+    # addresses must be listed - the recorded task windows in this home's
+    # metadata plus the ad-hoc "sess:win" the explicit-target cases use.
+    session=""; prev=""
+    for a in "$@"; do [ "$prev" = -t ] && session="$a"; prev="$a"; done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
+    for win in sess:win; do
+      [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
+      printf '%s\n' "${win#*:}"
+    done
+    for meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      win=$(sed -n 's/^window=//p' "$meta")
+      case "$win" in
+        *:*:*|'':*|*:'') continue ;;
+      esac
+      [ -z "$session" ] || [ "${win%%:*}" = "$session" ] || continue
+      printf '%s\n' "${win#*:}"
+    done
+    exit 0 ;;
 esac
 exit 0
 SH

@@ -1287,6 +1287,54 @@ test_housekeeping_resumed_stale_cleared() {
   pass "resumed (busy) stale clears its marker without escalating"
 }
 
+# Regression (2026-09-14 fleet-loss incident, the away-daemon half): a dotted
+# task id records a target `<session>:fm-<id>.<n>`; tmux resolves the trailing
+# suffix to the live prefix window, so the capture guard in stale_window_is_busy
+# does not fire, and the durable busy record outlived the window that wrote it.
+# The daemon's stale recheck then read the surviving record as busy and dropped
+# the possible-wedge escalation, hiding a removed worker. A busy record can only
+# describe an endpoint that still exists, so the recovery-grade classifier's
+# positive missing verdict must surface it.
+test_housekeeping_removed_dotted_window_surviving_busy_record_escalates() {
+  local dir state fakebin win live pane key gen absent busy
+  dir=$(make_supercase stale-removed-dotted-busy)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held.0"; live="sess:fm-held"; pane="$dir/pane.txt"
+  printf 'working\n' > "$state/held.0.status"
+  printf 'idle prompt, worker gone\n' > "$pane"
+  fm_write_meta "$state/held.0.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" held.0)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" held.0 busy --gen "$gen" \
+    --source pi-ext --event agent-start
+  key=$(printf '%s' "held.0" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  # Anti-vacuity: the live inventory holds only the prefix window, so the exact
+  # dotted target is authoritatively absent while the surviving record still
+  # classifies busy through the durable read.
+  absent=$(PATH="$fakebin:$PATH" bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_agent_state tmux "$2"
+  ' _ "$ROOT" "$win")
+  [ "$absent" = missing ] || fail "fixture drifted: the dotted target must classify missing, got '$absent'"
+  busy=$(PATH="$fakebin:$PATH" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    fm_busy_classify_meta "$2/held.0.meta" held.0 "$2"
+  ' _ "$ROOT" "$state")
+  [ "$busy" = 'busy pi-ext' ] || fail "fixture drifted: the surviving busy record must classify busy, got '$busy'"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$live" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" stale_window_is_busy "$win" "$state" \
+    && fail "a removed dotted window read busy from its surviving record"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$live" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "a removed dotted window's surviving busy record suppressed the wedge escalation"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
+  pass "a removed dotted window whose busy record survives escalates instead of reading busy"
+}
+
 test_housekeeping_herdr_persistent_stale_resolves_meta() {
   local dir state key
   dir=$(make_supercase stale-herdr-persistent)
@@ -1341,6 +1389,8 @@ test_housekeeping_herdr_idle_busy_record_clears_stale() {
       [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
       printf 'idle'
     }
+    fm_backend_target_exists() { return 0; }
+    fm_backend_agent_state() { printf 'unreadable'; }
     fm_backend_capture herdr default:w1:p4 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p4)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
@@ -1369,6 +1419,8 @@ test_housekeeping_herdr_resumed_stale_cleared() {
       [ "$2" = "default:w1:p3" ] || fail "expected herdr busy target, got $2"
       printf 'busy'
     }
+    fm_backend_target_exists() { return 0; }
+    fm_backend_agent_state() { printf 'unreadable'; }
     fm_backend_capture herdr default:w1:p3 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p3)" = busy ] || fail "herdr busy stub did not report busy"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
@@ -2803,6 +2855,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_housekeeping_removed_dotted_window_surviving_busy_record_escalates
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

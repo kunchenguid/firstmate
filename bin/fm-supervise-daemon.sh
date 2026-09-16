@@ -679,7 +679,11 @@ task_window_harness() {  # <window> <state>
 # semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
 # when the endpoint could not be read at all. Only an exact busy verdict is
 # working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# silent idle, so a stale pane whose state cannot be proven surfaces. A busy
+# record can only describe an endpoint that still exists, so the classification
+# goes through fm_busy_classify_live: a positively absent local endpoint is
+# never busy, while a remote, unreadable, or ambiguous endpoint keeps its
+# record.
 stale_window_is_busy() {  # <window> <state>
   local win=$1 state=$2 backend harness label task tail40 verdict
   backend=$(task_window_backend "$win" "$state")
@@ -687,7 +691,7 @@ stale_window_is_busy() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  verdict=$(fm_busy_classify_live "$backend" "$win" "$harness" "$task" "$state" "$label" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
 
@@ -1638,9 +1642,10 @@ fm_super_main() {
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
+  # probe, so a herdr supervisor pane is checked via the herdr adapter. The
+  # tmux arm proves the target from the session's window inventory by
+  # name/index/@id instead of trusting `display-message`, which silently
+  # resolves a missing window to the session's active window.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
