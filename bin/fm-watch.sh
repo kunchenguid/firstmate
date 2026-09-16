@@ -2166,6 +2166,23 @@ while :; do
         fi
       fi
       if [ -n "$out" ]; then
+        if [ "$(basename "$c")" = contributions.check.sh ]; then
+          contribution_check_output=
+          contribution_check_invalid=0
+          while IFS= read -r contribution_check_line; do
+            case "$contribution_check_line" in
+              'contribution-wake: check: contributions '*)
+                contribution_check_output="${contribution_check_output}${contribution_check_line#contribution-wake: }"$'\n'
+                ;;
+              *) contribution_check_invalid=1 ;;
+            esac
+          done <<EOF
+$out
+EOF
+          if [ "$contribution_check_invalid" -eq 0 ] && [ -n "$contribution_check_output" ]; then
+            continue
+          fi
+        fi
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if ! fm_merge_authority_read "$STATE" "$id" \
@@ -2199,13 +2216,6 @@ while :; do
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
-        # Contribution signals are already durable. Finish the existing merge
-        # polls before ringing for this aggregate check, so unavailable forge
-        # coverage cannot starve a task's terminal observation every cycle.
-        if [ "$(basename "$c")" = contributions.check.sh ]; then
-          contribution_check_output=$reason
-          continue
-        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi

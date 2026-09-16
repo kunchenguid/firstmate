@@ -43,7 +43,8 @@
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
 # before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and the authenticated custom check rings the existing watcher. ack removes
+# and emits only newly durable signals for the authenticated check to surface.
+# ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal. Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
@@ -242,11 +243,12 @@ publish_pending() { # task record-file
     jq --arg token "$token" '.notified = ((.notified // []) + [$token] | unique)' "$2" > "$TMP/notified.json"
     mv "$TMP/notified.json" "$2"
     write_record "$task" "$2"
+    printf 'contribution-wake: check: contributions %s %s\n' "$task" "$key"
   done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$2")
 }
 
 poll() {
-  local task url old kind error pending
+  local task url old kind error
   acquire
   get_input
   read_saved
@@ -282,9 +284,6 @@ poll() {
     write_record "$task" "$TMP/row.json"
     publish_pending "$task" "$TMP/row.json"
   done < "$TMP/known.tsv"
-  read_saved
-  pending=$(jq '[.[].records[].pending[]] | length' "$TMP/saved.json")
-  [ "$pending" -eq 0 ] || printf 'contributions: %s pending signal(s); read fm-contributions.sh pending\n' "$pending"
 }
 
 arm() {

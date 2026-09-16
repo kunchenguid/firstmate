@@ -66,6 +66,8 @@ def projected($input; $saved; $now; $max_age):
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
          else {actor:"fleet",reason:"terminal observation needs refresh"} end
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
+       elif ($k.url | startswith("https://github.com/") | not) then
+         {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
        elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
@@ -105,6 +107,7 @@ def summary($rows; $errors):
      fleet:([$rows[] | select(.actor == "fleet")] | length),
      maintainer:([$rows[] | select(.actor == "maintainer")] | length),
      nobody:([$rows[] | select(.actor == "nobody")] | length)},
+   unmeasured:([$rows[] | select(.actor == "unmeasured")] | length),
    complete:($errors == 0 and all($rows[]; .checked)),
    proven_clear:($errors == 0 and all($rows[]; .checked and .actor != "captain")),
    stale_verdicts:([$rows[].stale_verdicts] | add // 0),

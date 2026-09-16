@@ -618,6 +618,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                      and $snap.secondmate_current.registry.records_truncated != true),
            unmeasured_homes:([$homes[] | select(. == null)] | length),
            unreadable_records:([$measured[].unreadable_records] | add // 0),
+           unmeasured:([$measured[].unmeasured] | add // 0),
            stale_verdicts:([$measured[].stale_verdicts] | add // 0),
            missing_verdicts:([$measured[].missing_verdicts] | add // 0),
            captain_omitted:([$measured[].captain_omitted] | add // 0),
