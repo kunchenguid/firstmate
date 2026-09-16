@@ -30,8 +30,8 @@
 # autohandled capture needs - and gets - no `check` wake of its own. One remote
 # note therefore produces exactly one firstmate wake, through the same signal
 # classification a local secondmate's own status append gets, and a replayed
-# capture whose every line is already mirrored (the at-most-once append) adds
-# no bytes and stays completely quiet. Only a capture autohandle could NOT
+# capture whose source lines are already recorded adds no bytes and stays
+# completely quiet. Only a capture autohandle could NOT
 # fully apply is published as a `check` wake for the manual handler, and
 # running `handle` on that wake is idempotent.
 #
@@ -40,8 +40,9 @@
 # state/<id>.status, and every parent consumer - the open-decision fold, wake
 # classification, crew-state reconciliation, and pending-reply resolution - reads
 # that one stream. A remote secondmate must present the same model, so ingest
-# mirrors every content-bearing line at most once, omits blank separators, and
-# leaves every semantic judgement to those same shared consumers. Correlation is
+# deduplicates content-bearing lines by normalized source identity, omits blank
+# separators, and leaves every semantic judgement to those same shared consumers.
+# Correlation is
 # a per-line property that fm-pending-reply-lib.sh consumes; it is never a gate
 # on the stream. Gating on it here made a remote mate's own progress lines and
 # newly raised decisions - which carry no corr= by contract - unrepresentable,
@@ -50,10 +51,10 @@
 #
 # What remains here is only what crossing a machine boundary genuinely adds:
 #   - cursor continuity and identity (offset plus prefix digest)
-#   - data/*.md pointers fetched through the path-confined remote file reader and
-#     rewritten to their local copies, because the parent cannot read the remote
-#     filesystem
-#   - at-most-once append, because a captured generation can be replayed
+#   - documents a line explicitly OFFERS through a structured `report=data/....md`
+#     pointer, fetched through the path-confined remote file reader and rewritten
+#     to their local copies, because the parent cannot read the remote filesystem
+#   - source-line replay deduplication, because a captured generation can be replayed
 #   - control-byte normalization, so content-bearing bytes from another machine
 #     cannot make the parent's status file unsafe to read
 #   - the caught-up watermark this channel publishes for
@@ -75,7 +76,10 @@ WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
 # transport or unknown remote completion. Any other nonzero status is the remote
-# reader's own refusal and will not change on a retry.
+# reader's own refusal of that path at that moment. The reader has no permanence
+# vocabulary - a report the mate has not finished writing refuses exactly like a
+# path that will never exist - so a refusal fails open rather than being read as
+# final (see cmd_ingest).
 SSH_UNAVAILABLE=255
 DOCUMENT_LOCAL_FAILURE=2
 
@@ -118,6 +122,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
   local path=$1 offset hash schema
@@ -271,12 +276,102 @@ safe_doc_path() {
   return 0
 }
 
+# Only an explicit structured pointer OFFERS a document. `report=data/....md` is
+# the tag a home's own ledger publisher emits for a report it has already
+# confirmed exists (bin/fm-inactive-reconcile.sh), and a bracketed
+# `[report=data/....md]` form reads identically. A bare path inside prose is a
+# mention, not an offer: fetching every mention made a mate's sentence about a
+# report it had not written yet trigger a transfer it never offered.
+#
+# One boundary-valid recognition serves both extraction and rewriting, so the two
+# can never disagree about what counts as a pointer. A pointer must start and end
+# at a token boundary: `child-report=` is not this tag, and
+# `report=data/x.md.bak` offers nothing, not even its `data/x.md` prefix. Each
+# line is scanned behind a sentinel byte that normalized payload can never
+# contain, so every candidate needs a real preceding boundary character. A
+# rejected candidate therefore cannot make the text after it look like the start
+# of a line, while adjacent pointers each keep their own boundary.
+#
+# The rewrite map arrives through a FILE, never the process environment. A delta
+# may carry many delivered pointers, and an expanded map can exceed the platform's
+# exec argument limit; awk would then fail to start, and a caller that did not
+# check would append the empty result as a blank line and advance the cursor past
+# dropped status content. Every caller checks the exit status.
+process_document_pointers() { # <extract|rewrite> <pointer-map-file>
+  LC_ALL=C awk -v mode="$1" -v mapfile="$2" '
+    BEGIN {
+      if (mapfile != "") {
+        while ((getline entry < mapfile) > 0) {
+          separator = index(entry, "\t")
+          if (separator > 0)
+            replacements[substr(entry, 1, separator - 1)] = substr(entry, separator + 1)
+        }
+        close(mapfile)
+      }
+    }
+    {
+      rest = "\001" $0
+      rewritten = ""
+      while (match(rest, /[^A-Za-z0-9._\/-]report=data\/[A-Za-z0-9._\/-]+[.]md/)) {
+        doc = substr(rest, RSTART + 8, RLENGTH - 8)
+        next_index = RSTART + RLENGTH
+        next_char = next_index <= length(rest) ? substr(rest, next_index, 1) : ""
+        if (next_char == "" || next_char !~ /[A-Za-z0-9._\/-]/) {
+          if (mode == "extract") {
+            if (!seen[doc]++) print doc
+          } else {
+            replacement = doc in replacements ? replacements[doc] : doc
+            rewritten = rewritten substr(rest, 1, RSTART + 7) replacement
+            rest = substr(rest, next_index)
+            continue
+          }
+        }
+        if (mode != "extract")
+          rewritten = rewritten substr(rest, 1, next_index - 1)
+        rest = substr(rest, next_index)
+      }
+      if (mode != "extract") print substr(rewritten rest, 2)
+    }
+  '
+}
+
+extract_document_pointers() { # <payload-file>
+  process_document_pointers extract '' < "$1"
+}
+
+rewrite_document_pointers() { # <input-file> <pointer-map-file> <output-file>
+  process_document_pointers rewrite "$2" < "$1" > "$3"
+}
+
+# The reader's own explanation for a refusal, reduced to one bounded, tab-free,
+# control-free line. bin/fm-procevent.sh runs this adapter with its stderr
+# discarded, so a reason that is not carried into the status stream is lost.
+summarize_fetch_reason() { # <stderr-file> <remote-relative>
+  local reason
+  reason=$(LC_ALL=C tr '\000-\010\011\013-\037\177' ' ' < "$1" 2>/dev/null \
+    | awk 'NF { last = $0 } END { if (last != "") print last }' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  reason=${reason#error: }
+  # The note already names the document, so the reader's habit of echoing the
+  # path back is redundant noise.
+  reason=${reason%": $2"}
+  [ -n "$reason" ] || reason='the remote reader gave no reason'
+  [ "${#reason}" -le 160 ] || reason="${reason:0:157}..."
+  printf '%s' "$reason"
+}
+
 # Fetch one referenced remote document. Returns 0 on success, 1 when the remote
 # reader refused the path or size, DOCUMENT_LOCAL_FAILURE when local storage
-# failed, and SSH_UNAVAILABLE when transport completion is unknown.
+# failed, and SSH_UNAVAILABLE when transport completion is unknown. A refusal
+# leaves the reader's own explanation in FETCH_DOC_REASON.
+FETCH_DOC_REASON=''
 fetch_document() { # <id> <remote-relative> <result-var>
-  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel rc=0
-  safe_doc_path "$rel" || return 1
+  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp err local_rel rc=0
+  FETCH_DOC_REASON=''
+  if ! safe_doc_path "$rel"; then
+    FETCH_DOC_REASON='pointer is not a confined data/*.md path'
+    return 1
+  fi
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
   parent=$(dirname "$destination")
@@ -285,13 +380,16 @@ fetch_document() { # <id> <remote-relative> <result-var>
   parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
   case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
   [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" || rc=$?
+  err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-doc-reason.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    rm -f -- "$tmp"
+    FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
+    rm -f -- "$tmp" "$err"
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
+  rm -f -- "$err"
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
   mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
   local_rel="data/remote-secondmates/$id/$rel"
@@ -308,9 +406,9 @@ normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
 
-# The one place a line enters the parent status stream. A captured generation can
-# be replayed, so every append - a mirrored line or an escalation this adapter
-# raises itself - is at most once on exact bytes.
+# Adapter-authored escalations and notes use exact-byte append suppression.
+# Mirrored payload lines use their pre-rewrite source identity in
+# stage_mirror_lines instead, because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -318,10 +416,55 @@ append_status_once() { # <status-file> <line>
   return 0
 }
 
+# Stage whole-stream additions by exact normalized source line, before pointer
+# rewriting. The caller appends status additions first and source identities
+# second: reversing that order could record a line the parent never received.
+# The record lives outside cursor state and survives adapter retirement because
+# the parent status stream it describes survives that retirement too.
+stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-additions> <source-additions>
+  LC_ALL=C awk \
+    -v rewritten_file="$2" \
+    -v source_record="$3" \
+    -v status_file="$4" \
+    -v status_additions="$5" \
+    -v source_additions="$6" '
+    BEGIN {
+      printf "%s", "" > status_additions
+      printf "%s", "" > source_additions
+      while ((getline line < source_record) > 0) mirrored[line] = 1
+      close(source_record)
+      while ((getline line < status_file) > 0) present[line] = 1
+      close(status_file)
+    }
+    {
+      source = $0
+      read_result = getline rewritten < rewritten_file
+      if (read_result <= 0) {
+        failed = 1
+        exit 1
+      }
+      if (source == "" || (source in mirrored)) next
+      mirrored[source] = 1
+      print source > source_additions
+      if (!(rewritten in present)) {
+        present[rewritten] = 1
+        print rewritten > status_additions
+      }
+    }
+    END {
+      if (!failed && (getline extra < rewritten_file) > 0) failed = 1
+      close(rewritten_file)
+      if (close(status_additions) != 0) failed = 1
+      if (close(source_additions) != 0) failed = 1
+      if (failed) exit 1
+    }
+  ' "$1"
+}
+
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
-  local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
-  local fetch_rc append_rc undelivered=''
+  local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
+  local fetch_rc append_rc offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -359,6 +502,23 @@ cmd_ingest() {
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
   lock="$STATE/.remote-reply-ingest-$id.lock"
   fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
+  if [ ! -e "$status_file" ]; then
+    (umask 077; : > "$status_file") \
+      || { fm_lock_release "$lock"; die "cannot create parent status log"; }
+  fi
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] \
+    || { fm_lock_release "$lock"; die "parent status log is unsafe"; }
+  source_record=$(mirrored_source_path "$id")
+  if [ -L "$source_record" ] || { [ -e "$source_record" ] && [ ! -f "$source_record" ]; }; then
+    fm_lock_release "$lock"
+    die "remote reply mirrored-source record is unsafe: $source_record"
+  fi
+  if [ ! -e "$source_record" ]; then
+    (umask 077; : > "$source_record") \
+      || { fm_lock_release "$lock"; die "cannot create remote reply mirrored-source record"; }
+  fi
+  chmod 600 "$source_record" \
+    || { fm_lock_release "$lock"; die "cannot secure remote reply mirrored-source record"; }
   read_cursor "$id"
   if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
     cursor_already=1
@@ -375,38 +535,66 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    rewritten=$line
-    while IFS= read -r doc; do
-      [ -n "$doc" ] || continue
-      fetch_rc=0
-      fetch_document "$id" "$doc" local_doc || fetch_rc=$?
-      if [ "$fetch_rc" -eq 1 ]; then
-        # The remote reader refused this document and always will. Mirror the
-        # mate's line with its own pointer intact rather than inventing a local
-        # path or stalling the stream, and name the gap once for this delta.
-        undelivered="${undelivered}${undelivered:+, }$doc"
-        continue
-      fi
-      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
-        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
-      [ "$fetch_rc" -eq 0 ] \
-        || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
-      rewritten=${rewritten//"$doc"/"$local_doc"}
-    done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
-    append_rc=0
-    append_status_once "$status_file" "$rewritten" || append_rc=$?
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
-    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
-  done < "$normalized_payload"
-  if [ -n "$undelivered" ]; then
-    line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
-    append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append document escalation"; }
-    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  # Every document this delta OFFERS, deduplicated across the whole delta, is
+  # attempted exactly once.
+  if ! offered=$(extract_document_pointers "$normalized_payload"); then
+    fm_lock_release "$lock"
+    die "cannot extract remote document pointers"
   fi
+  delivered_map="$tmp/delivered.map"
+  : > "$delivered_map" || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
+  while IFS= read -r doc || [ -n "$doc" ]; do
+    [ -n "$doc" ] || continue
+    fetch_rc=0
+    local_doc=''
+    fetch_document "$id" "$doc" local_doc || fetch_rc=$?
+    if [ "$fetch_rc" -eq 1 ]; then
+      # Fail open. A refusal is never a decision: the mate's line keeps its own
+      # pointer, the cursor still advances, and one unkeyed note says why. A
+      # keyed escalation raised here once stood open forever describing a report
+      # that had in fact arrived, because nothing could ever resolve it.
+      undelivered="${undelivered}${undelivered:+$'\n'}${doc}"$'\t'"${FETCH_DOC_REASON}"
+      continue
+    fi
+    [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
+      || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
+    [ "$fetch_rc" -eq 0 ] \
+      || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
+    printf '%s\t%s\n' "$doc" "$local_doc" >> "$delivered_map" \
+      || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
+  done <<EOF
+$offered
+EOF
+  mirrored="$tmp/mirrored"
+  rewrite_document_pointers "$normalized_payload" "$delivered_map" "$mirrored" \
+    || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
+  status_additions="$tmp/status-additions"
+  source_additions="$tmp/source-additions"
+  : > "$status_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  : > "$source_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  stage_mirror_lines "$normalized_payload" "$mirrored" "$source_record" "$status_file" \
+    "$status_additions" "$source_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  cat "$status_additions" >> "$status_file" \
+    || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+  appended=$(LC_ALL=C awk 'END { print NR + 0 }' "$status_additions") \
+    || { fm_lock_release "$lock"; die "cannot count appended remote replies"; }
+  cat "$source_additions" >> "$source_record" \
+    || { fm_lock_release "$lock"; die "cannot commit remote reply mirror identity"; }
+  # A note, never a decision: it stays visible without entering the open-decision
+  # fold, so it cannot stand open the way a keyed block did.
+  while IFS=$'\t' read -r doc reason || [ -n "$doc" ]; do
+    [ -n "$doc" ] || continue
+    append_rc=0
+    append_status_once "$status_file" "note: remote document did not transfer for $id: $doc - $reason" \
+      || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote document note"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  done <<EOF
+$undelivered
+EOF
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
