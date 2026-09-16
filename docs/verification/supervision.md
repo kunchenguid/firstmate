@@ -251,6 +251,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+| DSH | 0.1.5-rc.1 (dsh-base 0.1.5-rc.2) | Blocking `Stop` hook with an adapter-owned, session-scoped block budget | Exit 2 plus stderr forced exactly one continuation carrying the reason as steering; four consecutive blind stops over one in-flight task returned `2, 2, 2, 0`, so the budget bounded the loop and the fourth stop emitted one attended fail-open. |
 
 ### Cursor primary park, 2026-08-13
 
@@ -444,6 +445,34 @@ Observed output:
 ```text
 fm-claude-stop-autoarm: ok
 ```
+
+### DSH primary adapter, 2026-09-16
+
+DeepSeek Harness was validated as a primary on 2026-09-16 against the installed
+CLI on macOS with a scratch `headless` profile, never against a live home.
+
+Mechanism facts established first, with a probe hook registered through
+`dsh-hooks-claude-code`:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Can `Stop` block and force a step? | hook exits 2 with a reason on stderr | Yes. The hook fired twice, the model received the reason as steering and complied, and the second firing was allowed. |
+| Is `stop_hook_active` usable? | read the field from the payload | No. DSH reports `false` on every Stop, so the field cannot bound a re-block loop. |
+| Does `SessionStart` context reach the first request? | hook emits `additionalContext`, prompt asks for the token | No. The context arrived AFTER the first request, injected as a user-shaped message the model read as something the user had just sent. |
+| Does `UserPromptSubmit` reach the first request? | same token, delivered from `UserPromptSubmit` | Yes. The model saw the token on its first look, with no tools used. |
+| Does DSH provide process inspection? | `ps -o comm= -p \$\$` inside a hook | No under the default `workspace-write` sandbox (`Operation not permitted`); yes under `danger-full-access`. |
+| Is the launcher identifiable? | `ps -o pid=,comm=,args=` on the host | `comm=node`, argv carrying the dsh launcher path, so detection is `args` strength. |
+
+Bounded-guard behaviour was then measured through the shipped adapter with one
+task in flight and no live watcher: stops 1-3 returned 2 and wrote the reason
+banner to stderr, stop 4 returned 0 with the attended fail-open `systemMessage`,
+a new session id reset the counter, and removing the in-flight work cleared the
+budget file and allowed the stop.
+
+Instruction budget: `dsh-agent-instructions` ships `maxBytes: 65536` while
+firstmate's `AGENTS.md` is 81127 bytes, so the shipped default truncates the
+chain at line 476 of 612 and drops sections 10-14 plus the captain-precedence
+and maintenance sections. The captain profile raises `maxBytes` to 262144.
 
 ## Watcher continuity
 
