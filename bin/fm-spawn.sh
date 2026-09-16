@@ -481,6 +481,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-preservation-lib.sh
+. "$SCRIPT_DIR/fm-preservation-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2331,6 +2333,22 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# AgentLab evidence-preservation gate (docs/evidence-preservation-lifecycle.md
+# in yagakeerthikiran/agentlab-shared-memory is the canonical contract;
+# bin/fm-preservation-lib.sh is the mechanical enforcement). A ship spawn is
+# refused before any endpoint exists unless a verified initial checkpoint is
+# already on record for this task id: the captain directive requires that
+# checkpoint before implementation proceeds materially, and a spawn is the
+# first material implementation step. Scouts are exempt here - a scout's own
+# report becomes its initial checkpoint at promotion (bin/fm-promote.sh).
+if [ "$KIND" = ship ]; then
+  if ! fm_preservation_verify "$STATE" "$ID" initial; then
+    echo "error: $FM_PRESERVATION_VERIFY_ERROR" >&2
+    echo "Publish an initial AgentLab checkpoint and record its receipt with bin/fm-preservation-record.sh before spawning $ID." >&2
+    exit 1
   fi
 fi
 

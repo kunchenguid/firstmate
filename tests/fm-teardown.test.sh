@@ -55,8 +55,8 @@
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
 
-# shellcheck source=tests/lib.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -618,9 +618,25 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+# Pre-satisfies the AgentLab preservation gate (bin/fm-preservation-lib.sh) for
+# task-x1 in <case_dir>, reading its CURRENT worktree= and kind= from the meta
+# file at call time so a case that commits or moves its worktree between setup
+# and run_teardown still gets a fresh, matching app head. Cases that build their
+# own preservation fixture (the dedicated preservation-gate suite) never call
+# this file's run_teardown, so there is no double-provisioning to worry about.
+preservation_satisfy_case() {
+  local case_dir=$1 meta="$1/state/task-x1.meta" wt='' head=''
+  if [ -f "$meta" ]; then
+    wt=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
+  fi
+  [ -z "$wt" ] || head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+  fm_test_preservation_satisfy "$case_dir/state" task-x1 "$case_dir/agentlab-fixture" final "$head"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  preservation_satisfy_case "$case_dir"
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
@@ -628,6 +644,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PRESERVATION_AGENTLAB_ROOT="$case_dir/agentlab-fixture/src" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -657,7 +674,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv node perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -2198,10 +2215,12 @@ SH
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
       ;;
   esac
+  preservation_satisfy_case "$case_dir"
   rc=0
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$case_dir/agentlab-fixture/src" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"

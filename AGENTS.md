@@ -320,6 +320,7 @@ Fill the task subsections according to section 11.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
+A ship spawn also refuses without a verified initial AgentLab evidence-preservation checkpoint already on record for that task id (scouts are exempt; a scout's own report becomes its initial checkpoint at promotion, which `bin/fm-promote.sh` also requires); publish it and record its receipt with `bin/fm-preservation-record.sh` before spawning (`docs/evidence-preservation-lifecycle.md` in `yagakeerthikiran/agentlab-shared-memory` is the canonical contract).
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
@@ -393,6 +394,7 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
+Teardown also refuses ship, scout, and secondmate cleanup without a verified final AgentLab evidence-preservation checkpoint; `--force` never bypasses that gate, only `bin/fm-teardown.sh --preservation-waived-by-captain "<verbatim words>"` does, and only on the captain's explicit word (`docs/evidence-preservation-lifecycle.md` in `yagakeerthikiran/agentlab-shared-memory` is the canonical contract; `bin/fm-preservation-lib.sh` is the mechanical enforcement).
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.
@@ -540,6 +542,7 @@ Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions t
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+Every ship and scout scaffold also carries an `# Evidence preservation` section pointing at the canonical AgentLab contract and the crew identity block it requires; do not restate that contract's content, only adjust the section when the task genuinely differs from the standard shape.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.

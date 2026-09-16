@@ -343,6 +343,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-preservation-lib.sh
+. "$SCRIPT_DIR/fm-preservation-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -857,6 +859,12 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
+
+  # AgentLab evidence-preservation receipt (bin/fm-preservation-lib.sh):
+  # network-free, so a missing/stale checkpoint surfaces here without waiting
+  # on the deferred network stage. fm_preservation_verify is what a
+  # spawn/promote/teardown call actually enforces against the live clone.
+  fm_preservation_digest_line "$STATE" "$id" "$(fm_meta_get "$meta" worktree)"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 

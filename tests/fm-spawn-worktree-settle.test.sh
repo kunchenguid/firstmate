@@ -104,9 +104,11 @@ EOF
 
 run_settle_spawn() {
   local id=$1
+  fm_test_preservation_satisfy "$HOME_DIR/state" "$id" "$HOME_DIR/agentlab-fixture" initial
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$HOME_DIR/agentlab-fixture/src" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \

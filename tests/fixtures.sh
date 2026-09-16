@@ -268,13 +268,72 @@ make_spawn_fakebin() {
   fm_test_make_spawn_fakebin "$@"
 }
 
+# --- AgentLab evidence-preservation fixture ---------------------------------
+#
+# bin/fm-preservation-lib.sh's fm_preservation_verify re-derives every fact
+# from a real AgentLab clone (fetch, commit reachability, file-at-commit, the
+# validator). Suites that are not testing that gate itself (spawn, promote,
+# teardown suites exercising unrelated behavior) still need a real,
+# passing fixture to satisfy it, exactly as they already fake git/gh/no-mistakes
+# so unrelated gates never interfere. tests/fm-preservation-gate.test.sh is the
+# one suite that builds its OWN fixtures to exercise this gate's failure modes.
+
+# fm_test_preservation_fixture_build <dir>: idempotent. Builds a minimal
+# AgentLab-shaped repo at <dir>/src with a bare origin at <dir>/origin.git, one
+# checkpoint file, and an always-passing scripts/validate-checkpoint.mjs stub
+# (it proves the gate's git plumbing - fetch/reachability/file-at-commit - not
+# the real AgentLab validator's own content rules).
+fm_test_preservation_fixture_build() {
+  local dir=$1
+  [ ! -d "$dir/src/.git" ] || return 0
+  mkdir -p "$dir/src/scripts" "$dir/src/checkpoints/test-home/generic"
+  git init -q -b main "$dir/src"
+  printf '%s\n' 'export {}' > "$dir/src/scripts/validate-checkpoint.mjs"
+  printf '%s\n' '# fixture checkpoint' > "$dir/src/checkpoints/test-home/generic/001--fixture--initial.md"
+  git -C "$dir/src" add -A
+  git -C "$dir/src" -c user.email=t@t -c user.name=t commit -q -m fixture
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/src" remote add origin "$dir/origin.git"
+  git -C "$dir/src" push -q origin main
+}
+
+# fm_test_preservation_satisfy <state_dir> <id> <fixture_dir> <kind> [<app_head>]
+# Appends a receipt for <id> that fm_preservation_verify accepts, building the
+# shared fixture first if needed. <fixture_dir> is shared across every task
+# spawned in one test home; the receipt itself is per-task.
+fm_test_preservation_satisfy() {
+  local state_dir=$1 id=$2 fixture_dir=$3 kind=$4 app_head=${5:-}
+  fm_test_preservation_fixture_build "$fixture_dir"
+  local commit
+  commit=$(git -C "$fixture_dir/src" rev-parse HEAD)
+  mkdir -p "$state_dir"
+  node -e '
+    const fs = require("node:fs");
+    const [statePath, id, kind, commit, appHead] = process.argv.slice(1);
+    const now = new Date().toISOString();
+    const line = JSON.stringify({
+      kind, task: id, home: "test-home", commit,
+      path: "checkpoints/test-home/generic/001--fixture--initial.md",
+      branch: "main", app_branch: "", app_head: appHead || "",
+      timestamp: now, recorded_at: now,
+    });
+    fs.appendFileSync(statePath, line + "\n");
+  ' "$state_dir/$id.preservation" "$id" "$kind" "$commit" "$app_head"
+}
+
 # fm_test_run_spawn <home> <pane-path> <fakebin> [fm-spawn args...]
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
 # CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
 # that need a delivery contract pass those flags themselves.
+# Pre-satisfies the AgentLab preservation gate's initial-receipt requirement
+# for the spawned task id (position 1 of the trailing fm-spawn args, per
+# bin/fm-spawn.sh's own <task-id> <project-dir> ... contract) so suites that are
+# not about the preservation gate keep exercising ordinary spawn behavior.
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
+  local spawn_task_id=${1:-}
+  [ -z "$spawn_task_id" ] || fm_test_preservation_satisfy "$home/state" "$spawn_task_id" "$home/agentlab-fixture" initial
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
   # HOME; without it the suite would write the developer's real ~/.claude.json.
@@ -291,6 +350,7 @@ fm_test_run_spawn() {
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$home/agentlab-fixture/src" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1

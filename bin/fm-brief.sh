@@ -214,6 +214,28 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# The AgentLab evidence-preservation contract (bin/fm-preservation-lib.sh is
+# firstmate's mechanical enforcement of it: no verified checkpoint receipt, no
+# spawn, no promotion, no teardown). Kept to a pointer plus the exact fields
+# and commands a crew member cannot get from the canonical doc alone (this
+# task's own id and worktree), per the one-owner rule.
+if [ "$KIND" = scout ]; then
+  EVIDENCE_LIFECYCLE_NOTE='Your report is a scout deliverable, not an initial checkpoint: it becomes the initial checkpoint only if firstmate promotes this task to a ship (bin/fm-promote.sh requires one, published from your report, before promotion proceeds).'
+else
+  EVIDENCE_LIFECYCLE_NOTE='This task could not have been spawned without a verified initial checkpoint already on record (bin/fm-spawn.sh requires one); a pre-teardown checkpoint is what firstmate still needs from you.'
+fi
+IFS= read -r -d '' EVIDENCE_SECTION <<EOF || true
+# Evidence preservation
+The canonical contract is \`docs/evidence-preservation-lifecycle.md\` in \`yagakeerthikiran/agentlab-shared-memory\`; read it, this section only points at it and adds this task's own identifiers.
+$EVIDENCE_LIFECYCLE_NOTE
+A summary without its governing decisions, current requirements, mock-ups, branch recovery state, artifacts, and resume-session details is not a valid AgentLab handoff - terminal output and a bare report file are never a handoff by themselves.
+Your report and every checkpoint must carry the crew identification block from the contract's section 7: Crew role/name, Crew task, Crew model, Crew Claude session ID, Crew resume URL, Supervising FirstMate session ID, Supervising FirstMate resume URL, Application branch/head, AgentLab artifact/report paths.
+Write \`UNAVAILABLE\` plus the reason for any field you cannot determine; never omit one silently.
+Publish a new checkpoint whenever the captain makes or changes a decision, requirements change, a mock-up is created or revised, scope changes, a blocker is discovered or resolved, implementation begins, a PR is opened or substantially updated, a branch is rebased or replaced, tests materially change the evidence state, deployment or live/staging verification occurs, work is handed to another agent, or you are paused for a meaningful period.
+Publish each checkpoint with \`scripts/publish-firstmate-checkpoint.sh --home <home> --task $ID --kind <initial|update|final> --source <checkpoint.md> [--artifacts <dir>]... [--app-repo <path>]\` in the AgentLab clone, then record its printed \`CHECKPOINT_RECEIPT=<json>\` into firstmate's own gate with \`$FM_ROOT/bin/fm-preservation-record.sh $ID --home <home>\` (reads the publisher's output on stdin) so bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-teardown.sh can verify it.
+EOF
+EVIDENCE_SECTION=${EVIDENCE_SECTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -413,6 +435,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $INBOX_SECTION
 
+$EVIDENCE_SECTION
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -503,6 +527,8 @@ $ASK_USER_BLOCK
    timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
+
+$EVIDENCE_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

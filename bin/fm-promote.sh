@@ -46,6 +46,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-preservation-lib.sh
+. "$SCRIPT_DIR/fm-preservation-lib.sh"
 
 MODE=
 YOLO=
@@ -132,6 +134,20 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+# AgentLab evidence-preservation gate (docs/evidence-preservation-lifecycle.md
+# in yagakeerthikiran/agentlab-shared-memory is the canonical contract;
+# bin/fm-preservation-lib.sh is the mechanical enforcement). A scout was exempt
+# from the initial-checkpoint requirement at spawn because its own report
+# becomes the initial checkpoint; promotion is where that checkpoint must
+# exist, before this task takes on ship teardown protection and a delivery
+# contract. Publish it from the scout's report with the AgentLab publisher and
+# record the receipt with bin/fm-preservation-record.sh before promoting.
+if ! fm_preservation_verify "$STATE" "$ID" initial; then
+  echo "error: $FM_PRESERVATION_VERIFY_ERROR" >&2
+  echo "Publish an initial AgentLab checkpoint from $DATA/$ID/report.md and record its receipt with bin/fm-preservation-record.sh before promoting $ID." >&2
+  exit 1
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then

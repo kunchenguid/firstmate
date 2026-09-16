@@ -151,9 +151,19 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#          [--preservation-waived-by-captain "<verbatim words>"]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --force never bypasses the AgentLab evidence-preservation gate
+#   (bin/fm-preservation-lib.sh; docs/evidence-preservation-lifecycle.md in
+#   yagakeerthikiran/agentlab-shared-memory is the canonical contract): --force
+#   authorizes discarding THIS task's unlanded local work, never skipping proof
+#   that its recovery checkpoint was preserved. The only way past that gate is
+#   --preservation-waived-by-captain, which records the captain's own verbatim
+#   words as an auditable waiver receipt (bin/fm-preservation-lib.sh's
+#   fm_preservation_record_waiver) before proceeding - a waiver is always an
+#   explicit captain act, never an implicit consequence of --force.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -286,6 +296,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-preservation-lib.sh
+. "$SCRIPT_DIR/fm-preservation-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -293,11 +305,20 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+PRESERVATION_WAIVER=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --preservation-waived-by-captain)
+      shift
+      [ "$#" -gt 0 ] || {
+        echo "error: --preservation-waived-by-captain requires the captain's verbatim words as its value" >&2
+        exit 2
+      }
+      PRESERVATION_WAIVER=$1
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -3183,6 +3204,39 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+# AgentLab evidence-preservation gate
+# (docs/evidence-preservation-lifecycle.md in yagakeerthikiran/agentlab-shared-memory
+# is the canonical contract; bin/fm-preservation-lib.sh is the mechanical
+# enforcement). Runs after every landed/dirty-work refusal above has passed (or
+# --force skipped them) and BEFORE the backlog transition and any destructive
+# step below. --force does NOT reach this gate: it authorizes discarding this
+# task's unlanded local work, never skipping proof that a final recovery
+# checkpoint was preserved and pushed. The only bypass is
+# --preservation-waived-by-captain, which records the captain's own verbatim
+# words as an auditable waiver receipt before proceeding, so waiving
+# preservation is always an explicit captain act.
+# Ship, scout, and local secondmate teardown all reach this point; a remote
+# secondmate retires through remote_secondmate_teardown_locked above and is out
+# of scope for this pass.
+case "$KIND" in
+  ship | scout | secondmate)
+    if [ -n "$PRESERVATION_WAIVER" ]; then
+      fm_preservation_record_waiver "$STATE" "$ID" "$PRESERVATION_WAIVER" || {
+        echo "error: could not record the captain's preservation waiver for $ID; nothing was changed" >&2
+        exit 1
+      }
+    else
+      PRESERVATION_WT=
+      [ "$KIND" != ship ] || PRESERVATION_WT=$WT
+      if ! fm_preservation_verify "$STATE" "$ID" final "$PRESERVATION_WT"; then
+        echo "$FM_PRESERVATION_VERIFY_ERROR" >&2
+        echo "Publish a final AgentLab checkpoint and record its receipt with bin/fm-preservation-record.sh, then retry; or get the captain's explicit words and retry with --preservation-waived-by-captain \"<verbatim words>\"." >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)

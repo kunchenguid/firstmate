@@ -15,6 +15,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
@@ -25,6 +27,17 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
+
+# preservation_ok <home> <id> <kind> [<worktree>]: pre-satisfies the AgentLab
+# preservation gate (bin/fm-preservation-lib.sh) for a $TEARDOWN/$PROMOTE call
+# in this suite, so that gate is not a confounding variable for cases that are
+# really about public-followup obligation resolution. Pass <worktree> to match
+# a kind=ship final check's app-head requirement.
+preservation_ok() {
+  local home=$1 id=$2 kind=$3 wt=${4:-} head=
+  [ -z "$wt" ] || head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+  fm_test_preservation_satisfy "$home/state" "$id" "$home/agentlab-fixture" "$kind" "$head"
+}
 PF_TEST_NOW=1787539200
 PF_TEST_LOCK_HOLDER=
 
@@ -927,10 +940,12 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
+  preservation_ok "$child" work-clean final "$child/projects/worktree"
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent_alias" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$child/agentlab-fixture/src" \
     "$TEARDOWN" work-clean 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a resolved parent with no owed commitment must allow cleanup (rc=$rc): $out"
   assert_not_contains "$out" "cannot resolve the primary home" \
@@ -1091,10 +1106,12 @@ SH
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
+  preservation_ok "$home" work-disabled final "$home/projects/worktree"
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$home/agentlab-fixture/src" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled unmarked teardown must not refuse public-followup cleanup (rc=$rc): $out"
   [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi: $(tr '\n' ';' < "$tasks_log")"
@@ -1127,11 +1144,13 @@ SH
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
+  preservation_ok "$child" work-disabled final "$child/projects/worktree"
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_CONFIG_OVERRIDE="$child/config" \
     FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" FAKE_TASKS_AXI_LOG="$tasks_log" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$child/agentlab-fixture/src" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled parent must allow marked-child teardown (rc=$rc): $out"
   [ ! -s "$tasks_log" ] || fail "relay-disabled parent must not invoke tasks-axi for a marked child"
@@ -1264,10 +1283,12 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   emit_terminal "$home" "$home" pf-guard main ship-task >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-guard >/dev/null || fail "delivery failed"
+  preservation_ok "$home" ship-task final
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-task >/dev/null 2>&1 || rc=$?
+    FM_CONFIG_OVERRIDE="$home/config" FM_PRESERVATION_AGENTLAB_ROOT="$home/agentlab-fixture/src" \
+    "$TEARDOWN" ship-task >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "cleanup must proceed once the public reply has landed (rc=$rc)"
   pass "cleanup refuses while a public reply is owed and proceeds once it has landed"
 }
@@ -1506,8 +1527,10 @@ test_dropped_baton_now_surfaces_open_loop() {
   grep -q 'request=req-pirearm' "$TMP_ROOT/pending.out" \
     || fail "the open-loop line must name the original request"
 
+  preservation_ok "$child" pi-rearm-loop-fix-r1 final "$child"
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" FAKE_CURL_LOG="$log" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$child/agentlab-fixture/src" \
     "$TEARDOWN" pi-rearm-loop-fix-r1 > "$TMP_ROOT/td.out" 2>&1 || true
   case "$(cat "$TMP_ROOT/td.out")" in
     *"still owes a public reply"*) fail "teardown unexpectedly guarded the unregistered follow-on" ;;
@@ -2129,10 +2152,12 @@ test_retention_creates_no_false_teardown_refusal() {
     || fail "guard-work must pass for the work whose reply already landed"
   assert_present "$home/state/public-followup/registry/pf-retain" \
     "the delivered registration must still be present"
+  preservation_ok "$home" ship-retain final
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-retain \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PRESERVATION_AGENTLAB_ROOT="$home/agentlab-fixture/src" \
+    "$TEARDOWN" ship-retain \
     > "$home/td.out" 2> "$home/td.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "teardown must proceed with a retained delivered registration (rc=$rc)"
   case "$(cat "$home/td.err")" in
@@ -2282,10 +2307,12 @@ test_x_request_teardown_warns_when_final_unposted() {
     "mode=local-only" \
     "spawn_gen=public-followup-legacy-link" \
     "x_request=req-legacy-final"
+  preservation_ok "$home" linked-task final
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" linked-task \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PRESERVATION_AGENTLAB_ROOT="$home/agentlab-fixture/src" \
+    "$TEARDOWN" linked-task \
     > "$home/td.out" 2> "$home/td.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "legacy-link warning must not block teardown (rc=$rc)"
   assert_grep "still carries an unreconciled Relay request link (req-legacy-final) on its task record" "$home/td.err" \
@@ -2317,8 +2344,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   fm_write_meta "$child/state/promote-conflict.meta" \
     "window=firstmate:fm-promote-conflict" "kind=scout"
   write_promotion_brief "$child" promote-conflict
+  preservation_ok "$child" promote-conflict initial
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$child/agentlab-fixture/src" \
     "$PROMOTE" promote-conflict --mode local-only --yolo off 2>&1) \
     || fail "promotion must not block on conflicting parent bindings: $out"
   assert_contains "$out" "promoted promote-conflict to ship" \
@@ -2332,8 +2361,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   fm_write_meta "$child/state/promote-legacy.meta" \
     "window=firstmate:fm-promote-legacy" "kind=scout"
   write_promotion_brief "$child" promote-legacy
+  preservation_ok "$child" promote-legacy initial
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$child/agentlab-fixture/src" \
     "$PROMOTE" promote-legacy --mode local-only --yolo off 2>&1) \
     || fail "legacy parent recovery must not block promotion: $out"
   assert_contains "$out" "next: FM_HOME=" \
@@ -2349,8 +2380,10 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   fm_write_meta "$remote_child/state/promote-remote.meta" \
     "window=firstmate:fm-promote-remote" "kind=scout"
   write_promotion_brief "$remote_child" promote-remote
+  preservation_ok "$remote_child" promote-remote initial
   out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
     FM_STATE_OVERRIDE="$remote_child/state" \
+    FM_PRESERVATION_AGENTLAB_ROOT="$remote_child/agentlab-fixture/src" \
     "$PROMOTE" promote-remote --mode local-only --yolo off 2>&1) \
     || fail "a remote parent route must not block promotion: $out"
   assert_contains "$out" "promoted promote-remote to ship" \
