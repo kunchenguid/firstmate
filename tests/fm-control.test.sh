@@ -799,7 +799,7 @@ test_muse_interrupt_preserves_fresh_input() {
   # The composer holds fresh typed input, not the restored prompt: the clear
   # must be skipped so the captain's text survives the interrupt.
   printf 'transcript row\n\342\235\257 fresh captain typing\n' > "$dir/fake/pane"
-  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=0 run_control "$dir" t1 interrupt); rc=$?
+  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "the interrupt itself was delivered, so the verb still succeeds"$'\n'"$out"
   [ "$(keys_sent "$dir")" = "Escape" ] \
     || fail "fresh composer input must never be cleared, got keys: $(keys_sent "$dir")"
