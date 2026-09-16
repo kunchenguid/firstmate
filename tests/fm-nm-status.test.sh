@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# fm-nm-status.test.sh - the panel reads a run's rework count from the daemon's
+# step_rounds record and never presents the run id as a round number.
+set -u
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+command -v sqlite3 >/dev/null 2>&1 || { echo 'skip: sqlite3 not found'; exit 0; }
+
+TMP=$(fm_test_tmproot fm-nm-status) || fail 'could not create a fixture root'
+FAKEBIN=$(fm_fakebin "$TMP")
+NM_HOME="$TMP/nm"
+mkdir -p "$NM_HOME"
+
+# The fake daemon answers `axi status [--run ID]` with the TOON shape the panel
+# parses; the run id is whatever --run named so one fake serves every case.
+cat > "$FAKEBIN/no-mistakes" <<'FAKE'
+#!/usr/bin/env bash
+id=RUNNONE
+status=running
+while [ $# -gt 0 ]; do
+  case "$1" in --run) id=$2; shift ;; esac
+  shift
+done
+case "$id" in RUNPASSED) status=completed ;; esac
+cat <<TOON
+run:
+  id: "$id"
+  branch: fm/demo
+  status: $status
+  head: abc12345
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,3
+    rebase,completed,0,3510
+    review,completed,0,1436878
+    test,completed,0,1000
+    document,completed,0,1000
+    lint,completed,0,1000
+    push,completed,0,1000
+    pr,completed,0,1000
+    ci,completed,0,1000
+TOON
+FAKE
+chmod +x "$FAKEBIN/no-mistakes"
+
+# Only the columns the panel's query touches; the real schema has many more.
+sqlite3 "$NM_HOME/state.sqlite" <<'SQL'
+CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL);
+CREATE TABLE step_rounds (id TEXT PRIMARY KEY, step_result_id TEXT NOT NULL, round INTEGER NOT NULL, trigger_type TEXT NOT NULL);
+INSERT INTO step_results VALUES ('s-none-review', 'RUNNONE', 'review');
+INSERT INTO step_rounds VALUES ('r-none-1', 's-none-review', 1, 'initial');
+INSERT INTO step_results VALUES ('s-many-review', 'RUNMANY', 'review');
+INSERT INTO step_results VALUES ('s-many-test', 'RUNMANY', 'test');
+INSERT INTO step_rounds VALUES ('r-many-1', 's-many-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-many-2', 's-many-review', 2, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-many-3', 's-many-review', 3, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-many-4', 's-many-review', 4, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-many-5', 's-many-review', 5, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-many-t1', 's-many-test', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-many-t2', 's-many-test', 2, 'auto_fix');
+INSERT INTO step_results VALUES ('s-passed-review', 'RUNPASSED', 'review');
+INSERT INTO step_rounds VALUES ('r-passed-1', 's-passed-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-passed-2', 's-passed-review', 2, 'auto_fix');
+SQL
+
+panel() {
+  PATH="$FAKEBIN:$PATH" COLUMNS=80 NO_COLOR=1 TERM=dumb NM_HOME="$NM_HOME" \
+    bash "$ROOT/bin/fm-nm-status.sh" "$@" 2>&1
+}
+
+OUT=$(panel --run RUNNONE); CODE=$?
+expect_code 0 "$CODE" 'panel with no rework'
+assert_contains "$OUT" '运行编号  RUNNONE' 'run id is labelled as the run number'
+assert_contains "$OUT" '未返工' 'a run with only initial rounds reads as not reworked'
+assert_not_contains "$OUT" '轮' 'no round wording survives'
+
+OUT=$(panel --run RUNMANY); CODE=$?
+expect_code 0 "$CODE" 'panel with rework across two steps'
+assert_contains "$OUT" '返工 5 次' 'rework sums non-initial rounds over every step'
+assert_not_contains "$OUT" '第 ' 'the run is not numbered as a round'
+
+OUT=$(panel --run RUNPASSED); CODE=$?
+expect_code 0 "$CODE" 'panel for a passed run'
+assert_contains "$OUT" '✓ 验收通过' 'passed status still renders'
+assert_contains "$OUT" '返工 1 次' 'a passed run keeps its rework count'
+
+OUT=$(NM_HOME="$TMP/empty" panel --run RUNMANY); CODE=$?
+expect_code 0 "$CODE" 'panel with an unreadable record keeps rendering'
+assert_contains "$OUT" '返工次数不可读' 'an unreadable record is reported, not shown as zero'
+assert_contains "$OUT" '09  远端验证' 'the step table still renders after the failed read'
+assert_not_contains "$OUT" '未返工' 'an unreadable record never reads as no rework'
+
+OUT=$(panel --help)
+assert_contains "$OUT" '返工次数' 'help explains the rework count'
+assert_not_contains "$OUT" '轮次' 'help drops the old round wording'
+
+pass 'fm-nm-status reads rework count from step_rounds and labels the run id separately'
