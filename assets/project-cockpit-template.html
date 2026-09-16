@@ -276,11 +276,11 @@ __FM_PROJECT_COCKPIT_DATA__
     const filteredProjects = () => {
       return state.payload.projects.filter((project) => filteredTasks(project).length > 0);
     };
-    const reconcileVisibleSelection = () => {
+    const reconcileVisibleSelection = (preserveEmptyTask = false) => {
       const projects = filteredProjects();
       if (!projects.some((project) => project.id === state.projectId)) state.projectId = projects[0]?.id || null;
       const tasks = currentProject() ? filteredTasks(currentProject()) : [];
-      if (!tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = tasks[0] ? taskKey(tasks[0]) : null;
+      if (!tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = preserveEmptyTask ? null : (tasks[0] ? taskKey(tasks[0]) : null);
     };
     const warningText = () => {
       const inventory = state.payload.inventory;
@@ -527,18 +527,22 @@ __FM_PROJECT_COCKPIT_DATA__
       const focusedProject = document.activeElement?.dataset?.projectId || null;
       const focusedTask = document.activeElement?.dataset?.taskKey || null;
       const payload = validatePayload(next);
+      const invalidatedUnproven = previous?.identity_scope === "snapshot";
       state.payloadInstance += 1;
       state.payload = payload;
       state.taskKey = previousKey;
-      reconcileVisibleSelection();
+      reconcileVisibleSelection(invalidatedUnproven);
       renderAll();
-      const focusTarget = focusedTask
-        ? [...byId("project-board").querySelectorAll("button.task-button")].find((button) => button.dataset.taskKey === focusedTask)
-        : focusedProject
-          ? [...byId("project-list").querySelectorAll("button.project-button")].find((button) => button.dataset.projectId === focusedProject)
-          : null;
+      const projectTarget = byId("project-list").querySelector('[aria-current="true"]');
+      const focusTarget = invalidatedUnproven
+        ? projectTarget
+        : focusedTask
+          ? [...byId("project-board").querySelectorAll("button.task-button")].find((button) => button.dataset.taskKey === focusedTask)
+          : focusedProject
+            ? [...byId("project-list").querySelectorAll("button.project-button")].find((button) => button.dataset.projectId === focusedProject)
+            : null;
       if (focusTarget) focusTarget.focus();
-      else if (focusedTask) byId("project-list").querySelector('[aria-current="true"]')?.focus();
+      else if (focusedTask) projectTarget?.focus();
       const current = currentTask();
       if (previous && current && previousKey === state.taskKey && (previous.state !== current.state || previous.gate.label !== current.gate.label)) byId("task-detail").classList.add("changed");
       announce("Project Cockpit snapshot updated");

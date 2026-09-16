@@ -230,8 +230,7 @@ EOF
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship" \
-    "spawn_gen=gen-active-hold"
+    "mode=ship"
   child_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" active-hold)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" active-hold busy --gen "$child_gen" \
     --source claude-hook --event user-prompt-submit
@@ -239,7 +238,7 @@ EOF
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-15T12:00:00Z \
     "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
-    ([.active_children[] | select(.id == "active-hold")] | length) == 1
+    ([.active_children[] | select(.id == "active-hold" and .spawn_gen == null)] | length) == 1
     and ([.queued[] | select(.id == "active-hold")][0]
       | .report_path == "data/active-hold/report.md" and .report_present == true)
     and ([.queued[] | select(.id == "missing-hold")][0]

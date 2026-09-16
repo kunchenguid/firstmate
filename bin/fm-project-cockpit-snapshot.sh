@@ -449,9 +449,7 @@ jq \
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
        | secondmate_current_records($mate) as $current_record
-       | (if (($current_record.spawn_gen // null) | ident) == null then null
-          else ([ $mate.queued[]? | select(.id == $current_record.id and .hold_bucket != null) ][0] // null)
-          end) as $held_record
+       | ([ $mate.queued[]? | select(.id == $current_record.id and .hold_bucket != null) ][0] // null) as $held_record
        | secondmate_active_hold_projection($mate; $current_record; $held_record; $now)
        | . + {_identity:("secondmate:" + .id),_priority:1} ]) as $secondmate_active
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate

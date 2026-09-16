@@ -289,13 +289,20 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
       and ([.projects[].tasks[]][0]
         | .spawn_gen == "child-gen-b" and .state == "blocked" and .lane == "waiting")' "$replacement" >/dev/null \
     || fail "replacement endpoint generation did not supersede the stale working child row"
-  jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
+  jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)
+      | .secondmate_current.records[0].queued=[{
+          id:"child",title:"Remote child",repo:"omega",kind:"ship",captain_actionable:true,
+          hold_bucket:"live",hold_reason:"Choose recovery route",hold_age_days:4,
+          unresolved_blocker_ids:[],report_path:"data/child/report.md",report_present:true
+        }]' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven"
   jq -e '.projects[0].tasks[0]
       | .spawn_gen == null and .identity_scope == "snapshot"
         and .state == "unknown" and .state_source == "generation-unavailable"
-        and .observed_at == null and .started_at == null and .elapsed_seconds == null' "$unproven" >/dev/null \
-    || fail "unproven secondmate generation retained mutable child evidence"
+        and .observed_at == null and .started_at == null and .elapsed_seconds == null
+        and .hold == {classification:"live",actionable:true,question:"Choose recovery route",age_days:4,until:null,evidence:"structured backlog hold"}
+        and .artifacts.report == {status:"available",path:"data/child/report.md"}' "$unproven" >/dev/null \
+    || fail "unproven secondmate generation lost canonical hold evidence or retained mutable child evidence"
   jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven_same_a"
   jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)
