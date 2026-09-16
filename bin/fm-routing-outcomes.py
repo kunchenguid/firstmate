@@ -487,7 +487,7 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
     for row in latest.values():
         message = row["message"]
         usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
-        model_row = token_row(message.get("model"), "anthropic", usage, {
+        model_row = token_row(message.get("model"), None, usage, {
             "input": "input_tokens", "output": "output_tokens",
             "cache_read": "cache_read_input_tokens", "cache_write": "cache_creation_input_tokens",
         }, service_tier=usage.get("service_tier"))
@@ -502,7 +502,7 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
         "requested_model_receipt": source.get("requested_model"),
         "selected_effort_receipt": source.get("requested_effort"),
         "effective_model": one_observed((row["message"].get("model") for row in latest.values()), "effective model", "native Claude session"),
-        "effective_effort": None, "provider": "anthropic", "api": "claude-code",
+        "effective_effort": None, "provider": None, "api": "claude-code",
         "models": models, "tokens": total_tokens(models),
         "first_native_at": min(timestamps) if timestamps else None,
         "last_native_at": max(timestamps) if timestamps else None,
@@ -518,6 +518,8 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
     effective_model = None
     effective_effort = None
     pending_model = None
+    selected_routes: set[tuple[str, Any]] = set()
+    ambiguous_selection = False
     log_digest = None
     if source.get("native_log_path") is not None:
         log, log_digest = read_private(source.get("native_log_path"), "native_receipt.native_log_path")
@@ -531,12 +533,13 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
                 model_key = re.sub(r"[^a-z0-9]+", "-", pending_model.lower()).strip("-")
                 label_keys, label_effort = agy_model_label(label.group(1))
                 if model_key in label_keys:
-                    effective_model = pending_model
-                    effective_effort = label_effort
+                    selected_routes.add((pending_model, label_effort))
                 else:
-                    effective_model = None
-                    effective_effort = None
+                    ambiguous_selection = True
                 pending_model = None
+    if len(selected_routes) == 1 and not ambiguous_selection:
+        effective_model, effective_effort = next(iter(selected_routes))
+    measurement_scope = "whole-session" if len(selected_routes) > 1 else "attempt-route"
     model_row = token_row(effective_model, "google", usage, {
         "input": "input_tokens", "output": "output_tokens", "cache_read": "cache_read_tokens",
         "reasoning": "thinking_tokens", "total": "total_tokens",
@@ -551,12 +554,16 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
         "requested_model_receipt": source.get("requested_model"),
         "selected_effort_receipt": source.get("requested_effort"),
         "effective_model": effective_model, "effective_effort": effective_effort,
+        "selected_routes": [{"model": model, "effort": effort}
+                            for model, effort in sorted(
+                                selected_routes, key=lambda item: (item[0], item[1] or ""))],
+        "measurement_scope": measurement_scope,
         "provider": "google", "api": "agy",
         "models": [model_row], "tokens": total_tokens([model_row]),
         "first_native_at": None, "last_native_at": None,
         "native_duration_ms": duration * 1000 if isinstance(duration, (int, float)) else None,
         "native_reported_cost_usd": None,
-        "completeness": {"request_payload": "selected-model-log" if log_digest else "unavailable", "usage": usage_completeness([model_row], ("input", "output", "cache_read", "reasoning", "total")), "effort": "native-model-label" if effective_effort else "requested-only", "attribution": "manifest-plus-conversation"},
+        "completeness": {"request_payload": "selected-model-log" if log_digest else "unavailable", "usage": usage_completeness([model_row], ("input", "output", "cache_read", "reasoning", "total")), "effort": "whole-session" if measurement_scope == "whole-session" else ("native-model-label" if effective_effort else "requested-only"), "attribution": "manifest-plus-conversation"},
     }
 
 
@@ -1131,15 +1138,21 @@ def native_model_identities(record: dict[str, Any]) -> set[tuple[str, str]]:
 
 def route_name(record: dict[str, Any]) -> str:
     route = record["route"]
+    selected_routes = record["native"].get("selected_routes") or []
     identities = native_model_identities(record)
-    if len(identities) > 1:
+    if record["native"].get("measurement_scope") == "whole-session" and selected_routes:
+        names = sorted(f"{item['model']}@{item.get('effort') or 'unknown'}"
+                       for item in selected_routes)
+        effective_model = f"whole-session-multi-route:{'+'.join(names)}"
+    elif len(identities) > 1:
         providers = {provider for provider, _model in identities}
         names = sorted(model if len(providers) == 1 else f"{provider}:{model}"
                        for provider, model in identities)
         effective_model = f"whole-session-multi-model:{'+'.join(names)}"
     else:
         effective_model = record["native"].get("effective_model") or f"requested-only:{route['requested_model']}"
-    effective_effort = record["native"].get("effective_effort") or f"requested-only:{route['requested_effort']}"
+    effective_effort = ("whole-session" if record["native"].get("measurement_scope") == "whole-session"
+                        else record["native"].get("effective_effort") or f"requested-only:{route['requested_effort']}")
     return (f"{route['harness']}/{route['provider']}/{effective_model}/{effective_effort} "
             f"[auth={route['auth_category']}, context={route['context_tier']}, service={route['service_tier']}]")
 
@@ -1157,7 +1170,9 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             "auth_category": items[0]["route"]["auth_category"],
             "context_tier": items[0]["route"]["context_tier"],
             "service_tier": items[0]["route"]["service_tier"],
-            "measurement_scope": "whole-session" if any(len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
+            "measurement_scope": "whole-session" if any(
+                item["native"].get("measurement_scope") == "whole-session"
+                or len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
             "efficiency_scope": "execution-only-partial",
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},

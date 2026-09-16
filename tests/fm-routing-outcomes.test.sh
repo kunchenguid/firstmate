@@ -722,6 +722,35 @@ class RoutingOutcomesTest(unittest.TestCase):
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("mixed or incomplete effective model", json.loads(result.stdout)["error"])
 
+    def test_claude_session_provider_and_quota_binding_remain_unknown(self):
+        receipt = self.dir / "claude-session-provider.jsonl"
+        receipt.write_text(json.dumps({
+            "type": "assistant", "sessionId": "session-provider", "uuid": "one",
+            "timestamp": "2030-01-01T00:00:01Z",
+            "message": {"id": "one", "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 1, "output_tokens": 1}},
+        }) + "\n", encoding="utf-8")
+        self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z",
+                         provider="anthropic")
+        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z",
+                         provider="anthropic", generated_at="2030-01-01T00:02:00Z")
+        manifest = self.manifest(receipt={"kind": "claude-session", "path": str(receipt),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"}, outcome="unresolved")
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5",
+                                  "requested_effort": "high"})
+        manifest["quota"]["provider"] = "anthropic"
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        self.import_manifest(manifest)
+        record = self.latest_record()
+        self.assertIsNone(record["native"]["provider"])
+        self.assertIsNone(record["native"]["models"][0]["provider"])
+        self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
+        self.assertIsNone(
+            record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"])
+
     def test_agy_native_model_label_proves_effective_variant(self):
         receipt = self.dir / "agy.json"
         log = self.dir / "agy.log"
@@ -839,6 +868,46 @@ class RoutingOutcomesTest(unittest.TestCase):
         native = self.latest_record()["native"]
         self.assertIsNone(native["effective_model"])
         self.assertIsNone(native["effective_effort"])
+
+    def test_agy_multi_route_conversation_is_whole_session(self):
+        receipt = self.dir / "agy-multi-route.json"
+        log = self.dir / "agy-multi-route.log"
+        self.write_json(receipt, {"conversation_id": "agy-multi", "duration_seconds": 1,
+                                  "num_turns": 2,
+                                  "usage": {"input_tokens": 2, "output_tokens": 1,
+                                            "thinking_tokens": 0, "cache_read_tokens": 0,
+                                            "total_tokens": 3}})
+        log.write_text(
+            "Resolving model gemini-a\n"
+            "Propagating selected model override to backend: label=\"Gemini A (Medium)\"\n"
+            "Resolving model gemini-b\n"
+            "Propagating selected model override to backend: label=\"Gemini B (High)\"\n",
+            encoding="utf-8")
+        manifest = self.manifest(receipt={"kind": "agy-result", "path": str(receipt),
+                                         "native_log_path": str(log),
+                                         "requested_model": "gemini-b",
+                                         "requested_effort": "high"}, outcome="unresolved")
+        manifest["route"].update({"harness": "agy", "provider": "google",
+                                  "auth_category": "oauth", "requested_model": "gemini-b",
+                                  "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="agy")
+        self.import_manifest(manifest)
+        native = self.latest_record()["native"]
+        self.assertIsNone(native["effective_model"])
+        self.assertIsNone(native["effective_effort"])
+        self.assertIsNone(native["models"][0]["model"])
+        self.assertEqual(native["selected_routes"], [
+            {"model": "gemini-a", "effort": "medium"},
+            {"model": "gemini-b", "effort": "high"},
+        ])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(score["routes"][0]["measurement_scope"], "whole-session")
+        self.assertIn("whole-session-multi-route:gemini-a@medium+gemini-b@high",
+                      score["routes"][0]["route"])
+        self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 2)
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"
