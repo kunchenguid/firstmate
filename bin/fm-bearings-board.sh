@@ -54,9 +54,10 @@
 # hidden is worse than a card wrongly shown. Cleanup is therefore a normal
 # rebuild effect rather than a committed migration or direct state mutation.
 #
-# CAPTAIN'S CALL CONTROLS. The effective payload applies board-control
-# normalization after stale-card filtering.
-# Contract owner: docs/captain-hold-lifecycle.md.
+# CAPTAIN'S CALL CONTROLS. After stale-card filtering, build appends Reconcile
+# to each decision card, then enables freeform when the final effective option
+# count exceeds one while preserving an explicit freeform opt-in.
+# Authority contract: docs/captain-hold-lifecycle.md.
 #
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
