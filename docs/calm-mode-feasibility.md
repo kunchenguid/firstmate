@@ -745,11 +745,12 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ✻ Sautéed for 8s · done 11:07 AM
 ```
 
-## 2026-09-15 OMP 18.2.0 global plugin-link verification
+## 2026-09-16 OMP 18.2.0 standalone global plugin verification
 
-The OMP Calm extension ships as the `extensions/fm-calm-omp` package and installs through `omp plugin link`, which symlinks the package into `~/.omp/plugins/node_modules/fm-calm-omp` and records it enabled in `omp-plugins.lock.json`; its `package.json` `omp.extensions` entry then loads in every omp session regardless of working directory.
-OMP de-duplicates extension entries by resolved absolute path rather than realpath (the `runtime-backends.md` extension-loading row records the same `-e` plus auto-discovery double-load), so the package deliberately lives outside `.omp/extensions/` and the installer retires the legacy project-local copy.
-Verified on this host with OMP 18.2.0: `bin/fm-omp-calm-install.sh` linked the package, `omp plugin list` and `omp plugin doctor` reported `fm-calm-omp@0.1.0` healthy, and `omp -p "/calm-omp"` in a directory outside any firstmate checkout executed the registered command locally with no model call, while an unknown command in the same session reached the model.
+The OMP Calm extension ships as the self-contained `extensions/fm-calm-omp` package (including `lib/fm-calm-working-ship.ts`).
+`bin/fm-omp-calm-install.sh` copies it to `~/.local/share/fm-calm-omp` and runs `omp plugin link`, which symlinks that copy into `~/.omp/plugins/node_modules/fm-calm-omp` and records it enabled in `omp-plugins.lock.json`; its `package.json` `omp.extensions` entry then loads in every omp session regardless of working directory.
+OMP de-duplicates extension entries by resolved absolute path rather than realpath, so the package deliberately lives outside `.omp/extensions/` and the installer retires the legacy project-local copy.
+Verified on this host with OMP 18.2.0: `omp plugin doctor` reported `fm-calm-omp@0.1.0` healthy with no orphan warnings.
 
 ```text
 $ tests/fm-omp-calm-install.test.sh
@@ -757,5 +758,7 @@ ok - install links package into user plugin scope
 ok - reinstall is idempotent
 ok - identical legacy copy removed
 ok - divergent legacy copy preserved as .bak
+ok - failed legacy retirement aborts before linking
+ok - failed legacy removal aborts before linking
 ok - manifest entry resolves through link
 ```

@@ -1,7 +1,7 @@
 # Calm mode
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
-It is fully supported on Pi, available on OMP through a linked user-scope plugin, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the sections below describe.
+It is fully supported on Pi, available on OMP through a standalone user-scope plugin, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the sections below describe.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on Pi and Claude Code through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns; on OMP the command delegates to OMP's own persisted display setting instead.
 
 ## Pi
