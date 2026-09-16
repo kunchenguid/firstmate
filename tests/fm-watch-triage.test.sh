@@ -788,15 +788,6 @@ write_covered_outcome_index() {  # <state> <task> <seq>
 }
 
 
-prime_status_seen() {  # <status-file>
-  local f=$1 base
-  base=$(basename "$f")
-  base=${base//./_}
-  printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
-}
-
-
-
 # Wait until the watcher records an absorbed wake matching <needle> in its triage
 # log. 1 if the watcher exits first (i.e. it surfaced the wake instead), which is
 # exactly the unfixed behavior this case exists to catch. Polls the log rather
@@ -5098,7 +5089,7 @@ test_turn_ended_outcome_covered_absorbed() {
   printf 'done: PR https://example.test/pr/9 checks green\n' > "$state/covered.status"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/covered.meta"
   write_covered_outcome_index "$state" covered 7
-  prime_status_seen "$state/covered.status"
+  prime_status_seen "$state" "$state/covered.status"
   : > "$state/covered.turn-ended"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
@@ -5151,7 +5142,7 @@ test_turn_ended_outcome_covered_absent_index_surfaces() {
   window="test:fm-noindex"
   printf 'done: ready\n' > "$state/noindex.status"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/noindex.meta"
-  prime_status_seen "$state/noindex.status"
+  prime_status_seen "$state" "$state/noindex.status"
   : > "$state/noindex.turn-ended"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
@@ -5174,7 +5165,7 @@ test_turn_ended_outcome_covered_ident_mismatch_surfaces() {
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/badident.meta"
   size=$(LC_ALL=C stat -c '%s' "$state/badident.status")
   printf 'fm-branch-outcome-index-v1\t4\t%s\tweak:0:0\n' "$size" > "$state/.badident.branch-outcome-index"
-  prime_status_seen "$state/badident.status"
+  prime_status_seen "$state" "$state/badident.status"
   : > "$state/badident.turn-ended"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
@@ -5196,7 +5187,7 @@ test_turn_ended_outcome_covered_bound_expires() {
   printf 'done: ready\n' > "$state/bound.status"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/bound.meta"
   write_covered_outcome_index "$state" bound 2
-  prime_status_seen "$state/bound.status"
+  prime_status_seen "$state" "$state/bound.status"
   : > "$state/bound.turn-ended"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   echo $(( $(date +%s) - 50 )) > "$state/.turnend-covered-since-$key"
@@ -5248,7 +5239,7 @@ test_turn_ended_outcome_covered_e2e_zero_turn_and_first_sights() {
   printf 'done: PR https://example.test/pr/11 checks green\n' > "$state/e2e.status"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/e2e.meta"
   write_covered_outcome_index "$state" e2e 9
-  prime_status_seen "$state/e2e.status"
+  prime_status_seen "$state" "$state/e2e.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   # N covered turn-ends with unchanged status: queue stays empty.
@@ -5402,7 +5393,7 @@ test_turn_ended_outcome_covered_post_steer_stop_surfaces() {
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/steered.meta"
   write_covered_outcome_index "$state" steered 7
   backdate_path "$state/.steered.branch-outcome-index"
-  prime_status_seen "$state/steered.status"
+  prime_status_seen "$state" "$state/steered.status"
   record_acked_steer "$state" steered
   : > "$state/steered.turn-ended"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
@@ -5623,7 +5614,7 @@ test_turn_ended_outcome_covered_unhandled_steer_surfaces() {
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/unhandledsteer.meta"
   write_covered_outcome_index "$state" unhandledsteer 11
   backdate_path "$state/.unhandledsteer.branch-outcome-index"
-  prime_status_seen "$state/unhandledsteer.status"
+  prime_status_seen "$state" "$state/unhandledsteer.status"
   mkdir -p "$state/unhandledsteer.inbox/handled"
   printf 'schema=fm-task-inbox.v1\nat=now\n--\nfix the failing CI check\n' \
     > "$state/unhandledsteer.inbox/001.msg"
