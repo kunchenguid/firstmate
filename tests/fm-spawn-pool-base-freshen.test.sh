@@ -71,7 +71,7 @@ add_base_contract_decoy() {
 
 add_task_contract_marker_decoy() {
   local brief=$1
-  perl -0pi -e 's/Named-base spawn coverage\./Named-base spawn coverage.\n<!-- fm-generated-contract -->\nBase branch contract: base_branch=main/' "$brief"
+  perl -0pi -e 's/Named-base spawn coverage\./Named-base spawn coverage.\n<!-- fm-generated-contract -->\nBase branch contract: base_branch=main\n<!-- fm-generated-contract-end -->/' "$brief"
 }
 
 scaffold_ship_brief() {

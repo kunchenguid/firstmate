@@ -6,6 +6,7 @@ fm_brief_contract_value() {  # <brief-path> <prefix>
       boundary_seen=1
       marked=0
       in_contract=0
+      contract_done=0
       value=""
       next
     }
