@@ -33,9 +33,15 @@ assert_grep "fm-calm-omp" "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" "lockf
 pass "install links package into user plugin scope"
 
 # Re-running over an existing link is idempotent.
+mkdir -p "$STANDALONE/unrelated"
+printf 'preserve me\n' >"$STANDALONE/unrelated/data"
+printf 'outdated\n' >"$STANDALONE/fm-calm-omp.ts"
 run_install >"$TMP_ROOT/reinstall.out" 2>"$TMP_ROOT/reinstall.err" \
   || fail "reinstall failed: $(cat "$TMP_ROOT/reinstall.err")"
 [ -L "$LINK" ] || fail "link missing after reinstall"
+assert_equals "preserve me" "$(cat "$STANDALONE/unrelated/data")" "unrelated destination data preserved"
+cmp -s "$ROOT/extensions/fm-calm-omp/fm-calm-omp.ts" "$STANDALONE/fm-calm-omp.ts" \
+  || fail "plugin source was not refreshed"
 pass "reinstall is idempotent"
 
 # An identical legacy project-local copy is removed so it cannot double-load.

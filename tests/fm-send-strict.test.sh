@@ -57,7 +57,11 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-ok\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -231,6 +235,144 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+# --- muse post-interrupt composer clear --------------------------------------
+#
+# muse restores the cancelled prompt into its composer after Escape, but only
+# when the composer was empty at cancel time: fresh typed input survives the
+# interrupt, so an unconditional C-c clobbers a message the captain was typing
+# when the interrupt landed. The clear is proof-gated on the composer's
+# extracted content being a suffix of the cancelled run's recorded started
+# prompt (bin/fm-busy-lib.sh); anything else skips the clear.
+
+# muse_clobber_fixture <dir> <home> <prompt>: a muse task on tmux whose bound
+# session log records one cancelled run carrying <prompt>. Echoes the composer
+# screen file the stub capture-pane serves.
+muse_clobber_fixture() {
+  local dir=$1 home=$2 prompt=$3 root log_dir log
+  root="$dir/muse-sessions"
+  log_dir="$root/$(date '+%Y/%m/%d')/session-uuid-1"
+  mkdir -p "$log_dir" "$dir/wt"
+  log="$log_dir/session.jsonl"
+  printf '{"schema_version":1,"payload_type":"runtime.session.metadata","payload":{"kind":"metadata","record":{"workspace_root":"%s"}}}\n' "$dir/wt" > "$log"
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":%s}}}\n' \
+    "$(printf '%s' "$prompt" | jq -Rsa .)" >> "$log"
+  printf '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}\n' >> "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=b1\n' "$root" "$dir/wt" \
+    > "$home/state/muse-clobber.muse-session"
+  fm_write_meta "$home/state/muse-clobber.meta" "window=sess:fm-muse-clobber" "kind=ship" "harness=muse"
+  printf '%s\n' "$dir/screen"
+}
+
+test_muse_interrupt_clears_the_restored_prompt() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-clear"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museclear); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" 'launch brief')
+  printf 'transcript row\n\xe2\x9d\xaf launch brief\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a proven restored prompt should still be cleared"
+  assert_contains "$(cat "$log")" "arg=C-c" "the restored prompt should be cleared after the interrupt"
+  pass "fm-send --key Escape: muse composer holding the restored prompt is cleared"
+}
+
+test_muse_interrupt_normalizes_multiline_prompt() {
+  local dir fb home log screen err rc sample expected
+  dir="$TMP_ROOT/muse-multiline"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home musemultiline); log="$dir/tmux.log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" $'first  line\n\n  second\tline')
+  for sample in 'first line second line' 'line second line' 'first linesecond line'; do
+    : > "$log"
+    printf 'transcript row\n\xe2\x9d\xaf %s\n' "$sample" > "$screen"
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+      "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+    expect_code 0 "$rc" "multiline prompt interrupt should be delivered"
+    assert_contains "$(cat "$log")" "arg=Escape" "the interrupt should be delivered"
+    expected="$(cat "$log")"
+    if [ "$sample" = 'first linesecond line' ]; then
+      assert_not_contains "$expected" "arg=C-c" "fresh joined words must not match a newline boundary"
+      assert_contains "$(cat "$err")" "left untouched" "fresh input should be preserved"
+    else
+      assert_contains "$expected" "arg=C-c" "multiline restored prompt or suffix should be cleared"
+    fi
+  done
+  pass "fm-send --key Escape: multiline prompt boundaries normalize without joining words"
+}
+
+test_muse_interrupt_preserves_fresh_input() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-clobber"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museclobber); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" 'launch brief')
+  printf 'transcript row\n\xe2\x9d\xaf FRESH captain typing\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the interrupt itself was delivered, so the send still succeeds"
+  assert_contains "$(cat "$log")" "arg=Escape" "the interrupt key should have been delivered"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "fresh composer input must never be cleared"
+  assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say why"
+  pass "fm-send --key Escape: muse composer holding fresh input survives the interrupt path"
+}
+
+test_muse_interrupt_skips_clear_when_unprovable() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-unprovable"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museunprovable); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  # No muse-session binding: the restored prompt cannot be proven, so the
+  # composer is left untouched even though it may hold a restored prompt.
+  fm_write_meta "$home/state/muse-clobber.meta" "window=sess:fm-muse-clobber" "kind=ship" "harness=muse"
+  screen="$dir/screen"
+  printf 'transcript row\n\xe2\x9d\xaf launch brief\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an unprovable restored prompt skips the clear without failing the delivered interrupt"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an unprovable composer must never be cleared"
+  assert_contains "$(cat "$err")" "cannot be proven" "the skipped clear should say why"
+  pass "fm-send --key Escape: muse composer is left untouched when the restored prompt cannot be proven"
+}
+
+test_muse_interrupt_empty_composer_needs_no_clear() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-empty"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museempty); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" 'launch brief')
+  printf 'transcript row\n\xe2\x9d\xaf\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an empty composer needs no clear"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an empty composer should not be cleared"
+  assert_not_contains "$(cat "$err")" "unreadable" "a provably empty composer skips the clear silently"
+  pass "fm-send --key Escape: an empty muse composer is left alone"
+}
+
+test_muse_interrupt_unreadable_composer_warns() {
+  local dir fb home log screen err rc
+  dir="$TMP_ROOT/muse-unreadable"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home museunreadable); log="$dir/tmux.log"; : > "$log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" 'launch brief')
+  # No provable composer shape anywhere in the capture, so the composer read
+  # fails for the whole poll: the clear must be skipped loudly, not silently.
+  printf 'transcript row\nplain scrollback with no composer shape\n' > "$screen"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+    "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an unreadable composer skips the clear without failing the delivered interrupt"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an unreadable composer must never be cleared"
+  assert_contains "$(cat "$err")" "unreadable" "the skipped clear should say the composer was unreadable"
+  assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say the composer was left untouched"
+  pass "fm-send --key Escape: an unreadable muse composer skips the clear with a warning"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -239,3 +381,9 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_muse_interrupt_clears_the_restored_prompt
+test_muse_interrupt_normalizes_multiline_prompt
+test_muse_interrupt_preserves_fresh_input
+test_muse_interrupt_skips_clear_when_unprovable
+test_muse_interrupt_empty_composer_needs_no_clear
+test_muse_interrupt_unreadable_composer_warns
