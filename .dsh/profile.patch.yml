@@ -11,7 +11,7 @@
 #
 # Which row carries that budget depends on the profile. Under dsh-web-app the
 # host `agent-instructions` row is disabled and every session is composed from
-# an agent preset, so the budget is the tracked `firstmate` preset's
+# an agent preset, so a new session's budget is the tracked `firstmate` preset's
 # (.dsh/agent-presets/firstmate), made the default below; raising the host row
 # there changes nothing. Profiles without agent presets (headless, sdk) render
 # with the host row, which is raised below for them.
@@ -27,7 +27,7 @@
 # DSH_PERMISSION_MODE and the locale are set at process start: a tool call
 # cannot set them, and hook subprocesses inherit whatever the host was given.
 # That wrapper also runs bin/fm-dsh-preflight.sh, which asserts this pin, the
-# budget of the row the session actually renders with, and that new sessions
+# budget of the row a new session renders with, and that new sessions
 # default to the danger-full-access permission preset and hooks run under the
 # danger-full-access sandbox mode, both of which permit ps - each of these
 # fails silently otherwise.

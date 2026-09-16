@@ -175,8 +175,8 @@ elif [ -n "$DUMP" ]; then
   OMIT_NOTE="over budget, DSH omits AGENTS.md whole and only the model sees its one-line budget marker"
   # Which row governs depends on the profile: where an enabled agent-presets
   # row exists (dsh-web-app), the host agent-instructions row is disabled and
-  # each session renders with its default preset's row, which no profile layer
-  # reaches; otherwise the host row governs.
+  # each new session renders with the default preset's row, which no profile
+  # layer reaches; otherwise the host row governs.
   ROW_SOURCE=
   ROW=
   PRESETS=$(printf '%s\n' "$DUMP" | entry_lines agent-presets)
