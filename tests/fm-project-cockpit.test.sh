@@ -256,6 +256,7 @@ test_stale_partial_invalid_empty_and_replacement_states() {
 test_nested_bounds_disclose_only_real_omissions() {
   local blockers_exact=$TMP_ROOT/blockers-exact.json blockers_over=$TMP_ROOT/blockers-over.json
   local decisions_exact=$TMP_ROOT/decisions-exact.json decisions_over=$TMP_ROOT/decisions-over.json
+  local endpoints_over=$TMP_ROOT/endpoints-over.json
   jq --argjson count 20 '
       (.tasks[] | select(.id == "healthy-work") | .backlog.unresolved_blocker_ids) =
         [range(0;$count) | ("blocker-" + tostring)]' "$FIXTURES/states.json" \
@@ -306,6 +307,31 @@ test_nested_bounds_disclose_only_real_omissions() {
   jq -e '.inventory.truncated == true
       and ([.projects[].tasks[] | select(.id == "bounded-mate:bounded-call")][0].decisions | length) == 20' "$decisions_over" >/dev/null \
     || fail "an over-limit decision list did not disclose its omitted item"
+  jq '
+      .tasks=[] | .backlog.records=[]
+      | .secondmate_current={
+          records:[{
+            id:"bounded-mate",home:"/fleet/mates/bounded",provenance:{selected:"structured-home"},
+            freshness:{observed_at:"2026-09-15T12:00:00Z"},
+            active_children:[range(0;20) | {
+              id:("working-" + tostring),spawn_gen:("gen-" + tostring),kind:"ship",
+              state:"working",repo:"bounded",name:("Working " + tostring),source:"structured-home"
+            }],
+            endpoints:[range(0;20) | {
+              id:("working-" + tostring),spawn_gen:("gen-" + tostring),kind:"ship",
+              state:"working",repo:"bounded",name:("Working " + tostring),source:"structured-home",
+              endpoint:{status:"alive"}
+            }],
+            decisions_open:[],queued:[],landed:[],
+            omitted:[{surface:"endpoints",count:1}]
+          }],total:1,shown:1,truncated:0
+        }' "$FIXTURES/empty.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$endpoints_over"
+  jq -e '.inventory.status == "partial"
+      and .inventory.truncated == true
+      and .inventory.partial_reasons == ["secondmate endpoints truncated"]
+      and ([.projects[].tasks[]] | length) == 20' "$endpoints_over" >/dev/null \
+    || fail "an omitted secondmate endpoint was not disclosed as partial and truncated"
   pass "nested evidence bounds disclose only genuine omissions"
 }
 

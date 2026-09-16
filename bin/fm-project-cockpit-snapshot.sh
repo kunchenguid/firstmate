@@ -178,6 +178,11 @@ jq \
     ($actionable == true or $state == "blocked" or $state == "failed");
   def blocked_evidence:
     (.state == "blocked" or .state == "failed" or .gate.status == "blocked" or (.blockers | length) > 0);
+  def cockpit_omission:
+    (.surface as $surface
+      | ["active_children","decisions_open","queued","endpoints","landed"]
+      | index($surface) != null)
+    and ((.count // 0) > 0);
   def source_age_at($parent_age):
     (.freshness.age_seconds // null) as $source_age
     | if ($source_age | type) == "number" and $source_age >= 0
@@ -489,7 +494,7 @@ jq \
         | ("secondmate " + (($mate.id | ident) // "unknown") + " authority stale ("
            + (($mate | source_age_at($age)) | floor | tostring) + "s)") | text(240)),
       (($snapshot.secondmate_current.records // [])[]?.omitted[]?
-        | select((.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0)
+        | select(cockpit_omission)
         | "secondmate " + .surface + " truncated"),
       (($snapshot.secondmate_landed.unreadable // [])[]? | "secondmate inventory unavailable"),
       (($snapshot.secondmate_landed.partial // [])[]? | "secondmate inventory partial"),
@@ -531,7 +536,7 @@ jq \
       age_seconds:$effective_age,
       stale_after_seconds:$stale_after,
       freshness:(if $age > $stale_after or $secondmate_stale then "stale" else "fresh" end),
-      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or $nested_truncated or (($snapshot.secondmate_current.truncated // 0) != 0) or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; (.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0))},
+      inventory:{status:$inventory_status,reason:(if $snapshot.main_inventory.valid != true then (($snapshot.main_inventory.reason // "invalid main inventory") | text(240)) else null end),partial_reasons:$partial_reasons,truncated:($combined_count > $max_total_tasks or ($project_ids | length) > $max_projects or $partial_reason_count > $max_partial_reasons or $nested_truncated or (($snapshot.secondmate_current.truncated // 0) != 0) or any($all_projects[]; .truncated) or any(($snapshot.secondmate_current.records // [])[]?.omitted[]?; cockpit_omission))},
       counts:{running:$running,waiting:$waiting,blocked:$blocked,attention:$attention},
       projects:$projects,
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1 because exact task attribution is not yet guaranteed."},
