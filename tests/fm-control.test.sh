@@ -391,16 +391,19 @@ test_harness_kind_capability() {
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
-  local dir out rc
+  local dir wt out rc
   dir=$(new_case orca-escape)
-  add_task "$dir" t1 claude ship orca "term-1"
-  # Orca records its endpoint as terminal=, which endpoint validation requires.
+  add_task "$dir" t1 claude ship orca "fm-t1"
+  wt=$(cat "$dir/fake/cwd")
+  # Orca records its endpoint as terminal= plus a uuid::path worktree id, which
+  # endpoint validation requires to match worktree= exactly.
   {
-    cat "$dir/home/state/t1.meta"
+    grep -v '^window=' "$dir/home/state/t1.meta"
+    echo "window=fm-t1"
     echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1"
+    echo "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$wt"
   } > "$dir/home/state/t1.meta.new"
-  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  mv "$dir/home/state/t1.meta.new" "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
