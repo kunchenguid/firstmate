@@ -773,7 +773,7 @@ test_muse_interrupt_clears_proven_restored_prompt() {
   # The pane shows the restored prompt in the composer: a transcript row
   # above a muse glyph row holding exactly the recorded prompt.
   printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
-  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=0 run_control "$dir" t1 interrupt); rc=$?
+  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "a proven restored prompt should still be cleared"$'\n'"$out"
   [ "$(keys_sent "$dir")" = "$(printf 'Escape\nC-u')" ] \
     || fail "the restored prompt should be cleared after the interrupt, got keys: $(keys_sent "$dir")"
