@@ -89,9 +89,15 @@ fi
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
+PR_POLL_PUBLISH_LOCK=
+PR_POLL_PUBLISH_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
+    PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -136,10 +142,18 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-fm_pr_poll_publish_prepared || {
+PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+PR_POLL_PUBLISH_LOCK_HELD=1
+if fm_pr_poll_publish_prepared; then
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
+else
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
-}
+fi
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
 # the exact merged-state poll. Registration is local and performs no forge read.
