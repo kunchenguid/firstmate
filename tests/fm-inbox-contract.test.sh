@@ -36,14 +36,6 @@ make_home() {  # <name> -> echoes a fresh fixture home path
 
 HOME_FIXTURE=$(make_home home-a)
 
-# An isolated operational home: state/ and data/ resolve through FM_HOME so
-# nothing here can reach the operator's real home.
-make_home() {  # <name> -> echoes a fresh fixture home path
-  local home="$TMP_ROOT/$1"
-  mkdir -p "$home/state" "$home/data"
-  printf '%s\n' "$home"
-}
-
 run_inbox() {  # <args...> -> stdout, exit code preserved in $?
   FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \
     FM_DATA_OVERRIDE="$HOME_FIXTURE/data" "$INBOX" "$@"

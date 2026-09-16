@@ -382,7 +382,8 @@ PY
 # ---------------------------------------------------------------- list / drain
 
 # Minimal JSON string escaping for note ids and outcome bodies. Bash cannot
-# hold NUL, so the remaining control characters cannot reach the text.
+# hold NUL; the remaining control characters cannot appear in valid JSON
+# strings, so they are stripped below.
 json_escape() {  # <text> -> escaped JSON string content
   local s=$1
   s=${s//\\/\\\\}
@@ -390,6 +391,7 @@ json_escape() {  # <text> -> escaped JSON string content
   s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}
   s=${s//$'\t'/\\t}
+  s=$(printf '%s' "$s" | tr -d '\001-\010\013\014\016-\037')
   printf '%s' "$s"
 }
 
