@@ -31,8 +31,8 @@ Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox a
 ## Instruction budget
 
 `dsh-agent-instructions` bounds the injected chain with `maxBytes`, which `dsh-base` ships as 65536.
-Firstmate's `AGENTS.md` is 81127 bytes, so the default silently drops sections 10 through 14 (Backlog contract, Crewmate briefs, Self-update, Agent-only reference skills, Relay) plus the captain-precedence and maintenance sections.
-The captain profile raises `maxBytes` to 262144.
+Firstmate's `AGENTS.md` is larger than that default, and the cut is silent and mid-section: measured with `head -c 65536 AGENTS.md`, it stops partway through §8 Supervision protocol, inside the away-mode and quiet-mode stub, so the rest of §8 (from the stuck-worker trigger on), §9 Escalation and captain etiquette, §10 through §14 (Backlog contract, Crewmate briefs, Self-update, Agent-only reference skills, Relay) and the captain-precedence and maintenance sections never reach the agent.
+The captain profile raises `maxBytes` to 262144, and `bin/fm-dsh-preflight.sh` compares the composed budget against the live size of `AGENTS.md` at every launch rather than trusting a recorded figure.
 
 ## Launch boundary
 

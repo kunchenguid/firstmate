@@ -2,9 +2,10 @@
 #
 # Mounts the Claude-dialect hook bridge (DSH implements that dialect, so
 # firstmate's existing hook scripts are reused with corrected matchers), raises
-# the instruction budget so firstmate's 81 KB AGENTS.md is injected whole, and
-# selects the sandbox mode this supervisor needs: firstmate's health model is
-# built on `ps` process inspection, which workspace-write denies.
+# the instruction budget so firstmate's AGENTS.md, larger than the default, is
+# injected whole, and selects the sandbox mode this supervisor needs:
+# firstmate's health model is built on `ps` process inspection, which
+# workspace-write denies.
 #
 # Install the bridge at the version matching the running dsh-base. The
 # sub-packages' npm `latest` tag is stale (0.0.1-rc.x), and an old bridge reads

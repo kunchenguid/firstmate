@@ -70,7 +70,7 @@ Measured against synthetic homes:
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
 
 Each of the three is silent in production, and all three were written into documentation before they were measured.
-The instruction budget is the clearest case: `AGENTS.md` is 82128 bytes as of this writing, so the shipped 65536 either truncates it or, if raised, must be monitored; the captain profile sets 262144 and the preflight compares that against the live file size rather than a constant.
+The instruction budget is the clearest case: `AGENTS.md` is larger than the shipped 65536, which cuts it partway through §8 Supervision protocol (inside the away-mode and quiet-mode stub) and drops the rest of §8, §9 through §14, and the captain-precedence and maintenance sections without any signal; the captain profile sets 262144 and the preflight compares that against the live file size rather than a recorded constant.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
