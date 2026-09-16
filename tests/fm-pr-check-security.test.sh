@@ -2436,6 +2436,253 @@ SH
   pass "poll retirement preserves a replacement authority record"
 }
 
+# A volume remount can renumber the state filesystem's st_dev while every inode
+# and byte stays put, as APFS does across a reboot. This rewrites a published
+# registration's recorded device the way that leaves it, changing no other
+# byte. <which> is both, data, or check.
+shift_registration_device() {  # <state> <id> [both|data|check]
+  local state=$1 id=$2 which=${3:-both} registration device shifted tmp
+  registration="$state/$id.pr-poll-registration"
+  device=$(fm_pr_file_device "$state") || fail "could not read the state device"
+  shifted=$((device + 1))
+  tmp=$(mktemp "$state/.test-shifted-registration.XXXXXX") || fail "could not stage a shifted registration"
+  awk -v live="$device" -v shifted="$shifted" -v which="$which" '
+    (NR == 10 && which != "check") || (NR == 11 && which != "data") { sub("^" live ":", shifted ":") }
+    { print }
+  ' "$registration" > "$tmp" || fail "could not shift the registration device"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$registration"
+  case "$which" in
+    both|data) [ "$(sed -n 10p "$registration")" = "$shifted:$(fm_pr_file_inode "$state/$id.pr-poll")" ] \
+      || fail "shifted fixture did not move only the recorded sidecar device" ;;
+  esac
+  case "$which" in
+    both|check) [ "$(sed -n 11p "$registration")" = "$shifted:$(fm_pr_file_inode "$state/$id.check.sh")" ] \
+      || fail "shifted fixture did not move only the recorded check device" ;;
+  esac
+}
+
+test_device_renumbered_poll_stays_armed() {
+  local dir state out rc original
+  dir=$(make_case device-renumber-merged)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  shift_registration_device "$state" task-a
+  # Assert the divergence so the case cannot pass vacuously: only the recorded
+  # device differs, and that alone refuses the strict validation.
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "renumber fixture changed the check bytes"
+  [ "$(sed -n 8p "$state/task-a.pr-poll-registration")" = "$(fm_pr_sha256 "$state/task-a.pr-poll")" ] \
+    || fail "renumber fixture changed the sidecar hash"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "renumber fixture still authenticated before any watcher cycle"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "renumbered poll watcher failed: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
+  esac
+  [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "renumbered poll did not surface its merge exactly once: $out"
+
+  dir=$(make_case device-renumber-rerecord)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  original="$dir/registration.original"
+  cp "$state/task-a.pr-poll-registration" "$original"
+  shift_registration_device "$state" task-a
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.pr-poll-registration "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    : > "$FM_TEST_REGISTRATION_RENAMED"
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "re-record watcher failed: $(cat "$dir/watch.err")"
+  [ -e "$dir/registration-renamed" ] || fail "re-record never replaced the registration under the control lock"
+  cmp -s "$original" "$state/task-a.pr-poll-registration" \
+    || fail "re-recorded registration differs from the one published on the live device"
+  [ "$(file_mode "$state/task-a.pr-poll-registration")" = 600 ] || fail "re-recorded registration is not private"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "re-recorded poll is not strictly authenticated"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "re-recorded poll did not run its validated check in the same cycle"
+  grep -F 're-recorded PR poll identity for task-a' "$state/.watch-triage.log" >/dev/null \
+    || fail "re-record left no triage evidence"
+  ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 || fail "re-record left a staged registration behind"
+  pass "a poll armed before a volume renumber is re-recorded under the control lock and keeps detecting merges"
+}
+
+test_device_rerecord_refuses_tampered_artifacts() {
+  local mutation dir state out rc registration_sha shifted_device replacement exercised=
+  for mutation in swapped-check altered-check swapped-sidecar altered-sidecar altered-template-hash \
+    wrong-mode hardlinked-check split-device foreign-device; do
+    # A regular file cannot sit on another device than its own directory without
+    # a file mount, which Darwin does not offer, and Darwin's device helper reads
+    # /usr/bin/stat directly, so no PATH fake can stand in there.
+    if [ "$mutation" = foreign-device ] && [ "$(uname)" = Darwin ]; then
+      exercised="$exercised (foreign-device not exercisable on Darwin)"
+      continue
+    fi
+    exercised="$exercised $mutation"
+    dir=$(make_case "device-rerecord-refuses-$mutation")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    if [ "$mutation" = split-device ]; then
+      shift_registration_device "$state" task-a data
+    else
+      shift_registration_device "$state" task-a
+    fi
+    shifted_device=$(( $(fm_pr_file_device "$state") + 1 ))
+    case "$mutation" in
+      swapped-check)
+        cp "$POLL" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.check.sh"
+        ;;
+      altered-check) printf '# tampered\n' >> "$state/task-a.check.sh" ;;
+      swapped-sidecar)
+        cp "$state/task-a.pr-poll" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.pr-poll"
+        ;;
+      altered-sidecar)
+        printf '%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/2 github.com o/r 2 \
+          > "$state/task-a.pr-poll"
+        ;;
+      altered-template-hash)
+        replacement=$(printf 'another template\n' | shasum -a 256 | awk '{print $1}')
+        awk -v hash="$replacement" 'NR == 9 { $0 = hash } { print }' \
+          "$state/task-a.pr-poll-registration" > "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.pr-poll-registration"
+        ;;
+      wrong-mode) chmod 0640 "$state/task-a.check.sh" ;;
+      hardlinked-check) ln "$state/task-a.check.sh" "$dir/check.alias" ;;
+      split-device) ;;
+      foreign-device)
+        cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_FOREIGN_PATH" ]; then
+  case " $* " in
+    *" %d "*) printf '%s\n' "$FM_TEST_FOREIGN_DEVICE"; exit 0 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+        chmod +x "$dir/fakebin/stat"
+        ;;
+    esac
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$mutation fixture was authenticated before any watcher cycle"
+    registration_sha=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+    set +e
+    FM_TEST_FOREIGN_PATH="$state/task-a.check.sh" FM_TEST_FOREIGN_DEVICE="$shifted_device" \
+      FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$out" in
+      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      *) fail "$mutation on a renumbered registration was not refused: $out" ;;
+    esac
+    [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_sha" ] \
+      || fail "$mutation let the watcher re-record the registration"
+    ! grep -F -- '--json state' "$dir/gh.log" >/dev/null 2>&1 \
+      || fail "$mutation ran the refused poll"
+    ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 \
+      || fail "$mutation left a staged registration behind"
+  done
+
+  dir=$(make_case device-rerecord-pending-retirement)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  shift_registration_device "$state" task-a
+  fm_pr_poll_registration_device_shifted "$state" task-a "$POLL" \
+    || fail "pending-retirement fixture was not a device shift before its receipt"
+  : > "$state/task-a.pr-poll-retirement"
+  chmod 0600 "$state/task-a.pr-poll-retirement"
+  ! fm_pr_poll_registration_device_shifted "$state" task-a "$POLL" \
+    || fail "a pending retirement receipt did not keep its artifacts from being re-recorded"
+  ! fm_pr_poll_registration_rerecord_device "$state" task-a "$POLL" \
+    || fail "a pending retirement receipt was re-recorded around"
+  pass "a renumbered registration is never re-recorded around a tampered artifact:$exercised, or a pending retirement"
+}
+
+test_device_rerecord_yields_to_concurrent_rearm() {
+  local dir state rc url_a url_b real_mktemp
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case device-rerecord-concurrent-rearm)
+  state="$dir/home/state"
+  real_mktemp=$(command -v mktemp)
+  write_poll_meta "$state" task-a "$url_a"
+  seed_canonical_poll "$dir" task-a "$url_a"
+  shift_registration_device "$state" task-a
+  add_stop_custom_check "$dir"
+  # A direct bin/fm-pr-check.sh re-arm takes no control lock, so land one after
+  # the locked proof and before the registration would be replaced.
+  cat > "$dir/rearm.sh" <<SH
+#!/usr/bin/env bash
+FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \\
+  PATH="$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err"
+printf '%s\n' \$? > "$dir/rearm.rc"
+SH
+  chmod +x "$dir/rearm.sh"
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *".fm-pr-poll-registration."*)
+    if [ ! -e "$FM_TEST_REARM_RAN" ] && [ -d "$FM_TEST_CONTROL_LOCK" ]; then
+      : > "$FM_TEST_REARM_RAN"
+      "$FM_TEST_REARM_SCRIPT"
+    fi
+    ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  set +e
+  FM_TEST_REARM_RAN="$dir/rearm-ran" FM_TEST_REARM_SCRIPT="$dir/rearm.sh" \
+    FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MKTEMP="$real_mktemp" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "concurrent re-arm watcher failed: $(cat "$dir/watch.err")"
+  [ -e "$dir/rearm-ran" ] || fail "concurrent re-arm never landed inside the re-record"
+  [ "$(cat "$dir/rearm.rc")" -eq 0 ] || fail "concurrent re-arm failed: $(cat "$dir/rearm.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "re-record clobbered a concurrent re-arm"
+  [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
+    || fail "registration no longer names the concurrent re-arm"
+  grep -F 'PR poll identity for task-a was not re-recorded' "$state/.watch-triage.log" >/dev/null \
+    || fail "re-record did not stand down for the concurrent re-arm"
+  grep -F "pr view $url_b --json state" "$dir/gh.log" >/dev/null \
+    || fail "watcher did not poll the concurrently re-armed PR in the same cycle"
+  ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 || fail "stood-down re-record left a staged registration"
+  pass "a re-record stands down for a direct re-arm that lands between its proof and its rename"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2464,6 +2711,9 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_device_renumbered_poll_stays_armed
+test_device_rerecord_refuses_tampered_artifacts
+test_device_rerecord_yields_to_concurrent_rearm
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal

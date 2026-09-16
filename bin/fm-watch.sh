@@ -2028,6 +2028,26 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# A poll armed before a state volume remount can fail capture only because its
+# registration names the old device number; bin/fm-pr-lib.sh
+# fm_pr_poll_registration_rerecord_device owns the proof and the rewrite.
+# Returns 0 when a re-record was attempted under the control lock, so the caller
+# captures again whatever the outcome: a concurrent re-arm may have published a
+# valid poll instead, and the strict capture decides either way.
+rerecord_device_shifted_pr_poll() {  # <id>
+  local id=$1
+  fm_pr_poll_registration_device_shifted "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+  fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+  if fm_pr_poll_registration_rerecord_device "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    triage_log "re-recorded PR poll identity for $id after its state volume device number changed"
+  else
+    triage_log "PR poll identity for $id was not re-recorded; the locked proof or rewrite did not hold"
+  fi
+  pr_poll_control_release || exit 1
+  return 0
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -2137,7 +2157,9 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+          || { rerecord_device_shifted_pr_poll "$id" \
+            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
