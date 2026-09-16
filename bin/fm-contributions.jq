@@ -40,24 +40,27 @@ def projected($input; $saved; $now; $max_age):
     | ([$input.backlog.records[]? | select(.structured and
          (.id == $k.task or ((.links // []) | index($k.url)) != null))
          | select(.hold_bucket == "live")] | first) as $hold
-    | ([$input.tasks[]? | select(.id == $k.task and .pr.url == $k.url) | .pr.head | select(. != null and . != "")] | first) as $recorded_head
+    | ([$input.tasks[]? | select(.id == $k.task and .pr.url == $k.url)
+       | {head:(.pr.head | select(. != null and . != "")), merge_authority:(.merge_authority // "unknown")}] | first) as $task
+    | ($task.head // null) as $recorded_head
+    | ($task.merge_authority // "unknown") as $merge_authority
     | ($record.observation // {}) as $o
-    | ($recorded_head != null and $recorded_head != $o.head) as $head_changed
+    | (if $record.error == null and $record.observation != null and ($o.head | sha) then $o.head else null end) as $observed_head
     | (($record.checked_at // "") | try fromdateiso8601 catch null) as $checked
     | ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age
-       and $record.error == null and $record.observation != null and ($head_changed | not)
+       and $observed_head != null
        and ($k.url | startswith("https://github.com/"))) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$checks[] | select(.status != "completed")] as $pending
     | [$checks[] | select(.status == "completed" and .conclusion != null
         and .conclusion != "" and (.conclusion | IN("success","skipped","neutral") | not))] as $failed
-    | (($record.verdict != null) and ($record.verdict.head != ($recorded_head // $o.head // null))) as $stale
+    | (($record.verdict != null) and $observed_head != null and ($record.verdict.head != $observed_head)) as $stale
     | (if $record.verdict == null then null
        else $record.verdict + {freshness:(if $stale then "STALE" elif $fresh then "current" else "unverified" end)} end) as $verdict
     | ([$o.reviews[]? | select(.state != "COMMENTED")] | group_by(.user.login)
        | map(sort_by([.submitted_at,.id]) | last)
-       | map(. + {freshness:(if .commit_id != ($recorded_head // $o.head // null) then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
+       | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
     | (if $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
          else {actor:"fleet",reason:"terminal observation needs refresh"} end
@@ -80,10 +83,12 @@ def projected($input; $saved; $now; $max_age):
        elif $verdict != null and $verdict.actor == "captain" then
          {actor:"fleet",reason:"record the unresolved arbitration as a captain hold"}
        elif $o.review_decision == "REVIEW_REQUIRED" then {actor:"maintainer",reason:"review required"}
+       elif $o.can_merge == true and ($merge_authority == "yolo" or $merge_authority == "away-grant") then
+         {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
     | $k + {kind:($record.kind // (if ($k.url | contains("/issues/")) then "issue" else "pr" end)),
-         checked_at:$record.checked_at,checked:$fresh,head:($recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
+         checked_at:$record.checked_at,checked:$fresh,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
          distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),
          stale_verdicts:((if $stale then 1 else 0 end) + ([$reviews[] | select(.freshness == "STALE")] | length)),

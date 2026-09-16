@@ -109,6 +109,7 @@ forge_home() {
   printf 'worktree=%s/wt\nkind=ship\n' "$home" > "$home/state/delivery.meta"
   chmod 600 "$home/state/delivery.meta"
   record "$home" delivery 8 open mergeable
+  printf '%s\n' "$HEAD_A" > "$home/forge/head"
   printf '[]\n' > "$home/forge/comments.json"
   printf '[]\n' > "$home/forge/reviews.json"
   printf '[]\n' > "$home/forge/inline.json"
@@ -119,11 +120,11 @@ forge_home() {
 set -eu
 case "$*" in
   'pr view '*headRefOid,reviewDecision*)
-    jq -n --arg head "$HEAD_A" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
-  'pr view '*headRefOid*) printf '%s\n' "$HEAD_A" ;;
+    jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
+  'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8')
-    jq -n --arg head "$HEAD_A" '{state:"open",user:{login:"author"},head:{sha:$head},draft:false,mergeable:true,merged_at:null}' ;;
+    jq -n --arg head "$(cat "$FORGE/head")" '{state:"open",user:{login:"author"},head:{sha:$head},draft:false,mergeable:true,merged_at:null}' ;;
   'api repos/o/r/issues/9')
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
   'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
@@ -260,14 +261,98 @@ test_verdict_retains_judged_head() {
   local home
   home=$(new_home verdict-roundtrip)
   forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery before judging its head'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
     https://github.com/o/r/pull/8#issuecomment-99 maintainer 'awaiting maintainer' || fail 'could not record judged head'
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  registered_checks "$home" >/dev/null
   printf 'pr=https://github.com/o/r/pull/8\npr_head=%s\n' "$HEAD_B" >> "$home/state/delivery.meta"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   bearings "$home" | jq -e '.contributions.stale_verdicts == 1 and .contributions.checked == 0' >/dev/null \
     || fail 'changed published head reused a current verdict'
   jq -e --arg head "$HEAD_A" '.records[0].verdict.head==$head' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'projection rewrote the judged head'
   pass 'recorded judgment keeps its exact head and is stale immediately on a published replacement'
+}
+
+test_observed_replacement_refreshes_verdict() {
+  local home
+  home=$(new_home observed-replacement)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery before replacement'
+  registered_checks "$home" >/dev/null
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  registered_checks "$home" >/dev/null
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_B" \
+    https://github.com/o/r/pull/8#issuecomment-100 maintainer 'awaiting maintainer' \
+    || fail 'could not record verdict on the observed replacement'
+  bearings "$home" | jq -e '.contributions.checked == 1 and .contributions.stale_verdicts == 0
+    and .contributions.counts.maintainer == 1 and .contributions.counts.fleet == 0' >/dev/null \
+    || fail 'a current forge observation did not refresh a verdict on its observed head'
+  pass 'a current forge observation refreshes a verdict after a replacement'
+}
+
+test_unobserved_head_leaves_verdict_unknown() {
+  local home out
+  home=$(new_home unobserved-head)
+  record "$home" delivery 17 open mergeable
+  mutate_record "$home" delivery ".records[0].error=\"forge unavailable\" | .records[0].verdict={head:\"$HEAD_B\",actor:\"maintainer\",source:\"https://github.com/o/r/pull/17#issuecomment-101\",summary:\"awaiting maintainer\"}"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input without a forge read'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project unavailable forge observation'
+  printf '%s' "$out" | jq -e '.stale_verdicts == 0 and .checked == 0
+    and .rows[0].verdict.freshness == "unverified"' >/dev/null \
+    || fail 'an unavailable current head became a fresh or stale verdict'
+  pass 'an unavailable current head leaves verdict freshness unknown'
+}
+
+test_away_yolo_is_fleet_work() {
+  local home out
+  home=$(new_home away-yolo)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register away delivery'
+  printf 'yolo=on\n' >> "$home/state/delivery.meta"
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
+    || fail 'could not propose away posture'
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
+    || fail 'could not confirm away posture'
+  mutate_record "$home" delivery '.records[0].observation.can_merge=true'
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input for away posture'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project away delivery'
+  printf '%s' "$out" | jq -e '.checked == 1 and .counts.captain == 0 and .counts.fleet == 1' >/dev/null \
+    || fail 'away yolo delivery requiring a merge remained captain work'
+  pass 'away yolo delivery is fleet work without granting merge authority'
+}
+
+test_away_yolo_cross_home_is_fleet_work() {
+  local home child
+  home=$(new_home away-yolo-parent)
+  child=$(new_home away-yolo-child)
+  mkdir -p "$child/bin"
+  printf '# Fixture\n' > "$child/AGENTS.md"
+  printf 'child\n' > "$child/.fm-secondmate-home"
+  forge_home "$child"
+  with_home "$child" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register child away delivery'
+  printf 'yolo=on\n' >> "$child/state/delivery.meta"
+  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
+    || fail 'could not propose child away posture'
+  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
+    || fail 'could not confirm child away posture'
+  mutate_record "$child" delivery '.records[0].observation.can_merge=true'
+  FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary > "$child/state/home-summary.json" \
+    || fail 'could not collect child contribution summary'
+  printf -- '- child - fixture (home: %s; scope: fixture; projects: sample; added 2026-09-16)\n' "$child" > "$home/data/secondmates.md"
+  bearings "$home" | jq -e '.contributions.checked == 1 and .contributions.counts.captain == 0
+    and .contributions.counts.fleet == 1' >/dev/null \
+    || fail 'cross-home away yolo delivery requiring a merge remained captain work'
+  pass 'cross-home away yolo delivery is fleet work'
 }
 
 test_retired_and_unsupported_coverage() {
@@ -317,7 +402,7 @@ test_unreadable_pending_is_not_empty() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_retired_and_unsupported_coverage test_home_summary_coverage test_unreadable_pending_is_not_empty; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_home_summary_coverage test_unreadable_pending_is_not_empty; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
