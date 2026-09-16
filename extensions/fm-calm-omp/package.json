@@ -1,0 +1,9 @@
+{
+  "name": "fm-calm-omp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Firstmate Calm for OMP: /calm-omp toggles native tool-activity visibility and draws the shared working boat",
+  "omp": {
+    "extensions": ["./fm-calm-omp.ts"]
+  }
+}
