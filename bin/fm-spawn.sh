@@ -228,6 +228,19 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+# Launch command length (FM_LAUNCH_LINE_MAX):
+#   A pane shell reads its command line in canonical mode, where the terminal
+#   caps one line at MAX_CANON and discards the excess silently (1024 bytes on
+#   macOS, 4096 on Linux), so a long launch command used to arrive truncated
+#   mid-quote and no agent ever started. Past FM_LAUNCH_LINE_MAX bytes (default
+#   1000, below every known cap) the command is written to $TASK_TMP/launch.sh
+#   at mode 0600 and the pane is sent a short line that sources it; at or under
+#   it the command is typed exactly as before. Command length scales with the
+#   home's own path, which is why one home crosses the cap and a shorter one
+#   never does. Every backend types its launch through the same
+#   spawn_send_literal, so the staging covers all of them rather than tmux
+#   alone. The pane's scrollback then shows the source line, and the staged file
+#   is the record until fm-teardown.sh removes TASK_TMP with it.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
@@ -3230,6 +3243,40 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+# A pane shell reads its command line in canonical mode, where the terminal line
+# discipline caps one line at MAX_CANON and DISCARDS the excess without an error:
+# 1024 bytes on macOS, 4096 on Linux. A launch command longer than that reaches
+# the shell truncated mid-quote, so the shell sits on a continuation prompt and
+# the agent never starts - a silent launch failure whose only symptom is a dead
+# endpoint. Command length depends on the home's own path, which is why an
+# ordinary home can cross the bound while a shorter one never does.
+#
+# Past a conservative bound below every known MAX_CANON, the command is staged in
+# the task's own temp root and the pane is sent a short line that sources it. The
+# staged file is mode 0600 and carries no credential, because fm-spawn keeps
+# secrets off the launch command in the first place; fm-teardown.sh removes
+# TASK_TMP and the file with it. Commands at or under the bound are sent
+# literally exactly as before, so this changes no launch that already worked.
+#
+# The cost is that the pane's scrollback shows the source line instead of the
+# full command. The staged file is the record while the task lives.
+SPAWN_LAUNCH_LINE_MAX=${FM_LAUNCH_LINE_MAX:-1000}
+spawn_send_launch() { # <target> <launch-command>
+  local target=$1 launch=$2 launch_file
+  if [ "${#launch}" -le "$SPAWN_LAUNCH_LINE_MAX" ]; then
+    # Bare return, so a transport failure keeps reaching set -e exactly as it
+    # did when this call site was a plain spawn_send_literal.
+    spawn_send_literal "$target" "$launch"
+    return
+  fi
+  launch_file="$TASK_TMP/launch.sh"
+  if ! (umask 077 && printf '%s\n' "$launch" > "$launch_file") || [ ! -s "$launch_file" ]; then
+    echo "error: the launch command could not be staged at $launch_file; refusing to send a partial command" >&2
+    return 1
+  fi
+  spawn_send_literal "$target" ". $(shell_quote "$launch_file")"
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -4362,7 +4409,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+spawn_send_launch "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0

@@ -100,6 +100,42 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
+# --- staged-launch dereference ----------------------------------------------
+#
+# bin/fm-spawn.sh stages a launch command past the terminal's canonical-mode
+# line cap and types a short line that sources it (spawn_send_launch). A fake
+# tmux deciding what was LAUNCHED must follow that indirection, or every
+# assertion about launch shape starts reading the transport instead. A fake that
+# wants the typed line itself does not call this.
+#
+# Generated rather than tracked, for the same reason every other stub here is:
+# a stub runs as its own process off PATH, so it cannot call a shell function,
+# and a tracked file under tests/assets/ would need its own changed-test
+# mapping to be selectable. This keeps one owner and no new mapping category.
+FM_TEST_LAUNCH_PAYLOAD=$(mktemp "${TMPDIR:-/tmp}/.fm-test-launch-payload.$$.XXXXXX") || return 1
+printf '%s\n' "$FM_TEST_LAUNCH_PAYLOAD" >> "$FM_TEST_CLEANUP_REGISTRY"
+cat > "$FM_TEST_LAUNCH_PAYLOAD" <<'LAUNCHPAYLOAD'
+#!/usr/bin/env bash
+# Prints the launch COMMAND behind a payload typed at a pane: the contents of a
+# staged file when the payload sources one, the payload itself otherwise.
+set -u
+payload=${1-}
+staged=
+case "$payload" in
+  ". '"*"'")
+    staged=${payload#. \'}
+    staged=${staged%\'}
+    ;;
+esac
+if [ -n "$staged" ] && [ -r "$staged" ]; then
+  cat "$staged"
+else
+  printf '%s\n' "$payload"
+fi
+LAUNCHPAYLOAD
+chmod +x "$FM_TEST_LAUNCH_PAYLOAD"
+export FM_TEST_LAUNCH_PAYLOAD
+
 fm_test_pid_identity() {
   local pid=$1
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
