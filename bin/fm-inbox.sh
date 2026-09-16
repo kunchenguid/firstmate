@@ -20,6 +20,7 @@
 #
 # Usage:
 #   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh note --key <key> -     (restart-safe capture; Python 3 required)
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
@@ -58,6 +59,7 @@
 # bin/fm_voice_records.py owns the scope-controlled machine view the voice agent
 # reads, because the voice agent must be able to answer without record free text
 # ever reaching a model.
+# Keyed-note publication and receipt retention are owned by fm_inbox_key.py.
 set -euo pipefail
 
 # A non-interactive `ssh host fm-inbox.sh ...` does NOT get a login shell, so it
@@ -196,7 +198,12 @@ queue_note() {
 }
 
 cmd_note() {
-  local body
+  local body key='' id
+  if [ "${1:-}" = --key ]; then
+    [ "$#" -eq 3 ] && [ "$3" = - ] || die "usage: note --key <key> -"
+    key=$2
+    shift 2
+  fi
   if [ "$#" -eq 0 ]; then
     die "usage: fm-inbox.sh note <text>...   (or: note - to read stdin)"
   elif [ "$1" = "-" ]; then
@@ -204,7 +211,15 @@ cmd_note() {
   else
     body="$*"
   fi
-  queue_note text "$body"
+  if [ -n "$key" ]; then
+    need python3
+    id=$(printf '%s' "$body" | python3 "$SELF_DIR/fm_inbox_key.py" "$INBOX" "$key") || return 1
+    printf 'queued %s\n' "$id"
+    # External body stays out of the wake payload; consumers read the record.
+    wake_for "$id" 'idempotent external note; inspect persisted record'
+  else
+    queue_note text "$body"
+  fi
 }
 
 # ---------------------------------------------------------------- say
