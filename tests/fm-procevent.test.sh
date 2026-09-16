@@ -728,7 +728,10 @@ assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "durable capture retires the recovery snapshot"
 [ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 1" || true)" = 1 ] \
   || fail "the recovered reply did not use exactly one process-event wake"
+printf 'obsolete snapshot\n' > "$HRECOVERY/state/procevent/$recovery_id.lavish-pending"
 FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECOVERY_ART" >/dev/null
+assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
+  "public retirement removes the adapter recovery snapshot"
 unset RECOVERY_COUNT LAVISH_AXI_STATE_DIR
 pass "pending dock prompts survive destructive poll failure through one wake owner"
 

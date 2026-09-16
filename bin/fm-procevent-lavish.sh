@@ -111,7 +111,6 @@
 # dies before returning output, the next invocation emits the snapshot through
 # the same process-event owner instead of polling again. Results that never
 # appeared in the session store retain the runner's ordinary output boundary.
-# Home-wide dock Send delivery, without poll, is bin/fm-lavish-dock-check.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,10 +165,13 @@ cmd_arm() {
 }
 
 cmd_retire() {
-  local artifact=${1-} id
+  local artifact=${1-} id snapshot
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+  snapshot=$(recovery_snapshot_path "$id")
+  [ ! -L "$snapshot" ] || die "Lavish recovery snapshot must not be a symlink"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || return
+  rm -f -- "$snapshot" || die "cannot remove Lavish recovery snapshot"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant

@@ -144,7 +144,6 @@ Also never claim that a source cannot refresh its owning home's lease: that rule
 
 The currently published `lavish-axi poll` destructively clears feedback before returning it.
 The Lavish adapter therefore atomically snapshots matching pending dock prompts before polling and retains that snapshot until the generic runner durably captures a result; if the poll clears the store and loses its output, the next invocation recovers the snapshot through the same process-event source and wake owner.
-Captain dock Send is also copied into the primary home's inbox by `bin/fm-lavish-dock-check.sh` when its standing check sees pending prompts without polling.
 Responses that never appeared in the Lavish session store remain outside the adapter's narrow recovery boundary.
 The remote-reply adapter removes that particular pre-capture window by never consuming its source, but it cannot recover bytes truly lost from the remote log itself.
 Say these boundaries plainly wherever the behavior is described.

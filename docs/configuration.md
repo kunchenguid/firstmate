@@ -937,23 +937,6 @@ The Lavish adapter adds one source-specific boundary: before its destructive pol
 Responses that never appeared in that store remain outside this narrow recovery boundary, so neither the generic runner nor this path is a generic no-loss or exactly-once mechanism.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-## Lavish dock replies (state/lavish-dock.check.sh)
-
-Captain dock Send notes are not a `lavish-axi poll` result.
-They sit in lavish-axi session `pending_prompts` until a poll consumes them, and that poll clears the feedback before returning it, so a home that does not keep a worker blocked on poll needs a standing copy path.
-`bin/fm-lavish-dock-check.sh` is the home-wide copy path that does not poll.
-It reads lavish-axi's session store (`$LAVISH_AXI_STATE_DIR/state.json`, default `~/.lavish-axi/state.json`), queues unseen prompts through `bin/fm-inbox.sh note`, and leaves the session's pending prompts in place.
-Queued notes rewrite inner HTTP `:4387` session Opens to the HTTPS wrap on `:4389` on the same host and never emit a `:4387` Open.
-This check does not author artifacts, open a browser, or change Library `:3000`.
-
-The mutable local bootstrap automatically arms the standing check in the primary human-facing home; secondmate homes stay passive.
-Arming writes `state/lavish-dock.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`).
-The owned process-event Lavish adapter snapshots matching pending prompts before it polls, retains that snapshot until durable capture, and recovers it through the same process-event source and wake owner if the destructive poll loses its output.
-The check prints one line when it queues new notes so the current watcher cycle wakes, and each queued note is itself a `check: captain inbox note` wake.
-A proven no-op prints nothing: no new prompts, or the same failure already reported.
-`state/.lavish-dock-seen` stores per-session prompt-occurrence snapshots, including empty and reused-UID prompts, so an unchanged queue is not copied twice and a later occurrence is not suppressed.
-The check is not inherited into secondmates.
-
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
