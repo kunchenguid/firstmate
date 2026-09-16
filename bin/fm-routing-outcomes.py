@@ -1154,10 +1154,12 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
             lines.append(f"- {row['task_id']} ({row['category']}, {row['task_shape']}): {row['recommended_route']} - shadow-only heuristic. {row['explanation']}")
             for candidate in row["candidate_evidence"]:
                 quota = candidate["quota_evidence"]
-                quota_text = "no quota snapshot"
+                quota_text = "no quota snapshot; native quota semantics=unknown"
                 if quota:
                     windows = ", ".join(f"{item.get('id')}={item.get('percentRemaining')}" for item in quota["windows"]) or "no windows"
-                    quota_text = f"raw quota {quota['provider']} at {quota['generated_at']} ({windows})"
+                    semantics = quota.get("quota_semantics")
+                    semantics_text = canonical(semantics) if isinstance(semantics, dict) and semantics else "unknown"
+                    quota_text = f"raw quota {quota['provider']} at {quota['generated_at']} ({windows}); native quota semantics={semantics_text}"
                 lines.append(f"  - {candidate['route']}: heuristic eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={candidate['spend_priority']}; {quota_text}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
     else:
         lines.append("- No shadow recommendations recorded.")

@@ -109,12 +109,14 @@ class RoutingOutcomesTest(unittest.TestCase):
             rows.append(copy.deepcopy(assistant))
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
-    def write_quota(self, path, remaining, reset, *, provider="codex", status="known", unresolved=None):
+    def write_quota(self, path, remaining, reset, *, provider="codex", status="known", unresolved=None,
+                    effective_availability=None):
         row = {
             "provider": provider,
             "windows": [{"id": "weekly", "label": "week", "kind": "weekly",
                          "resetsAt": reset, "percentRemaining": remaining}],
-            "quotaSemantics": {"status": status, "effectiveAvailability": []},
+            "quotaSemantics": {"status": status,
+                               "effectiveAvailability": effective_availability or []},
         }
         if unresolved is not None:
             row["quotaSemantics"]["unresolvedWindowIds"] = unresolved
@@ -555,6 +557,14 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("already has two comparison pairs", json.loads(result.stdout)["error"])
 
     def test_shadow_records_all_candidate_uncertainty_without_ranking(self):
+        self.write_quota(
+            self.quota_before, 100, "2030-01-02T00:00:00Z",
+            effective_availability=[{
+                "scope": "all_models", "status": "known", "effectivePercentRemaining": 12,
+                "selection": {"status": "known", "spendPriority": -0.4},
+                "runway": {"status": "projected_exhaustion", "usableRunwaySeconds": 900,
+                            "projectionConfidence": "established"},
+            }])
         route_one = self.manifest()["route"]
         route_two = copy.deepcopy(route_one)
         route_two.update({"harness": "claude", "provider": "anthropic",
@@ -588,6 +598,13 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("heuristic eligibility=pass; capability=pass; runway=pass; spendPriority=1.2", score.stdout)
         self.assertIn("shadow-only heuristic", score.stdout)
         self.assertIn("raw quota codex at 2030-01-01T00:00:00Z (weekly=100)", score.stdout)
+        self.assertIn(
+            'native quota semantics={"effectiveAvailability":[{"effectivePercentRemaining":12,'
+            '"runway":{"projectionConfidence":"established","status":"projected_exhaustion",'
+            '"usableRunwaySeconds":900},"scope":"all_models","selection":{"spendPriority":-0.4,'
+            '"status":"known"},"status":"known"}],"status":"known"}',
+            score.stdout)
+        self.assertIn("no quota snapshot; native quota semantics=unknown", score.stdout)
         data = json.loads(self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
