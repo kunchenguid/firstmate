@@ -179,7 +179,8 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   local lifecycle=$TMP_ROOT/secondmate-lifecycle.json replacement=$TMP_ROOT/secondmate-replacement.json
   local unproven=$TMP_ROOT/secondmate-generation-unproven.json done_one=$TMP_ROOT/done-1201.json
   local done_two=$TMP_ROOT/done-1301.json stopped_one=$TMP_ROOT/stopped-1201.json
-  local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json state
+  local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json
+  local done_hold=$TMP_ROOT/done-hold.json done_decision=$TMP_ROOT/done-decision.json state
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-a.json" --observed-at 2026-09-15T12:00:00Z > "$first"
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-b.json" --observed-at 2026-09-15T13:00:00Z > "$second"
   jq -e '.projects[0].tasks[0]
@@ -217,6 +218,33 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
       and .counts.attention == (if $state == "failed" then 1 else 0 end)
     ' "$lifecycle" >/dev/null || fail "$state secondmate endpoint lifecycle was omitted or misclassified"
   done
+  jq '(.secondmate_current.records[0].endpoints[0].state)="done"
+      | .secondmate_current.records[0].queued=[{
+          id:"child",title:"Remote child",repo:"omega",kind:"ship",captain_actionable:true,
+          hold_bucket:"live",hold_reason:"Retained hold",unresolved_blocker_ids:[]
+        }]' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$done_hold"
+  jq '(.secondmate_current.records[0].endpoints[0].state)="done"
+      | .secondmate_current.records[0].decisions_open=[{
+          id:"child",key:"route",verb:"needs-decision",summary:"Retained decision",reason:null,source:"status"
+        }]' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$done_decision"
+  jq -e '.counts == {running:0,waiting:0,blocked:0,attention:1}
+      and .projects[0].active_count == 0
+      and .projects[0].latest_phase == "quiet"
+      and .projects[0].oldest_active_seconds == null
+      and (.projects[0].tasks[0]
+        | .state == "done" and .lane == "recently_completed" and .elapsed_seconds == null
+          and .hold.question == "Retained hold" and .attention == true)' "$done_hold" >/dev/null \
+    || fail "retained hold revived a done secondmate endpoint into active metrics"
+  jq -e '.counts == {running:0,waiting:0,blocked:0,attention:1}
+      and .projects[0].active_count == 0
+      and .projects[0].latest_phase == "quiet"
+      and .projects[0].oldest_active_seconds == null
+      and (.projects[0].tasks[0]
+        | .state == "done" and .lane == "recently_completed" and .elapsed_seconds == null
+          and .decisions == ["Retained decision"] and .attention == true)' "$done_decision" >/dev/null \
+    || fail "retained decision revived a done secondmate endpoint into active metrics"
   jq '(.secondmate_current.records[0].active_children)=[{
         id:"child",spawn_gen:"child-gen-a",kind:"ship",state:"working",repo:"omega",
         name:"Remote child",source:"structured-home",started_at:"2026-09-15T11:30:00Z"

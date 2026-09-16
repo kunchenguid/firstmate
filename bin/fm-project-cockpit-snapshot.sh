@@ -361,7 +361,7 @@ jq \
     | if $held == null then $base
       else secondmate_queued_projection($owner; $held) as $hold
       | $base + {
-          lane:"waiting",
+          lane:(if $base.state == "done" then $base.lane else "waiting" end),
           attention:($base.attention or $hold.attention),
           attention_rank:([$base.attention_rank,$hold.attention_rank] | min),
           hold:$hold.hold,
@@ -395,7 +395,7 @@ jq \
     | if $active == null then $decision
       else (secondmate_active_projection($owner; $active; $now)) as $base
       | $base + {
-          lane:"waiting",
+          lane:(if $base.state == "done" then $base.lane else "waiting" end),
           decisions:$summaries[:$max_decisions],
           attention:true,
           attention_rank:0,
