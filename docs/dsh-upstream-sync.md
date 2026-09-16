@@ -7,9 +7,9 @@ project, so this branch is deliberately shaped to be mergeable rather than merel
 
 | | |
 | --- | --- |
-| Upstream base | `b430bf50` (upstream `main` at fork time) |
-| Added files | 12 — self-contained; an upstream merge cannot conflict on them |
-| Modified upstream files | 12 — this is the entire conflict surface |
+| Upstream base | `7111081c` — advanced from `b430bf50` by the first sync below |
+| Added files | 13 — self-contained; an upstream merge cannot conflict on them |
+| Modified upstream files | 15 — this is the entire conflict surface |
 
 ## Why it is shaped this way
 
@@ -54,6 +54,21 @@ that knows what `dsh` means.
 | `docs/sessionstart-nudge.md` | `dsh` in the Run tier and a note on its transport | Keep both |
 | `docs/verification/supervision.md` | The DSH verification records | Keep both; append rather than merge if upstream restructured the file |
 | `.agents/skills/harness-adapters/SKILL.md` | The routing JSON entry and a primary-only safety line | Keep both |
+| `tests/fm-turnend-guard.test.sh`, `tests/fm-session-lock-ancestry.test.sh`, `tests/fm-claude-stop-autoarm.test.sh` | `cp "$ROOT/bin/fm-dsh-lib.sh"` added to each fixture's script list | Keep both. A fixture that copies a script must copy what that script SOURCES; `fm-session-lock-lib.sh` now sources `fm-dsh-lib.sh`, and a fixture missing it fails with "No such file or directory" at source time |
+
+## Sync log
+
+**2026-09-16 — first sync, performed to prove the path.** Upstream `main` had advanced by one commit
+(`7111081c`, "report verified PR state for passed runs"), touching `fm-crew-state.sh`,
+`fm-inactive-reconcile.sh`, `fm-pr-lib.sh` and `fm-crew-state.test.sh` — none of them on this
+branch's conflict surface. `git rebase upstream-main` replayed all 24 commits with **zero conflicts**.
+
+The rebase was clean and the adapter was still broken, which is the lesson worth keeping: because the
+lock library gained a source dependency, three upstream test **fixtures** that copy scripts by explicit
+list needed the new file. `fm-turnend-guard.test.sh` failed with
+`fm-session-lock-lib.sh: line 19: .../bin/fm-dsh-lib.sh: No such file or directory`. That failure is
+invisible to the adapter's own suites and appears only when the upstream suites run, so a clean rebase
+must always be followed by the gates below — not by the adapter's tests alone.
 
 ## Verification gates after an update
 
