@@ -221,7 +221,7 @@ phase_recovery() {
 }
 
 phase_teardown() {
-  local teardown_out corr rec leftover leftover_rec
+  local teardown_out corr rec leftover leftover_rec other_corr
   corr=$(FM_HOME="$HOME_DIR" bash -c '
     . "$1"
     fm_pending_reply_create "$2" "$2/state" design "New routed work is in your backlog."
@@ -281,6 +281,27 @@ phase_teardown() {
     "unsafe corr_id cleanup deleted outside pending-replies"
   rm -rf "$HOME_DIR/state/pending-replies/.delivery-confirmed-.."
   rm -f "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  other_corr=bbbbbbbbbbbbbbbb
+  printf 'task_id=other\nphase=resolved\ncorr_id=%s\n' "$other_corr" \
+    > "$HOME_DIR/state/pending-replies/$other_corr"
+  : > "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr"
+  printf 'task_id=design\nphase=resolved\ncorr_id=%s\n' "$other_corr" \
+    > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a pending-reply with mismatched corr_id"
+  fi
+  assert_present "$SUB" "mismatched corr_id retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "mismatched corr_id retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "mismatched corr_id retirement removed the registry route"
+  assert_present "$HOME_DIR/state/pending-replies/$other_corr" \
+    "mismatched corr_id cleanup deleted another task's pending reply"
+  assert_present "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr" \
+    "mismatched corr_id cleanup deleted another task's delivery confirmation"
+  rm -f "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa" \
+    "$HOME_DIR/state/pending-replies/$other_corr" \
+    "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr"
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \

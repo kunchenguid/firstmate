@@ -737,8 +737,9 @@ remote_teardown_locks_release() {
 
 # Validate $STATE/pending-replies for local and remote secondmate retirement:
 # refuse a symlinked directory, any non-regular entry, and any entry whose
-# basename or corr_id is not a 16-hex correlation id; pin the realpath so later
-# cleanup cannot follow a swapped link target or a crafted confirmation path.
+# basename is not a 16-hex correlation id or whose corr_id disagrees with that
+# basename; pin the realpath so later cleanup cannot follow a swapped link
+# target or a crafted confirmation path.
 pending_replies_recovery_validate() {
   local mode=${1:-initial} pending_dir real rec base corr
   pending_dir="$STATE/pending-replies"
@@ -763,6 +764,8 @@ pending_replies_recovery_validate() {
       corr=$(fm_meta_get "$rec" corr_id)
       if [ -n "$corr" ]; then
         printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' \
+          || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+        [ "$corr" = "$base" ] \
           || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
       fi
     done
@@ -811,7 +814,7 @@ remote_recovery_paths_validate() {
 # confirmation when present. Shared by local and remote secondmate retirement
 # after the home/route is safely gone.
 pending_replies_cleanup_for_task() {
-  local pending_dir=$1 expected_real=${2-} rec corr confirmation task_id
+  local pending_dir=$1 expected_real=${2-} rec base corr task_id
   [ -d "$pending_dir" ] || return 0
   (
     CDPATH='' cd -- "$pending_dir" 2>/dev/null || exit 1
@@ -823,11 +826,11 @@ pending_replies_cleanup_for_task() {
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
       task_id=$(fm_meta_get "$rec" task_id)
       [ "$task_id" = "$ID" ] || continue
+      base=${rec#./}
+      printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' || exit 1
       corr=$(fm_meta_get "$rec" corr_id)
-      [ -n "$corr" ] || corr=${rec#./}
-      printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || exit 1
-      confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
-      rm -f -- "$confirmation" "$rec" || exit 1
+      [ -z "$corr" ] || [ "$corr" = "$base" ] || exit 1
+      rm -f -- "./.delivery-confirmed-$base" "$rec" || exit 1
     done
   )
 }
