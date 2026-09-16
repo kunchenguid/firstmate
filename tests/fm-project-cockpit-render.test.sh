@@ -37,11 +37,15 @@ empty=$TMP_ROOT/empty.json
 invalid=$TMP_ROOT/invalid.json
 partial=$TMP_ROOT/partial.json
 aged=$TMP_ROOT/aged.json
+secondmate_a=$TMP_ROOT/secondmate-a.json
+secondmate_b=$TMP_ROOT/secondmate-b.json
 home=$TMP_ROOT/home
 model states.json "$states" 2026-09-15T12:01:00Z
 model replacement.json "$replacement" 2026-09-15T12:06:00Z
 model empty.json "$empty" 2026-09-15T12:01:00Z
 model cached-age.json "$aged" 2026-09-15T12:01:10Z
+model secondmate-generation-a.json "$secondmate_a" 2026-09-15T12:00:00Z
+model secondmate-generation-b.json "$secondmate_b" 2026-09-15T13:00:00Z
 jq '.main_inventory.valid=false | .main_inventory.reason="inventory fixture invalid"' "$FIXTURES/empty.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
 jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
@@ -78,10 +82,14 @@ replacement_json=$(jq -c . "$replacement")
 promoted_json=$(jq -c '.projects |= (map(select(.id == "beta")) + map(select(.id != "beta")))' "$states")
 multiple_decisions_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).decisions=["Choose deployment window","Approve rollback policy"]' "$states")
 aged_json=$(jq -c . "$aged")
+secondmate_a_json=$(jq -c . "$secondmate_a")
+secondmate_b_json=$(jq -c . "$secondmate_b")
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.click(); b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.focus(); window.fmCockpit.replacePayload($states_json); return {state:window.fmCockpit.getState(),focused:document.activeElement.dataset.taskKey};}" \
   '\"focused\":\"healthy-work\\u001fgen-healthy-1\"' "same-generation refresh did not preserve focused task identity"
 assert_eval "() => {window.fmCockpit.replacePayload($replacement_json); return window.fmCockpit.getState();}" \
   'healthy-work\\u001fgen-healthy-2' "replacement generation retained the old selection identity"
+assert_eval "() => {window.fmCockpit.replacePayload($secondmate_a_json); const before=window.fmCockpit.getState().taskKey; window.fmCockpit.replacePayload($secondmate_b_json); return {before,after:window.fmCockpit.getState().taskKey};}" \
+  '\"after\":\"mate-one:child\\u001fchild-gen-b\"' "secondmate replacement generation retained the old selection identity"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); window.fmCockpit.replacePayload($promoted_json); return window.fmCockpit.getState().projectId + '|' + document.querySelector('.project-button').dataset.projectId;}" \
   'alpha|beta' "refresh did not adopt authoritative project priority while preserving selection"
 assert_eval "() => {window.fmCockpit.replacePayload($multiple_decisions_json); document.querySelector('[data-project-id=\"alpha\"]').click(); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); return document.getElementById('task-detail').innerText;}" \
@@ -108,14 +116,22 @@ pass "empty, invalid, partial, and stale browser states remain distinct"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); return window.fmCockpit.getState();}" \
   '\"projectId\":\"alpha\"' "state fixture could not be restored"
 chrome-devtools-axi resize 390 844 >/dev/null || fail "could not set narrow mobile viewport"
-assert_eval '() => ({overflow:document.documentElement.scrollWidth<=document.documentElement.clientWidth,width:innerWidth,columns:getComputedStyle(document.querySelector(".project-list")).gridTemplateColumns,mobile:[...document.querySelectorAll(".mobile-label")].filter(e=>getComputedStyle(e).display!=="none").map(e=>e.innerText),identity:document.getElementById("task-identity").innerText})' \
+assert_eval '() => {const nodes=[document.documentElement,document.body,...document.querySelectorAll(".fleet-strip,.fleet-strip__row,.toolbar,.layout,.navigator,.board,.inspector,#project-board,.project-list,.task-list,.task-button")]; const nested=nodes.filter(e=>e.clientWidth>0&&e.scrollWidth>e.clientWidth+1).map(e=>({name:e.id||e.className||e.tagName,scroll:e.scrollWidth,client:e.clientWidth})); const metrics=[...document.querySelectorAll(".metric,.freshness")].map(e=>({text:e.innerText,left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,visible:getComputedStyle(e).display!=="none"&&e.getBoundingClientRect().left>=0&&e.getBoundingClientRect().right<=innerWidth})); return {overflow:nested.length===0,nested,metricsVisible:metrics.every(e=>e.visible),metrics,width:innerWidth,columns:getComputedStyle(document.querySelector(".project-list")).gridTemplateColumns,mobile:[...document.querySelectorAll(".mobile-label")].filter(e=>getComputedStyle(e).display!=="none").map(e=>e.innerText),identity:document.getElementById("task-identity").innerText};}' \
   '\"overflow\":true' "narrow mobile viewport overflows horizontally"
+assert_eval '() => ({metricsVisible:[...document.querySelectorAll(".metric,.freshness")].every(e=>{const r=e.getBoundingClientRect();return getComputedStyle(e).display!=="none"&&r.left>=0&&r.right<=innerWidth})})' \
+  '\"metricsVisible\":true' "narrow mobile fleet strip hides a required metric"
 assert_eval '() => ({mobile:[...document.querySelectorAll(".mobile-label")].filter(e=>getComputedStyle(e).display!=="none").map(e=>e.innerText)})' \
   '\"mobile\":[\"NOW\",\"DECISIONS\",\"QUEUE\"]' "mobile project drill-down labels are missing"
 assert_eval '() => ({identity:document.getElementById("task-identity").innerText,columns:getComputedStyle(document.querySelector(".project-list")).gridTemplateColumns})' \
   'generation gen-call-1' "task identity is not retained in narrow detail"
-assert_eval '() => {const b=document.querySelector(".task-button"); b.focus(); return document.activeElement===b;}' \
-  'result: "true"' "mobile task did not receive focus"
-chrome-devtools-axi press Escape >/dev/null || fail "Escape could not return from mobile task navigation"
+assert_eval '() => {const b=document.querySelector(".project-button[aria-current=\"true\"]"); b.focus(); return {project:b.dataset.projectId,focused:document.activeElement===b};}' \
+  '\"focused\":true' "mobile selected project did not receive focus"
+chrome-devtools-axi press Enter >/dev/null || fail "Enter could not drill from the mobile project into its task list"
+assert_eval '() => ({task:document.activeElement.dataset.taskKey||null,focused:document.activeElement.classList.contains("task-button")})' \
+  '\"focused\":true' "mobile project activation did not focus its first task"
+chrome-devtools-axi press Enter >/dev/null || fail "Enter could not activate the mobile task"
+assert_eval '() => ({tag:document.activeElement.tagName,id:document.activeElement.id,taskKey:window.fmCockpit.getState().taskKey})' \
+  '\"id\":\"inspector\"' "mobile task activation did not focus the inspector"
+chrome-devtools-axi press Escape >/dev/null || fail "Escape could not return from the focused mobile inspector"
 assert_eval '() => ({project:document.activeElement.dataset.projectId})' '\"project\":\"alpha\"' "Escape did not return focus to the selected mobile project"
 pass "narrow mobile layout has no horizontal overflow and preserves drill-down identity and keyboard return"

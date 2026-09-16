@@ -53,7 +53,8 @@ test_projection_is_deterministic_and_allowlisted() {
     and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
       | .lane == "waiting" and .state == "unknown" and .crew.summary == "UNKNOWN")
     and ([.projects[].tasks[] | select(.id == "done-work")][0]
-      | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
+      | .lane == "recently_completed" and .elapsed_seconds == null
+        and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
   ' "$one" >/dev/null || fail "projected state semantics, stable ordering, elapsed time, or safe links are wrong"
   for unsafe in PRIVATE-INBOX-TEXT-MUST-NOT-LEAK SECRET-STATUS-DETAIL SECRET-RAW-LINE PRIVATE-EVENT-TEXT PRIVATE-DECISION-TEXT FORBIDDEN-CONTROL-TEXT; do
     ! grep -Fq "$unsafe" "$one" || fail "unsafe source text leaked through the allowlist: $unsafe"
@@ -65,6 +66,91 @@ test_projection_is_deterministic_and_allowlisted() {
         | .lane == "waiting" and .state == "stopped" and .crew.summary == "UNKNOWN")' "$stopped" >/dev/null \
     || fail "stopped lifecycle evidence was presented as running"
   pass "projection is deterministic, stably ordered, semantically faithful, and allowlisted"
+}
+
+test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
+  local model=$TMP_ROOT/main-decision.json held=$TMP_ROOT/main-decision-held.json
+  local exact=$TMP_ROOT/main-decisions-exact.json over=$TMP_ROOT/main-decisions-over.json invalid=$TMP_ROOT/main-decision-invalid.json
+  project main-open-decision.json "$model"
+  jq -e '
+    .counts == {running:0,waiting:1,blocked:0,attention:1}
+    and .projects[0].attention_count == 1
+    and .projects[0].rank == 0
+    and (.projects[0].tasks[0]
+      | .id == "healthy-work" and .attention == true and .attention_rank == 0
+        and .decisions == ["Choose API v1 or v2"]
+        and .gate == {status:"decision",label:"Choose API v1 or v2"})
+  ' "$model" >/dev/null || fail "canonical main-home open decision did not affect task, project, and fleet attention"
+  ! grep -Fq 'PRIVATE-STATUS-PROSE' "$model" || fail "current-state prose leaked beside the canonical decision"
+  ! grep -Fq 'PRIVATE-INBOX-STYLE-PROSE' "$model" || fail "unrelated event or inbox-style prose leaked beside the canonical decision"
+
+  jq '(.tasks[0].backlog) += {
+        captain_actionable:true,hold_bucket:"live",hold_reason:"Choose API v1 or v2",
+        hold_age_days:1,hold_until:null
+      }' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$held"
+  jq -e '.projects[0].tasks[0]
+      | .attention == true and .hold.question == "Choose API v1 or v2" and .decisions == []
+        and .gate == {status:"live",label:"Choose API v1 or v2"}' "$held" >/dev/null \
+    || fail "same-task canonical decision and hold were not merged without duplication"
+
+  jq --argjson count 20 '
+      .tasks[0].hints.open_decisions = [range(0;$count) | {
+        key:("decision-" + tostring),verb:"needs-decision",summary:("Question " + tostring)
+      }]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$exact"
+  jq --argjson count 21 '
+      .tasks[0].hints.open_decisions = [range(0;$count) | {
+        key:("decision-" + tostring),verb:"needs-decision",summary:("Question " + tostring)
+      }]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$over"
+  jq -e '.inventory.truncated == false and (.projects[0].tasks[0].decisions | length) == 20' "$exact" >/dev/null \
+    || fail "an exactly-at-limit canonical main decision list was reported truncated"
+  jq -e '.inventory.truncated == true and (.projects[0].tasks[0].decisions | length) == 20' "$over" >/dev/null \
+    || fail "an over-limit canonical main decision list did not disclose its omitted item"
+
+  jq '.tasks[0].hints.open_decisions = [
+        {key:"api",verb:"progress",summary:"Unrelated status prose"},
+        {verb:"needs-decision",summary:"Unkeyed inbox prose"}
+      ]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
+  jq -e '.counts.attention == 0 and .projects[0].tasks[0].decisions == []' "$invalid" >/dev/null \
+    || fail "noncanonical status or inbox prose became a main-home decision"
+  pass "canonical main-home decisions are actionable, bounded, deduplicated, and prose-blind"
+}
+
+test_secondmate_generation_and_terminal_elapsed_fail_closed() {
+  local first=$TMP_ROOT/secondmate-generation-a.json second=$TMP_ROOT/secondmate-generation-b.json
+  local unproven=$TMP_ROOT/secondmate-generation-unproven.json done_one=$TMP_ROOT/done-1201.json
+  local done_two=$TMP_ROOT/done-1301.json working=$TMP_ROOT/working-1301.json
+  "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-a.json" --observed-at 2026-09-15T12:00:00Z > "$first"
+  "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-b.json" --observed-at 2026-09-15T13:00:00Z > "$second"
+  jq -e '.projects[0].tasks[0]
+      | .id == "mate-one:child" and .spawn_gen == "child-gen-a" and .state == "working"
+        and .started_at == "2026-09-15T11:30:00Z"' "$first" >/dev/null \
+    || fail "first canonical secondmate child generation was not preserved"
+  jq -e '.projects[0].tasks[0]
+      | .id == "mate-one:child" and .spawn_gen == "child-gen-b" and .state == "blocked"
+        and .started_at == "2026-09-15T12:30:00Z"' "$second" >/dev/null \
+    || fail "replacement secondmate child generation was not preserved"
+  jq 'del(.secondmate_current.records[0].active_children[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven"
+  jq -e '.projects[0].tasks[0]
+      | .spawn_gen == null and .state == "unknown" and .state_source == "generation-unavailable"
+        and .observed_at == null and .started_at == null and .elapsed_seconds == null' "$unproven" >/dev/null \
+    || fail "unproven secondmate generation retained mutable child evidence"
+
+  "$PROJECTOR" --from-snapshot "$FIXTURES/terminal-elapsed.json" --observed-at 2026-09-15T12:01:00Z > "$done_one"
+  "$PROJECTOR" --from-snapshot "$FIXTURES/terminal-elapsed.json" --observed-at 2026-09-15T13:01:00Z > "$done_two"
+  jq -e '.projects[0].tasks[0] | .state == "done" and .elapsed_seconds == null' "$done_one" >/dev/null \
+    || fail "done task invented elapsed time at the first projection clock"
+  jq -e '.projects[0].tasks[0] | .state == "done" and .elapsed_seconds == null' "$done_two" >/dev/null \
+    || fail "done task elapsed time grew at a later projection clock"
+  jq '(.tasks[0].current_state.state)="working"' "$FIXTURES/terminal-elapsed.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:01:00Z > "$working"
+  jq -e '.projects[0].tasks[0] | .state == "working" and .elapsed_seconds == 9060' "$working" >/dev/null \
+    || fail "adjacent nonterminal task lost canonical running elapsed time"
+  pass "secondmate replacement identity and terminal elapsed time fail closed"
 }
 
 test_stale_partial_invalid_empty_and_replacement_states() {
@@ -185,10 +271,10 @@ test_secondmate_structured_surfaces_are_projected_once() {
           id:"mate-one",home:"/fleet/mates/one",spawn_gen:"mate-gen",provenance:{selected:"structured-home"},
           freshness:{observed_at:"2026-09-15T11:59:30Z"},
           active_children:[
-            {id:"child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",started_at:"2026-09-15T11:30:00Z",doing:"PRIVATE-REMOTE-DETAIL"},
-            {id:"release-call",kind:"ship",state:"working",repo:"omega",name:"Release preparation",source:"structured-home",doing:"PRIVATE-REMOTE-DECISION"},
-            {id:"status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"},
-            {id:"dated-hold",kind:"ship",state:"working",repo:"omega",name:"Scheduled deployment",source:"structured-home",started_at:"2026-09-15T11:45:00Z",doing:"PRIVATE-HOLD-DETAIL"}
+            {id:"child-live",spawn_gen:"gen-child-live",kind:"ship",state:"working",repo:"omega",name:"Remote implementation",source:"structured-home",started_at:"2026-09-15T11:30:00Z",doing:"PRIVATE-REMOTE-DETAIL"},
+            {id:"release-call",spawn_gen:"gen-release-call",kind:"ship",state:"working",repo:"omega",name:"Release preparation",source:"structured-home",doing:"PRIVATE-REMOTE-DECISION"},
+            {id:"status-call",spawn_gen:"gen-status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"},
+            {id:"dated-hold",spawn_gen:"gen-dated-hold",kind:"ship",state:"working",repo:"omega",name:"Scheduled deployment",source:"structured-home",started_at:"2026-09-15T11:45:00Z",doing:"PRIVATE-HOLD-DETAIL"}
           ],
           decisions_open:[
             {id:"release-call",verb:"captain-hold",summary:"Choose release route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"},
@@ -209,7 +295,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
   jq -e '
     ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 7
     and ([.projects[].tasks[] | select(.id == "mate-one:child-live")][0]
-      | .lane == "running" and .project_id == "omega" and .crew.kind == "ship"
+      | .lane == "running" and .project_id == "omega" and .crew.kind == "ship" and .spawn_gen == "gen-child-live"
         and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
     and ([.projects[].tasks[] | select(.id == "mate-one:release-call")][0]
       | .lane == "waiting" and .attention == true and .hold.actionable == true
@@ -525,6 +611,8 @@ SH
 }
 
 test_projection_is_deterministic_and_allowlisted
+test_main_open_decisions_are_bounded_deduplicated_and_actionable
+test_secondmate_generation_and_terminal_elapsed_fail_closed
 test_stale_partial_invalid_empty_and_replacement_states
 test_nested_bounds_disclose_only_real_omissions
 test_secondmate_structured_surfaces_are_projected_once

@@ -100,6 +100,7 @@ Project Cockpit uses `bin/fm-project-cockpit-snapshot.sh` to turn one `fm-fleet-
 `bin/fm-project-cockpit-contract.sh` owns the projector and builder's shared list limits and the model byte ceiling derived from those limits and every bounded presentation field.
 Its live refresh uses the fleet collector's read-only mode, which may consume an existing remote-summary cache but never contacts a remote home or creates or refreshes the cache.
 The projector preserves structured task generations, lifecycle states, captain-hold classifications, blockers, source freshness, partial inventory, and validated artifact references without passing raw status events, backlog body text, inbox content, or control commands to the browser.
+Canonical keyed main-home open decisions merge with same-task hold evidence without duplicate questions and participate in attention counts and ordering.
 It consolidates same-task secondmate decisions and merges matching structured hold and gate evidence onto the active task while retaining that task's runtime evidence, so identity deduplication cannot discard a captain question or invent a queued lifecycle.
 Unknown and stopped lifecycle evidence stays in the non-running waiting lane with its exact state, while blocked metrics count either a blocked or failed lifecycle or independently structured blocked-gate or blocker evidence.
 Every omission caused by the shared project, task, blocker, decision, partial-reason, or secondmate-summary bounds sets the model's truncation disclosure.
@@ -107,7 +108,8 @@ Cached secondmate authority makes inventory partial, carries its cache provenanc
 `bin/fm-project-cockpit-board.sh` validates that model, injects it into the shipped graphite renderer, verifies the embedded JSON round trip, and atomically publishes the private artifact.
 Its optional Lavish path is presentation-only and has no captain-hold binding, process-event registration, watcher, task-control, or terminal-input path.
 The renderer never opens paths from the model or reparses mutable fleet state, and terminal observation remains explicitly unavailable until an identity-bound capture contract can prove task generation and endpoint attribution across capture.
-New task metadata records an explicit `started_at` timestamp for elapsed-time display, while legacy records remain unavailable rather than deriving time from the opaque `spawn_gen` token or filesystem timestamps.
+New task metadata records an explicit `started_at` timestamp for elapsed-time display, while legacy records and terminal lifecycle states without a canonical end time or duration remain unavailable rather than deriving time from the opaque `spawn_gen` token, filesystem timestamps, or projection clock.
+Structured secondmate summaries carry each active child's canonical `spawn_gen`; an unproven generation drops mutable child evidence and receives only snapshot-scoped browser identity so refresh selection cannot cross incarnations.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.

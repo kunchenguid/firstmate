@@ -1,0 +1,25 @@
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-09-15T12:01:00Z",
+  "backlog": {"present": true, "records": []},
+  "tasks": [
+    {
+      "id": "done-work",
+      "kind": "ship",
+      "harness": "codex",
+      "backend": "tmux",
+      "project": "/work/alpha",
+      "spawn_gen": "gen-done-1",
+      "started_at": "2026-09-15T10:30:00Z",
+      "backlog": {"structured": true, "id": "done-work", "state": "in_flight", "title": "Completed work", "repo": "alpha", "kind": "ship", "hold_bucket": null, "captain_actionable": false, "unresolved_blocker_ids": []},
+      "current_state": {"state": "done", "source": "status-terminal", "detail": "complete", "observed_at": "2026-09-15T12:01:00Z"},
+      "endpoint": {"status": "absent", "target": null},
+      "paths": {"report": {"present": false, "path": null}, "worktree": {"path": null}, "home": {"path": null}},
+      "pr": {"url": null},
+      "hints": {"open_decisions": [], "pending_decision": false, "blocked_event": false}
+    }
+  ],
+  "main_inventory": {"valid": true, "reason": null, "orphan_in_flight": [], "unstructured_current_count": 0},
+  "secondmate_current": {"records": [], "total": 0, "shown": 0, "truncated": false},
+  "secondmate_landed": {"records": [], "truncated": [], "unreadable": [], "partial": []}
+}

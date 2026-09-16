@@ -151,8 +151,17 @@
       .inspector { grid-column: 2; border-left: 0; border-top: 1px solid var(--line); }
     }
     @media (max-width: 760px) {
-      .fleet-strip__row { gap: 12px; padding: 10px 12px; }
-      .brand { min-width: 160px; }
+      .fleet-strip__row {
+        display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px 4px; padding: 9px 8px; overflow-x: visible;
+      }
+      .brand { grid-column: 1 / -1; min-width: 0; margin-right: 0; }
+      .brand p { overflow-wrap: anywhere; }
+      .metric { min-width: 0; display: flex; flex-direction: column; gap: 1px; text-align: center; }
+      .metric__label { font-size: 9px; letter-spacing: .04em; }
+      .freshness { min-width: 0; padding-left: 0; border-left: 0; text-align: center; }
+      .freshness strong { font-size: 11px; }
+      .freshness span { font-size: 9px; letter-spacing: .04em; }
       .layout { display: block; min-width: 0; }
       .navigator { border-right: 0; border-bottom: 1px solid var(--line); }
       .project-list { display: grid; grid-template-columns: 1fr; }
@@ -219,7 +228,7 @@ __FM_PROJECT_COCKPIT_DATA__
       ["recently_completed", "Recently completed"]
     ];
     const text = (value, fallback = "Unavailable") => value === null || value === undefined || value === "" ? fallback : String(value);
-    const taskKey = (task) => `${task.id}\u001f${task.spawn_gen || "legacy"}`;
+    const taskKey = (task, payload = state.payload) => `${task.id}\u001f${task.spawn_gen || `unproven:${payload?.generated || "unavailable"}`}`;
     const upper = (value) => text(value).replaceAll("_", " ").toUpperCase();
     const duration = (seconds) => {
       if (!Number.isFinite(seconds)) return "Unavailable";
@@ -474,6 +483,11 @@ __FM_PROJECT_COCKPIT_DATA__
       if (focusInspector && window.matchMedia("(max-width: 760px)").matches) byId("inspector").focus();
       announce(`Selected task ${task?.name || "unavailable"}`);
     };
+    const inspectorKeydown = (event) => {
+      if (event.key !== "Escape" || !window.matchMedia("(max-width: 760px)").matches) return;
+      event.preventDefault();
+      byId("project-list").querySelector('[aria-current="true"]')?.focus();
+    };
     const renderAll = () => {
       renderHeader(); renderProjects(); renderBoard(); renderInspector();
     };
@@ -511,6 +525,7 @@ __FM_PROJECT_COCKPIT_DATA__
       state.taskKey = state.payload.projects[0]?.tasks[0] ? taskKey(state.payload.projects[0].tasks[0]) : null;
       byId("search").addEventListener("input", (event) => { state.query = event.target.value; renderProjects(); renderBoard(); });
       byId("view-filter").addEventListener("change", (event) => { state.filter = event.target.value; renderProjects(); renderBoard(); });
+      byId("inspector").addEventListener("keydown", inspectorKeydown);
       renderAll();
       setInterval(updateAge, 30000);
       window.fmCockpit = { replacePayload, getState: () => ({ projectId: state.projectId, taskKey: state.taskKey }) };

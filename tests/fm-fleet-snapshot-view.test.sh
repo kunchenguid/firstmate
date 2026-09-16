@@ -95,6 +95,7 @@ EOF
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
+    "spawn_gen=gen-ship-fixture" \
     "started_at=2026-07-07T12:00:00Z" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
@@ -178,8 +179,8 @@ test_fixture_snapshot_json() {
   summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$summary" | jq -e '
     .active_children[] | select(.id == "ship-task")
-    | .started_at == "2026-07-07T12:00:00Z"
-  ' >/dev/null || fail "home summary did not carry canonical child start time"
+    | .spawn_gen == "gen-ship-fixture" and .started_at == "2026-07-07T12:00:00Z"
+  ' >/dev/null || fail "home summary did not carry canonical child generation and start time"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")
     | .paths.report.present == true
