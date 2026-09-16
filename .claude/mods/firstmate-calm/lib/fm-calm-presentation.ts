@@ -2,11 +2,11 @@
 //
 // This module owns the decisions ../hooks/register.ts applies through `$`: where the
 // shared per-home Calm preference lives and how its value reads, which assistant text is
-// a mid-turn working note, and which transcript rows Calm hides. It mirrors the Pi
-// policy in .pi/extensions/lib/fm-calm-visibility.ts and .pi/extensions/fm-calm.ts:
-// genuine user prompts, genuine agent responses, and working activity stay visible;
-// tool rows, tool groups, working notes, and canonically classified operational user
-// rows hide. docs/calm.md owns the captain-facing contract and docs/configuration.md
+// a mid-turn working note, and which transcript rows Calm hides. It shares Pi Calm's
+// broad presentation boundary: genuine user prompts, genuine agent responses, and
+// working activity stay visible; tool rows, tool groups, classified working notes, and
+// canonically classified operational user rows hide. docs/calm.md owns the exact
+// captain-facing contract and docs/configuration.md
 // the persisted preference schema. Everything here is pure so tests run it under Node.
 import { classifyFirstmateOperationalText } from "./fm-operational-input.ts";
 

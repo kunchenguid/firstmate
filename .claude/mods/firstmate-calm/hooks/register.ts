@@ -15,7 +15,7 @@
 // glue under `claude plugin test`. Nothing here rewrites a message: `ui.render` changes
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
-// Presentation while Calm is on, matching Pi Calm's policy where the mods API allows:
+// Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
 // the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input

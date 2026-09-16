@@ -76,8 +76,8 @@ On Claude Code the boat is painted in Claude Code's own theme colors rather than
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
-A mid-turn working note, the text of a model step that stopped to call tools or ran out of tokens while calling them, draws at zero height once that step settles when it is both single-line and short, with its trimmed length below the 240-character preservation threshold.
-Longer or multi-line mid-turn content is preserved and treated as a final reply, including when `claude --continue` restores the transcript.
+A mid-turn working note, the text of a model step that stopped to call tools or ran out of tokens while calling them, draws at zero height once that step settles only when its raw text contains no newline and its trimmed length is below the 240-character preservation threshold.
+Mid-turn content whose raw text contains a newline or whose trimmed length is at least 240 characters is preserved and treated as a final reply, including when `claude --continue` restores the transcript.
 Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and the preference is read before the first row draws.
 Nothing is rewritten: hidden rows remain in the message, model context, session storage, and exports, and the mod never touches tool execution, prompts, or the stored transcript.
 
