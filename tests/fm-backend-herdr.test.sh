@@ -323,6 +323,33 @@ test_workspace_label_different_secondmates_get_different_labels() {
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
 }
 
+test_workspace_label_config_override_applies_with_internal_space() {
+  local home
+  home="$TMP_ROOT/primary-home-with-label"; mkdir -p "$home/config"
+  printf '  Mate Raiz  \n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "Mate Raiz" ] || fail "a non-empty config/herdr-workspace-label should be used verbatim (trimmed at the ends), got '$out'"
+  pass "fm_backend_herdr_workspace_label: config/herdr-workspace-label overrides the label, preserving internal spaces"
+}
+
+test_workspace_label_config_override_absent_falls_back_to_primary() {
+  local home
+  home="$TMP_ROOT/primary-home-no-label-file"; mkdir -p "$home"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "firstmate" ] || fail "an absent config/herdr-workspace-label should fall back to 'firstmate', got '$out'"
+  pass "fm_backend_herdr_workspace_label: an absent config/herdr-workspace-label falls back to 'firstmate'"
+}
+
+test_workspace_label_secondmate_marker_wins_over_config_override() {
+  local home
+  home="$TMP_ROOT/secondmate-home-with-label"; mkdir -p "$home/config"
+  printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
+  printf 'Mate Raiz\n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "2ndmate-sshhip-h7" ] || fail "the secondmate marker must take precedence over config/herdr-workspace-label, got '$out'"
+  pass "fm_backend_herdr_workspace_label: the secondmate marker wins over a config/herdr-workspace-label override"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -5212,6 +5239,9 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_workspace_label_config_override_applies_with_internal_space
+test_workspace_label_config_override_absent_falls_back_to_primary
+test_workspace_label_secondmate_marker_wins_over_config_override
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary

@@ -49,6 +49,7 @@ The ordinary topology puts one task tab per endpoint in the exact workspace of t
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is `firstmate`.
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
+A primary home overrides its own label by writing the desired text into local gitignored `config/herdr-workspace-label` (see [`docs/configuration.md`](configuration.md)); the secondmate marker still wins when present, and the override only affects workspaces created after it is set.
 A secondmate launched by the primary receives a narrowly scoped home override during container creation.
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
