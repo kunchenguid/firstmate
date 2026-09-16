@@ -149,6 +149,22 @@ test_no_pr_meta_uses_local_branch() {
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
 }
 
+test_legacy_brief_uses_symbolic_worktree_branch() {
+  local case_dir out
+  case_dir=$(make_case legacy-branch)
+  git -C "$case_dir/wt" checkout -q -b legacy-crew
+  git -C "$case_dir/wt" branch -D fm/task-x1 >/dev/null
+  printf 'legacy-crew\n' > "$case_dir/wt/legacy.txt"
+  git -C "$case_dir/wt" add legacy.txt
+  git -C "$case_dir/wt" commit -qm "legacy crew branch"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" '+legacy-crew' \
+    "legacy brief review did not use the symbolic worktree branch"
+  pass "fm-review-diff preserves the legacy symbolic-branch fallback"
+}
+
 test_unreachable_pr_head_falls_back_with_warning() {
   local case_dir out err
   case_dir=$(make_case fetch-fallback)
@@ -321,6 +337,7 @@ test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
+test_legacy_brief_uses_symbolic_worktree_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_is_compare_base
 test_local_only_recorded_base_does_not_require_default_or_remote_ref

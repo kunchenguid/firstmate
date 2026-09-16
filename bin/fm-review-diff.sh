@@ -82,9 +82,15 @@ fi
 
 BRANCH="fm/$ID"
 BRIEF="$DATA/$ID/brief.md"
+RECORDED_BRANCH=
 if [ -f "$BRIEF" ]; then
   RECORDED_BRANCH=$(fm_brief_crew_branch "$BRIEF")
-  [ -z "$RECORDED_BRANCH" ] || BRANCH=$RECORDED_BRANCH
+fi
+if [ -n "$RECORDED_BRANCH" ]; then
+  BRANCH=$RECORDED_BRANCH
+elif ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
 fi
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
   || { echo "error: $BRIEF records an invalid crew branch: $BRANCH" >&2; exit 1; }
