@@ -121,6 +121,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
   local path=$1 offset hash schema
@@ -414,10 +415,50 @@ append_status_once() { # <status-file> <line>
   return 0
 }
 
+stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-additions> <source-additions>
+  LC_ALL=C awk \
+    -v rewritten_file="$2" \
+    -v source_record="$3" \
+    -v status_file="$4" \
+    -v status_additions="$5" \
+    -v source_additions="$6" '
+    BEGIN {
+      printf "%s", "" > status_additions
+      printf "%s", "" > source_additions
+      while ((getline line < source_record) > 0) mirrored[line] = 1
+      close(source_record)
+      while ((getline line < status_file) > 0) present[line] = 1
+      close(status_file)
+    }
+    {
+      source = $0
+      read_result = getline rewritten < rewritten_file
+      if (read_result <= 0) {
+        failed = 1
+        exit 1
+      }
+      if (source == "" || (source in mirrored)) next
+      mirrored[source] = 1
+      print source > source_additions
+      if (!(rewritten in present)) {
+        present[rewritten] = 1
+        print rewritten > status_additions
+      }
+    }
+    END {
+      if (!failed && (getline extra < rewritten_file) > 0) failed = 1
+      close(rewritten_file)
+      if (close(status_additions) != 0) failed = 1
+      if (close(source_additions) != 0) failed = 1
+      if (failed) exit 1
+    }
+  ' "$1"
+}
+
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
-  local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
-  local fetch_rc append_rc offered='' delivered_map='' mirrored='' undelivered=''
+  local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
+  local fetch_rc append_rc offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -455,6 +496,23 @@ cmd_ingest() {
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
   lock="$STATE/.remote-reply-ingest-$id.lock"
   fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
+  if [ ! -e "$status_file" ]; then
+    (umask 077; : > "$status_file") \
+      || { fm_lock_release "$lock"; die "cannot create parent status log"; }
+  fi
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] \
+    || { fm_lock_release "$lock"; die "parent status log is unsafe"; }
+  source_record=$(mirrored_source_path "$id")
+  if [ -L "$source_record" ] || { [ -e "$source_record" ] && [ ! -f "$source_record" ]; }; then
+    fm_lock_release "$lock"
+    die "remote reply mirrored-source record is unsafe: $source_record"
+  fi
+  if [ ! -e "$source_record" ]; then
+    (umask 077; : > "$source_record") \
+      || { fm_lock_release "$lock"; die "cannot create remote reply mirrored-source record"; }
+  fi
+  chmod 600 "$source_record" \
+    || { fm_lock_release "$lock"; die "cannot secure remote reply mirrored-source record"; }
   read_cursor "$id"
   if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
     cursor_already=1
@@ -504,13 +562,19 @@ EOF
   mirrored="$tmp/mirrored"
   rewrite_document_pointers "$normalized_payload" "$delivered_map" "$mirrored" \
     || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
-  while IFS= read -r rewritten || [ -n "$rewritten" ]; do
-    [ -n "$rewritten" ] || continue
-    append_rc=0
-    append_status_once "$status_file" "$rewritten" || append_rc=$?
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
-    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
-  done < "$mirrored"
+  status_additions="$tmp/status-additions"
+  source_additions="$tmp/source-additions"
+  : > "$status_additions" && : > "$source_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  stage_mirror_lines "$normalized_payload" "$mirrored" "$source_record" "$status_file" \
+    "$status_additions" "$source_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  cat "$status_additions" >> "$status_file" \
+    || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+  appended=$(LC_ALL=C awk 'END { print NR + 0 }' "$status_additions") \
+    || { fm_lock_release "$lock"; die "cannot count appended remote replies"; }
+  cat "$source_additions" >> "$source_record" \
+    || { fm_lock_release "$lock"; die "cannot commit remote reply mirror identity"; }
   # A note, never a decision: it stays visible without entering the open-decision
   # fold, so it cannot stand open the way a keyed block did.
   while IFS=$'\t' read -r doc reason || [ -n "$doc" ]; do

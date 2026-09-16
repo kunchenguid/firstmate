@@ -563,6 +563,62 @@ assert_grep 'report=data/remote-secondmates/ios/data/reply/writefail.md' "$PAREN
 mirrored_cursor_is_current "the recovered delta did not advance the cursor"
 pass "a failed mirror write never drops status content or advances the cursor"
 
+# A source line remains the replay identity even when document availability
+# changes between a successful mirror append and a failed ingestion commit.
+REPLAY_LINE='needs-decision [key=replay-decision]: pick report=data/reply/replay.md'
+rm -f "$REMOTE/data/reply/replay.md"
+GEN=$((GEN + 1))
+printf '%s\n' "$REPLAY_LINE" >> "$REMOTE/state/parent-replies.status"
+replay_commit_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+RECEIPT_FAIL_BIN="$TMP_ROOT/receipt-fail-bin"
+mkdir -p "$RECEIPT_FAIL_BIN"
+REAL_MKTEMP=$(command -v mktemp)
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */state/remote-replies/.ingested.XXXXXX) exit 73 ;;
+esac
+SH
+  printf 'exec %q "$@"\n' "$REAL_MKTEMP"
+} > "$RECEIPT_FAIL_BIN/mktemp"
+chmod +x "$RECEIPT_FAIL_BIN/mktemp"
+PATH="$RECEIPT_FAIL_BIN:$PATH" remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" \
+  >/dev/null 2>&1 || true
+RESULT_REPLAY_COMMIT="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_REPLAY_COMMIT" "the replay-identity delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the generation whose ingestion receipt failed was acknowledged"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$replay_commit_cursor_before" ] \
+  || fail "an ingestion receipt failure advanced the remote reply cursor"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "the pre-rewrite decision line was not mirrored exactly once before commit failure"
+printf '# replay decision report\n' > "$REMOTE/data/reply/replay.md"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_REPLAY_COMMIT" >/dev/null \
+  || fail "the uncommitted generation did not retry after its document arrived"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "retrying after document arrival duplicated the source decision line"
+assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
+  "$PARENT/state/ios.status" "retrying after document arrival appended a rewritten duplicate"
+assert_present "$PARENT/data/remote-secondmates/ios/data/reply/replay.md" \
+  "the retry did not fetch the document that had since arrived"
+printf 'resolved [key=replay-decision]: selection complete\n' >> "$PARENT/state/ios.status"
+assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'replay-decision\t' \
+  "the replay decision fixture did not close before cursor-loss recapture"
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
+  || fail "the replay-identity whole-log recapture was not captured"
+assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the replay-identity whole-log recapture was not applied"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "cursor-loss recapture duplicated the resolved decision"
+assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
+  "$PARENT/state/ios.status" "cursor-loss recapture reopened the decision in rewritten form"
+assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'replay-decision\t' \
+  "cursor-loss recapture reopened the resolved decision"
+pass "source-line identity survives commit failure and cursor-loss recapture"
+
 # A remote mate cannot squat the decision keys this parent's pending-reply
 # library owns. The guard is deliberately NOT in this adapter: rejecting a line
 # here would be batch-fatal and could wedge the whole stream, and it would
