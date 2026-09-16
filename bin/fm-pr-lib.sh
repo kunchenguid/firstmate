@@ -287,6 +287,14 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Meta tail contract: the poll identity sits at the end of state/<id>.meta.
+# After the single pr= line, only pr_head= and the x_request=, x_request_ts=,
+# x_followups=, x_platform=, and x_reply_max_chars= link fields are accepted;
+# any other line makes the identity unreadable. Writers of non-whitelisted
+# fields therefore never place a line after pr=: bin/fm-pr-check.sh publishes
+# pr=/pr_head= last, and fm-spawn.sh's relaunch publication and traceparent
+# recording insert their lines before the first pr= line, so an armed merge
+# poll stays valid across a rewrite such as a relaunch.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

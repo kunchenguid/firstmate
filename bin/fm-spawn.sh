@@ -4301,6 +4301,10 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # Insert the carrier before the first pr= line, never after it: the meta
+  # tail contract (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse) rejects
+  # any line after pr= that is not pr_head= or an x_* link field, and a
+  # relaunch-published record must keep its armed PR poll valid.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
     ! awk -F= -v tp="$SPAWN_TRACEPARENT" '
       $1 == "traceparent" { next }

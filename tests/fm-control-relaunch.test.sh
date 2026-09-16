@@ -17,6 +17,9 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. An armed PR merge poll survives relaunch with and without trace-context
+#      recording: the replacement record keeps the preserved pr=/pr_head= tail
+#      last, so fm_pr_poll_artifacts_valid still holds afterwards.
 set -u
 
 # shellcheck source=tests/lib.sh
