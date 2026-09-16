@@ -1415,6 +1415,9 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
+    bin/fm-unified-library.sh|.agents/skills/unified-library/*)
+      printf '%s\n' "__script__:fm-unified-library.test.sh"
+      ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
       # The portable suites that actually load these files, named one by one.
