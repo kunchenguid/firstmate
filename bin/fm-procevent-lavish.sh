@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh discover
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -85,8 +86,9 @@
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# server-side events. The primary watcher discovers active sessions and
+# registers this same listener; there is no timer fallback or dependency on any
+# unreleased capability.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -126,7 +128,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,113p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -162,6 +164,66 @@ cmd_arm() {
     -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
+}
+
+registration_matches() {
+  local id=$1 real=$2 status
+  fm_procevent_source_lock_acquire "$id" || return 1
+  fm_procevent_registration_matches_locked "$STATE" lavish "$id" \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"
+  status=$?
+  fm_procevent_source_lock_release "$id" || return 1
+  return "$status"
+}
+
+cmd_discover() {
+  local store artifacts artifact real id status=0
+  [ "$#" -eq 0 ] || usage
+  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
+  if [ ! -e "$store" ] && [ ! -L "$store" ]; then
+    return 0
+  fi
+  [ -f "$store" ] && [ ! -L "$store" ] || die "Lavish state store must be a regular file"
+  artifacts=$(python3 - "$store" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+sessions = data.get("sessions", {})
+if not isinstance(sessions, dict):
+    raise SystemExit("Lavish sessions must be an object")
+paths = set()
+for session in sessions.values():
+    if not isinstance(session, dict):
+        continue
+    prompts = session.get("prompts")
+    has_prompts = isinstance(prompts, list) and bool(prompts)
+    if not has_prompts and (
+        session.get("session_ended") is True or session.get("status") == "ended"
+    ):
+        continue
+    path = session.get("file")
+    if not isinstance(path, str) or not path or any(c in path for c in "\0\r\n"):
+        continue
+    real = os.path.realpath(path)
+    if os.path.isfile(real):
+        paths.add(real)
+for path in sorted(paths):
+    print(path)
+PY
+  ) || die "cannot read Lavish sessions"
+  while IFS= read -r artifact; do
+    [ -n "$artifact" ] || continue
+    real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+      || { status=1; continue; }
+    id=$(cmd_source_id "$real") || { status=1; continue; }
+    registration_matches "$id" "$real" && continue
+    cmd_arm "$real" >/dev/null || status=1
+  done <<< "$artifacts"
+  return "$status"
 }
 
 cmd_retire() {
@@ -787,6 +849,7 @@ cmd_capture_committed() {
 
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
+  discover)  shift; cmd_discover "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   capture-committed) shift; cmd_capture_committed "$@" ;;

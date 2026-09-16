@@ -27,6 +27,8 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 ## Arming a source
 
 Use the adapter, not the generic runner, for a real source.
+The primary Firstmate watcher automatically discovers active sessions from the local Lavish store and registers them through the same process-event owner, so ordinary dock replies require no manual arm.
+Secondmate homes do not run this discovery.
 For a Lavish review artifact firstmate owns (a live investigating scout should host its own loop):
 
 ```sh

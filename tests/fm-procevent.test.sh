@@ -713,12 +713,23 @@ assert_contains "$first_recovery" "no-result: $recovery_id" \
   || fail "the failed destructive poll created a result before recovery"
 assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "pending dock prompts are retained before destructive polling"
-PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
+PATH="$RECOVERY_BIN:$PATH" FM_PROCEVENT_MAX_OUTPUT_BYTES=256 \
+  pe "$HRECOVERY" start "$recovery_id" >/dev/null
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] \
   || fail "recovery polled the already-cleared source again"
 [ "$(count_results "$HRECOVERY" "$recovery_id")" = 1 ] \
-  || fail "the retained dock reply was not captured exactly once"
+  || fail "the bounded recovery result was not captured"
 RECOVERY_RESULT=$(first_result "$HRECOVERY" "$recovery_id" || true)
+assert_grep 'status: feedback' "$RECOVERY_RESULT" \
+  "the bounded recovery result retains its feedback lifecycle"
+assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
+  "a truncated capture does not acknowledge the complete recovery snapshot"
+PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
+[ "$(cat "$RECOVERY_COUNT")" = 1 ] \
+  || fail "complete recovery polled the already-cleared source again"
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 2 ] \
+  || fail "the retained complete dock reply was not captured after truncation"
+RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.2.result"
 assert_grep 'survive destructive poll' "$RECOVERY_RESULT" \
   "the recovered result retains the captain's prompt"
 recovery_read=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" read "$RECOVERY_RESULT")
@@ -726,14 +737,82 @@ assert_contains "$recovery_read" "/tmp/recovered.png" \
   "the recovered presentation retains attachment metadata"
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "durable capture retires the recovery snapshot"
-[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 1" || true)" = 1 ] \
-  || fail "the recovered reply did not use exactly one process-event wake"
+[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 2" || true)" = 1 ] \
+  || fail "the complete recovered reply did not use the process-event wake owner"
 printf 'obsolete snapshot\n' > "$HRECOVERY/state/procevent/$recovery_id.lavish-pending"
 FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECOVERY_ART" >/dev/null
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "public retirement removes the adapter recovery snapshot"
 unset RECOVERY_COUNT LAVISH_AXI_STATE_DIR
-pass "pending dock prompts survive destructive poll failure through one wake owner"
+pass "pending dock prompts survive destructive poll failure and bounded capture"
+
+# --- primary watcher automatically registers Lavish sessions ---------------
+HAUTOLAVISH="$TMP_ROOT/hauto-lavish"; new_home "$HAUTOLAVISH"
+AUTO_LAVISH_ROOT="$TMP_ROOT/auto-lavish-primary"
+AUTO_LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/auto-lavish-stub")
+AUTO_LAVISH_STORE="$TMP_ROOT/auto-lavish-store"
+AUTO_LAVISH_ART="$TMP_ROOT/auto-lavish-board.html"
+mkdir -p "$AUTO_LAVISH_ROOT" "$AUTO_LAVISH_STORE"
+ln -s "$ROOT/bin" "$AUTO_LAVISH_ROOT/bin"
+git -C "$AUTO_LAVISH_ROOT" init -q
+printf '# Primary test home\n' > "$AUTO_LAVISH_ROOT/AGENTS.md"
+printf '<h1>automatic Lavish session</h1>\n' > "$AUTO_LAVISH_ART"
+python3 - "$AUTO_LAVISH_STORE/state.json" "$AUTO_LAVISH_ART" <<'PY'
+import json
+import sys
+
+store, artifact = sys.argv[1:]
+with open(store, "w", encoding="utf-8") as fh:
+    json.dump({"sessions": {"automatic": {
+        "file": artifact,
+        "status": "feedback",
+        "session_ended": True,
+        "prompts": [{
+            "uid": "",
+            "prompt": "automatic dock delivery",
+            "text": "the captain sent and ended",
+        }],
+    }}}, fh)
+PY
+cat > "$AUTO_LAVISH_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+python3 - "$LAVISH_AXI_STATE_DIR/state.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+data["sessions"]["automatic"]["prompts"] = []
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+PY
+printf 'session:\n  file: %s\n  status: feedback\n  session_ended: true\n' "$AUTO_LAVISH_ART"
+printf 'prompts[1]{uid,selector,tag,prompt,text,attachments}:\n'
+printf '  "","","","automatic dock delivery","the captain sent and ended","[]"\n'
+SH
+chmod +x "$AUTO_LAVISH_BIN/lavish-axi"
+auto_lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$AUTO_LAVISH_ART")
+fm_test_track_procevent_home "$HAUTOLAVISH"
+export AUTO_LAVISH_ART
+PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$AUTO_LAVISH_STORE" \
+  FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HAUTOLAVISH" \
+  FM_STATE_OVERRIDE="$HAUTOLAVISH/state" \
+  bash -c '. "$1/bin/fm-watch.sh"; procevent_reconcile_tick' _ "$ROOT"
+wait_for "$HAUTOLAVISH/state/.wake-queue" \
+  || fail "automatic Lavish registration did not publish its recovered reply"
+assert_contains "$(wake_payloads "$HAUTOLAVISH")" \
+  "procevent lavish $auto_lavish_id 1" \
+  "the primary watcher auto-registers an ended Lavish session with feedback"
+AUTO_LAVISH_RESULT=$(first_result "$HAUTOLAVISH" "$auto_lavish_id" || true)
+assert_grep 'automatic dock delivery' "$AUTO_LAVISH_RESULT" \
+  "automatic registration delivers pending dock feedback"
+[ "$(count_results "$HAUTOLAVISH" "$auto_lavish_id")" = 1 ] \
+  || fail "automatic registration captured more than one Lavish result"
+[ "$(wake_payloads "$HAUTOLAVISH" | grep -c "procevent lavish $auto_lavish_id 1" || true)" = 1 ] \
+  || fail "automatic registration did not use exactly one process-event wake"
+unset AUTO_LAVISH_ART
+pass "primary watcher auto-registers Lavish feedback on the process-event path"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
