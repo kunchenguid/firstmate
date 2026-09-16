@@ -742,9 +742,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
     .[0].data.provider == "openai-codex" and
     .[0].data.selectedModel == "selected-model" and
     .[0].data.selectedThinkingLevel == "max" and
-    .[0].data.payloadModel == "payload-model" and
-    .[0].data.payloadReasoningEffort == "max" and
-    (.[0].data | keys | sort) == (["api", "at", "payloadModel", "payloadReasoningEffort", "provider", "requestSequence", "schema", "selectedModel", "selectedThinkingLevel", "spawnGen", "taskId"] | sort)
+    .[0].data.observationStage == "provisional-before-remaining-handlers" and
+    (.[0].data | keys | sort) == (["api", "at", "observationStage", "provider", "requestSequence", "schema", "selectedModel", "selectedThinkingLevel", "spawnGen", "taskId"] | sort)
   ' >/dev/null || fail "generated Pi extension emitted an incomplete or unsanitized route receipt: $receipt"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }

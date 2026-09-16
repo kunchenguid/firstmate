@@ -3807,12 +3807,9 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
-// The fm-routing-request custom entry records only sanitized route facts from
-// Pi's final provider payload. It deliberately excludes prompts, messages,
-// headers, credentials, and the rest of the payload. bin/fm-routing-outcomes.py
-// joins that native request proof to the assistant usage receipt; this is what
-// can prove that model-specific requirements such as max effort reached the
-// provider request rather than merely appearing in launch metadata.
+// The fm-routing-request custom entry records only sanitized selected-route
+// facts observed by this handler. The observation is provisional because later
+// before_provider_request handlers may still change the provider payload.
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
@@ -3823,9 +3820,7 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (pi: any) {
   let routeRequestSequence = 0;
-  pi.on("before_provider_request", (event: any, ctx: any) => {
-    const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {};
-    const reasoning = payload.reasoning && typeof payload.reasoning === "object" ? payload.reasoning : {};
+  pi.on("before_provider_request", (_event: any, ctx: any) => {
     const model = ctx && ctx.model && typeof ctx.model === "object" ? ctx.model : {};
     pi.appendEntry("fm-routing-request", {
       schema: "fm-routing-request.v1",
@@ -3833,12 +3828,11 @@ export default function (pi: any) {
       spawnGen: "$SPAWN_GEN",
       requestSequence: ++routeRequestSequence,
       at: new Date().toISOString(),
+      observationStage: "provisional-before-remaining-handlers",
       provider: typeof model.provider === "string" ? model.provider : null,
       selectedModel: typeof model.id === "string" ? model.id : null,
       selectedThinkingLevel: typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : null,
       api: typeof model.api === "string" ? model.api : null,
-      payloadModel: typeof payload.model === "string" ? payload.model : null,
-      payloadReasoningEffort: typeof reasoning.effort === "string" ? reasoning.effort : null,
     });
   });
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));

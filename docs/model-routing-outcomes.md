@@ -59,22 +59,22 @@ Supported source shapes are:
 - `agy-result` reads agy `--output-format json`; an optional native log proves only the selected model label and its low, medium, or high variant.
 
 A Firstmate-spawned Pi worker writes one sanitized custom entry immediately before each provider request.
-The entry contains the task identifier, task `spawn_gen`, request sequence, timestamp, selected provider/model/thinking level/API, final payload model, and final payload reasoning effort.
-It contains no other payload field.
-That final-payload evidence can enforce an `effective_effort` requirement rather than trusting requested launch metadata.
-The associated assistant message remains Pi's native response/usage receipt.
+The entry contains the task identifier, task `spawn_gen`, request sequence, timestamp, selected provider/model/thinking level/API, and an explicit provisional observation stage.
+It contains no provider payload fields.
+Later `before_provider_request` handlers may still change the provider payload, so the entry is requested-route context rather than final model or effective-effort proof.
+The associated assistant message is Pi's native response, model, provider, API, and usage receipt.
 
-Claude Code's current result and session receipts do not prove effective reasoning effort.
+Pi and Claude Code's current retained receipts do not prove effective reasoning effort.
 The importer therefore preserves requested effort and leaves effective effort unknown.
 Agy's one-shot result gives native usage, and its native selected-model log can prove a named effort variant, while the current interactive conversation store is not treated as a prompt-safe portable receipt.
 These limitations remain visible in `native.completeness` and in scorecard uncertainty.
-A Pi session with mixed or partially missing task, incarnation, model, effort, provider, or API evidence is rejected instead of pooling its usage into one exact route.
+A Pi session with mixed or partially missing task, incarnation, assistant model, provider, or API evidence is rejected instead of pooling its usage into one exact route.
 A Claude session with mixed or partially missing assistant-model or session evidence is rejected, while a Claude result may retain separately itemized auxiliary-model usage.
 When a Claude result contains multiple models, the scorecard labels its combined usage as a whole-session multi-model observation rather than assigning every token to the requested main model.
 Multiple turns using the same native model and provider remain one exact attempt route.
 The manifest harness must agree with the task metadata and receipt kind, and its provider must agree with native provider evidence when present.
 When a receipt supplies native timestamps, every retained native timestamp must fall within the manifest's measured attempt interval.
-Only Pi receipts carrying the task identifier and `spawn_gen` may certify an accepted outcome.
+An accepted outcome additionally requires complete native provider, effective-model, and effective-effort evidence, which the retained provisional Pi request observation does not provide.
 Claude and agy receipts remain useful raw measurements, but their task attribution and outcome stay unresolved operator observations.
 
 Token categories retain the native source's accounting.
@@ -112,7 +112,7 @@ Provider-reported list-cost fields are retained as native evidence but never pro
 
 Quota inputs are native quota-axi schema-version-5 snapshots taken before and after the attempt.
 The importer retains the selected provider's literal windows and normalized semantics.
-It computes a per-window consumption delta only when the quota provider exactly matches native provider evidence, reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
+It computes a per-window consumption delta only when the quota provider exactly matches native provider evidence, the snapshots bracket the attempt, reset identity is unchanged, concurrent activity is explicitly absent, attribution is exclusive, and both percentage values are known.
 When that exact native provider binding is absent, the raw dated provider observations remain visible as unbound and consumption stays unknown.
 It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
 A shadow candidate may attach one raw dated quota-axi provider snapshot.
@@ -121,7 +121,7 @@ The tool displays its literal windows and semantics beside separately labeled he
 ## Scorecard interpretation
 
 The scorecard groups attempt-route observations by category, task shape, harness, provider, effective model, effective effort, authentication category, context tier, and service tier.
-When effective model or effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
+When provider, effective model, or effective effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
 Multi-model native results use an explicit whole-session label.
 Task count reports unique task IDs, while task-incarnation count separately reports observed lifecycle incarnations.
 The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual execution-only partial observation for every task incarnation and attempt.

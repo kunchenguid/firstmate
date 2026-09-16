@@ -35,7 +35,7 @@ Import manifest, schema fm-routing-attempt.v1:
       "service_tier": "standard"
     },
     "native_receipt": {"kind": "pi-session", "path": "/private/session.jsonl"},
-    "requirements": {"effective_model": "gpt-5.6-luna", "effective_effort": "max"},
+    "requirements": {"effective_model": "gpt-5.6-luna"},
     "started_at": "2030-01-01T00:00:00Z", "finished_at": "2030-01-01T00:01:00Z",
     "time_ms": {"queue": 1, "model": 2, "tool": 3, "review": 4,
                  "retry": null, "handoff": null, "human": null},
@@ -53,7 +53,7 @@ Import manifest, schema fm-routing-attempt.v1:
                               "sha256": "..."}],
                 "overhead": {"duration_ms": 10, "tokens": null,
                              "actual_incremental_usd": null}},
-    "outcome": "accepted"
+    "outcome": "unresolved"
   }
 
 Native receipt kinds are pi-session (Pi v3 JSONL with fm-routing-request
@@ -151,6 +151,14 @@ def parse_time(value: Any, field: str) -> dt.datetime:
     if parsed.tzinfo is None:
         fail(f"{field} must include a timezone")
     return parsed.astimezone(dt.timezone.utc)
+
+
+def timestamp_extrema(values: Iterable[str], field: str) -> tuple[Any, Any]:
+    parsed = [(parse_time(value, f"{field}[{index}]"), value)
+              for index, value in enumerate(values)]
+    if not parsed:
+        return None, None
+    return min(parsed, key=lambda item: item[0])[1], max(parsed, key=lambda item: item[0])[1]
 
 
 def nullable_number(value: Any, field: str, *, integer: bool = False) -> Any:
@@ -378,16 +386,16 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
     request_data = [row["data"] for row in requests]
     if any("requestedModel" in item for item in request_data):
         fail("native Pi request uses unsupported requestedModel; expected selectedModel")
+    if any(item.get("observationStage") != "provisional-before-remaining-handlers"
+           for item in request_data):
+        fail("native Pi request must identify its provisional observation stage")
     task_id = one_observed((item.get("taskId") for item in request_data), "task identity")
     spawn_gen = one_observed((item.get("spawnGen") for item in request_data), "task incarnation")
     requested_model = one_observed((item.get("selectedModel") for item in request_data), "requested model")
     selected_effort = one_observed((item.get("selectedThinkingLevel") for item in request_data), "selected effort")
-    payload_model = one_observed((item.get("payloadModel") for item in request_data), "effective model")
-    payload_effort = one_observed((item.get("payloadReasoningEffort") for item in request_data), "effective effort")
     assistant_model = one_observed((row["message"].get("model") for row in assistants), "assistant model")
-    if payload_model is not None and assistant_model is not None and payload_model != assistant_model:
-        fail("native Pi session has mixed effective model evidence")
     timestamps = [row.get("timestamp") for row in [*requests, *assistants] if isinstance(row.get("timestamp"), str)]
+    first_native_at, last_native_at = timestamp_extrema(timestamps, "native Pi timestamp")
     return {
         "kind": "pi-session",
         "source_sha256": source_digest,
@@ -398,16 +406,14 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
         "spawn_gen_receipt": spawn_gen,
         "requested_model_receipt": requested_model,
         "selected_effort_receipt": selected_effort,
-        "effective_model": payload_model or assistant_model,
-        "effective_effort": payload_effort,
-        "provider": one_observed([*(item.get("provider") for item in request_data),
-                                  *(row["message"].get("provider") for row in assistants)], "provider"),
-        "api": one_observed([*(item.get("api") for item in request_data),
-                             *(row["message"].get("api") for row in assistants)], "API"),
+        "effective_model": assistant_model,
+        "effective_effort": None,
+        "provider": one_observed((row["message"].get("provider") for row in assistants), "provider"),
+        "api": one_observed((row["message"].get("api") for row in assistants), "API"),
         "models": models,
         "tokens": total_tokens(models),
-        "first_native_at": min(timestamps) if timestamps else None,
-        "last_native_at": max(timestamps) if timestamps else None,
+        "first_native_at": first_native_at,
+        "last_native_at": last_native_at,
         "native_duration_ms": None,
         "native_reported_cost_usd": all_or_unknown(
             row["message"].get("usage", {}).get("cost", {}).get("total")
@@ -415,9 +421,9 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
             for row in assistants
         ),
         "completeness": {
-            "request_payload": "complete" if request_data else "missing",
+            "request_payload": "provisional-before-remaining-handlers" if request_data else "missing",
             "usage": usage_completeness(models, TOKEN_KEYS),
-            "effort": "provider-request" if payload_effort else "unknown",
+            "effort": "unknown",
             "attribution": "task-incarnation-entry" if task_id and spawn_gen else "manifest-only",
         },
     }
@@ -495,6 +501,7 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
         model_row["tokens"]["total"] = None
         models.append(model_row)
     timestamps = [row.get("timestamp") for row in latest.values() if isinstance(row.get("timestamp"), str)]
+    first_native_at, last_native_at = timestamp_extrema(timestamps, "native Claude timestamp")
     return {
         "kind": "claude-session", "source_sha256": source_digest,
         "session_id": one_observed((row.get("sessionId") for row in latest.values()), "session identity", "native Claude session"),
@@ -504,8 +511,8 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
         "effective_model": one_observed((row["message"].get("model") for row in latest.values()), "effective model", "native Claude session"),
         "effective_effort": None, "provider": None, "api": "claude-code",
         "models": models, "tokens": total_tokens(models),
-        "first_native_at": min(timestamps) if timestamps else None,
-        "last_native_at": max(timestamps) if timestamps else None,
+        "first_native_at": first_native_at,
+        "last_native_at": last_native_at,
         "native_duration_ms": None, "native_reported_cost_usd": None,
         "completeness": {"request_payload": "unavailable", "usage": usage_completeness(models, ("input", "output", "cache_read", "cache_write")), "effort": "requested-only", "attribution": "manifest-plus-session"},
     }
@@ -539,7 +546,7 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
                 pending_model = None
     if len(selected_routes) == 1 and not ambiguous_selection:
         effective_model, effective_effort = next(iter(selected_routes))
-    measurement_scope = "whole-session" if len(selected_routes) > 1 else "attempt-route"
+    measurement_scope = "whole-session" if ambiguous_selection or len(selected_routes) > 1 else "attempt-route"
     model_row = token_row(effective_model, "google", usage, {
         "input": "input_tokens", "output": "output_tokens", "cache_read": "cache_read_tokens",
         "reasoning": "thinking_tokens", "total": "total_tokens",
@@ -558,6 +565,7 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
                             for model, effort in sorted(
                                 selected_routes, key=lambda item: (item[0], item[1] or ""))],
         "measurement_scope": measurement_scope,
+        "selection_ambiguous": ambiguous_selection,
         "provider": "google", "api": "agy",
         "models": [model_row], "tokens": total_tokens([model_row]),
         "first_native_at": None, "last_native_at": None,
@@ -998,6 +1006,8 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     outcome = manifest.get("outcome")
     if outcome not in OUTCOMES:
         fail("outcome must be accepted, unresolved, failed, or abandoned")
+    grading_record = validate_grading(
+        manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id)
     if native.get("kind") == "pi-session" and outcome == "accepted" and (
             native.get("task_id_receipt") is None or native.get("spawn_gen_receipt") is None):
         fail("accepted Pi outcome requires native task incarnation evidence")
@@ -1015,7 +1025,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         "started_at": started, "finished_at": finished, "time_ms": time_values,
         "billing": billing_record,
         "quota": quota_record(manifest.get("quota"), started, finished, native.get("provider")),
-        "grading": validate_grading(manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id),
+        "grading": grading_record,
         "comparison": validate_comparison(manifest.get("comparison")),
         "handoff": validate_handoff(manifest.get("handoff"), attempt_id),
         "outcome": outcome,
@@ -1136,11 +1146,32 @@ def native_model_identities(record: dict[str, Any]) -> set[tuple[str, str]]:
              row.get("model") or "unknown") for row in native.get("models") or []}
 
 
+def measurement_scope(record: dict[str, Any]) -> str:
+    return ("whole-session" if record["native"].get("measurement_scope") == "whole-session"
+            or len(native_model_identities(record)) > 1 else "attempt-route")
+
+
+def quota_attribution_supported(quota: Any) -> bool:
+    if not isinstance(quota, dict):
+        return False
+    if (quota.get("attribution") != "exclusive"
+            or quota.get("route_provider_binding") != "exact-native-provider"
+            or quota.get("concurrent_activity") is not False
+            or quota.get("attempt_bracketed") is not True
+            or quota.get("reset_crossed") is not False):
+        return False
+    return any(isinstance(row.get("attributed_consumption_percent_points"), (int, float))
+               and not isinstance(row.get("attributed_consumption_percent_points"), bool)
+               for row in quota.get("window_deltas") or [])
+
+
 def route_name(record: dict[str, Any]) -> str:
     route = record["route"]
     selected_routes = record["native"].get("selected_routes") or []
     identities = native_model_identities(record)
-    if record["native"].get("measurement_scope") == "whole-session" and selected_routes:
+    if record["native"].get("selection_ambiguous"):
+        effective_model = "whole-session-route-unknown"
+    elif measurement_scope(record) == "whole-session" and selected_routes:
         names = sorted(f"{item['model']}@{item.get('effort') or 'unknown'}"
                        for item in selected_routes)
         effective_model = f"whole-session-multi-route:{'+'.join(names)}"
@@ -1151,9 +1182,11 @@ def route_name(record: dict[str, Any]) -> str:
         effective_model = f"whole-session-multi-model:{'+'.join(names)}"
     else:
         effective_model = record["native"].get("effective_model") or f"requested-only:{route['requested_model']}"
-    effective_effort = ("whole-session" if record["native"].get("measurement_scope") == "whole-session"
+    effective_effort = ("whole-session" if measurement_scope(record) == "whole-session"
                         else record["native"].get("effective_effort") or f"requested-only:{route['requested_effort']}")
-    return (f"{route['harness']}/{route['provider']}/{effective_model}/{effective_effort} "
+    effective_provider = (record["native"].get("provider")
+                          or f"requested-only:{route['provider']}")
+    return (f"{route['harness']}/{effective_provider}/{effective_model}/{effective_effort} "
             f"[auth={route['auth_category']}, context={route['context_tier']}, service={route['service_tier']}]")
 
 
@@ -1171,8 +1204,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             "context_tier": items[0]["route"]["context_tier"],
             "service_tier": items[0]["route"]["service_tier"],
             "measurement_scope": "whole-session" if any(
-                item["native"].get("measurement_scope") == "whole-session"
-                or len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
+                measurement_scope(item) == "whole-session" for item in items) else "attempt-route",
             "efficiency_scope": "execution-only-partial",
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},
@@ -1189,9 +1221,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             "uncertainty": sorted({reason for item in items for reason in (
                 (["effective effort unknown"] if item["native"].get("effective_effort") is None else [])
                 + (["API-equivalent price unknown"] if item["billing"].get("api_equivalent_usd") is None else [])
-                + (["quota attribution unknown"] if not item.get("quota")
-                   or item["quota"].get("attribution") != "exclusive"
-                   or item["quota"].get("route_provider_binding") != "exact-native-provider" else [])
+                + (["quota attribution unknown"] if not quota_attribution_supported(item.get("quota")) else [])
             )}),
         })
     observations = [{"task_id": record["task_id"], "spawn_gen": record["spawn_gen"],
@@ -1200,7 +1230,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                      "outcome": record["outcome"],
                      "outcome_authority": "native-task-incarnation" if record["native"].get("task_id_receipt") and record["native"].get("spawn_gen_receipt") else "operator-observation",
                      "attribution": record["native"]["completeness"].get("attribution"),
-                     "measurement_scope": "whole-session" if len(native_model_identities(record)) > 1 else "attempt-route",
+                     "measurement_scope": measurement_scope(record),
                      "efficiency_scope": "execution-only-partial",
                      "tokens": record["native"]["tokens"],
                      "elapsed_ms": record["time_ms"].get("end_to_end"),

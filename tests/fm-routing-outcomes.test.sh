@@ -81,9 +81,9 @@ class RoutingOutcomesTest(unittest.TestCase):
                 "customType": "fm-routing-request", "timestamp": "2030-01-01T00:00:01Z",
                 "data": {"schema": "fm-routing-request.v1", "taskId": task, "spawnGen": spawn_gen,
                          "requestSequence": 1, "at": "2030-01-01T00:00:01Z",
+                         "observationStage": "provisional-before-remaining-handlers",
                          "provider": request_provider, "selectedModel": "gpt-5.6-luna",
-                         "selectedThinkingLevel": "max", "api": "openai-codex-responses",
-                         "payloadModel": "gpt-5.6-luna", "payloadReasoningEffort": effort},
+                         "selectedThinkingLevel": effort, "api": "openai-codex-responses"},
             })
             if extra_request is not None or second_response:
                 extra = copy.deepcopy(rows[-1])
@@ -129,7 +129,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.write_json(path, {"schemaVersion": 5, "generatedAt": generated_at, "providers": [row]})
 
     def manifest(self, *, receipt=None, task="task-one", spawn_gen="spawn-1",
-                 attempt="attempt-one", outcome="accepted"):
+                 attempt="attempt-one", outcome="unresolved"):
         task_binding = self.bind_task(task, spawn_gen)
         return {
             "schema": "fm-routing-attempt.v1", "task_id": task, "attempt_id": attempt,
@@ -139,7 +139,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                       "auth_category": "subscription", "requested_model": "gpt-5.6-luna",
                       "requested_effort": "max", "context_tier": "all", "service_tier": "standard"},
             "native_receipt": receipt or {"kind": "pi-session", "path": str(self.pi)},
-            "requirements": {"effective_model": "gpt-5.6-luna", "effective_effort": "max"},
+            "requirements": {"effective_model": "gpt-5.6-luna"},
             "started_at": "2030-01-01T00:00:00Z", "finished_at": "2030-01-01T00:01:00Z",
             "time_ms": {"queue": 10, "model": 20, "tool": 5, "review": 7,
                         "retry": None, "handoff": None, "human": None},
@@ -174,9 +174,11 @@ class RoutingOutcomesTest(unittest.TestCase):
         result = self.import_manifest(self.manifest())
         self.assertEqual(json.loads(result.stdout)["action"], "created")
         record = self.latest_record()
-        self.assertEqual(record["native"]["effective_effort"], "max")
+        self.assertIsNone(record["native"]["effective_effort"])
         self.assertEqual(record["native"]["tokens"]["input"], 100)
-        self.assertEqual(record["native"]["completeness"]["effort"], "provider-request")
+        self.assertEqual(record["native"]["completeness"]["effort"], "unknown")
+        self.assertEqual(record["native"]["completeness"]["request_payload"],
+                         "provisional-before-remaining-handlers")
         self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
         self.assertIsNone(record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"])
         self.assertNotIn("PRIVATE PROMPT RESPONSE", self.store.read_text())
@@ -206,6 +208,10 @@ class RoutingOutcomesTest(unittest.TestCase):
         quota = self.latest_record()["quota"]
         self.assertEqual(quota["route_provider_binding"], "exact-native-provider")
         self.assertEqual(quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertNotIn("quota attribution unknown", score["routes"][0]["uncertainty"])
 
     def test_attempt_phase_and_pi_request_alias_are_rejected(self):
         shadow_attempt = self.manifest()
@@ -405,6 +411,44 @@ class RoutingOutcomesTest(unittest.TestCase):
         result = self.import_manifest(finishes_too_early, ok=False)
         self.assertIn("native receipt timestamps must fall within", json.loads(result.stdout)["error"])
 
+        self.write_pi(self.pi, second_response=True)
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        requests = [row for row in rows if row.get("customType") == "fm-routing-request"]
+        assistants = [row for row in rows if row.get("type") == "message"]
+        requests[0]["timestamp"] = "2029-12-31T19:00:01-05:00"
+        requests[1]["timestamp"] = "2030-01-01T00:30:00+01:00"
+        assistants[0]["timestamp"] = "2030-01-01T01:00:03+01:00"
+        assistants[1]["timestamp"] = "2030-01-01T01:00:04+01:00"
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        mixed_offsets = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("native receipt timestamps must fall within",
+                      json.loads(mixed_offsets.stdout)["error"])
+
+        claude = self.dir / "claude-mixed-offsets.jsonl"
+        claude_rows = [
+            {"type": "assistant", "sessionId": "mixed-offsets", "uuid": str(index),
+             "timestamp": timestamp,
+             "message": {"id": str(index), "model": "claude-sonnet-5",
+                         "usage": {"input_tokens": 1, "output_tokens": 1}}}
+            for index, timestamp in enumerate((
+                "2029-12-31T19:00:01-05:00",
+                "2030-01-01T00:30:00+01:00",
+                "2030-01-01T01:00:04+01:00"))
+        ]
+        claude.write_text("".join(json.dumps(row) + "\n" for row in claude_rows),
+                          encoding="utf-8")
+        manifest = self.manifest(receipt={"kind": "claude-session", "path": str(claude),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"})
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5",
+                                  "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        mixed_offsets = self.import_manifest(manifest, ok=False)
+        self.assertIn("native receipt timestamps must fall within",
+                      json.loads(mixed_offsets.stdout)["error"])
+
     def test_native_duration_must_fit_attempt_interval(self):
         receipt = self.dir / "agy-long-duration.json"
         self.write_json(receipt, {"conversation_id": "agy-long", "duration_seconds": 120,
@@ -438,68 +482,56 @@ class RoutingOutcomesTest(unittest.TestCase):
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertEqual(score["routes"][0]["route"],
-                         "pi/openai-codex/gpt-5.6-luna/max [auth=subscription, context=all, service=standard]")
+                         "pi/openai-codex/gpt-5.6-luna/requested-only:max "
+                         "[auth=subscription, context=all, service=standard]")
         self.assertEqual(score["routes"][0]["measurement_scope"], "attempt-route")
         self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 200)
 
     def test_missing_provider_effort_stays_unknown_and_requirement_blocks(self):
         self.write_pi(self.pi, effort=None)
-        blocked = self.import_manifest(self.manifest(), ok=False)
+        blocked_manifest = self.manifest()
+        blocked_manifest["requirements"]["effective_effort"] = "max"
+        blocked = self.import_manifest(blocked_manifest, ok=False)
         self.assertIn("effective effort requirement not proven", json.loads(blocked.stdout)["error"])
         allowed = self.manifest()
         allowed["requirements"] = None
         allowed["outcome"] = "unresolved"
         self.import_manifest(allowed)
         self.assertIsNone(self.latest_record()["native"]["effective_effort"])
-        self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"], "complete")
+        self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"],
+                         "provisional-before-remaining-handlers")
 
     def test_accepted_pi_requires_complete_native_route_identity(self):
-        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
-        request = next(row for row in rows if row.get("customType") == "fm-routing-request")
-        assistant = next(row for row in rows if row.get("type") == "message")
-        cases = {
-            "provider": lambda: (request["data"].update({"provider": None}),
-                                  assistant["message"].update({"provider": None})),
-            "effective model": lambda: (request["data"].update({"payloadModel": None}),
-                                         assistant["message"].update({"model": None})),
-            "effective effort": lambda: request["data"].update(
-                {"payloadReasoningEffort": None}),
-        }
-        for field, remove_identity in cases.items():
-            with self.subTest(field=field):
-                current = copy.deepcopy(rows)
-                request = next(row for row in current
-                               if row.get("customType") == "fm-routing-request")
-                assistant = next(row for row in current if row.get("type") == "message")
-                remove_identity()
-                self.pi.write_text("".join(json.dumps(row) + "\n" for row in current),
-                                   encoding="utf-8")
-                manifest = self.manifest()
-                manifest["requirements"] = None
-                result = self.import_manifest(manifest, ok=False)
-                self.assertIn("complete native provider, effective model, and effective effort",
-                              json.loads(result.stdout)["error"])
+        manifest = self.manifest(outcome="accepted")
+        manifest["requirements"] = None
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("complete native provider, effective model, and effective effort",
+                      json.loads(result.stdout)["error"])
 
-        request["data"].update({"provider": None, "payloadModel": None,
-                                "payloadReasoningEffort": None})
-        assistant["message"].update({"provider": None, "model": None})
-        self.pi.write_text("".join(json.dumps(row) + "\n" for row in current), encoding="utf-8")
-        unresolved = self.manifest(outcome="unresolved")
+        unresolved = self.manifest()
         unresolved["requirements"] = None
         self.import_manifest(unresolved)
         record = self.latest_record()
         self.assertEqual(record["outcome"], "unresolved")
-        self.assertIsNone(record["native"]["provider"])
-        self.assertIsNone(record["native"]["effective_model"])
+        self.assertEqual(record["native"]["provider"], "openai-codex")
+        self.assertEqual(record["native"]["effective_model"], "gpt-5.6-luna")
         self.assertIsNone(record["native"]["effective_effort"])
 
-    def test_mixed_pi_route_evidence_is_rejected(self):
-        self.write_pi(self.pi, extra_request={"payloadReasoningEffort": None})
+    def test_pi_request_must_be_explicitly_provisional(self):
+        self.write_pi(self.pi, extra_request={"observationStage": None})
         result = self.import_manifest(self.manifest(), ok=False)
-        self.assertIn("mixed or incomplete effective effort", json.loads(result.stdout)["error"])
-        self.write_pi(self.pi, extra_request={"payloadModel": "gpt-other"})
-        result = self.import_manifest(self.manifest(), ok=False)
-        self.assertIn("mixed or incomplete effective model", json.loads(result.stdout)["error"])
+        self.assertIn("provisional observation stage", json.loads(result.stdout)["error"])
+
+    def test_legacy_pi_payload_fields_do_not_certify_effective_route(self):
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        request = next(row for row in rows if row.get("customType") == "fm-routing-request")
+        request["data"].update({"payloadModel": "gpt-other",
+                                "payloadReasoningEffort": "max"})
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        self.import_manifest(self.manifest())
+        native = self.latest_record()["native"]
+        self.assertEqual(native["effective_model"], "gpt-5.6-luna")
+        self.assertIsNone(native["effective_effort"])
 
     def test_manifest_route_identity_must_match_native_and_task_evidence(self):
         wrong_harness = self.manifest()
@@ -512,7 +544,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("native provider evidence", json.loads(result.stdout)["error"])
         self.write_pi(self.pi, assistant_provider="google")
         result = self.import_manifest(self.manifest(), ok=False)
-        self.assertIn("mixed or incomplete provider", json.loads(result.stdout)["error"])
+        self.assertIn("native provider evidence", json.loads(result.stdout)["error"])
         self.write_pi(self.pi)
         task_mismatch = self.manifest()
         self.bind_task("task-one", harness="pi-signed")
@@ -539,13 +571,19 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("before_semantics=unknown; after_semantics=unknown", markdown)
 
     def test_reset_and_concurrent_activity_prevent_quota_attribution(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
         self.write_quota(self.quota_after, 100, "2030-01-09T00:00:00Z")
         manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
         manifest["quota"]["concurrent_activity"] = True
         self.import_manifest(manifest)
         quota = self.latest_record()["quota"]
         self.assertTrue(quota["reset_crossed"])
         self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
 
     def test_missing_reset_identity_prevents_quota_attribution(self):
         self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
@@ -658,6 +696,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "requested_model": "claude-sonnet-5", "requested_effort": "high"})
         self.bind_task("task-one", harness="claude")
         manifest["requirements"] = None
+        manifest["outcome"] = "accepted"
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("record this receipt as an unresolved observation", json.loads(result.stdout)["error"])
         manifest["outcome"] = "unresolved"
@@ -750,6 +789,11 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
         self.assertIsNone(
             record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertIn("claude/requested-only:anthropic/claude-sonnet-5/",
+                      score["routes"][0]["route"])
 
     def test_agy_native_model_label_proves_effective_variant(self):
         receipt = self.dir / "agy.json"
@@ -848,6 +892,8 @@ class RoutingOutcomesTest(unittest.TestCase):
                                             "thinking_tokens": 0, "cache_read_tokens": 0,
                                             "total_tokens": 3}})
         log.write_text(
+            "Resolving model gemini-c\n"
+            "Propagating selected model override to backend: label=\"Gemini C (Low)\"\n"
             "Resolving model gemini-a\n"
             "Resolving model gemini-b\n"
             "Propagating selected model override to backend: label=\"Gemini A (Medium)\"\n",
@@ -868,6 +914,13 @@ class RoutingOutcomesTest(unittest.TestCase):
         native = self.latest_record()["native"]
         self.assertIsNone(native["effective_model"])
         self.assertIsNone(native["effective_effort"])
+        self.assertTrue(native["selection_ambiguous"])
+        self.assertEqual(native["measurement_scope"], "whole-session")
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(score["observations"][0]["measurement_scope"], "whole-session")
+        self.assertIn("whole-session-route-unknown", score["routes"][0]["route"])
 
     def test_agy_multi_route_conversation_is_whole_session(self):
         receipt = self.dir / "agy-multi-route.json"
@@ -905,6 +958,7 @@ class RoutingOutcomesTest(unittest.TestCase):
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertEqual(score["routes"][0]["measurement_scope"], "whole-session")
+        self.assertEqual(score["observations"][0]["measurement_scope"], "whole-session")
         self.assertIn("whole-session-multi-route:gemini-a@medium+gemini-b@high",
                       score["routes"][0]["route"])
         self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 2)
@@ -1104,15 +1158,15 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(self.latest_record()["native"]["completeness"]["usage"], "partial")
 
     def test_independent_grade_and_actual_receipt_are_required_for_acceptance(self):
-        manifest = self.manifest()
+        manifest = self.manifest(outcome="accepted")
         manifest["grading"]["independent"] = False
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("independent", json.loads(result.stdout)["error"])
-        manifest = self.manifest()
+        manifest = self.manifest(outcome="accepted")
         manifest["grading"]["receipts"] = []
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("passing receipt", json.loads(result.stdout)["error"])
-        manifest = self.manifest()
+        manifest = self.manifest(outcome="accepted")
         grading_receipt = manifest["grading"]["receipts"][0]
         artifact_path = Path(grading_receipt["artifact_path"])
         artifact = json.loads(artifact_path.read_text())
@@ -1121,7 +1175,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         grading_receipt["sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("must have exit_code 0", json.loads(result.stdout)["error"])
-        manifest = self.manifest()
+        manifest = self.manifest(outcome="accepted")
         manifest["grading"]["receipts"][0]["sha256"] = "0" * 64
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("must match the check artifact", json.loads(result.stdout)["error"])
