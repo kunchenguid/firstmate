@@ -47,9 +47,9 @@ class RoutingOutcomesTest(unittest.TestCase):
     def write_json(self, path, value):
         path.write_text(json.dumps(value), encoding="utf-8")
 
-    def bind_task(self, task, spawn_gen="spawn-1"):
+    def bind_task(self, task, spawn_gen="spawn-1", harness="pi"):
         (self.state / f"{task}.meta").write_text(
-            f"endpoint_task_id={task}\nspawn_gen={spawn_gen}\nharness=pi\nkind=ship\n",
+            f"endpoint_task_id={task}\nspawn_gen={spawn_gen}\nharness={harness}\nkind=ship\n",
             encoding="utf-8")
         return {"spawn_gen": spawn_gen}
 
@@ -70,7 +70,8 @@ class RoutingOutcomesTest(unittest.TestCase):
                 "criteria_ids": [criterion], "artifact_path": str(artifact), "sha256": sha}
 
     def write_pi(self, path, *, custom=True, effort="max", task="task-one",
-                 spawn_gen="spawn-1", duplicate=False, extra_request=None, assistant_model="gpt-5.6-luna"):
+                 spawn_gen="spawn-1", duplicate=False, extra_request=None,
+                 assistant_model="gpt-5.6-luna", assistant_provider="openai-codex"):
         rows = [{"type": "session", "id": "session-1", "timestamp": "2030-01-01T00:00:00Z"}]
         if custom:
             rows.append({
@@ -90,7 +91,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         assistant = {
             "type": "message", "id": "assistant-1", "parentId": "request-1",
             "timestamp": "2030-01-01T00:00:03Z",
-            "message": {"role": "assistant", "provider": "openai-codex",
+            "message": {"role": "assistant", "provider": assistant_provider,
                         "model": assistant_model, "api": "openai-codex-responses",
                         "content": [{"type": "text", "text": "PRIVATE PROMPT RESPONSE"}],
                         "usage": {"input": 100, "output": 20, "cacheRead": 10,
@@ -138,7 +139,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                         "first_pass": "pass", "final_result": "pass", "defect_count": 0,
                         "fix_count": 0, "retry_count": 0,
                         "receipts": [self.check_receipt(task=task, spawn_gen=spawn_gen, attempt=attempt)],
-                        "overhead": {"duration_ms": 3, "tokens": None,
+                        "overhead": {"cost_basis": "no-model", "duration_ms": 3, "tokens": None,
                                      "actual_incremental_usd": None}},
             "outcome": outcome,
         }
@@ -220,11 +221,13 @@ class RoutingOutcomesTest(unittest.TestCase):
     def test_accepted_cost_stops_at_first_acceptance_and_subscription_is_context_only(self):
         accepted = self.manifest(attempt="accepted")
         accepted["billing"]["actual_incremental_usd"] = 0.2
+        accepted["grading"]["overhead"].update({"duration_ms": 3, "actual_incremental_usd": 0.05})
         self.import_manifest(accepted)
         later = self.manifest(attempt="later", outcome="failed")
         later["started_at"] = "2030-01-01T00:02:00Z"
         later["finished_at"] = "2030-01-01T00:03:00Z"
         later["billing"]["actual_incremental_usd"] = 0.9
+        later["grading"]["overhead"].update({"duration_ms": 30, "actual_incremental_usd": 0.7})
         later["grading"].update({"first_pass": "fail", "final_result": "fail",
                                   "receipts": [self.check_receipt(attempt="later", passed=False)]})
         self.import_manifest(later)
@@ -233,6 +236,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         score = json.loads(result.stdout)
         task = score["tasks"][0]
         self.assertEqual(task["accepted_task_actual_incremental_usd"]["known_total"], 0.2)
+        self.assertEqual(task["grader_actual_incremental_usd"]["known_total"], 0.05)
+        self.assertEqual(task["grader_duration_ms"]["known_total"], 3)
         self.assertEqual(task["accepted_task_fixed_subscription_usd"]["distinct_values"], [20.0])
         self.assertEqual(score["routes"][0]["fixed_subscription_usd"]["aggregation"], "not-applicable")
 
@@ -280,6 +285,24 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.write_pi(self.pi, extra_request={"payloadModel": "gpt-other"})
         result = self.import_manifest(self.manifest(), ok=False)
         self.assertIn("mixed or incomplete effective model", json.loads(result.stdout)["error"])
+
+    def test_manifest_route_identity_must_match_native_and_task_evidence(self):
+        wrong_harness = self.manifest()
+        wrong_harness["route"]["harness"] = "claude"
+        result = self.import_manifest(wrong_harness, ok=False)
+        self.assertIn("native receipt kind", json.loads(result.stdout)["error"])
+        wrong_provider = self.manifest()
+        wrong_provider["route"]["provider"] = "google"
+        result = self.import_manifest(wrong_provider, ok=False)
+        self.assertIn("native provider evidence", json.loads(result.stdout)["error"])
+        self.write_pi(self.pi, assistant_provider="google")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("mixed or incomplete provider", json.loads(result.stdout)["error"])
+        self.write_pi(self.pi)
+        task_mismatch = self.manifest()
+        self.bind_task("task-one", harness="pi-signed")
+        result = self.import_manifest(task_mismatch, ok=False)
+        self.assertIn("task metadata harness", json.loads(result.stdout)["error"])
 
     def test_actual_zero_allowance_and_unresolved_agy_windows_remain_literal(self):
         self.write_quota(self.quota_before, 0, "2030-01-02T00:00:00Z", provider="agy",
@@ -339,6 +362,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                                          "requested_effort": "high"})
         manifest["route"].update({"harness": "claude", "provider": "anthropic",
                                   "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        self.bind_task("task-one", harness="claude")
         manifest["requirements"] = None
         self.import_manifest(manifest)
         native = self.latest_record()["native"]
@@ -346,6 +370,29 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIsNone(native["effective_effort"])
         self.assertEqual(len(native["models"]), 2)
         self.assertNotIn("PRIVATE RESPONSE", self.store.read_text())
+
+    def test_mixed_claude_session_models_are_rejected(self):
+        receipt = self.dir / "claude-session.jsonl"
+        rows = [
+            {"type": "assistant", "sessionId": "session-one", "uuid": "one",
+             "timestamp": "2030-01-01T00:00:01Z",
+             "message": {"id": "one", "model": "claude-sonnet-5",
+                         "usage": {"input_tokens": 1, "output_tokens": 1}}},
+            {"type": "assistant", "sessionId": "session-one", "uuid": "two",
+             "timestamp": "2030-01-01T00:00:02Z",
+             "message": {"id": "two", "model": "claude-opus-5",
+                         "usage": {"input_tokens": 1, "output_tokens": 1}}},
+        ]
+        receipt.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        manifest = self.manifest(receipt={"kind": "claude-session", "path": str(receipt),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"})
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("mixed or incomplete effective model", json.loads(result.stdout)["error"])
 
     def test_agy_native_model_label_proves_effective_variant(self):
         receipt = self.dir / "agy.json"
@@ -365,6 +412,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "auth_category": "oauth",
                                   "requested_model": "gemini-3.8-flash-medium",
                                   "requested_effort": "medium"})
+        self.bind_task("task-one", harness="agy")
         manifest["requirements"] = {"effective_model": "gemini-3.8-flash-medium",
                                     "effective_effort": "medium"}
         self.import_manifest(manifest)
@@ -387,6 +435,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "auth_category": "oauth",
                                   "requested_model": "gemini-3.8-flash-medium",
                                   "requested_effort": "medium"})
+        self.bind_task("task-one", harness="agy")
         manifest["requirements"] = {"effective_model": "gemini-3.8-flash-medium"}
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("effective model requirement not proven", json.loads(result.stdout)["error"])
@@ -421,6 +470,43 @@ class RoutingOutcomesTest(unittest.TestCase):
         billing = self.latest_record()["billing"]
         self.assertIsNone(billing["api_equivalent_usd"])
         self.assertEqual(self.latest_record()["native"]["native_reported_cost_usd"], 0.5)
+
+    def test_model_grader_cost_uses_distinct_priced_attempt(self):
+        prices = self.dir / "prices.json"
+        self.write_json(prices, {
+            "schema": "fm-routing-prices.v1", "observed_at": "2030-01-01T00:00:00Z",
+            "entries": [{"provider": "openai-codex", "model": "gpt-5.6-luna",
+                         "context_tier": "all", "service_tier": "standard",
+                         "source_url": "https://example.test/prices", "effective_from": "2029-01-01T00:00:00Z",
+                         "effective_to": None, "currency": "USD", "reasoning": "included_in_output",
+                         "per_million_tokens": {"input": 1, "output": 2,
+                                                "cache_read": 0.5, "cache_write": 1}}]})
+        grader = self.manifest(attempt="grader-one", outcome="unresolved")
+        grader["attempt_role"] = "grader"
+        grader["started_at"] = "2030-01-01T00:00:50Z"
+        grader["finished_at"] = "2030-01-01T00:01:10Z"
+        self.import_manifest(grader)
+        work = self.manifest(attempt="work-one")
+        work["grading"]["grader"]["kind"] = "model-review"
+        work["grading"]["overhead"] = {"cost_basis": "grader-attempt",
+                                         "grader_attempt_id": "grader-one",
+                                         "duration_ms": None, "tokens": None,
+                                         "actual_incremental_usd": None}
+        self.import_manifest(work, prices=prices)
+        task = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)["tasks"][0]
+        self.assertAlmostEqual(task["accepted_execution_api_equivalent_usd"]["known_total"], 0.000145)
+        self.assertIsNone(task["accepted_grader_api_equivalent_usd"]["known_total"])
+        self.assertIsNone(task["accepted_complete_api_equivalent_usd"]["known_total"])
+        self.assertEqual(task["accepted_task_end_to_end_ms"]["known_total"], 70000)
+        self.import_manifest(grader, prices=prices)
+        task = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)["tasks"][0]
+        self.assertAlmostEqual(task["accepted_grader_api_equivalent_usd"]["known_total"], 0.000145)
+        self.assertAlmostEqual(task["accepted_complete_api_equivalent_usd"]["known_total"], 0.00029)
+        self.assertEqual(task["accepted_task_end_to_end_ms"]["known_total"], 70000)
 
     def test_independent_grade_and_actual_receipt_are_required_for_acceptance(self):
         manifest = self.manifest()
@@ -510,6 +596,9 @@ class RoutingOutcomesTest(unittest.TestCase):
             "candidates": [
                 {"route": route_one, "eligibility": "pass", "capability_class_fit": "pass",
                  "runway_feasibility": "pass", "spend_priority": 1.2,
+                 "allowance_evidence": {"snapshot_path": str(self.quota_before),
+                                        "provider": "codex", "window_id": "weekly",
+                                        "percent_remaining": 100},
                  "uncertainty": "none observed", "explanation": "known headroom after fit gates"},
                 {"route": route_two, "eligibility": "unknown", "capability_class_fit": "pass",
                  "runway_feasibility": "unknown", "spend_priority": None,
@@ -528,8 +617,51 @@ class RoutingOutcomesTest(unittest.TestCase):
                              "--shadow-store", self.shadow_store, "--format", "markdown")
         self.assertIn("unknown is not exhaustion", score.stdout)
         self.assertIn("eligibility=pass; capability=pass; runway=pass; spendPriority=1.2", score.stdout)
-        self.assertIn("shadow-only, policy unverified", score.stdout)
+        self.assertIn("shadow-only, policy unverified, allowance evidence partial", score.stdout)
         self.assertIn("small samples do not establish a winner", score.stdout)
+
+    def test_shadow_allowance_claims_require_matching_quota_evidence(self):
+        route = self.manifest()["route"]
+        base = {
+            "schema": "fm-routing-shadow.v1", "task_id": "task-one", "decision_id": "decision-one",
+            "task_binding": {"spawn_gen": "spawn-1"}, "at": "2030-01-01T00:00:00Z",
+            "category": "1", "task_shape": "code-change", "recommended_route": route,
+            "explanation": "shadow evidence check",
+            "candidates": [{"route": route, "eligibility": "pass", "capability_class_fit": "pass",
+                            "runway_feasibility": "pass", "spend_priority": 1,
+                            "uncertainty": "none", "explanation": "available"}],
+        }
+        path = self.dir / "shadow-evidence.json"
+        self.write_json(path, base)
+        result = self.run_cli("shadow", "--manifest", path, "--shadow-store", self.shadow_store, "--json", ok=False)
+        self.assertIn("require quota-axi evidence", json.loads(result.stdout)["error"])
+        base["candidates"][0]["allowance_evidence"] = {
+            "snapshot_path": str(self.quota_before), "provider": "codex",
+            "window_id": "weekly", "percent_remaining": 99}
+        self.write_json(path, base)
+        result = self.run_cli("shadow", "--manifest", path, "--shadow-store", self.shadow_store, "--json", ok=False)
+        self.assertIn("does not match quota-axi evidence", json.loads(result.stdout)["error"])
+        unresolved = self.dir / "quota-unresolved.json"
+        self.write_quota(unresolved, 100, "2030-01-02T00:00:00Z", provider="agy",
+                         status="unresolved", unresolved=["weekly"])
+        base["candidates"][0]["allowance_evidence"] = {
+            "snapshot_path": str(unresolved), "provider": "agy",
+            "window_id": "weekly", "percent_remaining": 100}
+        self.write_json(path, base)
+        result = self.run_cli("shadow", "--manifest", path, "--shadow-store", self.shadow_store, "--json", ok=False)
+        self.assertIn("unresolved allowance evidence", json.loads(result.stdout)["error"])
+        base["candidates"][0]["allowance_evidence"] = {
+            "snapshot_path": str(self.quota_before), "provider": "codex",
+            "window_id": "weekly", "percent_remaining": 100}
+        self.write_json(path, base)
+        self.run_cli("shadow", "--manifest", path, "--shadow-store", self.shadow_store, "--json")
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        evidence = score["shadow_recommendations"][0]["candidate_evidence"][0]["allowance_evidence"]
+        self.assertEqual(evidence["provider"], "codex")
+        self.assertEqual(evidence["percent_remaining"], 100)
+        self.assertRegex(evidence["source_sha256"], r"^[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Model-routing outcome measurement
 
 `bin/fm-routing-outcomes.py` adds receipt-backed measurement to existing Firstmate tasks without becoming a dispatcher, scheduler, quota provider, grader, or task lifecycle.
-It records one exact task attempt at a time, records quota-informed shadow recommendations separately, and renders a compact descriptive scorecard.
+It records one exact task attempt at a time, records evidence-qualified shadow recommendations separately, and renders a compact descriptive scorecard.
 Each record is bound to the existing task's current `spawn_gen` incarnation and metadata digest, while quota-axi remains the allowance source and `quota-array-dispatch` remains the routing decision owner.
 
 ## Rollout boundary
@@ -69,6 +69,8 @@ The importer therefore preserves requested effort and leaves effective effort un
 Agy's one-shot result gives native usage, and its native selected-model log can prove a named effort variant, while the current interactive conversation store is not treated as a prompt-safe portable receipt.
 These limitations remain visible in `native.completeness` and in scorecard uncertainty.
 A Pi session with mixed or partially missing task, incarnation, model, effort, provider, or API evidence is rejected instead of pooling its usage into one exact route.
+A Claude session with mixed or partially missing assistant-model or session evidence is rejected, while a Claude result may retain separately itemized auxiliary-model usage.
+The manifest harness must agree with the task metadata and receipt kind, and its provider must agree with native provider evidence when present.
 
 Token categories retain the native source's accounting.
 Reasoning tokens are reported separately but never added on top of output tokens for cost calculations, because the price catalog contract requires `reasoning: included_in_output`.
@@ -86,6 +88,8 @@ An accepted outcome requires an independent deterministic or blind-review grade,
 Each check artifact is bound to the task identifier, `spawn_gen`, attempt identifier, and SHA-256 of the normalized acceptance criteria.
 The implementation route cannot self-assert acceptance by setting an outcome string alone.
 First-pass result, final result, defect count, fix count, retry count, grader duration, grader tokens, and grader incremental charge stay explicit.
+Model-based grading references a distinct `attempt_role: grader` attempt, so its native usage and timestamped price provenance are reused without duplicating billing logic.
+Missing grader usage or price evidence makes the complete API-equivalent total unknown, while the execution-only subtotal remains explicitly labeled.
 The importer does not create a second full review pipeline; callers attach the ordinary task's actual check receipts and use limited blind review only where subjective grading requires it.
 
 ## Cost and allowance attribution
@@ -105,6 +109,8 @@ Quota inputs are native quota-axi schema-version-5 snapshots taken before and af
 The importer retains the selected provider's literal windows and normalized semantics.
 It computes a per-window consumption delta only when reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
 It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
+Each shadow candidate's runway or spend claim separately references an exact quota-axi snapshot, provider, and window, and the claimed remaining value must match the native evidence.
+Missing or unresolved allowance evidence is reported as unverified and cannot support runway or spend claims.
 
 ## Scorecard interpretation
 
@@ -113,6 +119,7 @@ When effective model or effort is unavailable, the route uses an explicit `reque
 It includes sample counts, outcomes, known token/cost/time totals, unknown counts, and unresolved or failed costs at the task level.
 It also prints each shadow recommendation and the eligibility, capability-class fit, runway feasibility, spend priority, explanation, and uncertainty recorded for every candidate.
 Attempts that begin after first acceptance do not increase accepted-task cost, while an attempt overlapping first acceptance contributes an explicit unknown rather than mismatched cost and time.
+The same first-acceptance boundary applies to grader time and cost, and accepted completion includes the finish of a referenced grader attempt.
 
 The scorecard is descriptive.
 It deliberately has no opaque weighted score and does not claim a statistical winner from a few heterogeneous tasks.

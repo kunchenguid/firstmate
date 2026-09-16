@@ -28,7 +28,7 @@ scorecard input.
 Import manifest, schema fm-routing-attempt.v1:
   {
     "schema": "fm-routing-attempt.v1",
-    "task_id": "task-id", "attempt_id": "attempt-1",
+    "task_id": "task-id", "attempt_id": "attempt-1", "attempt_role": "work",
     "task_binding": {"spawn_gen": "s20300101.1.1"},
     "phase": "measurement", "category": "1", "task_shape": "code-change",
     "route": {
@@ -54,7 +54,7 @@ Import manifest, schema fm-routing-attempt.v1:
                 "receipts": [{"kind": "test", "id": "suite", "passed": true,
                               "criteria_ids": ["tests"], "artifact_path": "/private/check.json",
                               "sha256": "..."}],
-                "overhead": {"duration_ms": 10, "tokens": null,
+                "overhead": {"cost_basis": "no-model", "duration_ms": 10, "tokens": null,
                              "actual_incremental_usd": null}},
     "outcome": "accepted"
   }
@@ -84,8 +84,10 @@ grader_id, criteria_ids, acceptance_criteria_sha256, passed, and exit_code.
 Shadow manifest, schema fm-routing-shadow.v1, records a recommendation without
 executing it. It must account for every candidate's eligibility, capability
 class fit, runway feasibility, spend priority (number or null), uncertainty,
-and explanation. The scorecard reports those explanations; it does not create
-a weighted ranking or claim a winner.
+and explanation. Runway and spend claims require an exact quota-axi snapshot,
+provider, window, timestamp, digest, and matching available value. The
+scorecard reports those explanations; it does not create a weighted ranking or
+claim a winner.
 """
 
 from __future__ import annotations
@@ -284,12 +286,12 @@ def one_or_unknown(values: Iterable[Any]) -> Any:
     return next(iter(found)) if len(found) == 1 else None
 
 
-def one_observed(values: Iterable[Any], field: str) -> Any:
+def one_observed(values: Iterable[Any], field: str, source: str = "native Pi session") -> Any:
     items = list(values)
     if not items or all(value is None for value in items):
         return None
     if any(value is None for value in items) or len(set(items)) != 1:
-        fail(f"native Pi session has mixed or incomplete {field} evidence")
+        fail(f"{source} has mixed or incomplete {field} evidence")
     return items[0]
 
 
@@ -360,8 +362,10 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
         "selected_effort_receipt": selected_effort,
         "effective_model": payload_model or assistant_model,
         "effective_effort": payload_effort,
-        "provider": one_observed((item.get("provider") for item in request_data), "provider") or one_observed((row["message"].get("provider") for row in assistants), "assistant provider"),
-        "api": one_observed((item.get("api") for item in request_data), "API") or one_observed((row["message"].get("api") for row in assistants), "assistant API"),
+        "provider": one_observed([*(item.get("provider") for item in request_data),
+                                  *(row["message"].get("provider") for row in assistants)], "provider"),
+        "api": one_observed([*(item.get("api") for item in request_data),
+                             *(row["message"].get("api") for row in assistants)], "API"),
         "models": models,
         "tokens": total_tokens(models),
         "first_native_at": min(timestamps) if timestamps else None,
@@ -417,7 +421,7 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
         "requested_model_receipt": source.get("requested_model"),
         "selected_effort_receipt": source.get("requested_effort"),
         "effective_model": main_model, "effective_effort": None,
-        "provider": "anthropic", "api": "claude-code",
+        "provider": one_or_unknown(row.get("provider") for row in models), "api": "claude-code",
         "models": models, "tokens": total_tokens(models),
         "first_native_at": None, "last_native_at": None,
         "native_duration_ms": receipt.get("duration_api_ms") if isinstance(receipt.get("duration_api_ms"), (int, float)) else None,
@@ -454,11 +458,11 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
     timestamps = [row.get("timestamp") for row in latest.values() if isinstance(row.get("timestamp"), str)]
     return {
         "kind": "claude-session", "source_sha256": source_digest,
-        "session_id": one_or_unknown(row.get("sessionId") for row in latest.values()),
+        "session_id": one_observed((row.get("sessionId") for row in latest.values()), "session identity", "native Claude session"),
         "request_count": len(latest), "response_count": len(latest), "task_id_receipt": None,
         "requested_model_receipt": source.get("requested_model"),
         "selected_effort_receipt": source.get("requested_effort"),
-        "effective_model": one_or_unknown(row["message"].get("model") for row in latest.values()),
+        "effective_model": one_observed((row["message"].get("model") for row in latest.values()), "effective model", "native Claude session"),
         "effective_effort": None, "provider": "anthropic", "api": "claude-code",
         "models": models, "tokens": total_tokens(models),
         "first_native_at": min(timestamps) if timestamps else None,
@@ -663,15 +667,31 @@ def validate_grading(value: Any, outcome: str, task_id: str, spawn_gen: str, att
         cleaned_receipts.append(cleaned)
     grade["receipts"] = cleaned_receipts
     overhead = need_object(grade.get("overhead"), "grading.overhead")
+    cost_basis = overhead.get("cost_basis")
+    if cost_basis not in {"no-model", "grader-attempt"}:
+        fail("grading.overhead.cost_basis must be no-model or grader-attempt")
+    grader_attempt_id = overhead.get("grader_attempt_id")
+    if cost_basis == "grader-attempt":
+        grader_attempt_id = need_id(grader_attempt_id, "grading.overhead.grader_attempt_id")
+        if grader_attempt_id == attempt_id:
+            fail("grading.overhead.grader_attempt_id must reference a distinct attempt")
+    elif grader_attempt_id is not None:
+        fail("grading.overhead.grader_attempt_id requires cost_basis grader-attempt")
+    if (grade["grader"]["kind"] == "model-review") != (cost_basis == "grader-attempt"):
+        fail("model-review grading requires grader-attempt cost evidence")
     overhead_tokens = overhead.get("tokens")
     if overhead_tokens is not None:
         overhead_tokens = need_object(overhead_tokens, "grading.overhead.tokens")
         overhead_tokens = {key: nullable_number(overhead_tokens.get(key), f"grading.overhead.tokens.{key}", integer=True) for key in TOKEN_KEYS}
     grade["overhead"] = {
+        "cost_basis": cost_basis,
+        "grader_attempt_id": grader_attempt_id,
         "duration_ms": nullable_number(overhead.get("duration_ms"), "grading.overhead.duration_ms"),
         "tokens": overhead_tokens,
         "actual_incremental_usd": nullable_number(overhead.get("actual_incremental_usd"), "grading.overhead.actual_incremental_usd"),
     }
+    if cost_basis == "grader-attempt" and any(grade["overhead"][key] is not None for key in ("duration_ms", "tokens", "actual_incremental_usd")):
+        fail("grader-attempt overhead must come from the referenced attempt")
     if outcome == "accepted":
         if method == "none" or independent is not True:
             fail("accepted outcome requires an independent deterministic or blind review")
@@ -859,6 +879,21 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     task_binding = bind_task(task_id, manifest.get("task_binding"))
     route = validate_route(manifest.get("route"))
     native = parse_native(manifest.get("native_receipt"))
+    attempt_role = manifest.get("attempt_role", "work")
+    if attempt_role not in {"work", "grader"}:
+        fail("attempt_role must be work or grader")
+    expected_harnesses = {
+        "pi-session": {"pi", "pi-signed"},
+        "claude-result": {"claude"},
+        "claude-session": {"claude"},
+        "agy-result": {"agy"},
+    }[native["kind"]]
+    if route["harness"] not in expected_harnesses:
+        fail("route.harness does not match native receipt kind")
+    if task_binding.get("harness") is not None and route["harness"] != task_binding["harness"]:
+        fail("route.harness does not match task metadata harness")
+    if native.get("provider") is not None and route["provider"] != native["provider"]:
+        fail("route.provider does not match native provider evidence")
     if native.get("task_id_receipt") not in (None, task_id):
         fail("native Pi task id does not match manifest task_id")
     if native.get("requested_model_receipt") not in (None, route["requested_model"]):
@@ -890,7 +925,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     record = {
         "schema": ATTEMPT_SCHEMA, "task_id": task_id, "attempt_id": attempt_id,
         "spawn_gen": task_binding["spawn_gen"], "task_binding": task_binding,
-        "phase": phase, "category": category, "task_shape": task_shape,
+        "phase": phase, "category": category, "task_shape": task_shape, "attempt_role": attempt_role,
         "route": route, "native": native, "requirements": copy.deepcopy(requirements),
         "started_at": started, "finished_at": finished, "time_ms": time_values,
         "billing": billing_record, "quota": quota_record(manifest.get("quota")),
@@ -931,6 +966,36 @@ def validate_candidate(value: Any, index: int) -> dict[str, Any]:
         fail(f"candidates[{index}].spend_priority must be a number or null")
     item["uncertainty"] = need_text(item.get("uncertainty"), f"candidates[{index}].uncertainty")
     item["explanation"] = need_text(item.get("explanation"), f"candidates[{index}].explanation")
+    evidence_value = item.get("allowance_evidence")
+    if evidence_value is None:
+        if item["runway_feasibility"] != "unknown" or item["spend_priority"] is not None:
+            fail(f"candidates[{index}] allowance claims require quota-axi evidence")
+        item["allowance_evidence"] = None
+        item["allowance_evidence_status"] = "unverified"
+        return item
+    evidence = need_object(evidence_value, f"candidates[{index}].allowance_evidence")
+    provider = need_text(evidence.get("provider"), f"candidates[{index}].allowance_evidence.provider")
+    window_id = need_text(evidence.get("window_id"), f"candidates[{index}].allowance_evidence.window_id")
+    snapshot = sanitize_quota(evidence.get("snapshot_path"), provider, f"candidates[{index}].allowance_evidence.snapshot_path")
+    parse_time(snapshot.get("generated_at"), f"candidates[{index}].allowance_evidence.generated_at")
+    windows = [window for window in snapshot["windows"] if window.get("id") == window_id]
+    if len(windows) != 1:
+        fail(f"candidates[{index}].allowance_evidence.window_id must identify one quota window")
+    claimed = nullable_number(evidence.get("percent_remaining"), f"candidates[{index}].allowance_evidence.percent_remaining")
+    observed = windows[0].get("percentRemaining")
+    if claimed != observed:
+        fail(f"candidates[{index}].allowance_evidence.percent_remaining does not match quota-axi evidence")
+    semantics = snapshot.get("quota_semantics") or {}
+    unresolved = semantics.get("status") == "unresolved" or window_id in (semantics.get("unresolvedWindowIds") or [])
+    if unresolved or claimed is None:
+        if item["runway_feasibility"] != "unknown" or item["spend_priority"] is not None:
+            fail(f"candidates[{index}] unresolved allowance evidence cannot support runway or spend claims")
+    item["allowance_evidence"] = {
+        "source_sha256": snapshot["source_sha256"], "generated_at": snapshot["generated_at"],
+        "provider": provider, "window_id": window_id, "percent_remaining": observed,
+        "quota_semantics": snapshot.get("quota_semantics"),
+    }
+    item["allowance_evidence_status"] = "unresolved" if unresolved or claimed is None else "verified"
     return item
 
 
@@ -955,6 +1020,8 @@ def import_shadow(args: argparse.Namespace) -> dict[str, Any]:
         "explanation": need_text(manifest.get("explanation"), "explanation"),
         "policy_status": "unverified",
     }
+    statuses = {item["allowance_evidence_status"] for item in record["candidates"]}
+    record["allowance_evidence_status"] = "verified" if statuses == {"verified"} else "partial" if "verified" in statuses else "unverified"
     parse_time(record["at"], "at")
     if "evidence_sufficient_for_bounded_routing" in manifest:
         fail("bounded-routing readiness is outside this shadow-only measurement tool")
@@ -1013,13 +1080,42 @@ def legacy_history(path: Path) -> dict[str, Any]:
 def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     records = [event["record"] for event in fold_events(store, EVENT_SCHEMA, ("task_id", "spawn_gen", "attempt_id")).values()]
     shadows = [event["record"] for event in fold_events(shadow_store, SHADOW_EVENT_SCHEMA, ("task_id", "spawn_gen", "decision_id")).values()]
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    attempt_index = {(record["task_id"], record["spawn_gen"], record["attempt_id"]): record for record in records}
+    referenced_graders: set[tuple[str, str, str]] = set()
+
+    def grader_evidence(item: dict[str, Any]) -> dict[str, Any]:
+        overhead = item["grading"]["overhead"]
+        if overhead.get("cost_basis", "no-model") == "no-model":
+            return {"duration_ms": overhead.get("duration_ms"),
+                    "actual_incremental_usd": overhead.get("actual_incremental_usd"),
+                    "api_equivalent_usd": 0.0, "tokens": overhead.get("tokens"),
+                    "finished_at": item["finished_at"], "complete": True}
+        key = (item["task_id"], item["spawn_gen"], overhead["grader_attempt_id"])
+        grader = attempt_index.get(key)
+        if grader is None:
+            return {"duration_ms": None, "actual_incremental_usd": None,
+                    "api_equivalent_usd": None, "tokens": None,
+                    "finished_at": item["finished_at"], "complete": False}
+        if grader.get("attempt_role", "work") != "grader":
+            fail("grading overhead reference must identify a grader attempt")
+        if key in referenced_graders:
+            fail("a grader attempt cannot be attributed to more than one work attempt")
+        referenced_graders.add(key)
+        return {"duration_ms": grader["time_ms"].get("end_to_end"),
+                "actual_incremental_usd": grader["billing"].get("actual_incremental_usd"),
+                "api_equivalent_usd": grader["billing"].get("api_equivalent_usd"),
+                "tokens": grader["native"].get("tokens"),
+                "finished_at": max(item["finished_at"], grader["finished_at"]), "complete": True}
+
+    grader_by_attempt = {(record["task_id"], record["spawn_gen"], record["attempt_id"]): grader_evidence(record)
+                         for record in records if record.get("attempt_role", "work") == "work"}
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for record in records:
-        groups.setdefault((record["category"], record["task_shape"], route_name(record)), []).append(record)
+        groups.setdefault((record["category"], record["task_shape"], record.get("attempt_role", "work"), route_name(record)), []).append(record)
     route_groups = []
-    for (category, shape, route), items in sorted(groups.items()):
+    for (category, shape, role, route), items in sorted(groups.items()):
         route_groups.append({
-            "category": category, "task_shape": shape, "route": route,
+            "category": category, "task_shape": shape, "attempt_role": role, "route": route,
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},
             "tokens": {key: metric(item["native"]["tokens"].get(key) for item in items) for key in TOKEN_KEYS},
@@ -1042,39 +1138,57 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     by_task: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in records:
         by_task.setdefault((record["task_id"], record["spawn_gen"]), []).append(record)
-    for (task_id, spawn_gen), items in sorted(by_task.items()):
+    for (task_id, spawn_gen), all_items in sorted(by_task.items()):
+        items = [item for item in all_items if item.get("attempt_role", "work") == "work"]
+        grader_items = [item for item in all_items if item.get("attempt_role", "work") == "grader"]
         accepted_items = [item for item in items if item["outcome"] == "accepted"]
         accepted = bool(accepted_items)
         accepted_span = None
+        def evidence(item: dict[str, Any]) -> dict[str, Any]:
+            return grader_by_attempt[(task_id, spawn_gen, item["attempt_id"])]
         if accepted:
             task_start = min(parse_time(item["started_at"], "started_at") for item in items)
-            accepted_finish = min(parse_time(item["finished_at"], "finished_at") for item in accepted_items)
-            accepted_span = max(0, round((accepted_finish - task_start).total_seconds() * 1000))
+            accepted_finish = min(parse_time(evidence(item)["finished_at"], "finished_at") for item in accepted_items)
+            if all(evidence(item)["complete"] for item in accepted_items
+                   if parse_time(evidence(item)["finished_at"], "finished_at") == accepted_finish):
+                accepted_span = max(0, round((accepted_finish - task_start).total_seconds() * 1000))
             accepted_sequence = [item for item in items if parse_time(item["started_at"], "started_at") <= accepted_finish]
-            completed_sequence = [item for item in accepted_sequence if parse_time(item["finished_at"], "finished_at") <= accepted_finish]
+            completed_sequence = [item for item in accepted_sequence
+                                  if parse_time(evidence(item)["finished_at"], "finished_at") <= accepted_finish]
             overlapping = len(accepted_sequence) - len(completed_sequence)
         else:
+            accepted_sequence = []
             completed_sequence = []
             overlapping = 0
+        execution_api = [item["billing"].get("api_equivalent_usd") for item in completed_sequence]
+        grader_api = [evidence(item)["api_equivalent_usd"] for item in completed_sequence]
+        complete_api = [round(execution + grading, 12) if execution is not None and grading is not None else None
+                        for execution, grading in zip(execution_api, grader_api)]
         task_rows.append({"task_id": task_id, "spawn_gen": spawn_gen,
                           "category": one_or_unknown(item["category"] for item in items),
                           "task_shape": one_or_unknown(item["task_shape"] for item in items),
-                          "attempts": len(items), "accepted": accepted,
+                          "attempts": len(items), "grader_attempts": len(grader_items), "accepted": accepted,
                           "accepted_task_actual_incremental_usd": metric([*(item["billing"].get("actual_incremental_usd") for item in completed_sequence), *([None] * overlapping)]) if accepted else None,
-                          "accepted_task_api_equivalent_usd": metric([*(item["billing"].get("api_equivalent_usd") for item in completed_sequence), *([None] * overlapping)]) if accepted else None,
+                          "accepted_execution_api_equivalent_usd": metric([*execution_api, *([None] * overlapping)]) if accepted else None,
+                          "accepted_grader_api_equivalent_usd": metric([*grader_api, *([None] * overlapping)]) if accepted else None,
+                          "accepted_complete_api_equivalent_usd": metric([*complete_api, *([None] * overlapping)]) if accepted else None,
                           "accepted_task_fixed_subscription_usd": contextual_values(item["billing"].get("fixed_subscription_usd") for item in accepted_sequence) if accepted else None,
                           "accepted_task_end_to_end_ms": metric([accepted_span]) if accepted else None,
-                          "grader_actual_incremental_usd": metric(item["grading"]["overhead"].get("actual_incremental_usd") for item in items),
-                          "grader_duration_ms": metric(item["grading"]["overhead"].get("duration_ms") for item in items),
+                          "grader_actual_incremental_usd": metric([*(evidence(item)["actual_incremental_usd"] for item in completed_sequence), *([None] * overlapping)]) if accepted else metric([]),
+                          "grader_duration_ms": metric([*(evidence(item)["duration_ms"] for item in completed_sequence), *([None] * overlapping)]) if accepted else metric([]),
                           "unresolved_or_failure_actual_usd": metric(item["billing"].get("actual_incremental_usd") for item in items if item["outcome"] != "accepted")})
     return {"schema": "fm-routing-scorecard.v1", "generated_at": now_iso(), "attempt_count": len(records),
             "task_count": len(by_task), "routes": route_groups, "tasks": task_rows,
             "shadow_recommendations": [{"task_id": row["task_id"], "decision_id": row["decision_id"], "category": row["category"],
                                          "task_shape": row["task_shape"], "recommended_route": route_name({"route": row["recommended_route"], "native": {"effective_model": None, "effective_effort": None}}),
-                                         "shadow_only": True, "policy_status": row["policy_status"], "explanation": row["explanation"],
+                                         "shadow_only": True, "policy_status": row["policy_status"],
+                                         "allowance_evidence_status": row.get("allowance_evidence_status", "unverified"),
+                                         "explanation": row["explanation"],
                                          "candidate_evidence": [{"route": route_name({"route": item["route"], "native": {"effective_model": None, "effective_effort": None}}),
                                                                  "eligibility": item["eligibility"], "capability_class_fit": item["capability_class_fit"],
                                                                  "runway_feasibility": item["runway_feasibility"], "spend_priority": item["spend_priority"],
+                                                                 "allowance_evidence_status": item.get("allowance_evidence_status", "unverified"),
+                                                                 "allowance_evidence": item.get("allowance_evidence"),
                                                                  "uncertainty": item["uncertainty"], "explanation": item["explanation"]}
                                                                 for item in row["candidates"]]}
                                         for row in sorted(shadows, key=lambda item: (item["task_id"], item["decision_id"]))],
@@ -1111,26 +1225,28 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
     if not scorecard["routes"]:
         lines.append("| - | - | - | 0 | 0 | unknown | unknown | unknown | unknown | unknown | unknown | unknown | no samples |")
     lines.extend(["", "## Accepted-task and failure cost", "",
-                  "| Task | Incarnation | Category | Shape | Attempts | Accepted | Accepted actual | Grader actual | Fixed subscription | API-equivalent | Accepted time | Unresolved/failure actual |",
-                  "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|"])
+                  "| Task | Incarnation | Category | Shape | Work attempts | Grader attempts | Accepted | Accepted actual | Grader actual | Fixed subscription | Execution API-equivalent | Grader API-equivalent | Complete API-equivalent | Accepted time | Unresolved/failure actual |",
+                  "|---|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|"])
     for row in scorecard["tasks"]:
         lines.append("| " + " | ".join([
-            row["task_id"], row["spawn_gen"], row["category"] or "mixed", row["task_shape"] or "mixed", str(row["attempts"]), "yes" if row["accepted"] else "no",
+            row["task_id"], row["spawn_gen"], row["category"] or "mixed", row["task_shape"] or "mixed", str(row["attempts"]), str(row["grader_attempts"]), "yes" if row["accepted"] else "no",
             format_metric(row["accepted_task_actual_incremental_usd"], " USD") if row["accepted_task_actual_incremental_usd"] else "n/a",
             format_metric(row["grader_actual_incremental_usd"], " USD"),
             format_context(row["accepted_task_fixed_subscription_usd"], " USD") if row["accepted_task_fixed_subscription_usd"] else "n/a",
-            format_metric(row["accepted_task_api_equivalent_usd"], " USD") if row["accepted_task_api_equivalent_usd"] else "n/a",
+            format_metric(row["accepted_execution_api_equivalent_usd"], " USD") if row["accepted_execution_api_equivalent_usd"] else "n/a",
+            format_metric(row["accepted_grader_api_equivalent_usd"], " USD") if row["accepted_grader_api_equivalent_usd"] else "n/a",
+            format_metric(row["accepted_complete_api_equivalent_usd"], " USD") if row["accepted_complete_api_equivalent_usd"] else "n/a",
             format_metric(row["accepted_task_end_to_end_ms"], " ms") if row["accepted_task_end_to_end_ms"] else "n/a",
             format_metric(row["unresolved_or_failure_actual_usd"], " USD"),
         ]) + " |")
     if not scorecard["tasks"]:
-        lines.append("| - | - | - | - | 0 | no | n/a | unknown | n/a | n/a | n/a | unknown |")
+        lines.append("| - | - | - | - | 0 | 0 | no | n/a | unknown | n/a | n/a | n/a | n/a | n/a | unknown |")
     lines.extend(["", "## Shadow recommendations", ""])
     if scorecard["shadow_recommendations"]:
         for row in scorecard["shadow_recommendations"]:
-            lines.append(f"- {row['task_id']} ({row['category']}, {row['task_shape']}): {row['recommended_route']} - shadow-only, policy {row['policy_status']}. {row['explanation']}")
+            lines.append(f"- {row['task_id']} ({row['category']}, {row['task_shape']}): {row['recommended_route']} - shadow-only, policy {row['policy_status']}, allowance evidence {row['allowance_evidence_status']}. {row['explanation']}")
             for candidate in row["candidate_evidence"]:
-                lines.append(f"  - {candidate['route']}: eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={candidate['spend_priority']}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
+                lines.append(f"  - {candidate['route']}: eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={candidate['spend_priority']}; allowance={candidate['allowance_evidence_status']}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
     else:
         lines.append("- No shadow recommendations recorded.")
     lines.extend(["", scorecard["interpretation"]])
