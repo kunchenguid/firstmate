@@ -107,19 +107,26 @@ fm_control_harness_family() {  # <recorded-harness>
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
-# config/unverified-secondmate-harness is the captain's written acceptance, for
-# THIS home, of an adapter that is not verified for the secondmate kind. It does
-# not make the adapter verified and closes none of the gaps above; it only records
-# that the captain accepts an unproven mate rather than none. It widens the
+# config/unverified-secondmate-harness is the operator's written acceptance, for
+# ONE named home, of an adapter that is not verified for the secondmate kind. It
+# does not make the adapter verified and closes none of the gaps above; it only
+# records that an unproven mate is accepted rather than none. It widens the
 # muse/gemini/agy row only, never rovo, matching what bin/fm-spawn.sh will
 # actually launch, so the two owners cannot disagree about what may start.
+# The flag is read ONLY from an explicit FM_HOME and never from the working
+# directory. This predicate is otherwise pure, and a cwd fallback made it answer
+# differently depending on where it was called from - which silently let one
+# home's acceptance widen the capability table for every caller that had not
+# named a home at all. With no FM_HOME there is no home to have accepted
+# anything, so it refuses.
 fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
     muse|gemini|agy)
       [ "$kind" != secondmate ] \
-        || [ -f "${FM_HOME:-$(pwd)}/config/unverified-secondmate-harness" ] \
+        || { [ -n "${FM_HOME:-}" ] \
+             && [ -f "$FM_HOME/config/unverified-secondmate-harness" ]; } \
         || return 1 ;;
     rovo) [ "$kind" != secondmate ] || return 1 ;;
   esac

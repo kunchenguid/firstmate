@@ -160,6 +160,45 @@ test_agy_control_mechanics_are_the_verified_ones() {
   pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
 }
 
+test_unverified_secondmate_flag_is_scoped_to_one_named_home() {
+  local home_with home_without
+  home_with="$TMP_ROOT/flag-home-accepted"
+  home_without="$TMP_ROOT/flag-home-plain"
+  mkdir -p "$home_with/config" "$home_without/config"
+  : > "$home_with/config/unverified-secondmate-harness"
+
+  # The regression that matters. Reading the flag relative to the working
+  # directory made a pure capability answer depend on where it was called from,
+  # so one home's written acceptance silently widened the table for every caller
+  # that had named no home at all - including this suite, run from a repo whose
+  # own config carries the flag. With no home named, nothing has accepted
+  # anything, so the gate refuses.
+  ( unset FM_HOME
+    fm_control_harness_supports_kind agy secondmate ) \
+    && fail "agy passed the secondmate gate with no home named at all" || true
+
+  FM_HOME="$home_without" fm_control_harness_supports_kind agy secondmate \
+    && fail "agy passed the secondmate gate in a home that never accepted it" || true
+
+  FM_HOME="$home_with" fm_control_harness_supports_kind agy secondmate \
+    || fail "agy was refused in the very home whose flag accepts it"
+
+  # rovo is the deliberate carve-out: it carries the same supervision gap and is
+  # excluded on purpose, so the flag must never widen it alongside the others.
+  FM_HOME="$home_with" fm_control_harness_supports_kind rovo secondmate \
+    && fail "rovo was widened by a flag that must never cover it" || true
+
+  # Non-vacuity: the flag is not a blanket yes. The kinds agy already runs must
+  # be unaffected by it, or the three assertions above would pass on a gate that
+  # simply stopped refusing anything.
+  FM_HOME="$home_with" fm_control_harness_supports_kind agy scout \
+    || fail "the flag broke agy's ordinary scout capability"
+  FM_HOME="$home_without" fm_control_harness_supports_kind agy ship \
+    || fail "a home without the flag lost agy's ordinary ship capability"
+
+  pass "fm-control-lib: the unverified-secondmate flag is read only from a named home, never from the working directory"
+}
+
 test_agy_busy_tail_needs_the_pinned_status_row() {
   printf 'working\nesc to cancel\n' | fm_busy_agy_tail_busy \
     || fail "the esc-to-cancel status row must read busy"
@@ -913,4 +952,5 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
+test_unverified_secondmate_flag_is_scoped_to_one_named_home
 test_agy_spawn_arms_no_busy_wiring

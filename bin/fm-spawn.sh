@@ -1961,8 +1961,10 @@ esac
 # It is a file rather than an environment variable on purpose: an automatic
 # liveness relaunch carries none of our environment, so a flag in the environment
 # would bring a dead mate back only when a human happened to be driving.
+# It is read only from the resolved FM_HOME, never from the working directory, so
+# one home's acceptance can never authorize a launch for a different home.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
-  if [ -f "${FM_HOME:-$(pwd)}/config/unverified-secondmate-harness" ]; then
+  if [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/config/unverified-secondmate-harness" ]; then
     echo "warning: $HARNESS is NOT a verified secondmate adapter. Launching it only because config/unverified-secondmate-harness records the captain's explicit acceptance; this mate's supervision is unproven, so verify it by hand." >&2
   else
     echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
