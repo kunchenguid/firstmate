@@ -943,7 +943,7 @@ The tmux, Zellij, Orca, and cmux launch paths do not call this adapter primitive
 Final current-session smoke procedure:
 
 1. From a Firstmate pane in the current Herdr session, use the ordinary guarded `bin/fm-spawn.sh` path to launch one small scout with backend `herdr`; do not set a lab session, model override, effort override, or environment override.
-2. Read the new task's recorded endpoint, `herdr_session`, `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id` from its metadata, and confirm that the session and workspace match the launching Firstmate pane.
+2. Read the new task's recorded endpoint, `herdr_session`, `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id` from its metadata, and confirm that the session matches the launching Firstmate pane; with presentation active, confirm that the task's presentation journal binds the recorded worker workspace beneath the launcher's exact workspace, or with presentation disabled, confirm that the recorded workspace is the launcher's workspace.
 3. Against that recorded endpoint, run `herdr agent get <pane-id> --session <session>` and confirm that the native agent is registered in the recorded pane and visible in the current session's sidebar.
 4. Run `bin/fm-send.sh <task-id> '<unique smoke token>'`, confirm the worker acknowledges the token, and run `bin/fm-peek.sh <task-id>` to confirm that the same pane renders the acknowledgement.
 5. After the scout report and decision gate are complete, run `bin/fm-teardown.sh <task-id>` and verify that only the smoke task's recorded pane and metadata are removed.
