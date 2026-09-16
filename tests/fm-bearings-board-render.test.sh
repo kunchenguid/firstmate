@@ -78,8 +78,45 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
+# Build the board from <captains-call-json> and return what the renderer
+# exposes to the captain for each PR link.
+render_captains_call() {  # <home> <captains-call-json>
+  local home=$1 calls=$2 data="$1/payload.json"
+  jq -n --argjson calls "$calls" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:true, captains_call:$calls, underway:[], landed:[], charted:[]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    || fail "the built board could not be rendered"
+}
+
 charted_next_count() {  # <render-json>
   printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
+}
+
+test_captains_call_shows_short_clickable_pr_numbers() {
+  local home out
+  home=$(make_home captain-call-pr-links)
+  out=$(render_captains_call "$home" '[
+    {"key":"merge-131","type":"merge","repo":"firstmate","title":"Review PR 131",
+     "risk":"low","pr_url":"https://github.com/kunchenguid/firstmate/pull/131",
+     "options":[{"value":"merge","label":"Merge"}]},
+    {"key":"merge-8435","type":"merge","repo":"sas","title":"Review PR 8435",
+     "risk":"low","pr_url":"https://github.com/portabilis/sas/pull/8435",
+     "options":[{"value":"merge","label":"Merge"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and .calls == [
+      {text:"#131", href:"https://github.com/kunchenguid/firstmate/pull/131",
+       title:"https://github.com/kunchenguid/firstmate/pull/131", target:"_blank", rel:"noopener"},
+      {text:"#8435", href:"https://github.com/portabilis/sas/pull/8435",
+       title:"https://github.com/portabilis/sas/pull/8435", target:"_blank", rel:"noopener"}
+    ]
+  ' >/dev/null || fail "Captain's Call did not render short clickable PR numbers: $out"
+  pass "Captain's Call renders #131 and #8435 as clickable PR links with full-URL tooltips"
 }
 
 test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
@@ -228,6 +265,7 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_captains_call_shows_short_clickable_pr_numbers
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
