@@ -210,7 +210,7 @@ With it present, every referenced task must independently show positive work evi
 It stays opt-in because the other two proofs read a verdict the harness itself vouches for while this one infers execution from rendered bytes; with the flag absent triage behaves exactly as it did before.
 `FM_TURNEND_CHURN_ABSORB_SECS` is a positive integer number of seconds, defaults to `900`, and bounds how long one endpoint's turn-ends may ride that evidence before surfacing anyway.
 An invalid value fails closed and surfaces the wake.
-The bound is required rather than cosmetic because churn and pane staleness read the same pane.
+The bound is required rather than cosmetic because churn and pane staleness share the same content-hash derivation ([`architecture.md`](architecture.md)).
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 

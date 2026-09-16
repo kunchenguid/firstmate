@@ -605,8 +605,8 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 ```
 
 On the real idle pane the strip succeeded, its output was a byte-identical prefix of the capture rather than a rewrite of it, the row it ended on was the solid separator of at least 8 columns, and the tail it dropped was a footer-sized run of rows.
-A pi release that draws its footer above that separator, stops drawing the separator, or moves the footer into the transcript fails this assertion naming the pi version, which is the drift this entry exists to catch; the portable half is `test_pi_footer_strip_bounds_the_hashed_region` in `tests/fm-composer-lib.test.sh`.
-The live evidence for the churn itself, rather than for the boundary, is the recorded before/after watcher run in the `fm-pi-footer-stale-churn` change: against a real finished pi pane whose footer countdown advanced once a minute, the shipped watcher surfaced a stale wake on every tick, and the same pane surfaced exactly once after the change.
+A pi release that draws its footer above that separator, stops drawing the separator, or moves the footer into the transcript fails this assertion naming the pi version, which is the drift this entry exists to catch.
+The portable half of the same contract - footer-only countdown ticks stay out of the hashed region, a transcript change above the separator moves it, and a screen with no separator falls back to the whole capture - is `test_pi_footer_strip_bounds_the_hashed_region` in `tests/fm-composer-lib.test.sh`, with the watcher consumers pinned in `tests/fm-watch-triage.test.sh`; this entry owns only the vendor-rendered boundary those fixtures cannot prove.
 
 ## Steering-inbox doorbell
 
