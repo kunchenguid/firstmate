@@ -1,8 +1,21 @@
 # Porting firstmate to DeepSeek Harness — plan of record
 
-Status: **Phase 1 built and partially verified; a full-repository audit has invalidated several
-"done" claims and added blockers the earlier plan did not contain.** This document supersedes the
-phased plan discussed before the audit.
+Status at 2026-09-16, after twelve work rounds.
+
+**Phase 1 — complete and verified.** The adapter, its documentation, its regression coverage and its
+verification record are in place, and every "silent failure" class the audit found has either been
+fixed or given a startup assertion that fails loud. Twelve suites, 405 tests, 0 failures.
+
+**Phase 2 — core verified, teardown parity open.** A scout crewmate was dispatched end to end from a
+DSH-hosted environment and produced the correct deliverable. Teardown parity (the landed-work proof
+chain, the DSH-specific state files in the volatile-state sweep, and the hook-placement/git-exclude
+rule) is NOT done; see the findings below.
+
+**Phases 3–5 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
+process-event sources, secondmates), the optional DSH crewmate, and upstreaming remain. They are
+larger than the work completed above, not smaller.
+
+This document supersedes the phased plan discussed before the audit.
 
 The audit covered all 180 `bin/` scripts, 30 `docs/` pages, 21 skills, all 16 `AGENTS.md` sections
 and the 7 per-harness integration directories, producing 3823 capability rows and four consolidated
