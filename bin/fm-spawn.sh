@@ -4111,11 +4111,15 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
+  # control_relaunch_tx is written before the preserved tail, never after it:
+  # an armed PR poll requires pr=/pr_head= to stay the last meta lines
+  # (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse rejects any other line
+  # after pr=), and preserve_relaunch_meta carries that tail forward.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2

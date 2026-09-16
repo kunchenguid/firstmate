@@ -25,8 +25,12 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -174,6 +178,29 @@ EOF
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# arm_pr_poll <case-dir> <id> <url>: arm a real merge poll through
+# bin/fm-pr-check.sh with stubbed forge CLIs, so the test proves the poll
+# artifacts and metadata binding, not a hand-written fixture.
+arm_pr_poll() {
+  local dir=$1 id=$2 url=$3
+  mkdir -p "$dir/root/bin"
+  cat > "$dir/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/root/bin/fm-guard.sh" "$dir/fakebin/gh"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    "$PR_CHECK" "$id" "$url" >/dev/null 2>&1
 }
 
 run_control() {  # <case-dir> <args...>
@@ -430,6 +457,24 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_valid() {
+  local dir out rc
+  dir=$(new_case armed-poll rl45)
+  add_ship_task "$dir" rl45 claude
+  arm_pr_poll "$dir" rl45 "https://github.com/example/repo/pull/45" \
+    || fail "the fixture PR poll could not be armed"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl45 "$PR_POLL" \
+    || fail "the fixture PR poll was not valid before relaunch"
+
+  out=$(run_control "$dir" rl45 relaunch --note "keep watching the PR"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl45 "$PR_POLL" \
+    || fail "relaunch invalidated the armed PR poll"
+  [ "$(meta_field "$dir" rl45 pr)" = "https://github.com/example/repo/pull/45" ] \
+    || fail "the recorded PR identity must survive relaunch"
+  pass "fm-control relaunch: an armed PR poll survives replacement record publication"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1686,6 +1731,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_valid
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
