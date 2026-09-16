@@ -811,6 +811,31 @@ test_base_branch_resets_to_named_origin_tip() {
   pass "spawn --base-branch resets the pooled worktree to the named origin tip"
 }
 
+test_legacy_brief_refuses_named_base_without_contract() {
+  local rec id out status
+  id='pool-legacy-base-contract-r1'
+  rec=$(make_case legacy-base-contract "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+
+  scaffold_ship_brief "$id" direct-PR
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy brief accepted a named base without a matching contract"
+  assert_contains "$out" "re-scaffold the brief with Base branch contract: base_branch=develop" \
+    "legacy named-base refusal did not explain how to restore the contract"
+  assert_contains "$out" "omit --base-branch for a true default-branch launch" \
+    "legacy named-base refusal did not explain the default-base alternative"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "legacy named-base refusal published task metadata"
+  pass "legacy briefs refuse named-base launches without a base contract"
+}
+
 test_absent_base_branch_leaves_default_freshen_and_meta() {
   local rec id out status current meta
   id='pool-base-branch-absent-r6'
@@ -1230,6 +1255,7 @@ test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_base_branch_resets_to_named_origin_tip
+test_legacy_brief_refuses_named_base_without_contract
 test_absent_base_branch_leaves_default_freshen_and_meta
 test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it
 test_local_only_base_branch_prefers_local_over_origin

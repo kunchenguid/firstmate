@@ -2685,7 +2685,10 @@ fi
 # Spawn-time agreement only. Downstream review, promotion, landing, and teardown
 # read state/<id>.meta base_branch=, never this brief line.
 BRIEF_BASE=$(fm_brief_contract_value "$BRIEF" 'Base branch contract: base_branch=')
-if [ -n "$BRIEF_BASE" ]; then
+if [ -n "${BASE_BRANCH:-}" ] && [ -z "$BRIEF_BASE" ]; then
+  echo "error: $BRIEF has no Base branch contract for --base-branch $BASE_BRANCH; re-scaffold the brief with Base branch contract: base_branch=$BASE_BRANCH, or omit --base-branch for a true default-branch launch" >&2
+  exit 1
+elif [ -n "$BRIEF_BASE" ]; then
   if [ -z "${BASE_BRANCH:-}" ]; then
     echo "error: base mismatch for $ID: the brief says base_branch=$BRIEF_BASE but this spawn passed no --base-branch; correct the flag or re-scaffold the brief so the worker's instructions and the pool agree" >&2
     exit 1
