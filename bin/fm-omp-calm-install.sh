@@ -26,10 +26,10 @@ command -v omp >/dev/null 2>&1 || { echo "error: omp is not on PATH" >&2; exit 1
 
 if [ -f "$LEGACY" ] || [ -L "$LEGACY" ]; then
   if [ -f "$LEGACY" ] && cmp -s "$LEGACY" "$PKG_DIR/fm-calm-omp.ts"; then
-    rm -f -- "$LEGACY"
+    rm -f -- "$LEGACY" || { echo "error: failed to remove $LEGACY" >&2; exit 1; }
     echo "removed identical project-local copy: $LEGACY"
   else
-    mv -- "$LEGACY" "$LEGACY.bak"
+    mv -- "$LEGACY" "$LEGACY.bak" || { echo "error: failed to move $LEGACY to $LEGACY.bak" >&2; exit 1; }
     echo "warning: divergent project-local copy moved to $LEGACY.bak" >&2
   fi
 fi
