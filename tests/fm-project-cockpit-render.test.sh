@@ -39,6 +39,7 @@ partial=$TMP_ROOT/partial.json
 aged=$TMP_ROOT/aged.json
 secondmate_a=$TMP_ROOT/secondmate-a.json
 secondmate_b=$TMP_ROOT/secondmate-b.json
+attentive_terminal=$TMP_ROOT/attentive-terminal.json
 home=$TMP_ROOT/home
 model states.json "$states" 2026-09-15T12:01:00Z
 model replacement.json "$replacement" 2026-09-15T12:06:00Z
@@ -52,6 +53,12 @@ jq '.main_inventory.valid=false | .main_inventory.reason="inventory fixture inva
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
 jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:10:01Z > "$partial"
+jq '(.secondmate_current.records[0].endpoints[0].state)="done"
+    | .secondmate_current.records[0].decisions_open=[{
+        id:"child",key:"route",verb:"blocked",summary:"Retained decision",reason:null,source:"status"
+      }]' "$FIXTURES/secondmate-generation-b.json" \
+  | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$attentive_terminal"
+attentive_terminal_json=$(jq -c . "$attentive_terminal")
 FM_HOME="$home" "$BOARD" build "$states" >/dev/null || fail "could not build browser fixture"
 
 out=$(chrome-devtools-axi open "file://$home/.lavish/project-cockpit.html") || fail "could not open Project Cockpit in Chrome: $out"
@@ -70,6 +77,10 @@ assert_eval "() => {window.fmCockpit.replacePayload($states_json); return window
   'healthy-work' "credential-link defense did not allow the safe fixture to be restored"
 assert_eval '() => [...document.querySelectorAll(".project-button")].map((button)=>button.dataset.projectId).join(",")' \
   'alpha,beta,delta' "active view retained a history-only project"
+assert_eval "() => {window.fmCockpit.replacePayload($attentive_terminal_json); return [document.querySelectorAll('.project-button').length,document.querySelectorAll('.task-button').length,document.querySelector('.task-button')?.innerText.includes('DONE'),document.getElementById('task-detail').innerText.includes('Retained decision')].join('|');}" \
+  '1|1|true|true' "active view hid an attentive terminal task or its retained evidence"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); return [...document.querySelectorAll('.project-button')].map((button)=>button.dataset.projectId).join(',');}" \
+  'alpha,beta,delta' "ordinary history became visible after restoring the active view"
 assert_eval '() => {const filter=document.getElementById("view-filter"); filter.value="all"; filter.dispatchEvent(new Event("change")); document.querySelector("[data-project-id=gamma]").click(); filter.value="active"; filter.dispatchEvent(new Event("change")); const state=window.fmCockpit.getState(); return `${state.projectId}|${state.taskKey}`;}' \
   'alpha|captain-call' "active view did not advance selection past a hidden history project"
 assert_eval '() => `${!!document.querySelector("[data-project-id=gamma]")}|${document.getElementById("task-identity").innerText}`' \

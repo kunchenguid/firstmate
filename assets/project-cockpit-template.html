@@ -266,7 +266,7 @@ __FM_PROJECT_COCKPIT_DATA__
       const q = state.query.trim().toLocaleLowerCase();
       const projectMatches = q && project.label.toLocaleLowerCase().includes(q);
       return allTasks(project).filter((task) =>
-        (state.filter === "all" || task.lane !== "recently_completed")
+        (state.filter === "all" || task.lane !== "recently_completed" || task.attention === true)
         && (!q || projectMatches || `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(q)));
     };
     const filteredProjects = () => {
@@ -394,9 +394,10 @@ __FM_PROJECT_COCKPIT_DATA__
       }
       byId("project-title").textContent = project.label;
       byId("project-summary").textContent = `${project.active_count} active · ${project.blocker_count} blocked · oldest active ${duration(project.oldest_active_seconds)}`;
+      const visibleTasks = filteredTasks(project);
       lanes.forEach(([lane, label]) => {
-        if (state.filter === "active" && lane === "recently_completed") return;
-        const tasks = filteredTasks(project).filter((task) => task.lane === lane);
+        const tasks = visibleTasks.filter((task) => task.lane === lane);
+        if (state.filter === "active" && lane === "recently_completed" && !tasks.length) return;
         const section = el("section", "board-section");
         section.setAttribute("aria-labelledby", `lane-${lane}`);
         const heading = el("h3");

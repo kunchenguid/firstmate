@@ -177,7 +177,8 @@ jq \
   def attention_for($state; $actionable):
     ($actionable == true or $state == "blocked" or $state == "failed");
   def blocked_evidence:
-    (.state == "blocked" or .state == "failed" or .gate.status == "blocked" or (.blockers | length) > 0);
+    (.state != "done"
+     and (.state == "blocked" or .state == "failed" or .gate.status == "blocked" or (.blockers | length) > 0));
   def cockpit_omission:
     (.surface as $surface
       | ["active_children","decisions_open","queued","endpoints","landed"]
