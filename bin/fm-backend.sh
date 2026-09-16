@@ -388,6 +388,25 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# An Orca worktree id is the composite `<orca id>::<absolute worktree path>`
+# that Orca itself returns, so the `:` and `/` characters every real value
+# carries make the simple-atom check reject it. Firstmate hands the id back to
+# Orca opaquely and resolves it through Orca before removing anything, so this
+# proves only the shape that can name one worktree: both halves of the first
+# `::` split present, and the path half absolute.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  case "$1" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+    *::*) ;;
+    *) return 1 ;;
+  esac
+  [ -n "${1%%::*}" ] || return 1
+  case "${1#*::}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +527,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
