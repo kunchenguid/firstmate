@@ -636,8 +636,15 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
     route_provider_binding = "exact-native-provider" if provider == native_provider else "unbound"
     before_state = before.get("state") if isinstance(before.get("state"), dict) else {}
     after_state = after.get("state") if isinstance(after.get("state"), dict) else {}
-    snapshots_fresh = (before_state.get("status") == "fresh" and before_state.get("stale") is False
-                       and after_state.get("status") == "fresh" and after_state.get("stale") is False)
+    before_fresh = (True if before_state.get("status") == "fresh" and before_state.get("stale") is False
+                    else False if before_state.get("status") == "stale" or before_state.get("stale") is True
+                    else None)
+    after_fresh = (True if after_state.get("status") == "fresh" and after_state.get("stale") is False
+                   else False if after_state.get("status") == "stale" or after_state.get("stale") is True
+                   else None)
+    snapshots_fresh = (True if before_fresh is True and after_fresh is True
+                       else False if before_fresh is False or after_fresh is False
+                       else None)
     before_windows = {row.get("id"): row for row in before["windows"] if row.get("id")}
     after_windows = {row.get("id"): row for row in after["windows"] if row.get("id")}
     deltas = []
@@ -1302,6 +1309,7 @@ def format_quota_movement(quota: Any) -> str:
     caveats = (f"attribution={format_optional(quota.get('attribution'))}; "
                f"route_provider_binding={format_optional(quota.get('route_provider_binding'))}; "
                f"concurrent={format_optional(quota.get('concurrent_activity')).lower()}; "
+               f"snapshots_fresh={format_optional(quota.get('snapshots_fresh')).lower()}; "
                f"reset_crossed={format_optional(quota.get('reset_crossed')).lower()}; "
                f"attempt_bracketed={format_optional(quota.get('attempt_bracketed')).lower()}; "
                f"before_semantics={format_optional(before_semantics)}; "
@@ -1358,7 +1366,11 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
                     windows = ", ".join(f"{item.get('id')}={format_optional(item.get('percentRemaining'))}" for item in quota["windows"]) or "no windows"
                     semantics = quota.get("quota_semantics")
                     semantics_text = canonical(semantics) if isinstance(semantics, dict) and semantics else "unknown"
-                    quota_text = f"raw quota {quota['provider']} at {quota['generated_at']} ({windows}); native quota semantics={semantics_text}"
+                    state = quota.get("state") if isinstance(quota.get("state"), dict) else {}
+                    state_text = (f"status={format_optional(state.get('status'))}, "
+                                  f"stale={format_optional(state.get('stale')).lower()}")
+                    quota_text = (f"raw quota {quota['provider']} at {quota['generated_at']} ({windows}); "
+                                  f"freshness {state_text}; native quota semantics={semantics_text}")
                 lines.append(f"  - {candidate['route']}: heuristic eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={format_optional(candidate['spend_priority'])}; {quota_text}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
     else:
         lines.append("- No shadow recommendations recorded.")

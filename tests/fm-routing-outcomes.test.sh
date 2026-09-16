@@ -231,6 +231,10 @@ class RoutingOutcomesTest(unittest.TestCase):
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
+        markdown = self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "markdown").stdout
+        self.assertIn("snapshots_fresh=false", markdown)
 
         for path in (self.quota_before, self.quota_after):
             snapshot = json.loads(path.read_text())
@@ -239,13 +243,17 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.import_manifest(manifest)
         quota = self.latest_record()["quota"]
         self.assertIsNone(quota["before"]["state"])
-        self.assertFalse(quota["snapshots_fresh"])
+        self.assertIsNone(quota["snapshots_fresh"])
         self.assertIsNone(
             quota["window_deltas"][0]["attributed_consumption_percent_points"])
         score = json.loads(self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
+        markdown = self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "markdown").stdout
+        self.assertIn("snapshots_fresh=unknown", markdown)
 
     def test_partial_quota_windows_keep_route_uncertainty(self):
         self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
@@ -1310,7 +1318,7 @@ class RoutingOutcomesTest(unittest.TestCase):
             }])
         self.write_quota(
             self.quota_after, None, "2030-01-02T00:00:00Z",
-            provider="claude", status="unknown")
+            provider="claude", status="unknown", freshness_status="stale", stale=True)
         route_one = self.manifest()["route"]
         route_two = copy.deepcopy(route_one)
         route_two.update({"harness": "claude", "provider": "anthropic",
@@ -1351,14 +1359,14 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIn("unknown is not exhaustion", score.stdout)
         self.assertIn("heuristic eligibility=pass; capability=pass; runway=pass; spendPriority=1.2", score.stdout)
         self.assertIn("shadow-only heuristic", score.stdout)
-        self.assertIn("raw quota codex at 2030-01-01T00:00:00Z (weekly=100)", score.stdout)
+        self.assertIn("raw quota codex at 2030-01-01T00:00:00Z (weekly=100); freshness status=fresh, stale=false", score.stdout)
         self.assertIn(
             'native quota semantics={"effectiveAvailability":[{"effectivePercentRemaining":12,'
             '"runway":{"projectionConfidence":"established","status":"projected_exhaustion",'
             '"usableRunwaySeconds":900},"scope":"all_models","selection":{"spendPriority":-0.4,'
             '"status":"known"},"status":"known"}],"status":"known"}',
             score.stdout)
-        self.assertIn("spendPriority=unknown; raw quota claude at 2030-01-01T00:00:00Z (weekly=unknown)",
+        self.assertIn("spendPriority=unknown; raw quota claude at 2030-01-01T00:00:00Z (weekly=unknown); freshness status=stale, stale=true",
                       score.stdout)
         self.assertIn("no quota snapshot; native quota semantics=unknown", score.stdout)
         self.assertNotIn("None", score.stdout)
