@@ -25,7 +25,27 @@ while [ $# -gt 0 ]; do
   case "$1" in --run) id=$2; explicit=1; shift ;; esac
   shift
 done
-case "$id" in RUNPASSED) status=completed ;; *) status=running ;; esac
+status=running
+review=completed
+active=''
+case "$id" in
+  RUNPASSED) status=completed ;;
+  RUNFIXING | RUNFIXING2)
+    review=fixing
+    active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    review,fixing,12m3s,8s,8s,44121,"fix 1"'
+    ;;
+  RUNROUND2)
+    review=running
+    active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    review,running,12m3s,8s,8s,44121,"round 2"'
+    ;;
+  RUNSTARTING)
+    review=running
+    active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    review,running,12m3s,8s,8s,44121,"starting"'
+    ;;
+esac
 block=run
 branch=fm/demo
 if [ "$explicit" -eq 0 ] || [ "$id" = RUNOTHER ]; then
@@ -44,13 +64,14 @@ $block:
   steps[9]{step,status,findings,duration_ms}:
     intent,completed,0,3
     rebase,completed,0,3510
-    review,completed,0,1436878
+    review,$review,0,1436878
     test,completed,0,1000
     document,completed,0,1000
     lint,completed,0,1000
     push,completed,0,1000
     pr,completed,0,1000
     ci,completed,0,1000
+$active
 TOON
 FAKE
 chmod +x "$FAKEBIN/no-mistakes"
@@ -76,6 +97,15 @@ INSERT INTO step_rounds VALUES ('r-passed-2', 's-passed-review', 2, 'auto_fix');
 INSERT INTO step_results VALUES ('s-other-review', 'RUNOTHER', 'review');
 INSERT INTO step_rounds VALUES ('r-other-1', 's-other-review', 1, 'initial');
 INSERT INTO step_rounds VALUES ('r-other-2', 's-other-review', 2, 'auto_fix');
+INSERT INTO step_results VALUES ('s-fixing-review', 'RUNFIXING', 'review');
+INSERT INTO step_rounds VALUES ('r-fixing-1', 's-fixing-review', 1, 'initial');
+INSERT INTO step_results VALUES ('s-round2-review', 'RUNROUND2', 'review');
+INSERT INTO step_rounds VALUES ('r-round2-1', 's-round2-review', 1, 'initial');
+INSERT INTO step_results VALUES ('s-starting-review', 'RUNSTARTING', 'review');
+INSERT INTO step_rounds VALUES ('r-starting-1', 's-starting-review', 1, 'initial');
+INSERT INTO step_results VALUES ('s-fixing2-review', 'RUNFIXING2', 'review');
+INSERT INTO step_rounds VALUES ('r-fixing2-1', 's-fixing2-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-fixing2-2', 's-fixing2-review', 2, 'auto_fix');
 SQL
 
 panel() {
@@ -116,6 +146,25 @@ OUT=$(panel --run RUNOTHER); CODE=$?
 expect_code 0 "$CODE" 'panel for a run named with --run on another branch'
 assert_contains "$OUT" '运行编号  RUNOTHER' 'an explicit --run still renders the run id'
 assert_contains "$OUT" '返工 1 次' 'an explicit --run still shows the run rework count'
+
+# A pass that is still running has no step_rounds row yet, so the panel must add
+# the in-flight one instead of reporting the stale stored count.
+OUT=$(panel --run RUNFIXING); CODE=$?
+expect_code 0 "$CODE" 'panel while a step is being repaired'
+assert_contains "$OUT" '返工 1 次' 'a fixing step counts the in-flight rework pass'
+assert_contains "$OUT" '12m3s · fix 1' 'the fixing step keeps its active timing and round label'
+
+OUT=$(panel --run RUNROUND2); CODE=$?
+expect_code 0 "$CODE" 'panel while a round-2 review runs'
+assert_contains "$OUT" '返工 1 次' 'a running round-2 review counts the in-flight pass'
+
+OUT=$(panel --run RUNSTARTING); CODE=$?
+expect_code 0 "$CODE" 'panel while a first review starts'
+assert_contains "$OUT" '未返工' 'a running first pass is not rework'
+
+OUT=$(panel --run RUNFIXING2); CODE=$?
+expect_code 0 "$CODE" 'panel with stored rework plus an in-flight pass'
+assert_contains "$OUT" '返工 2 次' 'the in-flight pass is added to the stored count, not replaced'
 
 OUT=$(panel --help)
 assert_contains "$OUT" '返工次数' 'help explains the rework count'

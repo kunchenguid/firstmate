@@ -97,21 +97,35 @@ if [[ -z $run_id ]]; then
   row '无法识别验收数据，请检查 no-mistakes 输出。' "$bad"; rule ╰ ╯; exit 1
 fi
 row "运行编号  $run_id" "$muted"
-# Rework count comes from the daemon's own run record, never from the run id or
-# from counting log folders: state.sqlite keeps one step_rounds row per round of
-# every step, round 1 carries trigger_type "initial", and each later row is one
-# rework pass (trigger_type "auto_fix", whether the captain picked the fix or the
-# pipeline did). Summing the non-initial rows over the run's steps is exactly
-# "how many times this run was sent back". NM_HOME is the variable the daemon
-# itself honours for its data directory; the read is -readonly so it never
-# contends with the daemon's writes, and a failed read is shown, not zeroed.
+# Rework count is the daemon's own record, never the run id or the number of log
+# folders: state.sqlite keeps one step_rounds row per round of every step, round 1
+# carries trigger_type "initial", and each later row (trigger_type "auto_fix",
+# captain-chosen or pipeline-chosen alike) is one rework pass. Those rows are
+# written when the round's review finishes, so a pass still in flight is not in
+# the table yet: a step the daemon marked fixing, or running on a round-2-or-later
+# review, adds exactly one pass on top of the stored count. NM_HOME is the
+# variable the daemon itself honours for its data directory; the read is
+# -readonly so it never contends with the daemon's writes, and a failed read is
+# shown, not zeroed.
 nm_db="${NM_HOME:-$HOME/.no-mistakes}/state.sqlite"
 rework=
 if [[ $run_id =~ ^[0-9A-Za-z]+$ ]] && command -v sqlite3 >/dev/null 2>&1; then
   rework=$(sqlite3 -readonly -cmd '.timeout 500' "$nm_db" \
     "select count(*) from step_rounds r join step_results s on s.id = r.step_result_id where s.run_id = '$run_id' and r.trigger_type <> 'initial';" 2>/dev/null)
 fi
+in_flight=0
+for i in "${!keys[@]}"; do
+  case ${states[i]:-} in
+    fixing) in_flight=1 ;;
+    running)
+      if [[ ${active_rounds[i]:-} =~ ^round[[:space:]]+([0-9]+)$ ]] && ((BASH_REMATCH[1] >= 2)); then
+        in_flight=1
+      fi
+      ;;
+  esac
+done
 if [[ $rework =~ ^[0-9]+$ ]]; then
+  ((in_flight)) && rework=$((rework + 1))
   if ((rework > 0)); then row "返工 ${rework} 次"; else row '未返工'; fi
 else
   row '返工次数不可读，请检查 no-mistakes 数据目录与 sqlite3。' "$bad"
