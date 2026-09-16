@@ -1493,9 +1493,20 @@ detect_local_config() {
 # into the home does not survive such a write (docs/configuration.md "Backlog
 # backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
 # merged here.
+#
+# The code root itself is sometimes an operating primary home (FM_HOME unset
+# there), with other homes' FM_HOME pointed elsewhere on the same checkout;
+# in that layout a code-root backlog.md/done-archive.md is that home's own
+# queue, not a fork. Session start's very first act at any home is acquiring
+# that home's session lock (AGENTS.md section 3 step 1), which leaves
+# state/.lock behind even after the session ends, so its presence at the code
+# root is the one artifact that cannot exist unless a real session has run
+# there as FM_HOME - unlike data/captain.md or data/projects.md, which stay
+# legitimately absent for a freshly seeded or defaults-only home.
 detect_code_root_backlog_fork() {
   local name root_copy
   [ "$FM_ROOT/data" -ef "$DATA" ] && return 0
+  [ -f "$FM_ROOT/state/.lock" ] && return 0
   for name in backlog.md done-archive.md; do
     root_copy="$FM_ROOT/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
