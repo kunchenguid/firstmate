@@ -532,6 +532,58 @@ cmp -s "$REMOTE/data/reply/pair-b.md" "$PARENT/data/remote-secondmates/ios/data/
   || fail "the second outstanding document was never re-attempted"
 pass "several outstanding documents are one order-independent obligation"
 
+# A remote line mirrors once whichever pointer forms it carried when it was
+# written. A line offering two documents where only one is deliverable produces
+# a MIXED rendering; once the second arrives, a whole-log recapture renders the
+# same line all-local, and it must still be recognized as already mirrored.
+printf '# mixed deliverable a\n' > "$REMOTE/data/reply/mixed-a.md"
+rm -f "$REMOTE/data/reply/mixed-b.md"
+mirror_lines 'done [key=mixed-pair]: two deliverables report=data/reply/mixed-a.md and report=data/reply/mixed-b.md'
+assert_grep 'report=data/remote-secondmates/ios/data/reply/mixed-a.md and report=data/reply/mixed-b.md' "$PARENT/state/ios.status" \
+  "the mixed rendering did not keep the delivered pointer local and the undelivered one remote"
+document_decision_open || fail "the undelivered half of the offered pair opened no obligation"
+printf '# mixed deliverable b\n' > "$REMOTE/data/reply/mixed-b.md"
+set +e
+FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
+set -e
+document_decision_open && fail "the second half of the pair arrived and the obligation stayed open"
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-mixed-replay"
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
+  || fail "the mixed-pointer whole-log recapture was not captured"
+cmp -s "$TMP_ROOT/ios-status-before-mixed-replay" "$PARENT/state/ios.status" \
+  || fail "a whole-log recapture mirrored the mixed-pointer line a second time"
+pass "a line mirrors once whichever pointer forms it carried when it was written"
+
+# A mirror write that cannot complete must fail loudly rather than leave blank
+# or partial content behind and advance the cursor past status bytes nobody
+# ever received. The delta stays uncommitted and applies in full once the
+# stream is writable again.
+printf '# write-failure probe\n' > "$REMOTE/data/reply/writefail.md"
+GEN=$((GEN + 1))
+printf 'done [key=write-failure]: probe report=data/reply/writefail.md\n' \
+  >> "$REMOTE/state/parent-replies.status"
+writefail_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-writefail"
+chmod 444 "$PARENT/state/ios.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
+RESULT_WRITEFAIL="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_WRITEFAIL" "the unwritable-stream delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "a capture whose mirror write failed was acknowledged anyway"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$writefail_cursor_before" ] \
+  || fail "a failed mirror write advanced the cursor past dropped status content"
+chmod 644 "$PARENT/state/ios.status"
+cmp -s "$TMP_ROOT/ios-status-before-writefail" "$PARENT/state/ios.status" \
+  || fail "a failed mirror write left partial or blank content on the parent stream"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_WRITEFAIL" >/dev/null \
+  || fail "the delta did not apply once the parent stream was writable again"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/writefail.md' "$PARENT/state/ios.status" \
+  "the recovered delta did not mirror its rewritten pointer"
+mirrored_cursor_is_current "the recovered delta did not advance the cursor"
+pass "a failed mirror write never drops status content or advances the cursor"
+
 # A remote mate cannot squat the decision keys this parent's pending-reply
 # library owns. The guard is deliberately NOT in this adapter: rejecting a line
 # here would be batch-fatal and could wedge the whole stream, and it would

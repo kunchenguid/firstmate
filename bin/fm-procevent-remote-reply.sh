@@ -294,14 +294,30 @@ safe_doc_path() {
 # required before `report=`, so a neighbouring key such as `child-report=` is not
 # this tag. Deduplication spans the WHOLE delta, so one document offered by
 # several lines is fetched, and named in one escalation, exactly once.
-process_document_pointers() { # <extract|rewrite> <pointer-map>
-  POINTER_MAP="$2" LC_ALL=C awk -v mode="$1" '
+# One boundary-valid recognition of a structured pointer, shared by extraction,
+# rewriting, and canonical identity, so those three can never disagree about
+# what counts as a pointer.
+#
+# The map arrives through a FILE, never the process environment. A delta may
+# legitimately carry many pointers, and the expanded map can exceed the
+# platform's exec argument limit; awk would then fail to start, and a caller
+# that did not check would append the empty result as a blank line and advance
+# the cursor past dropped status content. Every caller checks the exit status.
+#
+# `canonical` maps every pointer to the local form it would have once delivered,
+# whether or not it has been. That makes a mirrored line's identity independent
+# of which of its documents happened to be deliverable when it was written, so a
+# previously mirrored MIXED rendering is still recognized as the same line.
+process_document_pointers() { # <extract|rewrite|canonical> <pointer-map-file> <local-base>
+  LC_ALL=C awk -v mode="$1" -v mapfile="$2" -v base="$3" '
     BEGIN {
-      count = split(ENVIRON["POINTER_MAP"], entries, "\n")
-      for (i = 1; i <= count; i++) {
-        separator = index(entries[i], "\t")
-        if (separator > 0)
-          replacements[substr(entries[i], 1, separator - 1)] = substr(entries[i], separator + 1)
+      if (mapfile != "") {
+        while ((getline entry < mapfile) > 0) {
+          separator = index(entry, "\t")
+          if (separator > 0)
+            replacements[substr(entry, 1, separator - 1)] = substr(entry, separator + 1)
+        }
+        close(mapfile)
       }
     }
     {
@@ -321,19 +337,22 @@ process_document_pointers() { # <extract|rewrite> <pointer-map>
         if (mode == "extract") {
           if (!seen[doc]++) print doc
         } else {
-          replacement = doc in replacements ? replacements[doc] : doc
+          if (mode == "canonical")
+            replacement = index(doc, base) == 1 ? doc : base doc
+          else
+            replacement = doc in replacements ? replacements[doc] : doc
           rewritten = rewritten substr(rest, 1, RSTART - 1) \
             substr(matched, 1, marker + 6) replacement
         }
         rest = substr(rest, next_index)
       }
-      if (mode == "rewrite") print rewritten rest
+      if (mode != "extract") print rewritten rest
     }
   '
 }
 
 extract_document_pointers() { # <payload-file>
-  process_document_pointers extract '' < "$1"
+  process_document_pointers extract '' '' < "$1"
 }
 
 # The reader's own explanation for a refusal, reduced to one bounded, tab-free,
@@ -409,24 +428,6 @@ append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
   printf '%s\n' "$2" >> "$1" || return 2
   return 0
-}
-
-# One remote line becomes at most one mirrored line, whichever pointer form it
-# was mirrored under. A document that was still undelivered when its line first
-# mirrored, and has arrived by the time a whole-log recapture replays that line,
-# would otherwise mirror twice - once carrying the mate's own pointer and once
-# carrying the rewritten local one. The alternates are the same line under the
-# pointer forms this channel can legitimately have written.
-# Returns 0 appended, 1 already present, 2 the write itself failed.
-append_mirrored_line_once() { # <status-file> <line> <alternate>...
-  local file=$1 line=$2 alt
-  shift 2
-  for alt in "$@"; do
-    [ -n "$alt" ] || continue
-    [ "$alt" = "$line" ] && continue
-    grep -Fqx -- "$alt" "$file" 2>/dev/null && return 1
-  done
-  append_status_once "$file" "$line"
 }
 
 # --- the document obligation this channel owes the parent --------------------
@@ -505,8 +506,10 @@ sort_pointer_map() { # <map>
   ' | LC_ALL=C sort -rn -k1,1 | cut -f2-
 }
 
-rewrite_pointers() { # <line> <map>
-  printf '%s\n' "$1" | process_document_pointers rewrite "$2"
+# Rewrite every line of <input-file> through <map-file>, or map every pointer to
+# its canonical local form when <map-file> is empty and <local-base> is given.
+rewrite_pointer_stream() { # <mode> <input-file> <map-file> <local-base> <output-file>
+  process_document_pointers "$1" "$3" "$4" < "$2" > "$5"
 }
 
 # 0 when <path> is already an outstanding obligation in <docs>.
@@ -594,7 +597,8 @@ retry_document_obligations_locked() { # <id>
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
-  local fetch_rc append_rc announce_rc=0 offered='' offered_map='' delivered=''
+  local fetch_rc append_rc announce_rc=0 offered='' delivered='' delivered_map=''
+  local local_base='' mirrored='' payload_ids='' seen_ids=''
   local canonical='' carried='' outstanding='' undelivered='' cleared=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
@@ -679,19 +683,40 @@ $offered
 EOF
   # Longest pointer first, so rewriting one path can never eat a longer one that
   # merely starts with it.
-  delivered=$(sort_pointer_map "$delivered")
-  offered_map=$(sort_pointer_map "$(printf '%s' "$offered" | LC_ALL=C awk -v id="$id" '
-    $0 != "" { printf "%s\tdata/remote-secondmates/%s/%s\n", $0, id, $0 }
-  ')")
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    rewritten=$(rewrite_pointers "$line" "$delivered")
-    canonical=$(rewrite_pointers "$line" "$offered_map")
-    append_rc=0
-    append_mirrored_line_once "$status_file" "$rewritten" "$line" "$canonical" || append_rc=$?
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
-    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
-  done < "$normalized_payload"
+  delivered_map="$tmp/delivered.map"
+  sort_pointer_map "$delivered" > "$delivered_map" \
+    || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
+  local_base="data/remote-secondmates/$id/"
+  mirrored="$tmp/mirrored"
+  payload_ids="$tmp/payload-ids"
+  seen_ids="$tmp/seen-ids"
+  [ -e "$status_file" ] || : > "$status_file" \
+    || { fm_lock_release "$lock"; die "cannot create the parent status log"; }
+  # Three whole-stream passes rather than two awk forks per line: the delivered
+  # rendering that gets mirrored, its delivery-state-independent identity, and
+  # the identity of every line already on the stream. Each prints exactly one
+  # line per input line, so the first two stay aligned.
+  rewrite_pointer_stream rewrite "$normalized_payload" "$delivered_map" '' "$mirrored" \
+    || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
+  rewrite_pointer_stream canonical "$normalized_payload" '' "$local_base" "$payload_ids" \
+    || { fm_lock_release "$lock"; die "cannot derive remote reply line identity"; }
+  rewrite_pointer_stream canonical "$status_file" '' "$local_base" "$seen_ids" \
+    || { fm_lock_release "$lock"; die "cannot derive mirrored line identity"; }
+  exec 8< "$mirrored" || { fm_lock_release "$lock"; die "cannot read the rewritten payload"; }
+  exec 9< "$payload_ids" || { exec 8<&-; fm_lock_release "$lock"; die "cannot read the payload line identities"; }
+  while IFS= read -r rewritten <&8; do
+    IFS= read -r canonical <&9 || canonical=$rewritten
+    [ -n "$rewritten" ] || continue
+    grep -Fqx -- "$canonical" "$seen_ids" 2>/dev/null && continue
+    if ! printf '%s\n' "$rewritten" >> "$status_file"; then
+      exec 8<&- 9<&-
+      fm_lock_release "$lock"
+      die "cannot append remote reply"
+    fi
+    printf '%s\n' "$canonical" >> "$seen_ids"
+    appended=$((appended + 1))
+  done
+  exec 8<&- 9<&-
   # Obligations this delta did not itself attempt are re-attempted now, so a
   # document that has since been written arrives on the very next delta rather
   # than only if some later line happens to offer it again.
