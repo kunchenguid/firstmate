@@ -377,6 +377,20 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
+// A cold retry's OWN cycle closes actionable on `check: rearm-resurface`, the
+// line the reopened state/.watcher-down marker emits before that cycle has
+// supervised anything. Clearing the consecutive-failure count on it lets a
+// watcher that keeps dying alternate failure, cold retry and resurface without
+// bound - FM_WATCH_REARM_RETRY_LIMIT never terminates it, and firstmate is woken
+// once per lap instead of once by `could not restore watcher continuity`. Only a
+// genuine wake, or a cycle that lived long enough to have supervised anything,
+// clears the count.
+const healthyCycleMs = 120000;
+function closeClearsRetryFailures(message: string, startedAt: number): boolean {
+  if (Date.now() - startedAt >= healthyCycleMs) return true;
+  return message.split(/\r?\n/)[0].trim() !== "check: rearm-resurface";
+}
+
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
@@ -973,6 +987,7 @@ export default function (pi: ExtensionAPI) {
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
     };
+    const armStartedAt = Date.now();
     const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
       env,
@@ -1037,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
         enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
-        owner.retryFailures = 0;
+        if (closeClearsRetryFailures(classification.message, armStartedAt)) owner.retryFailures = 0;
         void processPendingActionables(owner);
         return;
       }

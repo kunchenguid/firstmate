@@ -436,8 +436,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   fi
   fm_wake_append stale "$w" "$reason" || watch_fail "stale wake could not be queued"
   if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
-    echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
-    exit 1
+    watch_fail "stale wake was queued for $task but its inbox escalation marker could not be written"
   fi
   wake "$reason"
 }
@@ -512,8 +511,7 @@ inbox_steer_check() {  # <window> <task>
       fi
       fm_wake_append stale "$w" "$reason" || watch_fail "stale wake could not be queued"
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
-        echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
-        exit 1
+        watch_fail "stale wake was queued for $task but its inbox escalation marker could not be written"
       fi
       wake "$reason"
       ;;
@@ -2397,9 +2395,14 @@ EOF
         # The pane is idle/stale at hash $h. Before triage: an endpoint the
         # backend proves is gone leaves a husk that captures and hashes just
         # like an idle pane, so it would otherwise wedge-escalate forever.
-        # Retire it silently; the probe costs one backend read per
-        # stale-classified window, and never runs for a churning or busy one.
-        if fm_backend_endpoint_confirmed_gone "$(window_backend "$w")" "$w"; then
+        # Retire it silently. The probe sits behind the same suppressor the
+        # triage below uses, so it costs one backend read per DISTINCT stale
+        # hash, never one per poll of a window that is idle but alive - the
+        # discipline the sibling worktree-write probe already states. A husk
+        # that froze on an already-classified hash is covered by the same
+        # proof inside wedge_timer_check, at its own bounded cadence.
+        if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ] \
+          && fm_backend_endpoint_confirmed_gone "$(window_backend "$w")" "$w"; then
           retire_gone_window_records "$w" "$key"
           continue
         fi

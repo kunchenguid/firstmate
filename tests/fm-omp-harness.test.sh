@@ -625,6 +625,116 @@ EOF
   pass ".omp watch extension: a retry after a failed cycle arms as a cold start, so the next child can reopen the recovery marker"
 }
 
+# A cold retry's own cycle recovers the home by reopening state/.watcher-down,
+# which closes that cycle ACTIONABLE on `check: rearm-resurface` before it has
+# supervised anything. While that close cleared the consecutive-failure count,
+# a watcher that kept dying looped failure -> cold retry -> resurface forever:
+# FM_WATCH_REARM_RETRY_LIMIT never terminated it and firstmate was woken once
+# per lap, which is the 2026-09-15 cascade with its bound removed.
+test_watch_extension_resurface_cycles_still_reach_the_retry_limit() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-resurface-limit/repo"; home="$TMP_ROOT/watch-resurface-limit/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # Every cold arm recovers and resurfaces; every successor dies established,
+  # the exact shape of the cascade.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'pred=[%s]\n' "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_HOME:?}/state/arm-calls.log"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+if [ -z "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+let tool = null; let prompts = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { prompts += String(m); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 600 && !prompts.includes("after 2 retries"); i += 1) {
+  await new Promise((r) => setTimeout(r, 10));
+}
+if (!prompts.includes("could not restore watcher continuity after 2 retries")) {
+  throw new Error(`a watcher that only resurfaces never exhausted its retry bound: ${prompts}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension resurface-loop bound: $out"
+  [ -z "$out" ] || fail "omp watch extension resurface-limit test printed output: $out"
+  pass ".omp watch extension: cycles that only recover and resurface still reach the retry limit and surface the typed failure"
+}
+
+# The other half of the same rule: a GENUINE wake is what proves the watcher did
+# its job, so it clears the consecutive-failure count and the bound never fires
+# for a home that keeps delivering real wakes between restarts.
+test_watch_extension_genuine_wake_clears_the_failure_count() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-wake-clears/repo"; home="$TMP_ROOT/watch-wake-clears/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'pred=[%s]\n' "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_HOME:?}/state/arm-calls.log"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+if [ -z "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'stale: test:fm-worker\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const armLog = `${process.env.FM_HOME}/state/arm-calls.log`;
+let tool = null; let prompts = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { prompts += String(m); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const armRows = () => (existsSync(armLog) ? readFileSync(armLog, "utf8").trim().split("\n") : []);
+for (let i = 0; i < 600 && armRows().length < 6; i += 1) {
+  await new Promise((r) => setTimeout(r, 10));
+}
+const rows = armRows();
+if (rows.length < 6) throw new Error(`the extension stopped re-arming after ${rows.length} cycles: ${rows.join("|")}`);
+if (prompts.includes("could not restore watcher continuity")) {
+  throw new Error(`a genuine wake between failures must clear the failure count: ${prompts}`);
+}
+if (!prompts.includes("stale: test:fm-worker")) throw new Error(`the genuine wakes were never delivered: ${prompts}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension genuine-wake reset: $out"
+  [ -z "$out" ] || fail "omp watch extension genuine-wake test printed output: $out"
+  pass ".omp watch extension: a genuine wake between failed cycles clears the consecutive-failure count"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -637,3 +747,5 @@ test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_retry_arms_as_a_cold_start
+test_watch_extension_resurface_cycles_still_reach_the_retry_limit
+test_watch_extension_genuine_wake_clears_the_failure_count
