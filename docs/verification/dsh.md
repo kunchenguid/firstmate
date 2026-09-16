@@ -40,7 +40,11 @@ A `FM_DSH_HARNESS` that no producer set was the state of the world before this w
 
 ## Launch: one boundary for values a tool call cannot set
 
-Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, forwards the tracked `.dsh/profile.patch.yml` with `--patch` after any the operator supplied (that file is the install step for the bridge mount, the budget and the pinned hook sandbox mode, and without it the documented command boots a profile carrying none of the three), runs the preflight with the profile and those overlays, and `exec`s `dsh` with them.
+Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, applies the tracked `.dsh/profile.patch.yml` with `--patch` (that file is the install step for the bridge mount, the budget and the pinned hook sandbox mode, and without it the documented command boots a profile carrying none of the three), runs the preflight with the profile, the tracked patch and then any operator overlays, so those follow it and can override it, and `exec`s `dsh` with the operator's arguments unchanged plus the tracked patch alone, placed immediately after `web` or first otherwise.
+
+Both placements were measured against dsh 0.1.5-rc.1, because the first version of this forwarding broke the launch it was meant to fix while every preflight check passed.
+DSH refuses parent options before a subcommand, so `dsh --patch <tracked> web --help` exits 1 with `web takes none of parent --profile, --from-default-profile, --patch, --dump-config, or --dump-default-config`, while `dsh web --patch <tracked> --help` loads the plugin tree and exits 0; `web`'s own options end at the first token it does not know, so a `--patch` after `--port` reaches the web app as `unknown option '--patch'`.
+An overlay applied twice is equally invisible to the preflight: `dsh web --patch <tracked> --patch <tracked> --dump-config` composes and exits 0, but loading the tree throws `duplicate loader entry id: hooks-claude-code`, so the launcher adds the tracked patch only when no operator `--patch` names the same file.
 
 ```
 bin/fm-dsh-launch.sh web --port 3080
@@ -98,7 +102,7 @@ Driven live through the documented `web` launch with every preflight check ok, t
 The hooks bridge calls `runHook(ctx.shell, …)` with no session, so `dsh-sandbox-policy` resolves the host default, `process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`, whatever preset the session holds.
 With the host started under `DSH_PERMISSION_MODE=danger-full-access` the same probe ran `ps` and the digest acquired the lock.
 The durable fix is that `.dsh/profile.patch.yml` pins the `sandbox-policy` row to `danger-full-access` literally, alongside `permission.defaultPreset` (the mode alone leaves the composed sandbox and approval defaults matching no preset, which `dsh-permission-presets` refuses at load), so the mode travels with the composed configuration rather than with an environment variable a caller can forget.
-`bin/fm-dsh-launch.sh` still exports the variable and now forwards the tracked patch explicitly, and the preflight evaluates whatever composed mode it finds, so a profile that does not pin the row still fails when the caller has not supplied the launcher's environment.
+`bin/fm-dsh-launch.sh` applies the tracked patch itself and still exports the variable, which matters only to a later overlay that hands the row back to `dsh-base`'s expression, and the preflight evaluates whatever composed mode it finds, so a profile that does not pin the row still fails when the caller has not supplied the launcher's environment.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -322,10 +326,11 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16, the portable suite passes 44 cases.
+As measured on 2026-09-17, the portable suite passes 45 cases.
 Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
 The five-contract run predates the preflight's hook sandbox-mode check, so it is not evidence that the first contract still passes.
+Its seventh contract, that the launcher's own `web` exec composes the tracked patch and loads the plugin tree with it applied once, was added after both; its commands were run on their own against dsh 0.1.5-rc.1 in a disposable `DSH_HOME`, where they pass and the previous launcher failed them with the parent-option refusal and `duplicate loader entry id`, and the whole guard has not been rerun since.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

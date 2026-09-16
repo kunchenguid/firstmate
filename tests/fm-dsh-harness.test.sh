@@ -347,10 +347,13 @@ install_fm_preset() {  # <dsh-home>
 # beside a stand-in `dsh` that <root>/fakebin links to, and the named profile
 # holds its own node_modules. There is no <root>/profiles/node_modules mirror,
 # which DSH only creates when a host boots, so every fixture is a fresh home.
-# The stand-in answers `--profile p --dump-config` with <root>/dump.yml, or with
-# <root>/dump-patched.yml when a --patch overlay is forwarded, and fails for any
-# other profile or a missing dump; any other invocation records the environment
-# it booted with in <root>/dsh-env.
+# The stand-in keeps DSH's argv grammar: a parent option before the `web` or
+# `plugin` subcommand exits 1, and so does a --patch after web's first unknown
+# token. It answers `--profile p|web --dump-config` with <root>/dump.yml, or with
+# <root>/dump-patched.yml when a --patch overlay is forwarded, recording its argv
+# in <root>/dsh-dump-argv, and fails for any other profile or a missing dump; any
+# other invocation records the environment it booted with in <root>/dsh-env and
+# its argv in <root>/dsh-argv, one argument per line.
 make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
   local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5 fakebin
   mkdir -p "$dir/install/node_modules/@deepseek-ai/dsh-base" "$dir/install/lib" "$dir/profiles/p" "$dir/fmhome"
@@ -366,11 +369,29 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
   fakebin=$(fm_fakebin "$dir")
   cat > "$dir/install/lib/dsh" <<SH
 #!/usr/bin/env bash
+parent= sub= value= inner=
+for a in "\$@"; do
+  if [ -n "\$value" ]; then value=; continue; fi
+  if [ -n "\$inner" ]; then
+    if [ "\$sub" = web ] && [ "\$a" = --patch ]; then echo "error: unknown option '--patch'" >&2; exit 1; fi
+    continue
+  fi
+  case "\$a" in
+    --profile|--patch|--from-default-profile) value=1; [ -n "\$sub" ] || parent=1 ;;
+    --dump-config|--dump-default-config) [ -n "\$sub" ] || parent=1 ;;
+    web|plugin)
+      [ -z "\$sub" ] || { inner=1; continue; }
+      [ -z "\$parent" ] || { echo "error: \$a takes none of parent --profile, --from-default-profile, --patch, --dump-config, or --dump-default-config" >&2; exit 1; }
+      sub=\$a ;;
+    *) inner=1 ;;
+  esac
+done
 case " \$* " in
-  *" --dump-config "*) ;;
-  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'; exit 0 ;;
+  *" --dump-config "*) printf '%s\n' "\$@" > '$dir/dsh-dump-argv' ;;
+  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'
+     printf '%s\n' "\$@" > '$dir/dsh-argv'; exit 0 ;;
 esac
-case " \$* " in *" --profile p "*) ;; *) exit 1 ;; esac
+case " \$* " in *" --profile p "*|*" --profile web "*) ;; *) exit 1 ;; esac
 dump='$dir/dump.yml'
 case " \$* " in *" --patch "*) dump='$dir/dump-patched.yml' ;; esac
 [ -f "\$dump" ] && cat "\$dump"
@@ -394,22 +415,59 @@ test_dsh_launcher_roots_the_host_in_its_checkout() {
   # FM_ROOT or the cwd, and DSH takes the cwd as its workspace root. Launched
   # from anywhere else, the bridge finds no hooks file and runs with no guards,
   # so the launcher must hand the host this checkout whatever the caller's cwd.
-  # The preflight is driven through the launcher too, so the --patch overlay the
-  # host boots with is one the budget DSH reports accounts for.
+  # The documented argv is driven, because DSH refuses a parent --patch before
+  # `web`, and the preflight runs through the launcher too, so the budget DSH
+  # reports accounts for the tracked patch the host boots with.
   dir=$(make_dsh_home "$TMP_ROOT/launch" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
   write_dump "$dir/dump-patched.yml" 262144
-  : > "$dir/overlay.yml"
+  ln -s p "$dir/profiles/web"
   elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
   rc=0
   ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_PERMISSION_MODE=workspace-write DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
-      "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
-  [ "$rc" -eq 0 ] || fail "the launcher must pass a preflight whose budget is raised by --patch, got rc=$rc"
+      "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the documented web launch must pass the preflight and boot, got rc=$rc"
   assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
   assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
   # Hooks run with no session, so they get the host's sandbox-policy mode, which
   # dsh-base reads from DSH_PERMISSION_MODE; any other mode denies ps in every hook.
   assert_equals "mode=danger-full-access" "$(sed -n 3p "$dir/dsh-env")" "the host was not started with hooks able to run ps"
-  pass "fm-dsh-launch.sh: the host is rooted in its checkout whatever the caller's cwd"
+  assert_equals "$(printf '%s\n' web --patch "$ROOT/.dsh/profile.patch.yml" --port 3080)" "$(cat "$dir/dsh-argv")" \
+    "the host must get the tracked patch after web and the operator's arguments once"
+  pass "fm-dsh-launch.sh: the documented web launch boots rooted in its checkout whatever the caller's cwd"
+}
+
+# The --patch values in a recorded argv, in order.
+patch_values() {  # <argv file>
+  awk 'take { print; take = 0; next } $0 == "--patch" { take = 1 }' "$1"
+}
+
+test_dsh_launcher_applies_each_patch_once() {
+  local dir rc tracked="$ROOT/.dsh/profile.patch.yml" respelled="$ROOT/.dsh/../.dsh/profile.patch.yml"
+  # DSH applies every overlay it is given, and a second insert of the hooks
+  # bridge fails the host at boot with "duplicate loader entry id" while a
+  # config dump composes it without complaint, so the host must boot exactly
+  # the overlays the preflight checked: the tracked patch first, then the
+  # operator's, each once.
+  dir=$(make_dsh_home "$TMP_ROOT/launch-patches" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  ln -s p "$dir/profiles/web"
+  : > "$dir/overlay.yml"
+  rc=0
+  ( DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a launch with an operator overlay must pass the preflight and boot, got rc=$rc"
+  assert_equals "$(printf '%s\n' "$tracked" "$dir/overlay.yml")" "$(patch_values "$dir/dsh-dump-argv")" \
+    "the preflight must compose the tracked patch first and the operator overlay after it"
+  assert_equals "$(patch_values "$dir/dsh-dump-argv")" "$(patch_values "$dir/dsh-argv")" \
+    "the host must boot the overlays the preflight checked, each once"
+  # An operator --patch naming the tracked file, however spelled, is that file.
+  rc=0
+  ( DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" web --patch "$respelled" --port 3080 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a web launch naming the tracked patch must pass the preflight and boot, got rc=$rc"
+  assert_equals "$respelled" "$(patch_values "$dir/dsh-dump-argv")" "the preflight must compose the tracked patch once"
+  assert_equals "$respelled" "$(patch_values "$dir/dsh-argv")" "the host must apply the tracked patch once"
+  pass "fm-dsh-launch.sh: the host boots the preflight's overlays, each once"
 }
 
 test_dsh_preflight_rejects_a_mismatched_bridge() {
@@ -1046,6 +1104,7 @@ test_dsh_preflight_checks_the_permission_preset_sessions_default_to
 test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under
 test_dsh_preflight_passes_a_conforming_home
 test_dsh_launcher_roots_the_host_in_its_checkout
+test_dsh_launcher_applies_each_patch_once
 test_dsh_ancestry_detects_the_launcher_path
 test_dsh_ancestry_detects_the_installed_bin_js
 test_dsh_ancestry_detects_a_global_install

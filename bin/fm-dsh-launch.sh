@@ -19,11 +19,14 @@
 #                       from this script's own location, never inherited.
 #   LC_ALL / LC_CTYPE   a locale. Unset, bin/fm-line-cap-lib.sh's character cap
 #                       becomes a byte cap and slices UTF-8 mid-character.
-#   DSH_PERMISSION_MODE the host's sandbox-policy mode, which dsh-base reads at
-#                       start. Hooks run with no session, so this mode - not a
-#                       session's permission preset - decides whether `ps` works
-#                       in every firstmate hook. Overridden, not defaulted: an
-#                       inherited workspace-write would silently break them.
+#   DSH_PERMISSION_MODE a fallback only. Hooks run with no session, so the host's
+#                       sandbox-policy mode - not a session's permission preset -
+#                       decides whether `ps` works in every firstmate hook. The
+#                       tracked patch pins that row to danger-full-access; this
+#                       export matters only to a later layer that hands the row
+#                       back to dsh-base's expression over this variable, and is
+#                       overridden, not defaulted, so an inherited
+#                       workspace-write cannot reach one.
 #
 # DSH takes the invoking directory as its workspace root, so the host is started
 # from this checkout whatever directory the operator launched from.
@@ -32,7 +35,8 @@
 # harness's pane cannot inherit its identity. bin/fm-spawn.sh does the same at
 # its own launch boundaries.
 #
-# Usage: bin/fm-dsh-launch.sh [dsh arguments...]      e.g. ... web --port 3080
+# Usage: bin/fm-dsh-launch.sh web [web app arguments...]     e.g. ... web --port 3080
+#        bin/fm-dsh-launch.sh --profile <name> [dsh arguments...]
 set -u
 
 ROOT=$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -51,13 +55,18 @@ unset CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE 
 unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null || true
 
 # The tracked patch is the install step: it mounts the hooks bridge, raises the
-# instruction budget and pins the hook sandbox mode. Collecting it here rather
-# than documenting a copy is what makes the documented launch correct on its
-# own; operator-supplied --patch values follow it and so can override it. It is
-# collected even when the preflight is skipped, because skipping the checks must
-# not also drop the configuration they check.
+# instruction budget and pins the hook sandbox mode. Adding it here rather than
+# documenting a copy is what makes the documented launch correct on its own. It
+# comes first, so operator-supplied --patch values follow it and can override
+# it, and it is added even when the preflight is skipped, because skipping the
+# checks must not also drop the configuration they check. An operator --patch
+# naming the same file replaces it rather than repeating it: DSH applies every
+# overlay it is given, and a second insert of the bridge fails the host at boot
+# with "duplicate loader entry id".
+TRACKED_PATCH="$ROOT/.dsh/profile.patch.yml"
+TRACKED=(--patch "$TRACKED_PATCH")
 PROFILE=web
-PATCHES=(--patch "$ROOT/.dsh/profile.patch.yml")
+PATCHES=()
 want=
 for arg in "$@"; do
   case "$want" in
@@ -69,15 +78,26 @@ for arg in "$@"; do
     --profile=*) PROFILE=${arg#--profile=} ;;
     --patch) want='patch' ;;
     --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
-    web|headless|acp|sdk|sdk-minimal) [ "$arg" = web ] || PROFILE=$arg ;;
   esac
+done
+for arg in ${PATCHES[@]+"${PATCHES[@]}"}; do
+  [ "$arg" -ef "$TRACKED_PATCH" ] && TRACKED=()
 done
 
 # Assert the DSH misconfigurations that fail silently, before a session starts
 # depending on them. FM_DSH_SKIP_PREFLIGHT=1 is the escape hatch for a
-# deliberately degraded home.
+# deliberately degraded home. The preflight composes with the root form, which
+# takes every overlay; the host gets the operator's arguments untouched, once.
 if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh" ]; then
-  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" "${PATCHES[@]}" || exit 3
+  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
+    ${TRACKED[@]+"${TRACKED[@]}"} ${PATCHES[@]+"${PATCHES[@]}"} || exit 3
 fi
 
-exec dsh "${PATCHES[@]}" "$@"
+# DSH refuses a parent --patch before the `web` subcommand, and web's own
+# options end at the first token it does not know, so there the tracked patch
+# goes immediately after `web`.
+if [ "${1:-}" = web ]; then
+  shift
+  exec dsh web ${TRACKED[@]+"${TRACKED[@]}"} "$@"
+fi
+exec dsh ${TRACKED[@]+"${TRACKED[@]}"} "$@"

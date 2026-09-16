@@ -257,7 +257,7 @@ if [ -n "$DUMP" ]; then
     ok "hooks run under the danger-full-access sandbox mode"
   else
     fail "hooks run under sandbox mode '${HOOK_MODE:-<unreadable>}', not danger-full-access" \
-      "launch through bin/fm-dsh-launch.sh, which exports DSH_PERMISSION_MODE=danger-full-access, and leave sandbox-policy's mode to that variable: the hooks bridge runs hooks with no session, so ps is denied in every hook and the digest reads READ-ONLY with an unknown harness"
+      "pin the sandbox-policy entry's mode to danger-full-access alongside the permission entry's defaultPreset, as .dsh/profile.patch.yml does and bin/fm-dsh-launch.sh applies, and drop any later --patch overlay that overrides that row: the hooks bridge runs hooks with no session, so ps is denied in every hook and the digest reads READ-ONLY with an unknown harness"
   fi
 fi
 

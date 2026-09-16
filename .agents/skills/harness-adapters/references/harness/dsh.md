@@ -33,7 +33,7 @@ Hooks are not session tool calls: `dsh-hooks-claude-code` runs them with no sess
 Under the preset alone every firstmate hook is denied `ps`, and the session-start digest reads READ-ONLY with an unknown harness.
 `.dsh/profile.patch.yml` therefore pins that row to `danger-full-access` literally, so the mode travels with the composed configuration instead of living in an environment variable a caller can forget to export.
 It is set alongside `permission.defaultPreset` because the mode alone leaves the composed sandbox and approval defaults matching no preset, which `dsh-permission-presets` refuses at load.
-`bin/fm-dsh-launch.sh` exports `DSH_PERMISSION_MODE=danger-full-access` as well, and forwards the tracked patch explicitly, so the documented launch needs no manual install step and is correct even for a profile that does not pin the row.
+`bin/fm-dsh-launch.sh` applies the tracked patch itself, so the documented launch needs no manual install step, and exports `DSH_PERMISSION_MODE=danger-full-access` as well, which matters only to a later `--patch` overlay that hands the row back to `dsh-base`'s expression.
 
 `bin/fm-dsh-preflight.sh` cannot probe `ps` under either sandbox: it runs in the launching shell before DSH starts, where nothing is sandboxed, so a `ps` there always succeeds.
 It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, whose `!!js` expression it evaluates in the environment it was invoked with, the one the launcher hands the host.
@@ -73,9 +73,15 @@ the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resol
 and the `firstmate` preset root from `FM_ROOT`), pins `LC_ALL`/`LC_CTYPE` (unset,
 `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), and clears the foreign
 harness markers so a session started from another harness's pane cannot inherit its identity.
-It also forwards the tracked `.dsh/profile.patch.yml` with `--patch`, after any the operator supplied,
-because that file is the install step for the bridge mount, the instruction budget and the pinned hook
-sandbox mode: without it the documented command boots a profile that carries none of the three.
+It also applies the tracked `.dsh/profile.patch.yml` with `--patch`, because that file is the install
+step for the bridge mount, the instruction budget and the pinned hook sandbox mode: without it the
+documented command boots a profile that carries none of the three. The tracked patch comes first and
+operator `--patch` overlays follow it, so they can override it. The preflight composes with every
+overlay in that order; the host gets the operator's arguments unchanged, with only the tracked patch
+added, immediately after `web` (DSH refuses a parent `--patch` before the `web` subcommand) or first
+otherwise. An operator `--patch` naming the same file replaces it rather than repeating it, because
+DSH applies every overlay it is given and a second insert of the bridge fails the host at boot with
+`duplicate loader entry id`, although `--dump-config` composes the doubled overlay without complaint.
 
 Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
 launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.

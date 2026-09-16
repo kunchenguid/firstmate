@@ -27,6 +27,10 @@
 #      default agent preset, so the budget that matters is the tracked firstmate
 #      preset's. The headless sessions above cannot see this: their host row is
 #      live, which is how a disabled web row once passed unnoticed.
+#   6. bin/fm-dsh-launch.sh's own exec loads the web plugin tree with the
+#      tracked patch applied once. DSH refuses a parent --patch before `web`, and
+#      a doubled bridge insert throws "duplicate loader entry id" only when the
+#      tree loads, so a config dump through the preflight passed both unnoticed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -233,3 +237,21 @@ console.log("ok");
 [ "$verdict" = ok ] \
   || fail "live dsh $BASE_VERSION: the firstmate preset does not deliver AGENTS.md whole under web: $verdict"
 pass "live dsh $BASE_VERSION: the documented web launch renders AGENTS.md whole through the firstmate preset (budget $budget)"
+
+# --- 7. the launcher's own exec boots the web tree with the tracked patch -----
+# Contract 6 composes through the preflight, which never used the launcher's
+# exec argv. `web --help` loads the plugin tree, where a misplaced or doubled
+# --patch fails, and prints the web app's help without serving. The preflight is
+# skipped because this disposable home has no hooks bridge.
+launch_web() {  # [arguments after web...]
+  ( cd "$TMP_ROOT" && DSH_HOME="$WEBHOME" FM_DSH_SKIP_PREFLIGHT=1 "$ROOT/bin/fm-dsh-launch.sh" web "$@" 2>&1 )
+}
+out=$(launch_web --dump-config) \
+  || fail "live dsh $BASE_VERSION: the launcher's web argv did not compose: $(printf '%s\n' "$out" | tail -3)"
+printf '%s\n' "$out" | grep -qx '    default: firstmate' \
+  || fail "live dsh $BASE_VERSION: the launcher's web exec did not apply the tracked patch (no firstmate preset default)"
+out=$(launch_web --help) \
+  || fail "live dsh $BASE_VERSION: the documented web launch did not load its plugin tree: $(printf '%s\n' "$out" | tail -3)"
+out=$(launch_web --patch "$ROOT/.dsh/profile.patch.yml" --help) \
+  || fail "live dsh $BASE_VERSION: a web launch naming the tracked patch did not load its plugin tree: $(printf '%s\n' "$out" | tail -3)"
+pass "live dsh $BASE_VERSION: the launcher's web exec loads the plugin tree with the tracked patch applied once"
