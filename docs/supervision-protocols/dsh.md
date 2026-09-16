@@ -13,6 +13,29 @@ When this session owns supervision and away mode is not active:
 6. Never use shell `&` for firstmate watcher supervision.
 7. Failure or missing cycle only: drain queued wakes, inspect the failure, then arm a fresh background cycle with `bin/fm-watch-arm.sh`.
 
+## The death window, stated honestly
+
+The re-arm owner is the MODEL, once per handled wake. There is no asynchronous hook on
+DeepSeek Harness, so nothing re-arms between turns except a turn.
+
+If the DSH host or session dies mid-cycle, the watcher job dies with its owner, no `Stop` ever
+fires, and nothing re-arms. Supervision is then off until either the operator starts a session or
+something outside DSH intervenes. Do not paper over this:
+
+- **A detached watcher is not the answer.** The arm seatbelt denies `nohup bin/fm-watch-arm.sh`
+  (and any `&`) as `watcher-background`, and `bin/fm-watch-arm.sh`'s own header records why: a
+  backgrounded child is reaped when the tool call returns, leaving no watcher running and a false
+  "already running" off the dying process - a mistake that once took supervision down for about
+  thirty minutes.
+- **Recovery happens at the NEXT session start.** A stolen watcher lock publishes a
+  generation-stamped `state/.watcher-down` marker, and the session-start digest's wake-queue stage
+  runs the drain, which surfaces that marker once per generation as `check: rearm-resurface`. So the
+  gap is bounded by how long the home stays sessionless, not by anything this adapter can shorten.
+- **An unattended home needs an owner outside DSH.** If a home must survive host death without a
+  human, the only true closure is an OS-level scheduler (cron, launchd, systemd) invoking
+  `bin/fm-watch-arm.sh` for that home, outside DSH's process tree and outside what the seatbelt
+  governs. That is an operator deployment decision, not something this protocol can assert.
+
 DeepSeek Harness offers no asynchronous harness hook, so watcher continuity is owned by the background job plus the bounded Stop guard rather than by a Stop-owned auto-arm.
 The guard blocks a turn that would end with work in flight and no live watcher, bounded by `FM_DSH_TURNEND_BLOCK_BUDGET` (default 3) continuations before one attended fail-open.
 DeepSeek Harness reports `stop_hook_active=false` on every Stop, so the adapter counts its own continuations instead of trusting that field.

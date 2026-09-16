@@ -522,6 +522,28 @@ test_dsh_job_verdict_still_alarms_a_real_lapse() {
   pass "fm-wake-lib: the job model still alarms a genuine lapse"
 }
 
+test_dsh_protocol_states_the_death_window_contract() {
+  local proto="$ROOT/docs/supervision-protocols/dsh.md" policy cmd
+  # The gap is real and cannot be closed from inside DSH, so the protocol must
+  # name it, name the marker and wake that recover it at the next session start,
+  # and the two workarounds it forbids must actually be forbidden - otherwise
+  # the document is describing a safety property the seatbelt does not hold.
+  grep -q 'state/.watcher-down' "$proto" \
+    || fail "the protocol does not name the recovery marker"
+  grep -q 'rearm-resurface' "$proto" \
+    || fail "the protocol does not name the recovery wake it relies on"
+  grep -q 'OS-level scheduler' "$proto" \
+    || fail "the protocol does not name the only out-of-band closure"
+  for cmd in 'nohup bin/fm-watch-arm.sh' 'bin/fm-watch-arm.sh &'; do
+    policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command "$cmd")
+    case "$policy" in
+      deny*watcher-background*) : ;;
+      *) fail "the protocol forbids '$cmd' but the seatbelt answers '$policy'" ;;
+    esac
+  done
+  pass "dsh protocol: the death-window contract matches the seatbelt"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -549,3 +571,4 @@ test_dsh_stop_wrapper_fails_open_without_a_root
 test_dsh_supervision_model_is_job
 test_dsh_job_verdict_tolerates_the_between_cycles_gap
 test_dsh_job_verdict_still_alarms_a_real_lapse
+test_dsh_protocol_states_the_death_window_contract

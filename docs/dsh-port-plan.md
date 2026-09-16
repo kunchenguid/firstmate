@@ -252,7 +252,8 @@ Configuration and capabilities the deployment must supply.
 6. Resolve the arm-seatbelt / protocol contradiction; bless the exact command text.
 7. Startup assertions for the bridge pin, the byte budget and the sandbox capabilities.
 
-**Phase 1b — make supervision honest.**
+**Phase 1b — make supervision honest.** (1b.1 the job supervision model and 1b.2 the death-window
+contract are done; 1b.3 deny verification and 1b.4 the doc/skill rows remain.)
 8. Add the fourth supervision model (`job`/`between-turns`) so `fm-guard.sh` stops crying
    `WATCHER DOWN` on every drain, with a poll-derived grace that tolerates the wake-handling turn.
 9. Wire a cron-owned re-arm so a session/host death is not a silent gap.
