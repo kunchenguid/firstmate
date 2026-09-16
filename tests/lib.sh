@@ -470,6 +470,40 @@ SH
   done
 }
 
+# fm_fake_treehouse_lease <fakebin>: the treehouse stub every crewmate or scout
+# spawn needs, because fm-spawn.sh acquires the task worktree by running
+# `treehouse get --lease` in its own shell and reading the path off stdout.
+#
+# `get` prints FM_FAKE_LEASE_PATH, defaulting to FM_FAKE_PANE_PATH so a fixture
+# that already names the worktree for its fake backend needs no second variable,
+# and exits 1 printing nothing when that value is empty, standing in for a pool
+# with nothing to hand out. FM_FAKE_LEASE_EXIT forces a non-zero exit instead.
+# `get --help` advertises `--lease` for the bootstrap upgrade check, and every
+# other subcommand, `return` included, exits 0. FM_FAKE_LEASE_LOG records each
+# invocation so a case can assert the lease and its rollback.
+fm_fake_treehouse_lease() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_LEASE_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_LEASE_LOG"
+if [ "${1:-}" = get ]; then
+  case " $* " in
+    *' --help '*)
+      printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+      exit 0
+      ;;
+  esac
+  [ "${FM_FAKE_LEASE_EXIT:-0}" = 0 ] || exit "$FM_FAKE_LEASE_EXIT"
+  leased=${FM_FAKE_LEASE_PATH-${FM_FAKE_PANE_PATH:-}}
+  [ -n "$leased" ] || exit 1
+  printf '%s\n' "$leased"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

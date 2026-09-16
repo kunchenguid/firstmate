@@ -807,18 +807,21 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  # The spawn leases its worktree here, in fm-spawn.sh's own shell, so the stub
+  # answers `get` with the same path the tmux stub reports for the pane.
+  fm_fake_treehouse_lease "$fb"
   printf '%s\n' "$fb"
 }
 
-run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> -- <spawn args...>
-  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
+run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> <worktree> -- <spawn args...>
+  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7 wt=$8; shift 8
   [ "${1:-}" = -- ] && shift
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
+    FM_FAKE_PANE_PATH="$wt" \
     "$bin/bin/fm-spawn.sh" "$@"
 }
 
@@ -877,7 +880,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse_lease "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -909,7 +912,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" "$wt" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
   assert_contains "$out" "worktree=$wt" \

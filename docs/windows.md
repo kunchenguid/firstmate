@@ -132,7 +132,11 @@ On the reference platforms Firstmate clones the project under `projects/`, spawn
 
 Three things differ here from those platforms:
 
-- **A worker spawn does not yet complete on Windows.** Herdr reports the pane's own shell as the working directory rather than the foreground subshell, so the spawn never sees `treehouse get` reach the acquired copy and refuses at its deadline. Everything up to that point - cloning, the session lock, supervision, and the whole toolchain - does work. This is the one remaining gap, and "Supported limits" below records what causes it.
+- **A worker spawn is believed to complete on Windows, but nobody has watched one end to end yet.**
+  Herdr reports the pane's own shell as the working directory rather than the foreground subshell, so the older spawn path never saw `treehouse get` reach the acquired copy and refused at its deadline.
+  Firstmate no longer reads the pane to find that copy: it leases the copy itself with `treehouse get --lease --lease-holder <task>`, so the path is known before the pane is told anything.
+  The evidence for that change is the `tests/fm-spawn-worktree-settle.test.sh` suite passing here and the installed `treehouse` supporting `--lease`; neither is a live spawn.
+  Treat the gap as closed in the code and unproven in the field until someone reports a real worker starting on this platform.
 - Watch a worker with `bin/fm-peek.sh` and steer it with `bin/fm-send.sh`, because Herdr's `terminal attach` is unsupported on Windows.
 - Keep `FM_WINDOWS` and `MSYS` intact in every session you launch, because a session missing either one supervises nothing and reports nothing, as described in "Turn Windows support on" above and in the next section.
 
@@ -267,7 +271,10 @@ Each degrades to a documented fallback rather than failing silently.
   A home that has not opted in keeps the strict exact-mode contract on every filesystem, including one that provably cannot store a mode, so this support cannot weaken a privacy guard for anyone by default.
 - MSYS `ps` supports no `-o` selectors, so process reads are served from `bin/fm-winproc-lib.sh` in native Windows process-id space, and signalling uses `/usr/bin/kill -W` by absolute path because the shell builtin has no `-W` flag.
 - `/usr/bin/kill -W` cannot address a process outside the MSYS runtime at all. That is a safety property rather than a gap, because the signalling path can never reach a process the adapter did not itself resolve.
-- Herdr's pane working directory on Windows tracks the pane's own shell and not a foreground subshell, so the spawn-time worktree wait never observes `treehouse get` moving into the acquired copy. A crewmate or scout spawn on the Herdr backend therefore still refuses at its deadline on this platform. That refusal is the isolation guard working, not a silent failure, and it is the one remaining Windows gap on this page.
+- Herdr's pane working directory on Windows tracks the pane's own shell and not a foreground subshell, so no number of polls ever observes a pane entering a worktree.
+  Firstmate therefore does not read the pane to find the task copy at all: it leases the copy with `treehouse get --lease --lease-holder <task>` in its own shell and then sends the pane into it.
+  The isolation guard still runs on every launch path, against the filesystem rather than the terminal, so a copy that is not an isolated worktree still refuses before any agent starts.
+  The arrival read that follows the lease is best-effort for the same reason: an empty read means this platform cannot answer, not that the pane is somewhere else, and the generated brief's own isolation assertion is the worker-side backstop.
 - The downloaded binaries are unsigned, so SmartScreen may warn if they are launched from Explorer. Fetching them with the installers above does not mark them, so they run without a prompt.
 
 ## Verification entry points
@@ -300,6 +307,6 @@ On Windows that path checks out as a plain text file rather than a link, no skil
 **The linter reports failures on files you did not touch.**
 Check for CRLF line endings first, under "Line endings".
 
-**A spawn refuses because the pane never entered an isolated worktree.**
+**A spawn refuses because the leased copy is not an isolated worktree.**
 Treehouse must be installed and on `PATH`, and the project must have a Treehouse pool; `treehouse status` reports the pool for the repository it is run in.
-If both are in order, this is the known Herdr pane working-directory limit under "Supported limits" rather than a local misconfiguration.
+The refusal names the path it resolved and the reason that path failed, which is what separates a missing pool from a project whose copy is not its own worktree root.

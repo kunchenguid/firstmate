@@ -258,14 +258,18 @@ EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
-# extra exit-0 tools. Echoes the fakebin path.
+# Creates <dir>/fakebin with the spawn tmux stub, the leasing treehouse stub, and
+# any extra exit-0 tools. Echoes the fakebin path. The treehouse stub leases
+# rather than exiting 0 because fm-spawn.sh acquires the task worktree from
+# `treehouse get --lease` and reads the path off stdout; a no-op treehouse prints
+# nothing and every spawn fixture would fail to resolve a worktree.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_fake_exit0 "$fakebin" "$@"
+  fm_fake_treehouse_lease "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
