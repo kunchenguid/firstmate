@@ -10,10 +10,11 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
-// persists a sequence-keyed visible record in main's transcript, and for a
-// captain-facing outcome opens one sequence-keyed processing turn on main
-// that stays open until main acknowledges that sequence (see
-// presentUnprocessedOutcomes).
+// persists a sequence-keyed visible record in main's transcript. For a
+// captain-facing outcome, action main opens one sequence-keyed processing
+// turn on main that stays open until main acknowledges that sequence, while
+// action none is display-only and advances the processed marker without a
+// main turn (see presentUnprocessedOutcomes).
 // Main's captain/assistant dialog is mirrored into the branch as read-only
 // fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
