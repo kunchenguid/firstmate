@@ -47,9 +47,11 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
-# state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# lock identity before and after close, and successor disposition. The child's
+# own stderr is relayed unchanged and kept in state/.watch-arm-stderr.log, so a
+# failed or signaled cycle's reason line outlives this arm (see the
+# ARM_STDERR_LOG block below). The separate state/.watch-triage.log remains
+# exclusively the watcher's absorbed-wake debug log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer

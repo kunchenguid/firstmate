@@ -46,6 +46,11 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          A window whose endpoint the backend PROVES is gone is
+#                          retired rather than escalated
+#                          (retire_gone_window_records below): no reason is
+#                          printed at all, and that window is skipped until its
+#                          recorded metadata changes.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
