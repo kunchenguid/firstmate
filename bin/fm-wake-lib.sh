@@ -205,14 +205,39 @@ fm_watcher_healthy() {
 fm_supervision_model() {
   local harness
   case "${FM_SUPERVISION_MODEL:-}" in
-    autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
+    autoarm|extension|persistent|job) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
+    dsh) printf 'job\n' ;;
     *) printf 'persistent\n' ;;
   esac
+}
+
+# DeepSeek Harness background-job supervision evidence.
+#
+# A DSH watcher runs as a background job that EXITS on every actionable wake,
+# and the model re-arms it only after handling that wake. "No live watcher" is
+# therefore this model's ordinary mid-turn state for the length of the handling
+# turn, where the persistent model would call it a lapse - and fm-guard.sh, the
+# drain and every guarded command assert liveness through that verdict.
+#
+# The proof is the arm's own delivery ledger: bin/fm-watch-arm.sh records one
+# line per delivered reason AFTER the cycle's final beacon touch, so a ledger
+# mtime at or after the beacon mtime proves the cycle ended by DELIVERING a wake
+# rather than by dying. The window bounds how long a handling turn may take
+# before the silence is a genuine lapse.
+fm_job_midturn_healthy() {  # <state> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}}
+  local beacon_mtime delivery_mtime age
+  beacon_mtime=$(fm_path_mtime "$state/.last-watcher-beat") || return 1
+  delivery_mtime=$(fm_path_mtime "$state/.watch-deliveries.log") || return 1
+  [ "$delivery_mtime" -ge "$beacon_mtime" ] || return 1
+  age=$(fm_path_age "$state/.watch-deliveries.log")
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -lt "$grace" ]
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
@@ -374,6 +399,11 @@ fm_afk_mode() {
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
 # version-drifted, or exited Pi session still alarms immediately, and a cycle the
 # extension never restores still alarms once the beacon passes grace.
+# job: a fresh beacon is healthy with or without a live watcher, because the
+# watcher only runs between turns - the DSH background job exits on every
+# actionable wake. A stale beacon is still healthy while fm_job_midturn_healthy
+# proves the last cycle ended by delivering a wake and an agent turn is still
+# handling it; otherwise the silence is a genuine lapse.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -395,6 +425,15 @@ fm_watcher_supervision_verdict() {
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
     if [ "$fresh" = true ] || fm_autoarm_midturn_healthy "$state" "$grace"; then
+      FM_WATCHER_VERDICT_OK=true
+    fi
+    return 0
+  fi
+  if [ "$model" = job ]; then
+    JOB_GRACE=${FM_JOB_MIDTURN_GRACE:-900}
+    case "$JOB_GRACE" in ''|*[!0-9]*|0) JOB_GRACE=900 ;; esac
+    if [ "$fresh" = true ] || fm_job_midturn_healthy "$state" "$JOB_GRACE"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     fi
     return 0

@@ -471,6 +471,57 @@ test_dsh_stop_wrapper_fails_open_without_a_root() {
   pass "fm-turnend-guard-dsh.sh: an unresolvable root fails open"
 }
 
+verdict() {  # <state-dir> <model> -> FM_WATCHER_VERDICT_OK
+  FM_SUPERVISION_MODEL=$2 FM_HOME=$1 FM_STATE_OVERRIDE=$1/state FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$0/bin/fm-wake-lib.sh"; fm_watcher_supervision_verdict "$FM_STATE_OVERRIDE" "$0/bin/fm-watch.sh" 300 "$FM_HOME" "$FM_ROOT_OVERRIDE"; printf "%s" "$FM_WATCHER_VERDICT_OK"' "$ROOT"
+}
+
+test_dsh_supervision_model_is_job() {
+  local fakebin model
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/model-job" node 'node /Users/x/.bin/dsh web')
+  model=$(PATH="$fakebin:$PATH" FM_DSH_HARNESS=dsh bash -c '. "$0/bin/fm-wake-lib.sh"; fm_supervision_model' "$ROOT")
+  [ "$model" = job ] \
+    || fail "a dsh home must resolve the job supervision model, got '$model'"
+  pass "fm-wake-lib: a dsh home resolves the job supervision model"
+}
+
+test_dsh_job_verdict_tolerates_the_between_cycles_gap() {
+  local dir
+  # The DSH watcher is a background job that exits on every actionable wake, so
+  # "no live watcher, fresh beacon" is its ordinary mid-turn state. The
+  # persistent model calls that a lapse, which is what made the drain and every
+  # guarded command cry WATCHER DOWN.
+  dir="$TMP_ROOT/verdict-fresh"; mkdir -p "$dir/state"
+  touch "$dir/state/.last-watcher-beat"
+  [ "$(verdict "$dir" job)" = true ] \
+    || fail "the job model must accept a fresh beacon with no live watcher"
+  [ "$(verdict "$dir" persistent)" = false ] \
+    || fail "the persistent model must still call that a lapse"
+  pass "fm-wake-lib: the job model tolerates the between-cycles gap"
+}
+
+test_dsh_job_verdict_still_alarms_a_real_lapse() {
+  local dir
+  dir="$TMP_ROOT/verdict-lapse"; mkdir -p "$dir/state"
+  printf '●  TURN WOULD END BLIND\n' > "$dir/state/probe.log"
+  # Stale beacon, no delivery evidence at all: nothing re-armed and nothing was
+  # delivered, which is exactly the silence the alarm exists for.
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  [ "$(verdict "$dir" job)" = false ] || fail "a stale beacon with no delivery proof must read down"
+  # A delivery ledger OLDER than the beacon proves no wake ended that cycle.
+  touch -t 202006010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = false ] || fail "a ledger older than the beacon must read down"
+  # A ledger at-or-after the beacon but past the handling window is a lapse too.
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  touch -t 202006010000 "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = false ] || fail "a delivery past the handling window must read down"
+  # Inside the window it is a wake still being handled.
+  touch "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = true ] || fail "a delivery inside the handling window must read healthy"
+  pass "fm-wake-lib: the job model still alarms a genuine lapse"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -495,3 +546,6 @@ test_dsh_guard_budget_is_session_scoped
 test_dsh_guard_clears_the_budget_when_supervision_is_not_needed
 test_dsh_guard_fails_open_on_unusable_input
 test_dsh_stop_wrapper_fails_open_without_a_root
+test_dsh_supervision_model_is_job
+test_dsh_job_verdict_tolerates_the_between_cycles_gap
+test_dsh_job_verdict_still_alarms_a_real_lapse
