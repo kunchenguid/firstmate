@@ -13,25 +13,32 @@ import { calmPresentationHides } from "./fm-calm-visibility.ts";
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
 type AssistantMessagePresentationState = {
-  hiddenThinkingLabel: string;
   hideThinkingBlock: boolean;
-  lastMessage?: AssistantMessage;
-  lastPresentedMessage?: AssistantMessage;
-  lastSourceMessage?: AssistantMessage;
-  liveStepKey?: string;
+  isStreaming: boolean;
 };
 
-type CalmAssistantLayoutPatch = {
-  hidesThinking: () => boolean;
-  hidesWorkingNote: () => boolean;
+type CalmAssistantPresentation = {
+  source: AssistantMessage;
+  rendered: AssistantMessage;
+  streamed: boolean;
+};
+
+type CalmAssistantLayoutController = {
+  render: (
+    component: PiAssistantMessageComponent,
+    message: AssistantMessage,
+    isStreaming: boolean,
+  ) => void;
+  originalUpdateContent: PiAssistantMessageComponent["updateContent"];
+  presentations: WeakMap<object, CalmAssistantPresentation>;
 };
 
 // A mid-turn assistant message is one the model did not end its response with: Pi's
 // agent loop runs its tool calls and then issues another assistant message. stopReason
-// is intrinsic to each message and is already set while the message streams, so this
-// layout never has to ask whether the turn ended. It stays "pending" until the tool
-// call materializes, which is why a working note is briefly visible before it
-// collapses; suppressing pending text would also stop a genuine reply from streaming.
+// is intrinsic to each settled message. Streaming content stays in the source message
+// while this adapter gives its transcript component zero height; fm-calm.ts presents
+// the latest line through one keyed widget until message_end identifies whether the
+// settled text is a working note to hide or a genuine final response to retain.
 function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   if (message.stopReason === "toolUse") return true;
   return (
@@ -40,129 +47,84 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   );
 }
 
-// Keep the introduction-version symbol stable so a compatible upgrade cannot
-// double-patch a live process.
-const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
-  "firstmate:calm-assistant-layout:pi-0.81.1",
+// The original adapter used this symbol without a mutable implementation delegate.
+// A long-lived Pi process kept that first wrapper across /reload, so source updates only
+// refreshed its visibility callbacks and never installed later behavior. This second
+// generation controller is itself stable across reloads, while render is replaced by
+// every newly loaded extension factory. Capturing the then-current method also upgrades
+// a process that still has the first-generation wrapper without mutating its transcript.
+const CALM_ASSISTANT_LAYOUT_CONTROLLER = Symbol.for(
+  "firstmate:calm-assistant-layout-controller:pi-0.81.1",
 );
-
-let liveStepCounter = 0;
-let liveStepSourceIds = new WeakMap<object, number>();
-let nextLiveStepSourceId = 0;
-
-export function resetCalmAssistantLiveStepCounter(): void {
-  liveStepCounter = 0;
-  liveStepSourceIds = new WeakMap<object, number>();
-  nextLiveStepSourceId = 0;
-}
-
-type LiveStep = {
-  key: string;
-  block: AssistantMessage["content"][number];
-  text: string;
-};
-
-function currentLiveStep(message: AssistantMessage): LiveStep | undefined {
-  let sourceId = liveStepSourceIds.get(message);
-  if (sourceId === undefined) {
-    sourceId = nextLiveStepSourceId++;
-    liveStepSourceIds.set(message, sourceId);
-  }
-  for (let index = message.content.length - 1; index >= 0; index--) {
-    const block = message.content[index];
-    if (block.type !== "thinking" && block.type !== "text") continue;
-    const raw = block.type === "thinking" ? block.thinking : block.text;
-    const lines = raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const text = lines.at(-1);
-    if (!text) continue;
-    return { key: `${sourceId}:${index}:${lines.length}`, block, text };
-  }
-  return undefined;
-}
 
 export function installCalmAssistantLayout(): void {
   const registry = globalThis as typeof globalThis & {
-    [key: symbol]: CalmAssistantLayoutPatch | undefined;
+    [key: symbol]: CalmAssistantLayoutController | undefined;
   };
-  const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
-  const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
-  const installed = registry[CALM_ASSISTANT_LAYOUT_PATCH];
-  if (installed) {
-    installed.hidesThinking = hidesThinking;
-    installed.hidesWorkingNote = hidesWorkingNote;
-    return;
-  }
-
-  const patch: CalmAssistantLayoutPatch = { hidesThinking, hidesWorkingNote };
   const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
   if (typeof AssistantMessageComponent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
   }
-  const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
-  if (typeof originalUpdateContent !== "function") {
-    throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
+
+  let controller = registry[CALM_ASSISTANT_LAYOUT_CONTROLLER];
+  if (!controller) {
+    const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
+    if (typeof originalUpdateContent !== "function") {
+      throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
+    }
+    const newController: CalmAssistantLayoutController = {
+      render: () => {},
+      originalUpdateContent,
+      presentations: new WeakMap(),
+    };
+    controller = newController;
+    registry[CALM_ASSISTANT_LAYOUT_CONTROLLER] = newController;
+    AssistantMessageComponent.prototype.updateContent = function (
+      message: AssistantMessage,
+      isStreaming = false,
+    ): void {
+      newController.render(this, message, isStreaming);
+    };
   }
 
-  AssistantMessageComponent.prototype.updateContent = function (
-    message: AssistantMessage,
-    isStreaming = false,
-  ): void {
-    const state = this as unknown as AssistantMessagePresentationState;
-    // Pi's invalidate() and presentation setters call updateContent() with the
-    // shallow presentation copy held by Pi itself. Do not decorate that copy a
-    // second time or a live step would acquire a new prefix on every redraw.
-    // A message_end can carry that same presentation copy, however, and must switch
-    // back to the source message so the live row is removed rather than retained.
-    const presentationReplay =
-      message === state.lastPresentedMessage && message !== state.lastSourceMessage;
-    const sourceMessage =
-      !isStreaming && presentationReplay && state.lastSourceMessage
-        ? state.lastSourceMessage
-        : message;
-    if (isStreaming && presentationReplay) {
-      originalUpdateContent.call(this, message, isStreaming);
-      return;
-    }
-
-    const midTurn = isMidTurnAssistantMessage(sourceMessage);
-    const hadLiveStep = state.liveStepKey !== undefined;
-    const liveStep = isStreaming && patch.hidesWorkingNote() ? currentLiveStep(sourceMessage) : undefined;
+  const activeController = controller;
+  // This function is deliberately replaced on every extension load. The wrapper above
+  // survives /reload, but no implementation captured by an older source revision does.
+  activeController.render = (component, message, isStreaming): void => {
+    const prior = activeController.presentations.get(component);
+    const sourceMessage = message === prior?.rendered ? prior.source : message;
+    const state = component as unknown as AssistantMessagePresentationState;
     const hideThinking =
-      !isStreaming &&
-      state.hiddenThinkingLabel === "" &&
-      (state.hideThinkingBlock || hadLiveStep) &&
-      patch.hidesThinking();
-    const hideWorkingNote = !isStreaming && patch.hidesWorkingNote() && midTurn;
-    let presentationMessage = sourceMessage;
-    if (liveStep) {
-      liveStepCounter = state.liveStepKey === liveStep.key ? liveStepCounter : liveStepCounter + 1;
-      state.liveStepKey = liveStep.key;
-      const text = `Step ${liveStepCounter}: ${liveStep.text}`;
-      const block =
-        liveStep.block.type === "thinking"
-          ? { ...liveStep.block, thinking: text }
-          : { ...liveStep.block, text };
-      presentationMessage = { ...sourceMessage, content: [block] };
-    } else if (hideThinking || hideWorkingNote) {
-      presentationMessage = {
+      calmPresentationHides("assistant-thinking") &&
+      (state.hideThinkingBlock || prior?.streamed === true);
+    const hideWorkingNote = calmPresentationHides("assistant-working-note");
+    let renderedMessage = sourceMessage;
+
+    // Streaming narration is presented by fm-calm.ts's one keyed widget. Keeping the
+    // assistant component empty is what makes replacement robust even when this new
+    // controller had to wrap the stale first-generation adapter in a live process.
+    if (isStreaming && hideWorkingNote) {
+      renderedMessage = { ...sourceMessage, content: [] };
+    } else if (!isStreaming && (hideThinking || hideWorkingNote)) {
+      const midTurn = isMidTurnAssistantMessage(sourceMessage);
+      renderedMessage = {
         ...sourceMessage,
         content: sourceMessage.content.filter(
           (block) =>
             !(hideThinking && block.type === "thinking") &&
-            !(hideWorkingNote && block.type === "text"),
+            !(hideWorkingNote && midTurn && block.type === "text"),
         ),
       };
     }
 
-    originalUpdateContent.call(this, presentationMessage, isStreaming);
-    state.lastMessage = sourceMessage;
-    if (!isStreaming) state.liveStepKey = undefined;
-    state.lastSourceMessage = sourceMessage;
-    state.lastPresentedMessage = presentationMessage;
+    activeController.presentations.set(component, {
+      source: sourceMessage,
+      rendered: renderedMessage,
+      streamed: isStreaming || prior?.streamed === true,
+    });
+    // A first-generation wrapper did not forward isStreaming to Pi. Seed the same
+    // private field Pi's own default argument reads, then pass the explicit value too.
+    state.isStreaming = isStreaming;
+    activeController.originalUpdateContent.call(component, renderedMessage, isStreaming);
   };
-
-  registry[CALM_ASSISTANT_LAYOUT_PATCH] = patch;
 }

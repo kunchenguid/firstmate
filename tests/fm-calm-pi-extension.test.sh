@@ -1155,7 +1155,7 @@ const assistantProgress = new AssistantMessageComponent(assistantProgressMessage
 const nextAssistantProgressMessage = {
   ...assistantProgressMessage,
   content: [
-    { type: "text", text: "NEXT_STEP_FROM_ASSISTANT" },
+    { type: "text", text: "CURRENT_STEP_FROM_ASSISTANT\nNEXT_STEP_FROM_ASSISTANT" },
     { type: "toolCall", id: "assistant-progress-tool-2", name: "read", arguments: { path: "sample.txt" } },
   ],
 };
@@ -1170,6 +1170,8 @@ let terminalInputHandler;
 let workingVisible;
 let hiddenThinkingLabel = "unset";
 const statuses = new Map();
+const widgets = new Map();
+const renderedWidget = (key) => widgets.get(key)?.({ requestRender() {} }).render(100).join("\n") ?? "";
 const sessionEntries = [{ type: "message", message: { role: "toolResult", content: "kept" } }];
 const entriesBefore = JSON.stringify(sessionEntries);
 const commandContext = {
@@ -1202,7 +1204,10 @@ const commandContext = {
     setWorkingVisible(value) {
       workingVisible = value;
     },
-    setWidget() {},
+    setWidget(key, value) {
+      if (value === undefined) widgets.delete(key);
+      else widgets.set(key, value);
+    },
   },
 };
 
@@ -1233,19 +1238,33 @@ if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
   throw new Error("Calm did not persist the active choice in the effective Firstmate home");
 }
 await handlers.get("agent_start")[0]({}, commandContext);
+await handlers.get("message_start")[0]({ message: assistantProgressMessage }, commandContext);
 assistantProgress.updateContent(assistantProgressMessage, true);
-let progressText = assistantProgress.render(100).join("\n");
-if (!progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT")) {
-  throw new Error(`Calm did not render assistant progress as one current numbered step: ${progressText}`);
+await handlers.get("message_update")[0]({ message: assistantProgressMessage }, commandContext);
+let progressText = renderedWidget("firstmate-calm-current-step");
+if (
+  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  assistantProgress.render(100).length !== 0
+) {
+  throw new Error(`Calm did not render assistant progress as one keyed current-step widget: ${progressText}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, true);
-progressText = assistantProgress.render(100).join("\n");
-if (!progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") || progressText.includes("CURRENT_STEP_FROM_ASSISTANT")) {
-  throw new Error(`Calm did not replace the prior assistant progress row: ${progressText}`);
+await handlers.get("message_update")[0]({ message: nextAssistantProgressMessage }, commandContext);
+progressText = renderedWidget("firstmate-calm-current-step");
+if (
+  !progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
+  progressText.includes("CURRENT_STEP_FROM_ASSISTANT") ||
+  assistantProgress.render(100).length !== 0
+) {
+  throw new Error(`Calm did not replace the prior assistant progress widget: ${progressText}`);
 }
+await handlers.get("message_end")[0]({ message: nextAssistantProgressMessage }, commandContext);
 await handlers.get("agent_settled")[0]({}, commandContext);
-if (statuses.get("firstmate-calm") !== undefined) {
-  throw new Error("Calm left a separate current-step status after the run settled");
+if (
+  statuses.get("firstmate-calm") !== undefined ||
+  widgets.has("firstmate-calm-current-step")
+) {
+  throw new Error("Calm left a separate current-step presentation after the run settled");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1527,6 +1546,8 @@ setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
 const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
 const components = [];
+const widgets = new Map();
+const renderedWidget = (key) => widgets.get(key)?.({ requestRender() {} }).render(100).join("\n") ?? "";
 const ui = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
@@ -1538,7 +1559,10 @@ const ui = {
   setStatus() {},
   setToolsExpanded() {},
   setWorkingVisible() {},
-  setWidget() {},
+  setWidget(key, value) {
+    if (value === undefined) widgets.delete(key);
+    else widgets.set(key, value);
+  },
   notify() {},
 };
 const context = { ui };
@@ -1547,12 +1571,18 @@ async function loadCalmExtension() {
   const registeredTools = [];
   let sessionStart;
   let agentStart;
+  let messageStart;
+  let messageUpdate;
+  let messageEnd;
   let calmCommand;
   const pi = {
     events: { emit() {}, on() {} },
     on(event, handler) {
       if (event === "session_start") sessionStart = handler;
       if (event === "agent_start") agentStart = handler;
+      if (event === "message_start") messageStart = handler;
+      if (event === "message_update") messageUpdate = handler;
+      if (event === "message_end") messageEnd = handler;
     },
     registerCommand(name, command) {
       if (name === "calm") calmCommand = command;
@@ -1567,10 +1597,18 @@ async function loadCalmExtension() {
   };
   const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
   extension.default(pi);
-  if (!calmCommand || !sessionStart || !agentStart) {
+  if (!calmCommand || !sessionStart || !agentStart || !messageStart || !messageUpdate || !messageEnd) {
     throw new Error("Calm extension did not register its command and lifecycle handlers");
   }
-  return { calmCommand, sessionStart, agentStart, registeredTools };
+  return {
+    calmCommand,
+    sessionStart,
+    agentStart,
+    messageStart,
+    messageUpdate,
+    messageEnd,
+    registeredTools,
+  };
 }
 
 const assistantBase = {
@@ -1668,26 +1706,41 @@ const liveMessage = {
   stopReason: "pending",
   content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
 };
+await calm.messageStart({ message: liveMessage }, context);
 live.updateContent(liveMessage, true);
-if (live.render(100).join("\n").indexOf("Step 1: LIVE_STEP_ONE") === -1) {
-  throw new Error("live Calm thinking did not render as the first numbered step");
+await calm.messageUpdate({ message: liveMessage }, context);
+let liveStepText = renderedWidget("firstmate-calm-current-step");
+if (!liveStepText.includes("Step 1: LIVE_STEP_ONE") || live.render(100).length !== 0) {
+  throw new Error("live Calm thinking did not render as the first numbered widget");
 }
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
-const liveStepText = live.render(100).join("\n");
-if (!liveStepText.includes("Step 2: LIVE_STEP_TWO") || liveStepText.includes("LIVE_STEP_ONE")) {
-  throw new Error(`live Calm thinking did not replace the prior step: ${liveStepText}`);
+await calm.messageUpdate({ message: liveMessage }, context);
+liveStepText = renderedWidget("firstmate-calm-current-step");
+if (
+  !liveStepText.includes("Step 2: LIVE_STEP_TWO") ||
+  liveStepText.includes("LIVE_STEP_ONE") ||
+  live.render(100).length !== 0
+) {
+  throw new Error(`live Calm thinking did not replace the prior widget: ${liveStepText}`);
 }
 if ((liveStepText.match(/Step [0-9]+:/g) || []).length !== 1) {
-  throw new Error(`live Calm thinking rendered more than one current step: ${liveStepText}`);
+  throw new Error(`live Calm thinking rendered more than one current widget: ${liveStepText}`);
 }
-live.updateContent(
-  { ...assistantBase, stopReason: "stop", content: [{ type: "text", text: "LIVE_FINAL_REPLY" }] },
-  false,
-);
+const finalMessage = {
+  ...assistantBase,
+  stopReason: "stop",
+  content: [{ type: "text", text: "LIVE_FINAL_REPLY" }],
+};
+live.updateContent(finalMessage, false);
+await calm.messageEnd({ message: finalMessage }, context);
 const settledLiveText = live.render(100).join("\n");
-if (!settledLiveText.includes("LIVE_FINAL_REPLY") || settledLiveText.includes("Step 2:")) {
-  throw new Error("settled final assistant response retained the live step prefix");
+if (
+  !settledLiveText.includes("LIVE_FINAL_REPLY") ||
+  settledLiveText.includes("Step 2:") ||
+  widgets.has("firstmate-calm-current-step")
+) {
+  throw new Error("settled final assistant response retained the live step widget");
 }
 if (rendered("midTurn").length !== 0) {
   throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);

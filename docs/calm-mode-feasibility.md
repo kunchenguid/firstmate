@@ -5,7 +5,7 @@ This document owns the version-scoped feasibility evidence, Pi transcript taxono
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, present the latest intermediate step in one replace-in-place assistant row without accumulating transcript rows, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, present the latest intermediate step in one replace-in-place row without accumulating transcript rows, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and working activity.
 Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
@@ -224,8 +224,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
-| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | A live stream shows only its current text line as one numbered `Step N:` row; each new line replaces the previous row, while settled tool-use narration is removed from the shallow presentation copy (verified on Pi 0.84.1 and 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | A live stream shows only its current thinking line as one numbered `Step N:` row; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
+| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The assistant component stays at zero height while a keyed widget shows only its current text line as one numbered `Step N:` row; each new line replaces the previous widget content, while settled tool-use narration is removed from the shallow presentation copy (verified on Pi 0.84.1 and 0.85.1). |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | The assistant component stays at zero height while a keyed widget shows only its current thinking line as one numbered `Step N:` row; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -297,6 +297,7 @@ The relevant commands are:
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_CALM_PI_REAL_MODEL_E2E=1 tests/fm-calm-pi-real-model-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```
 
@@ -614,11 +615,29 @@ ok - Pi calm native E2E replaces the stock working row with a moving, resize-cla
 
 ## 2026-09-16 Pi 0.85.1 live intermediate-step verification
 
-The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session with a deterministic provider that streamed three assistant messages, each containing thinking, commentary, and a tool call, before a final response.
+The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session.
+It first loaded the legacy assistant wrapper that a long-lived process retained, replaced the source with the current adapter, invoked Pi's real `/reload`, and then used a deterministic provider to stream three assistant messages containing thinking, commentary, and a tool call before a final response.
 
 ```text
-$ NODE_NO_WARNINGS=1 FM_CALM_PI_HERDR_LIVE_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
-ok - real Pi 0.85.1 in Herdr displayed one replacing numbered Calm step around three tool calls, settled to the final response, and preserved planning context
+$ NODE_NO_WARNINGS=1 FM_CALM_PI_HERDR_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-herdr-live-e2e.test.sh
+ok - real Pi 0.85.1 in Herdr reloaded the current Calm adapter over the legacy process wrapper, displayed one replacing numbered step around three tool calls, settled to the final response, and preserved planning context
 ```
 
-The test observed one numbered assistant row at a time around all three tool calls, verified that settlement removed the planning and commentary rows, and verified that all planning and commentary text remained in the persisted session transcript.
+The test observed one externally read numbered widget row at a time around all three tool calls, verified that settlement removed the step plus all planning and commentary rows, and verified that all planning and commentary text remained in the persisted session transcript.
+The credentialed companion test uses the same four Firstmate extensions with the real `openai-codex/gpt-5.6-sol` model at `xhigh`, the existing authenticated user Pi configuration, and isolated Firstmate state plus session output.
+It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, and requires the settled `REAL_MODEL_FINAL_RESPONSE` frame to contain no step row.
+
+```text
+$ NODE_NO_WARNINGS=1 FM_CALM_PI_REAL_MODEL_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-real-model-live-e2e.test.sh
+proof - working Step 1:  Step 1: Planning sequential tool calls with watcher setup
+proof - working Step 3:  Step 3: I’ll start the required watcher cycle, then inspect
+proof - working Step 5:  Step 5: The watcher reports no live session lock. I
+proof - working Step 7:  Step 7: Plan for the first
+proof - working Step 8:  Step 8: Plan for the second file: read only `.calm-probe-b`, preserving the required order.
+proof - working Step 9:  Step 9: Plan for the third file: read only `.calm-pro
+proof - working Step 11:  Step 11: Plan for the final file: read `.calm-final`, then return its contents verbatim with nothing added.
+proof - final:  REAL_MODEL_FINAL_RESPONSE
+ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set exposed one externally read numbered step at a time across 7 steps, then no step row after the final response
+```
+
+The earlier live checks were false positives because both started fresh Pi processes after the latest source was already present; neither loaded a legacy process-global wrapper and then exercised `/reload`, which was the divergent captain-facing lifecycle.

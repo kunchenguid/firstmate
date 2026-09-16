@@ -32,7 +32,55 @@ trap cleanup EXIT
 
 mkdir -p "$PROJECT/.pi/extensions/lib" "$HOME_DIR/config" "$PI_CONFIG" "$SESSIONS"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$PROJECT/.pi/extensions/fm-calm.ts"
-cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.current.ts"
+cat >"$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts" <<'TS'
+import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import { calmPresentationHides } from "./fm-calm-visibility.ts";
+
+type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
+type LegacyPatch = {
+  hidesThinking: () => boolean;
+  hidesWorkingNote: () => boolean;
+};
+const LEGACY_PATCH = Symbol.for("firstmate:calm-assistant-layout:pi-0.81.1");
+
+export function installCalmAssistantLayout(): void {
+  const registry = globalThis as typeof globalThis & { [key: symbol]: LegacyPatch | undefined };
+  const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
+  const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
+  const installed = registry[LEGACY_PATCH];
+  if (installed) {
+    installed.hidesThinking = hidesThinking;
+    installed.hidesWorkingNote = hidesWorkingNote;
+    return;
+  }
+  const patch = { hidesThinking, hidesWorkingNote };
+  const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
+  const original = AssistantMessageComponent.prototype.updateContent;
+  AssistantMessageComponent.prototype.updateContent = function (message: AssistantMessage): void {
+    const state = this as unknown as {
+      hiddenThinkingLabel: string;
+      hideThinkingBlock: boolean;
+      lastMessage?: AssistantMessage;
+    };
+    const midTurn = message.stopReason === "toolUse";
+    const hideThinking =
+      state.hiddenThinkingLabel === "" && state.hideThinkingBlock && patch.hidesThinking();
+    const presentation = hideThinking || (midTurn && patch.hidesWorkingNote())
+      ? {
+          ...message,
+          content: message.content.filter((block) =>
+            !(hideThinking && block.type === "thinking") &&
+            !(midTurn && patch.hidesWorkingNote() && block.type === "text")),
+        }
+      : message;
+    original.call(this, presentation);
+    if (presentation !== message) state.lastMessage = message;
+  };
+  registry[LEGACY_PATCH] = patch;
+}
+TS
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
@@ -43,10 +91,12 @@ printf '%s\n' '{"type":"module"}' >"$PROJECT/package.json"
 printf '%s\n' 'calm live fixture' >"$PROJECT/calm-live-probe.txt"
 
 cat >"$PROJECT/calm-live-provider.ts" <<'TS'
+import { appendFileSync } from "node:fs";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI): void {
+  appendFileSync("calm-live-loads", "loaded\n");
   pi.registerProvider("calm-live", {
     baseUrl: "http://127.0.0.1/unused",
     apiKey: "test-only",
@@ -164,6 +214,16 @@ wait_for_text() {
   return 1
 }
 wait_for_text "(calm-live)" || fail "real Pi did not reach its ready composer"
+cp "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.current.ts" \
+  "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" '/reload' >/dev/null
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
+reloaded=0
+for i in $(seq 1 120); do
+  [ "$(wc -l <"$PROJECT/calm-live-loads" 2>/dev/null | tr -d ' ')" -ge 2 ] && { reloaded=1; break; }
+  sleep 0.1
+done
+[ "$reloaded" -eq 1 ] || fail "real Pi did not reload the current Calm adapter over the legacy live wrapper"
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" '/calm-live-probe' >/dev/null
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
@@ -271,4 +331,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr displayed one replacing numbered Calm step around three tool calls, settled to the final response, and preserved planning context\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr reloaded the current Calm adapter over the legacy process wrapper, displayed one replacing numbered step around three tool calls, settled to the final response, and preserved planning context\n' "$(pi --version)"

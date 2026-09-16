@@ -16,8 +16,8 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, mid-turn assistant working notes, routine supervision notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
-Calm shows one current live intermediate thinking or assistant-text row, prefixed with an increasing `Step N:` counter, while the model is streaming.
-Each distinct streamed line replaces the previous row instead of accumulating a planning transcript on screen.
+Calm shows one current live intermediate thinking or assistant-text update in a keyed widget, prefixed with an increasing `Step N:` counter, while the model is streaming.
+Each distinct streamed line replaces that same widget instead of accumulating assistant transcript rows on screen.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
 When the response settles, intermediate tool-use narration and any live planning thinking are hidden while the genuine final response stays visible.
 Restored tool-use narration remains hidden, while explicit reasoning expansion still restores the original reasoning row.
@@ -52,7 +52,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns assistant progress extraction, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns zero-height streaming and settled assistant layout, `.pi/extensions/fm-calm.ts` owns current-step extraction and its keyed widget, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
 
 Regression entry points:
 
@@ -62,4 +62,5 @@ tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_CALM_PI_HERDR_LIVE_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
+FM_CALM_PI_REAL_MODEL_E2E=1 tests/fm-calm-pi-real-model-live-e2e.test.sh
 ```
