@@ -131,6 +131,55 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Pane input readiness
+
+A pane only accepts a long typed line while its own program is reading input.
+When nothing is reading, the kernel buffers the line itself and discards the whole line past its canonical-mode limit, silently, which is how a ~1117-byte launch command could vanish and leave no worker started.
+`fm_tmux_wait_pane_input_ready` (`bin/fm-tmux-lib.sh`) waits for that state instead of measuring the text against a byte count, because the limit is `MAX_CANON` and platforms size it differently.
+
+Verified on 2026-09-15 with tmux 3.6a on macOS (Darwin 25.6.0), typing into a pane whose interactive shell was running `sleep`:
+
+```sh
+bin/fm-test-run.sh tests/fm-tmux-long-launch.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm_backend_tmux_send_literal: a 1634-byte launch command starts a worker on a busy pane
+ok - pane that never becomes ready refuses loudly and names the reason
+ok - fm_tmux_wait_pane_input_ready: unreadable tty mode stays permissive
+ok - fm_tmux_wait_pane_input_ready: a ready pane returns without spending the budget
+```
+
+The gate sits on the launch path only, in `fm_backend_tmux_send_literal`.
+`fm_tmux_submit_core` keeps sending unconditionally: its callers (steering messages, daemon injection, the inbox doorbell, `fm-control.sh exit`) send short text a busy pane buffers and delivers correctly, so there is no truncation there to prevent, and refusing to deliver an exit to a busy worker is exactly when it needs to land.
+
+Measured boundary behind those cases, same host and tmux version: a canonical-mode pane took 1023 payload bytes plus the newline intact and lost the entire line at 1024, while a pane at its prompt took 4088 bytes in one send intact.
+The readiness read tries BSD `stty -f` and GNU `stty -F`, so it works on both platforms; the boundary value itself is verified on macOS only, and Linux sizes its own buffer differently.
+
+#### Known limitation: readiness is sampled, not held
+
+The gate reads the pane's mode once and types immediately after.
+A pane draining a queue of earlier buffered lines oscillates between canonical and raw - the shell flips to raw for its line editor, consumes one line, flips back to canonical while that line runs, and so on - so a sample taken in one of those raw windows can be followed by a flip back to canonical before the text lands, and a long command can still be lost in that narrow window.
+Those windows are far narrower than the failure measured above (the spawn path's `export` lines each run and return in microseconds).
+The gate closes the common case measured here; it does not make the send atomic.
+
+#### Chunking the send does not fix this
+
+Splitting the text across several `tmux send-keys -l` calls is the obvious fix and it does not work, so do not reach for it again.
+The limit applies to the line the kernel accumulates, not to each write, so a canonical-mode pane loses the command whichever way the bytes arrive.
+Measured on the same host with the same 1117-byte payload: 400, 200, and 100 bytes per send, each with and without pauses between sends, lost the whole command every time, exactly as the single call did.
+Waiting for the pane to read input itself is what makes the send land, which is why the gate waits on readiness rather than reshaping the write.
+
+This supersedes the finding reported alongside the 2026-09-15 incident, that sending the identical command in roughly 400-byte chunks worked first time.
+That observation was real; what it measured was misattributed.
+The pane it was tried on was idle, and an idle pane is not subject to the limit at all - 4088 bytes in a single send arrive intact there.
+The command succeeded because of the pane's state, not because the text was split, which is why repeating the split against a busy pane reproduces the loss.
+
+The other session providers deliver text through their own tool rather than through `tmux send-keys`, and none of them is verified here.
+herdr was not exercised because doing so requires driving Herdr lifecycle, which needs the guarded lab; zellij and orca are not installed on this host; cmux was not exercised.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

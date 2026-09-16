@@ -45,6 +45,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-timing-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-timing-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -187,6 +189,77 @@ fm_tmux_pane_is_cursor() {  # <target>
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
   return 1
+}
+
+# fm_tmux_pane_input_mode: read the target pane's tty LINE DISCIPLINE, which is
+# the kernel fact deciding how much text one typed line can carry.
+#
+#   raw       - the pane's foreground program reads input itself, character at a
+#               time: any interactive shell's line editor, and every harness
+#               TUI. There is no line-length limit in this state; 4088 bytes in
+#               a single literal send were measured arriving intact.
+#   canonical - nothing is reading input, so the KERNEL buffers the line. Past
+#               its limit it discards the WHOLE line, silently. This is what a
+#               pane looks like while its shell is still running something.
+#   unknown   - the mode could not be read.
+#
+# The limit itself is deliberately not encoded here. It is MAX_CANON, 1024 on
+# macOS, and other platforms size it differently; callers wait for `raw` rather
+# than measuring the text against a number. See
+# docs/verification/runtime-backends.md "Pane input readiness".
+#
+# `unknown` is NOT "not ready": a pane whose tty cannot be read must keep
+# behaving exactly as it does today, so only a positively measured `canonical`
+# ever holds a send back. BSD `stty -f` and GNU `stty -F` are both tried so the
+# read works on macOS and Linux alike.
+fm_tmux_pane_input_mode() {  # <target> -> raw|canonical|unknown
+  local target=$1 tty out
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || { printf 'unknown'; return 0; }
+  case "$tty" in /dev/*) ;; *) printf 'unknown'; return 0 ;; esac
+  [ -c "$tty" ] || { printf 'unknown'; return 0; }
+  out=$(stty -f "$tty" -a 2>/dev/null) || out=$(stty -F "$tty" -a 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  # GNU stty separates flags with newlines and semicolons, BSD with newlines and
+  # spaces; normalize to spaces so each flag is a whole token, and match
+  # `-icanon` first so the negated flag is never read as the plain one.
+  out=" $(printf '%s' "$out" | tr '\n;,' '   ') "
+  case "$out" in
+    *' -icanon '*) printf 'raw' ;;
+    *' icanon '*) printf 'canonical' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_tmux_wait_pane_input_ready: wait, bounded by ELAPSED TIME, for <target> to
+# be reading input itself, so a long line can actually land. Returns 0 as soon
+# as the pane is ready - or immediately when its mode cannot be read at all -
+# and 1 only when the pane stayed measurably canonical for the whole wait.
+#
+# The bound is a clock deadline rather than a count of polls, because each poll
+# spends a `tmux display-message` and an `stty` fork on top of its sleep: a
+# counted budget would hold a never-ready pane for several times the number the
+# caller's refusal then names. The clock is fm_timing_now_ms
+# (bin/fm-timing-lib.sh), the fleet's single reader of it, so the deadline
+# degrades on a shell without EPOCHREALTIME exactly where every other elapsed
+# measurement does.
+#
+# The default 5s budget is three times the longest canonical window measured on
+# a real pane (1.64s for a `sleep 1`) and matches the worktree-settle budget
+# bin/fm-spawn.sh already spends. A ready pane costs one poll, which is the
+# common case: the `export` lines the spawn path sends before launch leave the
+# pane ready again in under one 0.05s poll.
+fm_tmux_wait_pane_input_ready() {  # <target> [timeout-seconds]
+  local target=$1 timeout=${2:-${FM_PANE_READY_TIMEOUT:-5}}
+  local mode budget_ms deadline_ms
+  budget_ms=$(awk -v t="$timeout" 'BEGIN { printf "%d", (t > 0 ? t * 1000 : 0) }' 2>/dev/null)
+  case "$budget_ms" in ''|*[!0-9]*) budget_ms=5000 ;; esac
+  deadline_ms=$(( $(fm_timing_now_ms) + budget_ms ))
+  while :; do
+    mode=$(fm_tmux_pane_input_mode "$target")
+    [ "$mode" = canonical ] || return 0
+    [ "$(fm_timing_now_ms)" -lt "$deadline_ms" ] || return 1
+    sleep 0.05
+  done
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
