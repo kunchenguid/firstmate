@@ -29,10 +29,9 @@
 # Launch the primary through bin/fm-dsh-launch.sh, which applies this patch
 # itself with --patch, so no manual install step is needed. It sets
 # FM_DSH_HARNESS, FM_HOME and the locale at process start: a tool call cannot
-# set them, and hook subprocesses inherit whatever the host was given. Its
-# DSH_PERMISSION_MODE export is only a fallback for a later overlay that hands
-# the sandbox-policy row back to dsh-base's expression; the literal pin below is
-# what decides the hook sandbox. The launcher also runs
+# set them, and hook subprocesses inherit whatever the host was given. The hook
+# sandbox mode is not among them: the literal pin below is the only thing that
+# decides it. The launcher also runs
 # bin/fm-dsh-preflight.sh, which asserts the bridge pin, the
 # budget of the row a new session renders with, and that new sessions
 # default to the danger-full-access permission preset and hooks run under the

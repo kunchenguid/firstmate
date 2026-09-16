@@ -12,26 +12,29 @@
 # harness and version rather than degrading quietly.
 #
 # The contracts, each of which was once assumed and later measured:
-#   1. UserPromptSubmit delivers additionalContext BEFORE the first request.
+#   1. A hooks bridge pinned at the running dsh-base passes the preflight with
+#      the tracked patch and no DSH_PERMISSION_MODE, so the hook sandbox mode it
+#      reads comes from the patch's literal pin alone.
+#   2. UserPromptSubmit delivers additionalContext BEFORE the first request.
 #      DSH's SessionStart hook runs detached and lands after it, so the digest
 #      rides UserPromptSubmit; if that ever stops holding, the session-start
 #      digest silently arrives a turn late.
-#   2. A PreToolUse hook with the lowercase `bash` matcher fires AND a deny
+#   3. A PreToolUse hook with the lowercase `bash` matcher fires AND a deny
 #      blocks the call. The delegation guard and both seatbelts rest on it.
-#   3. A Stop hook that exits 2 forces one more model step, and the terminal
+#   4. A Stop hook that exits 2 forces one more model step, and the terminal
 #      alarm turn is bounded rather than looping.
-#   4. A hook subprocess inherits the host's environment, which is the premise
+#   5. A hook subprocess inherits the host's environment, which is the premise
 #      bin/fm-dsh-launch.sh's exported marker depends on.
-#   5. The documented `web` launch renders AGENTS.md whole. dsh-web-app disables
+#   6. The documented `web` launch renders AGENTS.md whole. dsh-web-app disables
 #      the host agent-instructions row and composes each session from its
 #      default agent preset, so the budget that matters is the tracked firstmate
 #      preset's. The headless sessions above cannot see this: their host row is
 #      live, which is how a disabled web row once passed unnoticed.
-#   6. bin/fm-dsh-launch.sh's own exec loads the web plugin tree with the
+#   7. bin/fm-dsh-launch.sh's own exec loads the web plugin tree with the
 #      tracked patch applied once. DSH refuses a parent --patch before `web`, and
 #      a doubled bridge insert throws "duplicate loader entry id" only when the
 #      tree loads, so a config dump through the preflight passed both unnoticed.
-#   7. The tracked patch keeps every permission preset dsh-base offers. A patch
+#   8. The tracked patch keeps every permission preset dsh-base offers. A patch
 #      replaces a row's whole config, so a permission row carrying only its
 #      default silently drops the read-only preset from every picker.
 set -u
@@ -139,7 +142,7 @@ SH
 # throwaway profile already mounts the bridge, raises the budget and sets the
 # default permission preset; the hook sandbox mode comes only from the tracked
 # patch's literal pin. DSH_PERMISSION_MODE is unset, so the check cannot pass on
-# dsh-base's expression over a variable inherited from a launcher-started shell.
+# dsh-base's expression over a variable inherited from the caller's shell.
 if ! env -u DSH_PERMISSION_MODE "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
     --patch "$ROOT/.dsh/profile.patch.yml" >/dev/null 2>&1; then
   fail "fm-dsh-preflight.sh rejected the freshly pinned profile '$PROFILE' with the tracked patch (dsh-base $BASE_VERSION)"
@@ -265,7 +268,7 @@ pass "live dsh $BASE_VERSION: the launcher's web exec loads the plugin tree with
 # Composed with DSH's own layer composer and resolved through the permission
 # plugin's own config schema, over the disposable web profile, once as the
 # profile boots bare and once with the tracked patch applied last.
-presets=$(cd "$ROOT" && env -u DSH_PERMISSION_MODE FM_ROOT="$ROOT" node --input-type=module -e '
+presets=$(cd "$ROOT" && FM_ROOT="$ROOT" node --input-type=module -e '
 const [scope, root, dshHome] = process.argv.slice(1);
 const { pathToFileURL } = await import("node:url");
 const boot = await import(pathToFileURL(scope + "/dsh-app-boot/lib/index.js").href);

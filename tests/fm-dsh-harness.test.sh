@@ -29,7 +29,6 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
   ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS FM_DSH_HARNESS
 
 HARNESS="$ROOT/bin/fm-harness.sh"
-GUARD="$ROOT/bin/fm-turnend-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dsh-harness)
 
 # A fake `ps` answering per-pid comm/args/ppid, the fm-agy-harness shape. The
@@ -298,7 +297,8 @@ permission_row() {  # <default preset|->
   [ "$1" = - ] || printf -- '    defaultPreset: %s\n' "$1"
 }
 
-# The composed sandbox-policy row as dsh-base ships it, or with a literal <mode>.
+# The composed sandbox-policy row as dsh-base ships it, or with a literal <mode>
+# as the tracked patch pins it.
 sandbox_row() {  # [<mode>]
   printf -- '- id: sandbox-policy\n  name: "@deepseek-ai/dsh-sandbox-policy"\n  config:\n'
   if [ -n "${1:-}" ]; then
@@ -316,7 +316,7 @@ write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>]
     printf '# == @deepseek-ai/dsh-base\n'
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: %s\n' "$2"
     [ -z "${3:-}" ] || printf -- '- id: other-plugin\n  name: other-plugin\n  config:\n    maxBytes: %s\n' "$3"
-    sandbox_row
+    sandbox_row danger-full-access
     permission_row "${4:-danger-full-access}"
     printf -- '- id: skill\n  name: "@deepseek-ai/dsh-skill"\n'
   } > "$1"
@@ -331,7 +331,7 @@ write_web_dump() {  # <file> <default preset>
     printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n'
     printf '# == @deepseek-ai/dsh-web-app\n'
     printf -- '- id: agent-presets\n  name: "@deepseek-ai/dsh-agent-presets"\n  config:\n    default: %s\n    roots:\n      - path: !!js process.cwd() + "/.dsh/agent-presets"\n        trust: system\n' "$2"
-    sandbox_row
+    sandbox_row danger-full-access
     permission_row danger-full-access
   } > "$1"
 }
@@ -391,7 +391,7 @@ for a in "\$@"; do
 done
 case " \$* " in
   *" --dump-config "*) ;;
-  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'; exit 0 ;;
+  *) printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'; exit 0 ;;
 esac
 case " \$* " in *" --profile p "*|*" --profile web "*) ;; *) exit 1 ;; esac
 dump='$dir/dump.yml'
@@ -407,7 +407,7 @@ run_preflight() {  # <dsh-home> [preflight args...] -> stdout in $PREFLIGHT_OUT,
   local home=$1
   shift
   PREFLIGHT_RC=0
-  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" DSH_PERMISSION_MODE=danger-full-access \
+  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
     "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" "$@" 2>&1) || PREFLIGHT_RC=$?
 }
 
@@ -425,15 +425,11 @@ test_dsh_launcher_roots_the_host_in_its_checkout() {
   ln -s p "$dir/profiles/web"
   elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
   rc=0
-  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_PERMISSION_MODE=workspace-write DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
       "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 >/dev/null 2>&1 ) || rc=$?
   [ "$rc" -eq 0 ] || fail "the documented web launch must pass the preflight and boot, got rc=$rc"
   assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
   assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
-  # Hooks run with no session, so they get the host's sandbox-policy mode. The
-  # tracked patch pins it; the export is the fallback for a later overlay that
-  # hands the row back to dsh-base's DSH_PERMISSION_MODE expression.
-  assert_equals "mode=danger-full-access" "$(sed -n 3p "$dir/dsh-env")" "the host was not started with hooks able to run ps"
   assert_equals "$(printf '%s\n' web --patch "$ROOT/.dsh/profile.patch.yml" --port 3080)" "$(cat "$dir/dsh-argv")" \
     "the host must get the tracked patch after web and the operator's arguments once"
   pass "fm-dsh-launch.sh: the documented web launch boots rooted in its checkout whatever the caller's cwd"
@@ -660,26 +656,27 @@ test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
   local home rc out
   # The hooks bridge runs a hook with no session, so the hook gets the host's
   # sandbox-policy mode, not the session's permission preset. The tracked patch
-  # pins that mode literally, which must pass with no DSH_PERMISSION_MODE at all;
-  # dsh-base's own row computes it from that variable, so left unpinned it must
-  # fail without it, as must a profile pinning another mode.
+  # pins that mode literally, the only mechanism, which must pass with no
+  # DSH_PERMISSION_MODE at all; dsh-base's own row computes it from that
+  # variable, so left unpinned it must fail without it, as must a profile
+  # pinning another mode.
   home=$(make_dsh_home "$TMP_ROOT/pre-hookmode" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
-  rc=0
-  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
-    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
-  [ "$rc" -eq 3 ] || fail "hooks defaulting to workspace-write must fail the preflight, got rc=$rc: $out"
-  assert_contains "$out" "hooks run under sandbox mode 'workspace-write'" "the hook sandbox mode was not named"
-  { sandbox_row danger-full-access; permission_row danger-full-access
-    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   rc=0
   out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
     "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a literally pinned danger-full-access mode must pass with no DSH_PERMISSION_MODE, got rc=$rc: $out"
   assert_contains "$out" "hooks run under the danger-full-access sandbox mode" "the pinned hook mode was not reported"
+  { sandbox_row; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  rc=0
+  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
+  [ "$rc" -eq 3 ] || fail "an unpinned mode defaulting to workspace-write must fail the preflight, got rc=$rc: $out"
+  assert_contains "$out" "hooks run under sandbox mode 'workspace-write'" "the hook sandbox mode was not named"
   { sandbox_row workspace-write; permission_row danger-full-access
     printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a profile pinning workspace-write must fail even when launched, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a profile pinning workspace-write must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
   assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode 'workspace-write'" "the pinned mode was not named"
   # An expression only DSH's loader scope can evaluate is not a passing mode.
   { sandbox_row '!!js ctx.loader.mode'; permission_row danger-full-access
@@ -687,10 +684,6 @@ test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "an unevaluable mode must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
   assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode '<unreadable>'" "the unevaluable mode was not named"
-  write_dump "$home/dump.yml" 262144
-  run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the launcher's DSH_PERMISSION_MODE must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "hooks run under the danger-full-access sandbox mode" "the passing hook mode was not reported"
   pass "fm-dsh-preflight.sh: hooks must run under a sandbox mode that permits ps"
 }
 
