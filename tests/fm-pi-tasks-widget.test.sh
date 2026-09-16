@@ -54,6 +54,7 @@ let execCalls = 0;
 let aborts = 0;
 let transcriptWrites = 0;
 let modelStarts = 0;
+const sentMessages = [];
 const responses = [];
 const tui = { terminal: { rows: 24 }, requestRender() { renderRequests += 1; } };
 const ui = {
@@ -72,7 +73,7 @@ const pi = {
   },
   registerCommand(name, options) { commands.set(name, options); },
   sendMessage() { transcriptWrites += 1; },
-  sendUserMessage() { transcriptWrites += 1; },
+  sendUserMessage(message) { sentMessages.push(message); transcriptWrites += 1; },
   appendEntry() { transcriptWrites += 1; },
   async exec(command, args, options) {
     execCalls += 1;
@@ -102,8 +103,15 @@ const context = {
 };
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+for (const status of ["working", "reviewing", "delivering", "monitoring"]) {
+  const elapsed = mod.formatTaskElapsed({ id: status, ref: "t1", name: status, status, outcome: "", started_at: "2026-09-16T10:00:00Z" }, now);
+  if (elapsed !== "00:00:05") throw new Error(`${status} did not expose phase elapsed time: ${elapsed}`);
+}
+if (mod.formatTaskElapsed({ id: "done", ref: "t2", name: "done", status: "done", outcome: "", started_at: "2026-09-16T10:00:00Z" }, now) !== "—") {
+  throw new Error("Done candidate exposed an active elapsed timer");
+}
 mod.default(pi);
-if (!commands.has("tasks")) throw new Error("/tasks was not registered");
+if (!commands.has("tasks") || !commands.has("t")) throw new Error("task dashboard commands were not registered");
 if (commands.get("tasks").description !== "Toggle Firstmate's live current-task table.") {
   throw new Error(`unexpected command description: ${commands.get("tasks").description}`);
 }
@@ -112,6 +120,9 @@ await emit("session_start", { reason: "startup" });
 if (component !== undefined) throw new Error("startup did not leave the task widget hidden");
 if (widgetCalls.at(-1)?.content !== undefined) throw new Error("startup did not explicitly clear the keyed widget");
 if ([...intervals.values()].some((timer) => timer.active)) throw new Error("startup created a hidden timer");
+if (commands.get("t").description !== "Open the task dashboard or route to one task.") {
+  throw new Error(`unexpected /t command description: ${commands.get("t").description}`);
+}
 
 responses.push({
   code: 0,
@@ -120,32 +131,34 @@ responses.push({
   stdout: JSON.stringify([
     { id: "active", ref: "t1", name: "active-work", status: "working", outcome: "implementing", started_at: "2026-09-16T10:00:00Z" },
     { id: "unknown", ref: "t2", name: "unknown-clock", status: "working", outcome: "waiting for timestamp", started_at: null },
-    { id: "ready", ref: "t3", name: "ready-work", status: "ready", outcome: "awaiting landing", started_at: "2026-09-16T09:00:00Z" },
+    { id: "done", ref: "t3", name: "done-work", status: "done", outcome: "candidate ready for review", started_at: "2026-09-16T09:00:00Z" },
   ]),
 });
 const entriesBefore = context.sessionManager.getEntries().length;
-await commands.get("tasks").handler("ignored", context);
+await commands.get("t").handler("", context);
 await settle();
-if (!component) throw new Error("first /tasks did not open the widget");
+if (!component) throw new Error("bare /t did not open the dashboard widget");
 if (widgetCalls.at(-1)?.key !== "firstmate-live-tasks") throw new Error("widget key changed");
 if (widgetCalls.at(-1)?.options?.placement !== "belowEditor") throw new Error("task widget is not isolated below Calm's above-editor rows");
-if (execCalls !== 1) throw new Error(`first open ran ${execCalls} task subprocesses`);
+if (execCalls !== 1) throw new Error(`bare /t ran ${execCalls} task subprocesses`);
 if (transcriptWrites !== 0 || context.sessionManager.getEntries().length !== entriesBefore || modelStarts !== 0) {
-  throw new Error("/tasks wrote transcript state or started a model turn");
+  throw new Error("bare /t wrote transcript state or started a model turn");
 }
+await commands.get("t").handler("t1", context);
+if (sentMessages.at(-1) !== "/task t1") throw new Error("/t selector did not route to /task");
 let wide = component.render(80);
 if (!wide.some((line) => line.includes("Elapsed")) || !wide.some((line) => line.includes("00:00:05"))) {
   throw new Error(`wide table omitted elapsed counter: ${wide.join("\n")}`);
 }
 const unknownLine = wide.find((line) => line.includes("unknown-clock"));
-const readyLine = wide.find((line) => line.includes("ready-work"));
-if (!unknownLine?.includes("—") || !readyLine?.includes("—")) {
+const doneLine = wide.find((line) => line.includes("done-work"));
+if (!unknownLine?.includes("—") || !doneLine?.includes("—")) {
   throw new Error(`unknown or inactive timestamps were inferred: ${wide.join("\n")}`);
 }
 if (!wide.every((line) => Array.from(line).length === 80)) throw new Error("wide render was not exactly width-aware");
 tui.terminal.rows = 6;
 const capped = component.render(80);
-if (!capped.some((line) => line.includes("+2 more")) || capped.some((line) => line.includes("ready-work"))) {
+if (!capped.some((line) => line.includes("+2 more")) || capped.some((line) => line.includes("done-work"))) {
   throw new Error(`short terminal did not cap rows with a +N summary: ${capped.join("\\n")}`);
 }
 tui.terminal.rows = 24;
@@ -170,7 +183,7 @@ responses.push({
   stderr: "",
   killed: false,
   stdout: JSON.stringify([
-    { id: "active", ref: "t1", name: "active-work", status: "ready", outcome: "state changed live", started_at: "2026-09-16T10:00:00Z" },
+    { id: "active", ref: "t1", name: "active-work", status: "reviewing", outcome: "state changed live", started_at: "2026-09-16T10:00:00Z" },
   ]),
 });
 now += 2000;

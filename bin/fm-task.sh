@@ -9,11 +9,12 @@
 # finalized data/closed-tasks records through fm-history.sh. Retired short
 # references never resolve from history because they may be recycled.
 #
-# Current detail composes the canonical fleet snapshot, current-state
-# reconciliation, task instructions, metadata, and recorded artifacts. It does
-# not persist another task summary. Dates are emitted only from explicit backlog,
-# metadata, or closure fields; absent dates stay null/unknown and file mtimes are
-# never treated as lifecycle dates.
+# Current detail composes the captain-facing lifecycle projection owned by
+# bin/fm-task-lifecycle.sh with task instructions, metadata, and artifacts.
+# docs/task-lifecycle.md owns status and route semantics. This command does not
+# persist another task summary. Dates are emitted only from explicit backlog,
+# metadata, lifecycle, or closure fields; absent dates stay null/unknown and file
+# mtimes are never treated as lifecycle dates.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,6 +92,16 @@ render_model() {  # <json>
     "Purpose: \(.purpose | shown(.))",
     "Details: \(.details | if . == null or . == "" then "none recorded" else . end)",
     "Current outcome: \(.outcome | shown(.))",
+    "Selected route: \(.route | shown(.))",
+    (if .acceptance == null then "Acceptance: not recorded"
+     else "Acceptance: \(.acceptance.actor) at \(.acceptance.at) - \(.acceptance.evidence)" end),
+    (if .acceptance == null then empty else "Acceptance limitations: \(.acceptance.limitations)" end),
+    (if .lifecycle.review == null then "Review: not recorded"
+     else "Review: started \(.lifecycle.review.startedAt | shown(.)); completed \(.lifecycle.review.completedAt | shown(.))" end),
+    (if .lifecycle.delivery == null then empty
+     else "Delivery phase: started \(.lifecycle.delivery.startedAt | shown(.)); completed \(.lifecycle.delivery.completedAt | shown(.))" end),
+    (if .lifecycle.monitoring == null then empty
+     else "Monitoring phase: started \(.lifecycle.monitoring.startedAt | shown(.)); completed \(.lifecycle.monitoring.completedAt | shown(.))" end),
     "Delivery / landing: \(.delivery | shown(.))",
     "Artifacts: \(.artifacts | list(.))",
     (if .source == "closed" then "Retained knowledge: \(.retainedKnowledge | list(.))" else empty end),
@@ -101,13 +112,17 @@ render_model() {  # <json>
 }
 
 current_model() {  # <compact-task-json>
-  local summary=$1 id snapshot row task ref name status outcome meta brief intent details
+  local summary=$1 id snapshot row task ref name status outcome meta brief intent details lifecycle route next_action close_ready
   local created started finished delivered
   id=$(printf '%s\n' "$summary" | jq -r '.id')
   ref=$(printf '%s\n' "$summary" | jq -r '.ref')
   name=$(printf '%s\n' "$summary" | jq -r '.name')
   status=$(printf '%s\n' "$summary" | jq -r '.status')
   outcome=$(printf '%s\n' "$summary" | jq -r '.outcome')
+  lifecycle=$(printf '%s\n' "$summary" | jq -c '.lifecycle')
+  route=$(printf '%s\n' "$summary" | jq -r '.route // empty')
+  next_action=$(printf '%s\n' "$summary" | jq -r '.next_action')
+  close_ready=$(printf '%s\n' "$summary" | jq -r '.close_ready')
   snapshot=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
     FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) \
     || fail "could not read the current fleet snapshot"
@@ -117,7 +132,9 @@ current_model() {  # <compact-task-json>
     '[.tasks[]? | select(.id == $id)] | if length == 1 then .[0] else {} end')
   if [ "$(printf '%s\n' "$row" | jq 'length')" -eq 0 ] \
      && [ "$(printf '%s\n' "$task" | jq 'length')" -eq 0 ]; then
-    fail "current task $id disappeared during detail lookup; retry"
+    [ "$lifecycle" != null ] || fail "current task $id disappeared during detail lookup; retry"
+    row=$(jq -n --arg id "$id" --arg title "$name" \
+      '{id:$id,title:$title,state:"done",structured:true,unresolved_blocker_ids:[]}')
   fi
   meta="$STATE/$id.meta"
   brief="$DATA/$id/brief.md"
@@ -127,12 +144,13 @@ current_model() {  # <compact-task-json>
   created=$(printf '%s\n' "$row" | jq -r '.since // empty')
   started=$(meta_value "$meta" started_at)
   finished=$(printf '%s\n' "$row" | jq -r '.done // .completion.date // empty')
-  delivered=$(printf '%s\n' "$row" | jq -r '.merged // .reported // empty')
+  delivered=$(printf '%s\n' "$lifecycle" | jq -r '.delivery.completedAt // empty')
+  [ -n "$delivered" ] || delivered=$(printf '%s\n' "$row" | jq -r '.merged // .reported // empty')
 
   jq -n \
-    --argjson row "$row" --argjson task "$task" \
+    --argjson row "$row" --argjson task "$task" --argjson lifecycle "$lifecycle" \
     --arg id "$id" --arg ref "$ref" --arg name "$name" \
-    --arg status "$status" --arg outcome "$outcome" \
+    --arg status "$status" --arg outcome "$outcome" --arg route "$route" --arg nextAction "$next_action" --argjson closeReady "$close_ready" \
     --arg intent "$intent" --arg details "$details" \
     --arg created "$created" --arg started "$started" \
     --arg finished "$finished" --arg delivered "$delivered" '
@@ -143,8 +161,7 @@ current_model() {  # <compact-task-json>
       elif (($task.hints.open_decisions // []) | length) > 0
         then ($task.hints.open_decisions | map(.summary) | join("; "))
       else "" end;
-    def current_outcome:
-      if $status == "done" then ($row.local_note // $row.body_excerpt // $outcome) else $outcome end;
+    def current_outcome: $outcome;
     def attention:
       if decision_text != "" then "Captain decision: " + decision_text
       elif $status == "blocked" and (blockers | length) > 0 then "Blocked by: " + (blockers | join(", "))
@@ -159,36 +176,28 @@ current_model() {  # <compact-task-json>
         (if ($task.paths.report.present // false) then "data/" + $id + "/report.md" else null end)
       ] | map(select(. != null and . != "")) | unique);
     def delivery($status):
-      if ($row.state // "") == "done" then current_outcome
-      elif ($task.mode // "") == "local-only" and $status == "ready" then "Local branch awaiting landing approval"
-      elif ($task.pr.url // "") != "" and $status == "ready" then "PR awaiting landing approval: " + $task.pr.url
-      elif ($task.pr.url // "") != "" then "PR open: " + $task.pr.url
-      elif ($task.kind // $row.kind // "") == "scout" and ($task.paths.report.present // false) then "Report available"
-      elif ($task.mode // "") == "local-only" then "Local branch in progress"
+      if $status == "accepted" and $route == "close" then "No delivery selected"
+      elif ($lifecycle.delivery.completedAt // "") != "" then "Delivery completed: " + $lifecycle.delivery.evidence
+      elif $status == "delivering" then "Delivery in progress"
+      elif ($task.pr.url // "") != "" then "Candidate PR: " + $task.pr.url
+      elif ($task.kind // $row.kind // "") == "scout" and ($task.paths.report.present // false) then "Candidate report available"
+      elif ($task.mode // "") == "local-only" then "Candidate local branch"
       elif ($task.mode // "") != "" then $task.mode
       else "Not recorded" end;
-    def next_action($status; $outcome):
-      if $status == "done" then "Ready to close"
-      elif $status == "ready" then "Awaiting landing approval"
-      elif $status == "needs-you" then "Answer the captain decision"
-      elif $status == "blocked" then "Resolve the blocker"
-      elif $status == "queued" then "Ready to start"
-      elif $status == "working" then $outcome
-      elif $status == "waiting" then "Wait for the recorded external condition"
-      elif $status == "failed" then "Investigate the failure"
-      else "Reconcile current state" end;
     (artifact_list) as $artifacts
     | {
-        schema:"fm-task-detail.v1", source:"current",
+        schema:"fm-task-detail.v2", source:"current",
         ref:$ref, name:$name, id:$id,
         project:($row.repo // (($task.project // "") | if . == "" then null else (split("/") | last) end)),
         kind:($row.kind // $task.kind // null), status:$status,
         dates:{created:value($created), started:value($started), finished:value($finished), delivered:value($delivered), closed:null},
         purpose:(if $intent != "" then $intent elif ($row.title // "") != "" then $row.title elif $details != "" then $details else null end),
         details:value($details), outcome:current_outcome,
+        route:value($route), acceptance:($lifecycle.acceptance // null), lifecycle:$lifecycle,
+        closeReady:$closeReady,
         delivery:delivery($status), artifacts:$artifacts,
         retainedKnowledge:[], followUps:[], attention:attention,
-        nextAction:next_action($status; $outcome)
+        nextAction:$nextAction
       }
   '
 }
@@ -218,13 +227,15 @@ closed_model() {  # <selector>
     def value($x): if $x == "" then null else $x end;
     $record as $r
     | {
-        schema:"fm-task-detail.v1", source:"closed",
+        schema:"fm-task-detail.v2", source:"closed",
         ref:(($r.ref // "-") + " (retired)"), name:$r.name, id:$r.id,
         project:($r.project // null), kind:($r.kind // null), status:"closed",
         dates:{created:($r.dates.created // null), started:($r.dates.started // null),
-          finished:($r.dates.completed // null), delivered:null, closed:($r.dates.closed // null)},
+          finished:($r.dates.completed // null), delivered:($r.lifecycle.delivery.completedAt // null), closed:($r.dates.closed // null)},
         purpose:(if $intent != "" then $intent elif $purpose != "" then $purpose else ($r.result // null) end),
         details:value($details), outcome:($r.result // "Closed"),
+        route:($r.lifecycle.acceptance.route // null), acceptance:($r.lifecycle.acceptance // null),
+        lifecycle:($r.lifecycle // null), closeReady:false,
         delivery:("Closed and archived at " + ($r.archive // ("data/closed-tasks/" + $r.id))),
         artifacts:($r.artifacts // []), retainedKnowledge:($r.retainedKnowledge // []),
         followUps:($r.followUps // []), attention:null,

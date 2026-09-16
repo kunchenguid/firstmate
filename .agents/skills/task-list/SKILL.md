@@ -18,5 +18,5 @@ For the literal `/tasks` command, do nothing here: Pi's extension-owned command 
 
 Names are concise two-to-four-token lowercase hyphenated shorthands, and are separately editable with `bin/fm-tasks.sh name <selector> <name>` when the captain explicitly asks to rename one.
 
-The command derives status from the canonical backlog and current-state reconciler.
-Done rows remain current with outcome `Ready to close` until `/close` archives them or the configured recent-Done retention moves older rows out of the live backlog.
+[`docs/task-lifecycle.md`](../../../docs/task-lifecycle.md) owns every displayed status, route, and closure prerequisite.
+The command derives that captain-facing projection from canonical task records; durable post-review rows remain visible until guarded closure, while unreviewed legacy Done rows still follow configured backlog retention.

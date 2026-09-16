@@ -7,9 +7,10 @@
 // this table deliberately lives below the editor, so neither extension removes,
 // reorders, or recreates the other's components during toggles.
 //
-// bin/fm-tasks.sh --json owns task selection, ordering, normalized state, current
-// outcome, and authoritative started_at projection. This extension only renders
-// that model, refreshes it on relevant Pi events plus one bounded fallback, and
+// bin/fm-task-lifecycle.sh and docs/task-lifecycle.md own task selection,
+// normalized state, routes, and semantics; bin/fm-tasks.sh --json exposes that
+// projection with ordering and authoritative phase started_at values. This extension
+// only renders that model, refreshes it on relevant Pi events plus one bounded fallback, and
 // advances elapsed labels locally once per second without rediscovering the fleet.
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,7 +78,8 @@ function cell(value: string, width: number): string {
 }
 
 export function formatTaskElapsed(row: TaskWidgetRow, now = Date.now()): string {
-  if (row.status !== "working" || !row.started_at) return "—";
+  const timedStatuses = ["working", "reviewing", "delivering", "monitoring"];
+  if (!timedStatuses.includes(row.status) || !row.started_at) return "—";
   const started = Date.parse(row.started_at);
   if (!Number.isFinite(started) || started > now) return "—";
   const totalSeconds = Math.floor((now - started) / 1000);
@@ -408,11 +410,26 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_end", refreshOnEvent);
   pi.on("message_end", refreshOnEvent);
 
+  const toggleDashboard = (ctx: ExtensionContext): void => {
+    if (live?.visible) hide();
+    else show(ctx);
+  };
+
   pi.registerCommand("tasks", {
     description: "Toggle Firstmate's live current-task table.",
     handler: async (_args, ctx) => {
-      if (live?.visible) hide();
-      else show(ctx);
+      toggleDashboard(ctx);
+    },
+  });
+  pi.registerCommand("t", {
+    description: "Open the task dashboard or route to one task.",
+    handler: async (args, ctx) => {
+      const selector = args.trim();
+      if (selector === "") {
+        toggleDashboard(ctx);
+        return;
+      }
+      pi.sendUserMessage(`/task ${selector}`);
     },
   });
 }

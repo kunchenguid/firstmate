@@ -167,7 +167,7 @@ SH
   cat > "$repo/bin/fm-task.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = t7 ] && [ "$#" -eq 1 ] || exit 2
-printf 'Task t7: detailed-task\nNext action: Ready to close\n'
+printf 'Task t7: detailed-task\nNext action: Start review\n'
 SH
   cat > "$repo/bin/fm-close.sh" <<'SH'
 #!/usr/bin/env bash
@@ -217,7 +217,7 @@ if (notification?.message !== "Ref: t7 - detailed-task\nRecommendation: Close it
   throw new Error(`next card was not returned verbatim: ${JSON.stringify(notification)}`);
 }
 await handlers.get("task")("t7", context);
-if (notification?.message !== "Task t7: detailed-task\nNext action: Ready to close" || notification?.type !== "info") {
+if (notification?.message !== "Task t7: detailed-task\nNext action: Start review" || notification?.type !== "info") {
   throw new Error(`task detail was not returned verbatim: ${JSON.stringify(notification)}`);
 }
 await handlers.get("close")("--review t7", context);

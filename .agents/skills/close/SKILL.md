@@ -14,8 +14,10 @@ For `/close --review <selector>`, run `bin/fm-close.sh --review <selector>` and 
 Inspect the named task's private report or instructions only when the captain asks what Firstmate recommends retaining.
 Apply the knowledge-routing rules already owned by `AGENTS.md`: task-specific material stays in the closed-task archive, fleet facts go to `data/learnings.md`, preferences go to the appropriate captain record, project-wide knowledge requires the project's normal delivery path, and general Firstmate knowledge requires Firstmate's normal delivery path.
 
-For routine `/close <selector>...`, run `bin/fm-close.sh <selector>...`.
-The command independently verifies every task, composes guarded cleanup when needed, archives useful private material, removes only verified Done rows through the configured backlog owner, and leaves failed batch members current.
+[`docs/task-lifecycle.md`](../../../docs/task-lifecycle.md) owns acceptance, selected routes, and closure prerequisites.
+For a task whose recorded route is complete, run `bin/fm-close.sh <selector>...`.
+When the captain explicitly closes an unreviewed candidate without delivery, run the single-task combined path with `--accept-close --actor captain --evidence <the captain's explicit close instruction>` and add actual limitations when any were stated.
+The command independently verifies every task, composes guarded cleanup when needed, archives acceptance and useful private material, removes only eligible rows through the configured backlog owner, and leaves failed batch members current.
 Report each concrete closure or refusal in plain language.
 
 When the captain explicitly chooses and the destination has already been written through its normal owner, add `--retained <destination>` so the closure record links it.

@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# fm-next.sh - select and render the single highest-value captain action.
+# Select and render the single highest-value captain-facing lifecycle action.
 #
 # Usage: fm-next.sh [--json] [--snapshot <path>|-]
 #
-# The command composes bin/fm-fleet-snapshot.sh rather than reading task state
-# itself. Its ranking is deterministic and does not mutate backlog or work state;
-# the snapshot may refresh observational caches and the identity owner may sync
-# private callsign assignments.
-# Default output is the stable plain-text card stored in the JSON `card` field;
-# --json prints the complete `fm-next.v1` object used by tests and other views.
-# --snapshot accepts an already captured canonical snapshot, with `-` meaning
-# stdin. This is primarily a deterministic composition/test seam.
-#
-# Ranking, in order:
-#   1. active work with a live captain call;
-#   2. finished delivery that lacks standing landing authority;
-#   3. inactive blocked work with a live captain call;
-#   4. ready queued captain-kind work whose ordering needs judgment;
-#   5. one Done item to close, but only when neither captain nor autonomous
-#      forward work exists.
-# Within one tier: explicit priority, number of downstream tasks released,
-# active before inactive, oldest actionable wait, then callsign and canonical id.
-# Ordinary autonomous recovery, landing with standing authority, and ordinary
-# ready queued work are deliberately ineligible.
+# docs/task-lifecycle.md owns status and route semantics. The command composes
+# fm-task-lifecycle.sh's projection rather than inferring acceptance from backlog
+# Done, worker completion, tests, or delivery. Ranking is deterministic:
+# concrete captain actions that restart work, review/acceptance/delivery work,
+# then closure only when no forward action remains. Within one tier: priority,
+# downstream tasks released, active before inactive, oldest action, callsign,
+# then canonical id. The command never mutates a task.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,19 +18,15 @@ FORMAT=text
 SNAPSHOT_PATH=
 
 usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "$0"
+  awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
 }
 
-while [ $# -gt 0 ]; do
+while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
     --snapshot)
       shift
-      [ $# -gt 0 ] || { echo "fm-next: --snapshot requires a path or -" >&2; exit 2; }
+      [ "$#" -gt 0 ] || { echo "fm-next: --snapshot requires a path or -" >&2; exit 2; }
       SNAPSHOT_PATH=$1
       ;;
     --snapshot=*) SNAPSHOT_PATH=${1#--snapshot=} ;;
@@ -73,10 +56,13 @@ else
   SNAPSHOT=$(cat "$SNAPSHOT_PATH") || exit $?
 fi
 
-RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -e --argjson callsigns "$CALLSIGNS" '
-  if .schema != "fm-fleet-snapshot.v1" then
-    error("fm-next requires fm-fleet-snapshot.v1")
-  else . end
+LIFECYCLE_ROWS=$(printf '%s\n' "$SNAPSHOT" | \
+  "$SCRIPT_DIR/fm-task-lifecycle.sh" project --snapshot - --callsigns-json "$CALLSIGNS") \
+  || { echo "fm-next: could not derive task lifecycle" >&2; exit 1; }
+
+RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -e \
+  --argjson callsigns "$CALLSIGNS" --argjson lifecycleRows "$LIFECYCLE_ROWS" '
+  if .schema != "fm-fleet-snapshot.v1" then error("fm-next requires fm-fleet-snapshot.v1") else . end
   | . as $snapshot
   | ($snapshot.backlog.records // []) as $records
   | ($snapshot.tasks // []) as $tasks
@@ -85,217 +71,147 @@ RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -e --argjson callsigns "$CALLSIGNS" '
       | if ($v | type) != "string" or ($v | length) == 0 then $fallback
         else ($v | gsub("[\\r\\n\\t]+"; " ") | gsub("  +"; " ")) end;
   def task_for($id): first($tasks[]? | select(.id == $id)) // null;
+  def life_for($id): first($lifecycleRows[]? | select(.id == $id)) // null;
   def callsign_for($owner; $id):
       if $owner == "main" then (first($callsigns[]? | select(.id == $id)) // null) else null end;
-  def priority_rank($priority):
-      if $priority == null or $priority == "" then 5
-      else (($priority | tonumber?) // 5) end;
+  def priority_rank($priority): if $priority == null or $priority == "" then 5 else (($priority | tonumber?) // 5) end;
   def wait_key($record; $fallback):
       ($record.hold_set // $record.since // $record.completion.date // $record.done // $record.merged // $record.reported // $fallback // "9999-12-31");
   def downstream_count($id):
-      [$records[]?
-       | select(.structured == true and .state != "done")
-       | select(((.unresolved_blocker_ids // .blocked_by_ids // []) | index($id)) != null)]
-      | length;
+      [$records[]? | select(.structured == true and .state != "done")
+       | select(((.unresolved_blocker_ids // .blocked_by_ids // []) | index($id)) != null)] | length;
   def artifact_for($record; $task):
       ($task.pr.url // $record.pr_url // $record.report_path // $record.local_note // ($record.links // [])[0] // null);
   def canonical_ref($owner; $id):
       if $owner == "main" or ($id | startswith($owner + "/")) then $id else ($owner + "/" + $id) end;
-  def base_candidate($tier; $kind; $owner; $record; $task; $id; $title; $reason; $active):
+  def base($tier; $kind; $owner; $record; $task; $row; $id; $title; $reason; $active):
       (callsign_for($owner; $id)) as $call
       | (canonical_ref($owner; $id)) as $canonical
       | {tier:$tier,kind:$kind,owner:$owner,
-       ref:($call.ref // $canonical),canonical_id:$canonical,id:$id,
-       name:clean(($call.name // $title); $id),
-       sort_callsign:(($call.ref // "") | ltrimstr("t") | tonumber? // 1000),
-       priority:($record.priority // null),
-       priority_rank:priority_rank($record.priority // null),
-       downstream_released:downstream_count($id),
-       active:$active,
-       active_rank:(if $active then 0 else 1 end),
-       actionable_since:wait_key($record; $snapshot.generated),
-       reason:clean($reason; "Captain input is required before this work can continue."),
-       current_state:($task.current_state.state // null),
-       current_detail:($task.current_state.detail // null),
-       repo:($record.repo // $task.project // null),
-       delivery:{mode:($task.mode // null),standing_landing_authority:(($task.yolo // "off") == "on")},
-       artifact:artifact_for($record; $task),
-       durable_context:($record.body_excerpt // null)};
+         ref:($call.ref // $canonical),canonical_id:$canonical,id:$id,
+         name:clean(($call.name // $title); $id),
+         sort_callsign:(($call.ref // "") | ltrimstr("t") | tonumber? // 1000),
+         priority:($record.priority // null),priority_rank:priority_rank($record.priority // null),
+         downstream_released:downstream_count($id),active:$active,active_rank:(if $active then 0 else 1 end),
+         actionable_since:wait_key($record; $snapshot.generated),
+         reason:clean($reason; "One task lifecycle action remains."),
+         current_state:($task.current_state.state // null),current_detail:($row.outcome // $task.current_state.detail // null),
+         status:($row.status // null),next_action:($row.next_action // null),route:($row.route // null),
+         close_ready:($row.close_ready // false),lifecycle:($row.lifecycle // null),
+         repo:($record.repo // $task.project // null),
+         delivery:{mode:($task.mode // null),standing_landing_authority:(($task.yolo // "off") == "on")},
+         artifact:artifact_for($record; $task),durable_context:($record.body_excerpt // null)};
+  def lifecycle_kind($row):
+      if $row.status == "done" then "review"
+      elif $row.status == "reviewing" then "acceptance"
+      elif $row.status == "accepted" or $row.status == "delivering" then
+        (if $row.route == "deliver-monitor" and ($row.lifecycle.delivery.completedAt // "") != "" then "monitoring" else "delivery" end)
+      elif $row.status == "monitoring" then "monitoring"
+      else "lifecycle" end;
   ([ $records[]?
-       | select(.structured == true and .state == "in_flight")
-       | . as $record
-       | task_for(.id) as $task
-       | [($task.hints.open_decisions // [])[]?
-          | select(.verb == "needs-decision" or .verb == "captain-hold")] as $calls
-       | select(.captain_actionable == true or ($calls | length) > 0)
-       | (($calls | map(.summary) | join("; ")) // "") as $call_reason
-       | base_candidate(1; "active_intervention"; "main"; $record; $task; .id; .title;
-           (if $call_reason != "" then $call_reason else .hold_reason end); true) ]
-     +
-     [ $records[]?
-       | select(.structured == true and .state == "in_flight")
-       | . as $record
-       | task_for(.id) as $task
-       | select($task != null and $task.current_state.state == "done")
-       | select(($task.yolo // "off") != "on")
-       | base_candidate(2; "delivery_review"; "main"; $record; $task; .id; .title;
-           ($task.current_state.detail // "The delivery is finished and awaits review or landing approval."); true) ]
-     +
-     [ $records[]?
-       | select(.structured == true and .state != "in_flight" and .state != "done")
-       | select(.captain_actionable == true)
-       | . as $record
-       | task_for(.id) as $task
-       | base_candidate(3; "blocked_captain_action"; "main"; $record; $task; .id; .title;
-           (.hold_reason // .blocked_reason); false) ]
-     +
-     [ $records[]?
-       | select(.structured == true and .state == "queued")
-       | select((.unresolved_blocker_ids // []) | length == 0)
-       | select(.hold_reason == null and .kind == "captain")
-       | . as $record
-       | task_for(.id) as $task
-       | base_candidate(4; "queued_judgment"; "main"; $record; $task; .id; .title;
-           "This queued captain-owned item needs an ordering or scope judgment before dispatch."; false) ]
-     +
-     [ ($snapshot.secondmate_current.records // [])[]?
-       | select(.provenance.selected == "structured-home")
-       | . as $mate
-       | ($mate.decisions_open // [])[]?
-       | . as $decision
-       | first(($mate.queued // [])[]? | select(.id == $decision.id)) as $record
-       | (($record // {id:$decision.id,title:$decision.summary,priority:null,since:null,repo:null}) + {id:$decision.id}) as $record
+       | select(.structured == true)
+       | . as $record | task_for(.id) as $task | life_for(.id) as $row
+       | select($row != null and $row.status == "needs-you")
+       | base((if .state == "in_flight" then 1 else 2 end);
+           (if .state == "in_flight" then "active_intervention" else "blocked_captain_action" end);
+           "main"; $record; $task; $row; .id; .title; $row.outcome; (.state == "in_flight")) ]
+   + [ $records[]?
+       | select(.structured == true and .state == "queued" and .kind == "captain")
+       | . as $record | task_for(.id) as $task | life_for(.id) as $row
+       | select($row != null and $row.status == "queued")
+       | base(3; "queued_judgment"; "main"; $record; $task; $row; .id; .title;
+           "This authorized item needs an ordering or scope judgment before it starts."; false) ]
+   + [ $records[]?
+       | select(.structured == true)
+       | . as $record | task_for(.id) as $task | life_for(.id) as $row
+       | select($row != null and ($row.status == "done" or $row.status == "reviewing" or $row.status == "accepted" or $row.status == "delivering" or $row.status == "monitoring"))
+       | select($row.close_ready != true)
+       | base(4; lifecycle_kind($row); "main"; $record; $task; $row; .id; .title; $row.outcome; (.state == "in_flight")) ]
+   + [ ($snapshot.secondmate_current.records // [])[]?
+       | select(.provenance.selected == "structured-home") | . as $mate
+       | ($mate.decisions_open // [])[]? | . as $decision
+       | first(($mate.queued // [])[]? | select(.id == $decision.id)) as $found
+       | (($found // {id:$decision.id,title:$decision.summary,priority:null,since:null,repo:null}) + {id:$decision.id}) as $record
        | (any(($mate.active_children // [])[]?; .id == $decision.id)) as $active
-       | base_candidate((if $active then 1 else 3 end);
-           (if $active then "active_intervention" else "blocked_captain_action" end);
-           $mate.id; $record; null; $decision.id; ($record.title // $decision.summary);
-           $decision.summary; $active) ]
-     +
-     [ ($snapshot.secondmate_current.records // [])[]?
-       | select(.provenance.selected == "structured-home")
-       | . as $mate
+       | base((if $active then 1 else 2 end); (if $active then "active_intervention" else "blocked_captain_action" end);
+           $mate.id; $record; null; null; $decision.id; ($record.title // $decision.summary); $decision.summary; $active) ]
+   + [ ($snapshot.secondmate_current.records // [])[]?
+       | select(.provenance.selected == "structured-home") | . as $mate
        | ($mate.queued // [])[]?
        | select((.unresolved_blocker_ids // []) | length == 0)
        | select(.captain_actionable != true and .hold_reason == null and .kind == "captain")
        | . as $record
-       | base_candidate(4; "queued_judgment"; $mate.id; $record; null; .id; .title;
-           "This queued captain-owned item needs an ordering or scope judgment before dispatch."; false) ]) as $forward
-  | (([ $records[]?
-         | select(.structured == true and .state == "queued")
-         | select((.unresolved_blocker_ids // []) | length == 0)
-         | select(.hold_reason == null and .kind != "captain") ]
-       + [ $records[]?
-           | select(.structured == true and .state == "in_flight")
-           | . as $record
-           | task_for(.id) as $task
-           | select(($task.current_state.state // "unknown") != "paused")
-           | select((($task.current_state.state // "unknown") == "done" and ($task.yolo // "off") != "on") | not) ]
-       + [ ($snapshot.secondmate_current.records // [])[]?
-           | select(.provenance.selected == "structured-home")
-           | (.active_children // [])[]? ]) | length > 0) as $autonomous_forward
+       | base(3; "queued_judgment"; $mate.id; $record; null; null; .id; .title;
+           "This authorized item needs an ordering or scope judgment before it starts."; false) ]) as $forward
+  | (any($lifecycleRows[]?; .status == "working" or .status == "queued")
+     or any(($snapshot.secondmate_current.records // [])[]?; ((.active_children // []) | length) > 0)) as $autonomous_forward
   | ([ $records[]?
-       | select(.structured == true and .state == "done")
-       | . as $record
-       | task_for(.id) as $task
-       | base_candidate(5; "closure"; "main"; $record; $task; .id; .title;
-           "The accepted task is recorded Done, so it is no longer an execution item."; false) ]
-    ) as $closures
-  | (if ($forward | length) > 0 then $forward
-     elif $autonomous_forward then []
-     else $closures end
+       | select(.structured == true) | . as $record | task_for(.id) as $task | life_for(.id) as $row
+       | select($row != null and $row.close_ready == true)
+       | base(5; "closure"; "main"; $record; $task; $row; .id; .title;
+           "Every selected lifecycle phase is complete; only archival closure remains."; false) ]) as $closures
+  | (if ($forward | length) > 0 then $forward elif $autonomous_forward then [] else $closures end
      | sort_by([.tier,.priority_rank,(-.downstream_released),.active_rank,.actionable_since,.sort_callsign,.canonical_id])) as $ranked
   | ($ranked[0] // null) as $selected
   | def consequence($c):
-      if $c.kind == "active_intervention" then
-        "Resolving this unlocks active work immediately" +
-        (if $c.downstream_released > 0 then " and releases \($c.downstream_released) downstream task(s)." else "." end)
-      elif $c.kind == "delivery_review" then
-        "The completed delivery remains unlanded and cannot produce its intended outcome."
-      elif $c.kind == "blocked_captain_action" then
-        "Answering this releases the blocked work" +
-        (if $c.downstream_released > 0 then " and \($c.downstream_released) dependent task(s)." else "." end)
-      elif $c.kind == "queued_judgment" then
-        "A clear choice lets Firstmate dispatch the right work without guessing about order, scope, cost, or risk."
-      else
-        "Execution is complete; only explicit closure into history remains."
-      end;
-  def recommendation($c):
-      if $c.kind == "active_intervention" then
-        "Decide this now. It is the fastest way to restart work already in motion."
-      elif $c.kind == "delivery_review" then
-        "Review and approve this delivery now. Finished value should land before new discretionary work starts."
-      elif $c.kind == "blocked_captain_action" then
-        "Clear this blocker now. It is the highest-ranked available captain action."
-      elif $c.kind == "queued_judgment" then
-        "Choose whether this should start next. The fleet should not guess where explicit judgment is required."
-      else
-        "Close this task rather than inventing follow-up work. Its accepted scope ended, and any new work requires separate authorization."
-      end;
-  def alternatives($c):
       if $c.kind == "active_intervention" or $c.kind == "blocked_captain_action" then
-        "Defer it explicitly, accepting that this work and its dependents remain stopped."
-      elif $c.kind == "delivery_review" then
-        "Request a specific correction instead of landing it, or defer review and leave the completed value unshipped."
-      elif $c.kind == "queued_judgment" then
-        "Leave it queued and choose another item through /tasks."
-      else
-        "Authorize a concrete follow-up only if the durable task detail shows unfinished accepted scope or an open defect."
-      end;
+        "Resolving this restarts stopped work" + (if $c.downstream_released > 0 then " and releases \($c.downstream_released) dependent task(s)." else "." end)
+      elif $c.kind == "queued_judgment" then "A clear choice lets authorized work start without guessing."
+      elif $c.kind == "review" then "The candidate cannot be accepted, delivered, or closed until review starts."
+      elif $c.kind == "acceptance" then "The active review must either accept the result with a route or return it for correction."
+      elif $c.kind == "delivery" then "The accepted result has not completed its selected delivery route."
+      elif $c.kind == "monitoring" then "The selected post-delivery observation is not complete."
+      else "The accepted lifecycle is complete; only archival closure remains." end;
+  def recommendation($c):
+      if $c.kind == "active_intervention" or $c.kind == "blocked_captain_action" then "Provide the exact recorded action now."
+      elif $c.kind == "queued_judgment" then "Choose whether this should start next."
+      elif $c.kind == "review" then "Review the candidate now; acceptance is a separate recorded result."
+      elif $c.kind == "acceptance" then "Finish review by accepting one route or returning the task with a concrete correction."
+      elif $c.kind == "delivery" then "Complete the selected delivery phase before considering closure."
+      elif $c.kind == "monitoring" then "Complete the selected monitoring phase before considering closure."
+      else "Close this task rather than inventing follow-up work." end;
+  def alternatives($c):
+      if $c.kind == "review" or $c.kind == "acceptance" then "Return the candidate to working with one specific correction."
+      elif $c.kind == "delivery" or $c.kind == "monitoring" then "Return it to working if the phase exposed a problem."
+      elif $c.kind == "closure" then "Keep it open only if the detail reveals unfinished accepted scope or a separate authorized follow-up."
+      else "Defer it explicitly, accepting that the affected work remains stopped." end;
   def actions($c):
-      if $c.kind == "closure" then
-        ["/task \($c.ref)", "/close \($c.ref)", "/history \($c.ref)"]
-      elif $c.kind == "delivery_review" then
-        ["/task \($c.ref)"]
-        + (if $c.artifact != null then ["Review \($c.artifact)"] else [] end)
-        + [(if ($c.artifact // "" | test("/pull/[0-9]+")) then
-              "Say: merge \($c.artifact), or request a specific correction"
-            else "Say: land \($c.ref), or request a specific correction" end), "/next"]
-      elif $c.kind == "queued_judgment" then
-        ["/task \($c.ref)", "Say: start \($c.ref), or name the item that should precede it", "/next"]
-      else
-        ["/task \($c.ref)", "Answer the recorded captain call in chat", "/next"]
-      end;
+      if $c.kind == "closure" then ["/task \($c.ref)", "/close \($c.ref)", "/history \($c.ref)"]
+      elif $c.kind == "review" then ["/task \($c.ref)", "Review the candidate artifact", "Record review start or return one correction"]
+      elif $c.kind == "acceptance" then ["/task \($c.ref)", "Accept with route close, deliver, or deliver-monitor; or return one correction"]
+      elif $c.kind == "delivery" then ["/task \($c.ref)", $c.next_action]
+      elif $c.kind == "monitoring" then ["/task \($c.ref)", $c.next_action]
+      elif $c.kind == "queued_judgment" then ["/task \($c.ref)", "Say: start \($c.ref), or name what should precede it"]
+      else ["/task \($c.ref)", "Answer the recorded captain call in chat"] end;
   def closure_context($c):
       if $c.kind != "closure" then null else
-        {accepted_scope_ended:true,
-         open_defect_or_authorized_follow_up:
-           (if $c.durable_context == null then
-              "No separate structured follow-up is recorded; verify the task detail before closing."
-            else
-              "Durable task notes were checked and still require human interpretation before closure: \($c.durable_context)"
-            end),
+        {accepted_scope_ended:true,acceptance:$c.lifecycle.acceptance,route:$c.route,
          durable_outcome:($c.artifact // $c.name),
-         knowledge_retained:
-           (if $c.artifact != null then "The durable outcome is retained at \($c.artifact)."
-            elif $c.durable_context != null then "The durable completion note remains in the task record."
-            else "The completion remains in backlog history." end)}
-      end;
+         open_defect_or_authorized_follow_up:
+           (if $c.durable_context == null then "No separate structured follow-up is recorded; verify the task detail before closing."
+            else "Durable task notes remain available for the closure review: \($c.durable_context)" end),
+         knowledge_retained:(if $c.artifact != null then "The durable outcome is retained at \($c.artifact)." else "The closure archive retains the task record." end)} end;
   if $selected == null then
-      {schema:"fm-next.v1",generated:$snapshot.generated,selection:null,
-       ranking:{eligible:0,forward_eligible:($forward|length),closure_eligible:($closures|length),autonomous_forward_present:$autonomous_forward},
-       card:"Fleet needs no captain action."}
-    else
-      ($selected + {consequence:consequence($selected),recommendation:recommendation($selected),
-                    alternatives:alternatives($selected),actions:actions($selected),
-                    closure_context:closure_context($selected)}) as $card
-      | {schema:"fm-next.v1",generated:$snapshot.generated,selection:$card,
-         ranking:{eligible:($ranked|length),forward_eligible:($forward|length),closure_eligible:($closures|length),autonomous_forward_present:$autonomous_forward,
-                  order:["tier","priority","downstream_released","active","oldest_actionable_wait","callsign","canonical_id"]},
-         card:
-           ((if $card.kind == "closure" then
-               "Ref: \($card.ref) - \($card.name)\nWhat completed: \($card.closure_context.durable_outcome)\nWhy it is not continuing: \($card.reason)\nClosure check: Accepted scope ended. \($card.closure_context.open_defect_or_authorized_follow_up) \($card.closure_context.knowledge_retained)\nWhat remains: \($card.consequence)"
-             else
-               "Ref: \($card.ref) - \($card.name)\nSituation: \($card.current_detail // $card.reason)\nWhy progress stopped: \($card.reason)\nConsequence: \($card.consequence)"
-             end)
-            + "\nRecommendation: \($card.recommendation)"
-            + "\nAlternatives: \($card.alternatives)"
-            + "\nActions:\n" + ($card.actions | map("- " + .) | join("\n")))}
-    end
+    {schema:"fm-next.v2",generated:$snapshot.generated,selection:null,
+     ranking:{eligible:0,forward_eligible:($forward|length),closure_eligible:($closures|length),autonomous_forward_present:$autonomous_forward},
+     card:"Fleet needs no captain action."}
+  else
+    ($selected + {consequence:consequence($selected),recommendation:recommendation($selected),
+                  alternatives:alternatives($selected),actions:actions($selected),closure_context:closure_context($selected)}) as $card
+    | {schema:"fm-next.v2",generated:$snapshot.generated,selection:$card,
+       ranking:{eligible:($ranked|length),forward_eligible:($forward|length),closure_eligible:($closures|length),autonomous_forward_present:$autonomous_forward,
+                order:["tier","priority","downstream_released","active","oldest_actionable_wait","callsign","canonical_id"]},
+       card:((if $card.kind == "closure" then
+                "Ref: \($card.ref) - \($card.name)\nWhat completed: \($card.closure_context.durable_outcome)\nAcceptance: \($card.closure_context.acceptance.actor) at \($card.closure_context.acceptance.at)\nRoute: \($card.route)\nWhat remains: \($card.consequence)"
+              else
+                "Ref: \($card.ref) - \($card.name)\nSituation: \($card.current_detail // $card.reason)\nNext lifecycle action: \($card.next_action // $card.reason)\nConsequence: \($card.consequence)" end)
+             + "\nRecommendation: \($card.recommendation)"
+             + "\nAlternatives: \($card.alternatives)"
+             + "\nActions:\n" + ($card.actions | map("- " + .) | join("\n")))}
+  end
 ' 2>&1) || { printf 'fm-next: %s\n' "$RESULT" >&2; exit 1; }
 
-# A live invocation composes the existing detail and closure owners after the
-# deterministic ranker has selected exactly one current task. The --snapshot
-# seam deliberately stays self-contained for repeatable tests and other views.
+# Live output composes the detail and closure owners after deterministic ranking.
 if [ -z "$SNAPSHOT_PATH" ] && [ "$(printf '%s\n' "$RESULT" | jq -r '.selection != null')" = true ]; then
   SELECTED_ID=$(printf '%s\n' "$RESULT" | jq -r '.selection.canonical_id')
   DETAIL=$(FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}" \
@@ -317,61 +233,41 @@ if [ -z "$SNAPSHOT_PATH" ] && [ "$(printf '%s\n' "$RESULT" | jq -r '.selection !
          elif (($line | startswith("Cleanup:")) or ($line | startswith("Cleanup blocker:"))) then .cleanup = $line | .mode = null
          elif ($line | startswith("Review only:")) then .mode = null
          elif ($line | startswith("- ")) and .mode == "retained" then .retained += [($line | ltrimstr("- "))]
-         elif ($line | startswith("- Continue existing task ")) and .mode == "follow-ups" then
-           .follow_ups += [($line | ltrimstr("- Continue existing task "))]
-         else . end)
-      | del(.mode)
-    ')
+         elif ($line | startswith("- Continue existing task ")) and .mode == "follow-ups" then .follow_ups += [($line | ltrimstr("- Continue existing task "))]
+         else . end) | del(.mode)')
   fi
   RESULT=$(printf '%s\n' "$RESULT" | jq --argjson detail "$DETAIL" --argjson review "$CLOSURE_REVIEW" '
-    .selection.task_detail = $detail
-    | .selection.artifact = (.selection.artifact // $detail.artifacts[0] // null)
+    .selection.task_detail=$detail
+    | .selection.artifact=(.selection.artifact // $detail.artifacts[0] // null)
     | if .selection.kind == "closure" then
-        .selection.closure_review = $review
-        | .selection.closure_context.durable_outcome = ($review.result // $detail.outcome // .selection.name)
-        | .selection.closure_context.open_defect_or_authorized_follow_up =
-            (if (($review.follow_ups // []) | length) > 0 then
-               "Authorized follow-up already exists: " + ($review.follow_ups | join(", "))
-             else
-               "The closure owner found no existing follow-up and will not create one automatically."
-             end)
-        | .selection.closure_context.knowledge_retained =
-            (if (($review.retained // []) | length) > 0 then
-               "Knowledge and task material will be retained at " + ($review.retained | join(", ")) + "."
+        .selection.closure_review=$review
+        | .selection.closure_context.durable_outcome=($review.result // $detail.outcome // .selection.name)
+        | .selection.closure_context.open_defect_or_authorized_follow_up=
+            (if (($review.follow_ups // []) | length) > 0 then "Authorized follow-up already exists: " + ($review.follow_ups | join(", "))
+             else "The closure owner found no existing follow-up and will not create one automatically." end)
+        | .selection.closure_context.knowledge_retained=
+            (if (($review.retained // []) | length) > 0 then "Knowledge and task material will be retained at " + ($review.retained | join(", ")) + "."
              else "No retained material is recorded." end)
-        | .selection.recommendation =
-            (if (($review.follow_ups // []) | length) > 0 then
-               "Close this completed scope and continue the already-authorized follow-up separately."
-             else
-               "Close this task rather than inventing follow-up work. Its accepted scope ended, and any new work requires separate authorization."
-             end)
-        | .selection.alternatives =
-            "Do not close only if the task detail reveals unfinished accepted scope or an open defect in this task."
-        | .card =
-            ("Ref: \(.selection.ref) - \(.selection.name)"
-             + "\nWhat completed: \(.selection.closure_context.durable_outcome)"
-             + "\nWhy it is not continuing: \(.selection.reason)"
-             + "\nClosure check: Accepted scope ended. \(.selection.closure_context.open_defect_or_authorized_follow_up) \(.selection.closure_context.knowledge_retained) \($review.cleanup)"
-             + "\nWhat remains: \(.selection.consequence)"
-             + "\nRecommendation: \(.selection.recommendation)"
-             + "\nAlternatives: \(.selection.alternatives)"
-             + "\nActions:\n" + (.selection.actions | map("- " + .) | join("\n")))
+        | .selection.recommendation=
+            (if (($review.follow_ups // []) | length) > 0 then "Close this completed scope and continue the already-authorized follow-up separately."
+             else "Close this task rather than inventing follow-up work." end)
+        | .card=("Ref: \(.selection.ref) - \(.selection.name)"
+          + "\nWhat completed: \(.selection.closure_context.durable_outcome)"
+          + "\nAcceptance: \(.selection.closure_context.acceptance.actor) at \(.selection.closure_context.acceptance.at)"
+          + "\nRoute: \(.selection.route)"
+          + "\nClosure check: \(.selection.closure_context.open_defect_or_authorized_follow_up) \(.selection.closure_context.knowledge_retained) \($review.cleanup)"
+          + "\nRecommendation: \(.selection.recommendation)"
+          + "\nAlternatives: \(.selection.alternatives)"
+          + "\nActions:\n" + (.selection.actions | map("- " + .) | join("\n")))
       else
-        .card =
-          ("Ref: \(.selection.ref) - \(.selection.name)"
-           + "\nSituation: " + (($detail.outcome // .selection.current_detail // .selection.reason) | tostring)
-           + (if ($detail.purpose // "") == "" then "" else " Purpose: " + $detail.purpose end)
-           + "\nWhy progress stopped: " + (($detail.attention // .selection.reason) | tostring)
-           + "\nConsequence: \(.selection.consequence)"
-           + "\nRecommendation: \(.selection.recommendation)"
-           + "\nAlternatives: \(.selection.alternatives)"
-           + "\nActions:\n" + (.selection.actions | map("- " + .) | join("\n")))
-      end
-  ') || { echo "fm-next: could not compose selected task context" >&2; exit 1; }
+        .card=("Ref: \(.selection.ref) - \(.selection.name)"
+          + "\nSituation: " + (($detail.outcome // .selection.reason) | tostring)
+          + "\nNext lifecycle action: " + (($detail.nextAction // .selection.next_action) | tostring)
+          + "\nConsequence: \(.selection.consequence)"
+          + "\nRecommendation: \(.selection.recommendation)"
+          + "\nAlternatives: \(.selection.alternatives)"
+          + "\nActions:\n" + (.selection.actions | map("- " + .) | join("\n")))
+      end') || { echo "fm-next: could not compose selected task context" >&2; exit 1; }
 fi
 
-if [ "$FORMAT" = json ]; then
-  printf '%s\n' "$RESULT"
-else
-  printf '%s\n' "$RESULT" | jq -r '.card'
-fi
+if [ "$FORMAT" = json ]; then printf '%s\n' "$RESULT"; else printf '%s\n' "$RESULT" | jq -r '.card'; fi

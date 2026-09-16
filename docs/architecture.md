@@ -93,18 +93,14 @@ For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
-`bin/fm-tasks.sh` adds the compact task table and uses `bin/fm-callsigns-lib.sh` for private atomic `t1`-`t99` references and concise editable two-to-four-token names; the table remains a projection of backlog and current-state authority rather than a second status list.
-Its JSON projection preserves numeric-reference ordering and exposes `started_at` only from task metadata written by the spawn transition owner.
-On Pi, `.pi/extensions/fm-tasks.ts` owns `/tasks` as a session-local live widget that starts hidden, refreshes that projection on bounded event and fallback cadences, and advances elapsed display locally without writing conversation history; the separate `task-list` skill retains natural-language transcript output.
-The widget renders below the editor while Calm's transient step and sailing components render above it, so either toggle leaves the other's keyed components and visibility controls untouched.
-It caps rows against the terminal height and renders a `+N more` summary in short terminals.
-Done rows remain actionable there as `Ready to close`.
-`bin/fm-task.sh` composes that same current identity owner with the canonical fleet snapshot, task instructions, metadata, artifacts, and finalized closure records into one stable detail card; it records no duplicate task summary and leaves absent lifecycle dates unknown.
-`bin/fm-next.sh` ranks that current task and worker truth into one captain action, excludes routine autonomous work, and falls back to one Done item only when no captain or autonomous forward action remains.
-`bin/fm-close.sh` composes the existing terminal-state, guarded cleanup, captain-hold, public-commitment, and tasks-axi owners, then stores one private closure record plus retained task material under `data/closed-tasks/<id>/` before `bin/fm-history.sh` exposes only finalized records.
-Closure retires the recyclable short reference for a deterministic one-day cooldown, while history uses only canonical ids and unambiguous human names.
-The resolver is used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr-check.sh`, `fm-teardown.sh`, and the close surface; merge, review, and promotion consumers remain deliberately deferred until their exact task-id boundaries are independently updated.
-The script headers own their exact schemas and recovery mechanics.
+[`task-lifecycle.md`](task-lifecycle.md) is the single semantic owner of captain-facing statuses, routes, acceptance, and closure prerequisites.
+`bin/fm-task-lifecycle.sh` projects those semantics from the existing backlog, worker, hold, and blocker authorities and atomically stores only review, acceptance, delivery, and monitoring evidence that must survive runtime cleanup.
+`bin/fm-tasks.sh` adds callsigns and ordered table rendering to that projection, while `bin/fm-task.sh`, `bin/fm-next.sh`, `bin/fm-close.sh`, and `bin/fm-history.sh` compose the same lifecycle owner for detail, action ranking, guarded archival, and recall.
+On Pi, `.pi/extensions/fm-tasks.ts` owns `/tasks` as a session-local live widget that starts hidden, refreshes the projection on bounded event and fallback cadences, and advances elapsed display locally without writing conversation history.
+The widget renders below the editor while Calm's transient components render above it, caps rows against terminal height, and leaves natural-language transcript output to the `task-list` skill.
+`bin/fm-callsigns-lib.sh` owns private atomic `t1`-`t99` references, concise editable names, and deterministic cooldown after closure.
+The resolver is also used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr-check.sh`, and `fm-teardown.sh`.
+The script headers own exact schemas, transition checks, and recovery mechanics.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.

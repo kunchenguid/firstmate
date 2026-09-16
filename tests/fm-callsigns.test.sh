@@ -91,6 +91,26 @@ sync "$home" 86420 || fail "post-cooldown reconciliation failed"
 [ "$(lookup "$home" t1)" = epsilon-task ] || fail "oldest cooled reference was not recycled first"
 pass "cooldown-safe recycling and independently editable concise names"
 
+home_lifecycle=$(make_home lifecycle-retention)
+cat > "$home_lifecycle/data/backlog.md" <<'EOF'
+## Done
+- [x] retained-task - Retained Lifecycle Task (repo: sample)
+EOF
+sync "$home_lifecycle" 21 || fail "lifecycle retention initial sync failed"
+mkdir -p "$home_lifecycle/data/task-lifecycle"
+cat > "$home_lifecycle/data/task-lifecycle/retained-task.json" <<'JSON'
+{"version":1,"id":"retained-task","stage":"accepted","updatedAt":"2026-09-16T00:00:00Z","review":{"startedAt":"2026-09-15T00:00:00Z","completedAt":"2026-09-16T00:00:00Z"},"acceptance":{"actor":"reviewer","at":"2026-09-16T00:00:00Z","evidence":"accepted","limitations":"none declared","route":"close"},"delivery":null,"monitoring":null,"correction":null}
+JSON
+: > "$home_lifecycle/data/backlog.md"
+sync "$home_lifecycle" 22 || fail "lifecycle retention sync failed"
+[ "$(lookup "$home_lifecycle" t1)" = retained-task ] || fail "reviewed task lost its short reference after runtime/backlog cleanup"
+retained_json=$(FM_HOME="$home_lifecycle" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" --json) || fail "retained lifecycle table failed"
+printf '%s\n' "$retained_json" | jq -e '
+  length == 1 and .[0].id == "retained-task" and .[0].ref == "t1"
+  and .[0].status == "accepted" and .[0].close_ready == true
+' >/dev/null || fail "durable lifecycle did not retain a current captain-facing row: $retained_json"
+pass "durable lifecycle evidence retains callsign and /tasks visibility after runtime cleanup"
+
 home2=$(make_home collisions)
 cat > "$home2/data/backlog.md" <<'EOF'
 ## Queued
@@ -147,15 +167,15 @@ json_wide=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=120 "$TASKS" --jso
 json_narrow=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=40 "$TASKS" --json) || fail "narrow JSON command failed"
 [ "$json_wide" = "$json_narrow" ] || fail "terminal width changed JSON output"
 expected='[
-  {"id":"active-task","ref":"t1","name":"active-task","status":"unknown","started_at":null,"outcome":"current state unavailable"},
-  {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","started_at":null,"outcome":"external wait"},
-  {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","started_at":null,"outcome":"waiting on active-task"},
-  {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","started_at":null,"outcome":"captain input needs a decision about production behavior and careful rollout sequencing"},
-  {"id":"done-task","ref":"t5","name":"done-task","status":"done","started_at":null,"outcome":"Ready to close"}
+  {"id":"active-task","ref":"t1","name":"active-task","status":"blocked","started_at":null,"outcome":"Current progress is unavailable; Firstmate must reconcile it","next_action":"Firstmate must resolve the recorded problem","route":null,"close_ready":false,"lifecycle":null},
+  {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","started_at":null,"outcome":"external wait","next_action":"Wait for the recorded external condition","route":null,"close_ready":false,"lifecycle":null},
+  {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","started_at":null,"outcome":"Waiting on active-task","next_action":"Firstmate must resolve the recorded problem","route":null,"close_ready":false,"lifecycle":null},
+  {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","started_at":null,"outcome":"captain input needs a decision about production behavior and careful rollout sequencing","next_action":"Provide the recorded decision, approval, credential, or security action","route":null,"close_ready":false,"lifecycle":null},
+  {"id":"done-task","ref":"t5","name":"done-task","status":"done","started_at":null,"outcome":"Candidate result ready; review has not started","next_action":"Start review","route":null,"close_ready":false,"lifecycle":null}
 ]'
 [ "$(printf '%s' "$json_wide" | jq -Sc .)" = "$(printf '%s' "$expected" | jq -Sc .)" ] \
   || fail "status normalization or JSON contract changed: $json_wide"
-pass "status normalization reserves waiting for a stated external delay"
+pass "status normalization uses only the captain-facing lifecycle vocabulary"
 
 table=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=80 "$TASKS" --table) || fail "table command failed"
 printf '%s\n' "$table" | grep -q '^┌.*┬.*┐$' || fail "top border missing"
@@ -206,12 +226,15 @@ ready_json=$(PATH="$fakebin:$PATH" FM_HOME="$home_ready" FM_ROOT_OVERRIDE="$ROOT
   || fail "ready local branch table failed"
 printf '%s\n' "$ready_json" | jq -e '
   length == 1
-    and .[0].status == "ready"
-    and .[0].outcome == "ready in branch fm/local-ready; awaiting landing approval"
+    and .[0].status == "done"
+    and .[0].outcome == "ready in branch fm/local-ready; candidate ready for review"
+    and .[0].next_action == "Start review"
+    and .[0].route == null
+    and .[0].close_ready == false
     and .[0].started_at == "2026-09-15T10:11:12Z"
-    and (.[0] | keys | sort) == ["id","name","outcome","ref","started_at","status"]
-' >/dev/null || fail "completed local branch was not a useful ready row: $ready_json"
-pass "completed local branches are ready while waiting remains an external-delay state"
+    and (.[0] | keys | sort) == ["close_ready","id","lifecycle","name","next_action","outcome","ref","route","started_at","status"]
+' >/dev/null || fail "completed local branch was not a useful Done candidate row: $ready_json"
+pass "completed local branches become Done candidates without inferred acceptance"
 
 home4=$(make_home empty)
 : > "$home4/data/backlog.md"

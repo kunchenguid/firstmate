@@ -145,6 +145,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/task-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -447,6 +451,10 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/task-lifecycle.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/tmux-backend.md",

@@ -94,8 +94,9 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
-That recent-Done window remains the bounded fallback, while an explicit close uses `bin/fm-close.sh` to preserve a richer private record under `data/closed-tasks/<id>/` and remove only that Done row through the configured tasks-axi adapter.
-Prepared closure records stay hidden from `bin/fm-history.sh` until the adapter removal and callsign retirement both finish, so retry by canonical id or human name is idempotent.
+That recent-Done window remains the bounded fallback, while [`task-lifecycle.md`](task-lifecycle.md) defines what backlog Done means in the captain-facing review, acceptance, delivery, monitoring, and closure path.
+`bin/fm-task-lifecycle.sh` writes the minimal post-review evidence under `data/task-lifecycle/<id>.json`, and an explicit close uses `bin/fm-close.sh` to embed that evidence with richer private material under `data/closed-tasks/<id>/` before removing only that Done row through the configured tasks-axi adapter.
+Prepared closure records stay hidden from `bin/fm-history.sh` until the adapter removal, lifecycle-record retirement, and callsign retirement finish, so retry by canonical id or human name is idempotent.
 A manual-backend home has no configured mutation owner for that removal, so automatic close refuses rather than hand-editing or duplicating its state machine.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 When the automatic transition gate applies, dispatch and completion are not separate operator actions: each moves its work item inside the same run that creates or removes the task's record, so the ordinary successful path cannot leave the backlog and live task set out of sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).

@@ -143,7 +143,7 @@ done
 [ "$(cat "$HOME_DIR/config/calm")" = off ] || fail "Calm did not turn off"
 wait_for_text WIDGET_INITIAL || fail "Calm-off toggle hid the task widget"
 
-printf '[{"id":"live-task","ref":"t1","name":"live-widget","status":"ready","outcome":"WIDGET_REFRESHED","started_at":"%s"}]\n' \
+printf '[{"id":"live-task","ref":"t1","name":"live-widget","status":"done","outcome":"WIDGET_REFRESHED","started_at":"%s"}]\n' \
   "$started_at" >"$HOME_DIR/widget-data.json"
 wait_for_text WIDGET_REFRESHED || fail "fallback refresh did not update the visible task row"
 send_command /tasks

@@ -276,7 +276,7 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
-    fm-callsigns.test.sh|fm-close-history.test.sh|fm-next.test.sh|\
+    fm-callsigns.test.sh|fm-close-history.test.sh|fm-next.test.sh|fm-task-detail.test.sh|fm-task-lifecycle.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
@@ -786,6 +786,7 @@ tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
+tests/fm-task-lifecycle.test.sh 30000
 tests/fm-teardown-endpoint-safety.test.sh 4620
 tests/fm-teardown.test.sh 97603
 tests/fm-test-fixture-cleanup.test.sh 915
@@ -1522,7 +1523,16 @@ families_for_changed_path() {
       printf '%s\n' snapshot-bearings
       printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
       ;;
+    bin/fm-task-lifecycle.sh)
+      printf '%s\n' __script__:fm-task-lifecycle.test.sh
+      printf '%s\n' __script__:fm-callsigns.test.sh
+      printf '%s\n' __script__:fm-task-detail.test.sh
+      printf '%s\n' __script__:fm-next.test.sh
+      printf '%s\n' __script__:fm-close-history.test.sh
+      printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
+      ;;
     bin/fm-tasks.sh)
+      printf '%s\n' __script__:fm-task-lifecycle.test.sh
       printf '%s\n' __script__:fm-callsigns.test.sh
       printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
       ;;

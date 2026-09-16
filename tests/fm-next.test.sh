@@ -10,6 +10,11 @@ NEXT="$ROOT/bin/fm-next.sh"
 TMP_ROOT=$(fm_test_tmproot fm-next)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+LIFECYCLE_DATA="$TMP_ROOT/lifecycle-data"
+mkdir -p "$LIFECYCLE_DATA/task-lifecycle"
+cat > "$LIFECYCLE_DATA/task-lifecycle/closure.json" <<'JSON'
+{"version":1,"id":"closure","stage":"accepted","updatedAt":"2026-09-15T00:00:00Z","review":{"startedAt":"2026-09-14T00:00:00Z","completedAt":"2026-09-15T00:00:00Z"},"acceptance":{"actor":"reviewer","at":"2026-09-15T00:00:00Z","evidence":"report approved","limitations":"none declared","route":"close"},"delivery":null,"monitoring":null,"correction":null}
+JSON
 
 fixture="$TMP_ROOT/all-tiers.json"
 cat > "$fixture" <<'JSON'
@@ -31,7 +36,7 @@ cat > "$fixture" <<'JSON'
 }
 JSON
 
-run_json() { "$NEXT" --snapshot "$1" --json; }
+run_json() { FM_DATA_OVERRIDE="$LIFECYCLE_DATA" "$NEXT" --snapshot "$1" --json; }
 
 mutate() { # <input> <output> <jq filter>
   jq "$3" "$1" > "$2"
@@ -46,27 +51,27 @@ test_each_ranking_tier() {
   two="$TMP_ROOT/tier-two.json"
   mutate "$fixture" "$two" '.backlog.records |= map(select(.id != "active-call")) | .tasks |= map(select(.id != "active-call"))'
   out=$(run_json "$two")
-  printf '%s' "$out" | jq -e '.selection.ref == "delivery" and .selection.tier == 2 and .selection.artifact == "https://github.com/example/alpha/pull/7"' >/dev/null \
-    || fail "finished delivery did not rank second: $out"
+  printf '%s' "$out" | jq -e '.selection.ref == "blocked-call" and .selection.tier == 2 and .selection.kind == "blocked_captain_action"' >/dev/null \
+    || fail "inactive concrete captain action did not rank second: $out"
 
   three="$TMP_ROOT/tier-three.json"
-  mutate "$two" "$three" '.tasks |= map(if .id == "delivery" then .yolo = "on" else . end)'
+  mutate "$two" "$three" '.backlog.records |= map(if .id == "blocked-call" then .captain_actionable = false else . end)'
   out=$(run_json "$three")
-  printf '%s' "$out" | jq -e '.selection.ref == "blocked-call" and .selection.tier == 3' >/dev/null \
-    || fail "blocked captain action did not rank third or autonomous landing was not excluded: $out"
+  printf '%s' "$out" | jq -e '.selection.ref == "queued-choice" and .selection.tier == 3 and .selection.kind == "queued_judgment"' >/dev/null \
+    || fail "queued judgment did not rank third: $out"
 
   four="$TMP_ROOT/tier-four.json"
-  mutate "$three" "$four" '.backlog.records |= map(if .id == "blocked-call" then .captain_actionable = false else . end)'
+  mutate "$three" "$four" '.backlog.records |= map(select(.id != "queued-choice"))'
   out=$(run_json "$four")
-  printf '%s' "$out" | jq -e '.selection.ref == "queued-choice" and .selection.tier == 4 and .selection.kind == "queued_judgment"' >/dev/null \
-    || fail "queued judgment did not rank fourth: $out"
+  printf '%s' "$out" | jq -e '.selection.ref == "delivery" and .selection.tier == 4 and .selection.kind == "review" and .selection.status == "done"' >/dev/null \
+    || fail "unreviewed candidate did not rank as forward review work: $out"
 
   five="$TMP_ROOT/tier-five.json"
   mutate "$four" "$five" '.backlog.records |= map(select(.id == "closure")) | .tasks = []'
   out=$(run_json "$five")
-  printf '%s' "$out" | jq -e '.selection.ref == "closure" and .selection.tier == 5 and .selection.kind == "closure"' >/dev/null \
-    || fail "Done closure did not remain a last-resort fallback: $out"
-  pass "every ranking tier is ordered and closure is fallback-only"
+  printf '%s' "$out" | jq -e '.selection.ref == "closure" and .selection.tier == 5 and .selection.kind == "closure" and .selection.route == "close"' >/dev/null \
+    || fail "accepted close route did not remain a last-resort fallback: $out"
+  pass "captain actions, lifecycle progress, and closure use deterministic tiers"
 }
 
 test_priority_dependency_and_ties() {
@@ -108,7 +113,7 @@ test_priority_dependency_and_ties() {
   pass "priority, dependency impact, oldest wait, and canonical reference order ties"
 }
 
-test_autonomous_actions_and_stale_events_are_excluded() {
+test_done_requires_review_and_stale_events_are_excluded() {
   local input out
   input="$TMP_ROOT/autonomous.json"
   jq -n '{
@@ -125,9 +130,15 @@ test_autonomous_actions_and_stale_events_are_excluded() {
     ],secondmate_current:{records:[]}}
   ' > "$input"
   out=$(run_json "$input")
-  printf '%s' "$out" | jq -e '.selection == null and .card == "Fleet needs no captain action." and .ranking.autonomous_forward_present == true and .ranking.closure_eligible == 1' >/dev/null \
-    || fail "routine dispatch, recovery, autonomous landing, or stale events became captain work: $out"
-  pass "autonomous work is excluded and stale status events never override current state"
+  printf '%s' "$out" | jq -e '
+    .selection.ref == "auto-land"
+    and .selection.kind == "review"
+    and .selection.status == "done"
+    and .selection.close_ready == false
+    and .ranking.autonomous_forward_present == true
+    and .ranking.closure_eligible == 0
+  ' >/dev/null || fail "worker completion inferred acceptance or stale events became captain actions: $out"
+  pass "worker completion remains forward review work and stale events do not create acceptance"
 }
 
 test_closure_context_and_stable_card() {
@@ -136,18 +147,21 @@ test_closure_context_and_stable_card() {
   out=$(run_json "$input")
   printf '%s' "$out" | jq -e '
     .selection.closure_context.accepted_scope_ended == true
-    and (.selection.closure_context.open_defect_or_authorized_follow_up | contains("Durable task notes were checked"))
+    and .selection.closure_context.acceptance.actor == "reviewer"
+    and .selection.closure_context.route == "close"
+    and (.selection.closure_context.open_defect_or_authorized_follow_up | contains("Durable task notes remain available"))
     and .selection.closure_context.durable_outcome == "data/closure/report.md"
     and (.selection.closure_context.knowledge_retained | contains("data/closure/report.md"))
     and (.selection.recommendation | contains("Close this task"))
     and (.selection.alternatives | contains("follow-up"))
     and .selection.actions == ["/task closure","/close closure","/history closure"]
   ' >/dev/null || fail "closure context, recommendation, alternatives, or commands are incomplete: $out"
-  card=$($NEXT --snapshot "$input")
+  card=$(FM_DATA_OVERRIDE="$LIFECYCLE_DATA" $NEXT --snapshot "$input")
   [ "$card" = "$(printf '%s' "$out" | jq -r '.card')" ] \
     || fail "plain output must return the JSON card verbatim"
   assert_contains "$card" "What completed: data/closure/report.md" "closure card lacks durable outcome"
-  assert_contains "$card" "Why it is not continuing:" "closure card lacks stop reason"
+  assert_contains "$card" "Acceptance: reviewer" "closure card lacks acceptance evidence"
+  assert_contains "$card" "Route: close" "closure card lacks selected route"
   assert_contains "$card" "Recommendation:" "card lacks recommendation"
   assert_contains "$card" "Alternatives:" "card lacks alternatives"
   assert_contains "$card" "Actions:" "card lacks exact actions"
@@ -188,11 +202,17 @@ SH
   Findings retained here.
 EOF
   printf '# Findings\n' > "$home/data/done-one/report.md"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_TASK_LIFECYCLE_NOW=2026-09-15T10:00:00Z \
+    "$ROOT/bin/fm-task-lifecycle.sh" review-start done-one >/dev/null || fail "live closure review did not start"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_TASK_LIFECYCLE_NOW=2026-09-15T10:01:00Z \
+    "$ROOT/bin/fm-task-lifecycle.sh" accept done-one --actor reviewer --evidence "report accepted" --route close >/dev/null \
+    || fail "live closure was not accepted"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$NEXT" --json) \
     || fail "live closure composition failed"
   printf '%s' "$out" | jq -e '
     .selection.kind == "closure"
-      and .selection.task_detail.schema == "fm-task-detail.v1"
+      and .selection.task_detail.schema == "fm-task-detail.v2"
+      and .selection.task_detail.acceptance.actor == "reviewer"
       and .selection.closure_review.result == "Report completed at data/done-one/report.md"
       and .selection.closure_review.follow_ups == ["follow-one"]
       and (.selection.closure_review.retained | index("data/closed-tasks/done-one/report.md") != null)
@@ -230,7 +250,7 @@ test_secondmate_canonical_ref() {
 
 test_each_ranking_tier
 test_priority_dependency_and_ties
-test_autonomous_actions_and_stale_events_are_excluded
+test_done_requires_review_and_stale_events_are_excluded
 test_closure_context_and_stable_card
 test_callsign_ref_and_name
 test_live_closure_composes_detail_and_closure_owners

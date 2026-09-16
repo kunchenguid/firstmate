@@ -6,6 +6,8 @@
 #
 # History reads only completed closure records under data/closed-tasks. Prepared
 # records from an interrupted close stay hidden until fm-close.sh finishes them.
+# Version 2 records include the accepted lifecycle and route; legacy version 1
+# records remain readable with lifecycle null and never gain inferred acceptance.
 # Positional lookup is exact and accepts canonical ids or unambiguous human
 # names, never retired t1-t99 references. --search is a case-insensitive bounded
 # text search across identity, project, result, artifacts, and follow-up links.
@@ -59,8 +61,21 @@ if [ -e "$ARCHIVE_ROOT" ] || [ -L "$ARCHIVE_ROOT" ]; then
   for record in "$ARCHIVE_ROOT"/*/closure.json; do
     [ -d "${record%/*}" ] && [ ! -L "${record%/*}" ] || continue
     [ -f "$record" ] && [ ! -L "$record" ] || continue
-    parsed=$(jq -c 'select(.version == 1 and (.disposition == "prepared" or .disposition == "closed")
-      and (.id | type == "string") and (.name | type == "string"))' "$record" 2>/dev/null) || {
+    parsed=$(jq -c '
+      def complete_lifecycle:
+        (.lifecycle.acceptance.actor | type == "string" and length > 0)
+        and (.lifecycle.acceptance.at | type == "string" and length > 0)
+        and (.lifecycle.acceptance.evidence | type == "string" and length > 0)
+        and (.lifecycle.acceptance.limitations | type == "string" and length > 0)
+        and ((.lifecycle.acceptance.route == "close" and .lifecycle.stage == "accepted")
+          or (.lifecycle.acceptance.route == "deliver" and .lifecycle.stage == "delivering"
+            and (.lifecycle.delivery.completedAt | type == "string" and length > 0))
+          or (.lifecycle.acceptance.route == "deliver-monitor" and .lifecycle.stage == "monitoring"
+            and (.lifecycle.monitoring.completedAt | type == "string" and length > 0)));
+      select((.version == 1 or (.version == 2 and complete_lifecycle))
+        and (.disposition == "prepared" or .disposition == "closed")
+        and (.id | type == "string") and (.name | type == "string"))
+      | if .version == 1 then . + {lifecycle:null} else . end' "$record" 2>/dev/null) || {
       printf 'fm-history: invalid closure record at %s\n' "$record" >&2
       exit 1
     }
@@ -86,7 +101,8 @@ MODEL=$(jq -s --arg selector "$SELECTOR" --arg search "$SEARCH" --argjson limit 
     elif $search != "" then
       ($search | ascii_downcase) as $q
       | map(select(([
-          .id, .name, .project, .kind, .result,
+          .id, .name, .project, .kind, .result, .lifecycle.acceptance.actor,
+          .lifecycle.acceptance.evidence, .lifecycle.acceptance.limitations, .lifecycle.acceptance.route,
           (.artifacts[]?), (.retainedKnowledge[]?), (.followUps[]?)
         ] | map(select(. != null) | tostring) | join(" ") | ascii_downcase | contains($q))))
     else . end
@@ -110,4 +126,6 @@ printf '%s\n' "$MODEL" | jq -r '.[] |
   | (.artifacts // []) as $artifacts
   | (if ($artifacts | length) == 0 then ""
      else " | " + ($artifacts | join(", ")) end) as $links
-  | "\($date)  \(.name) [\(.id)]  \(.project // "-")/\(.kind // "task") - \(.result)\($links)"'
+  | (if .lifecycle.acceptance == null then " | acceptance not recorded"
+     else " | accepted by \(.lifecycle.acceptance.actor), route \(.lifecycle.acceptance.route)" end) as $acceptance
+  | "\($date)  \(.name) [\(.id)]  \(.project // "-")/\(.kind // "task") - \(.result)\($acceptance)\($links)"'

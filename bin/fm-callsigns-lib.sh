@@ -13,6 +13,7 @@
 set -u
 
 FM_CALLSIGNS_STATE=${FM_CALLSIGNS_STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-.}/state}}
+FM_CALLSIGNS_DATA=${FM_CALLSIGNS_DATA:-${FM_DATA_OVERRIDE:-${FM_HOME:-.}/data}}
 FM_CALLSIGNS_FILE=${FM_CALLSIGNS_FILE:-$FM_CALLSIGNS_STATE/task-callsigns.tsv}
 FM_CALLSIGNS_LOCK=${FM_CALLSIGNS_LOCK:-$FM_CALLSIGNS_STATE/.task-callsigns.lock}
 FM_CALLSIGN_REUSE_COOLDOWN_SECS=${FM_CALLSIGN_REUSE_COOLDOWN_SECS:-86400}
@@ -77,8 +78,8 @@ fm_callsign_shorthand_name() {  # <title> <task-id>
 }
 
 fm_callsigns_inventory() {
-  local backlog=${FM_CALLSIGNS_BACKLOG:-${FM_DATA_OVERRIDE:-${FM_HOME:-.}/data}/backlog.md}
-  local meta id legacy
+  local backlog=${FM_CALLSIGNS_BACKLOG:-$FM_CALLSIGNS_DATA/backlog.md}
+  local meta lifecycle id legacy
   # Backlog titles are preferred for defaults, while metadata preserves tasks
   # during a short transition where the backlog row is not yet published.
   if [ -f "$backlog" ]; then
@@ -114,6 +115,15 @@ fm_callsigns_inventory() {
   for meta in "$FM_CALLSIGNS_STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=${meta##*/}; id=${id%.meta}
+    legacy=$(fm_callsign_legacy_name "$id")
+    printf '%s\t%s\t%s\n' "$id" "$(fm_callsign_shorthand_name "$id" "$id")" "$legacy"
+  done
+  # A reviewed task remains current across runtime cleanup until guarded closure,
+  # even when bounded backlog Done retention has already archived its row.
+  for lifecycle in "$FM_CALLSIGNS_DATA"/task-lifecycle/*.json; do
+    [ -f "$lifecycle" ] && [ ! -L "$lifecycle" ] || continue
+    id=${lifecycle##*/}; id=${id%.json}
+    case "$id" in ''|.*|*/*|*[!A-Za-z0-9._-]*) continue ;; esac
     legacy=$(fm_callsign_legacy_name "$id")
     printf '%s\t%s\t%s\n' "$id" "$(fm_callsign_shorthand_name "$id" "$id")" "$legacy"
   done

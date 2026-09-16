@@ -4,9 +4,11 @@
 #        fm-tasks.sh name <task-selector> <two-to-four-token-name>
 #        fm-tasks.sh resolve <task-selector>
 # The table consumes the canonical fleet snapshot and never maintains a second
-# current-state list. Reference and name assignments live in private state.
-# JSON rows are ordered by numeric short reference then canonical id and include
-# the spawn owner's authoritative started_at timestamp when one is available.
+# current-state list. bin/fm-task-lifecycle.sh owns its captain-facing lifecycle
+# projection; docs/task-lifecycle.md owns the status and route semantics.
+# Reference and name assignments live in private state. JSON rows are ordered by
+# numeric short reference then canonical id and include the spawn owner's
+# authoritative started_at timestamp when one is available.
 # Table width follows a positive COLUMNS value, then `tput cols`, then 120;
 # widths below 33 use the smallest aligned layout and may exceed the terminal.
 set -u
@@ -80,62 +82,9 @@ CALLSIGNS=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" bash -c \
   exit 1
 }
 
-MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg selector "$SELECTOR" '
-  def trunc($n): tostring | gsub("\\s+"; " ") | gsub("\\|"; "/") | if length > $n then .[:($n-1)] + "…" else . end;
-  def call($id): ([ $callsigns[] | select(.id == $id) ] | first) // {};
-  def event_note($t): ($t.hints.last_event_text // "" | sub("^[^:]+:[[:space:]]*"; ""));
-  def current_detail($t):
-    ([$t.current_state.detail, event_note($t)] | map(select(. != null and . != "")) | .[0]) // "";
-  def row_status($r; $t):
-    if $r.state == "done" then "done"
-    elif $t.mode == "local-only" and ($t.current_state.state // "unknown") == "done" then "ready"
-    elif ($r.unresolved_blocker_ids // [] | length) > 0 then "blocked"
-    elif $r.hold_kind == "captain" then "needs-you"
-    elif $r.hold_kind != null then "waiting"
-    elif ($t.hints.pending_decision // false) then "needs-you"
-    elif ($t.hints.blocked_event // false) then "blocked"
-    elif $r.state == "queued" then "queued"
-    elif ($t.current_state.state // "unknown") == "working" then "working"
-    elif ($t.current_state.state // "unknown") == "paused" then "waiting"
-    elif ($t.current_state.state // "unknown") == "blocked" then "blocked"
-    elif ($t.current_state.state // "unknown") == "parked" then "needs-you"
-    elif ($t.current_state.state // "unknown") == "done" then "ready"
-    elif ($t.current_state.state // "unknown") == "failed" then "failed"
-    else "unknown" end;
-  def outcome($r; $t; $status):
-    if $status == "done" then "Ready to close"
-    elif $status == "queued" then "queued"
-    elif $status == "blocked" then (($r.unresolved_blocker_ids // [] | join(", ")) as $b | if $b == "" then ($r.blocked_reason // "blocked") else "waiting on " + $b end)
-    elif $status == "needs-you" then ($r.hold_reason // (current_detail($t) | if . == "" then "needs your input" else . end))
-    elif $status == "waiting" then ($r.hold_reason // (current_detail($t) | if . == "" then "external delay" else . end))
-    elif $status == "ready" and $t.mode == "local-only" then
-      ($r.hold_reason // current_detail($t)) as $detail
-      | if $detail == "" then "awaiting landing approval"
-        elif ($detail | test("await|approval|landing"; "i")) then $detail
-        else $detail + "; awaiting landing approval" end
-    elif (current_detail($t)) != "" then current_detail($t)
-    elif $status == "unknown" then "current state unavailable"
-    else $status end;
-  def make($id; $r; $t):
-    (call($id)) as $c
-    | (if ($c.name // "") != "" then $c.name else $id end) as $name
-    | (row_status($r; $t)) as $status
-    | {id:$id, ref:($c.ref // "-"), name:$name, status:$status,
-       started_at:($t.started_at // null),
-       outcome:(outcome($r; $t; $status) | trunc(100))};
-  . as $snapshot
-  | def task($id): ([$snapshot.tasks[]? | select(.id == $id)] | first) // {};
-  ([.backlog.records[]? | select(.structured == true and (.state == "in_flight" or .state == "queued" or .state == "done"))
-    | . as $r | make($r.id; $r; task($r.id))]) as $backlog_rows
-  | ($backlog_rows | map(.id)) as $backlog_ids
-  | ($backlog_rows
-     + [.tasks[]? | select(.kind != "secondmate")
-        | .id as $id | select(($backlog_ids | index($id)) == null)
-        | make($id; {state:"in_flight",structured:true}; .)])
-  | unique_by(.id)
-  | if $selector == "" then . else map(select(.id == $selector or .ref == $selector or .name == $selector)) end
-  | sort_by([(.ref | ltrimstr("t") | tonumber? // 1000), .id])
-') || { echo "fm-tasks: could not build task table" >&2; exit 1; }
+MODEL=$(printf '%s\n' "$SNAPSHOT" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  "$SCRIPT_DIR/fm-task-lifecycle.sh" project --snapshot - --callsigns-json "$CALLSIGNS" \
+  --selector "$SELECTOR") || { echo "fm-tasks: could not build task table" >&2; exit 1; }
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"

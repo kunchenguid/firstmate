@@ -34,6 +34,14 @@ add_done() {  # <home> <id> <title>
     || fail "could not complete $2"
 }
 
+accept_for_close() {  # <home> <id>
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" FM_TASK_LIFECYCLE_NOW=2026-09-16T10:00:00Z \
+    "$ROOT/bin/fm-task-lifecycle.sh" review-start "$2" >/dev/null || fail "could not start review for $2"
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" FM_TASK_LIFECYCLE_NOW=2026-09-16T10:01:00Z \
+    "$ROOT/bin/fm-task-lifecycle.sh" accept "$2" --actor test-reviewer --evidence "review passed" --route close >/dev/null \
+    || fail "could not accept $2"
+}
+
 row_exists() { FM_HOME="$1" "$AXI" show "$2" >/dev/null 2>&1; }
 
 # Review mode renders the exact proposal, including its temporary callsign
@@ -46,6 +54,7 @@ before=$(cksum "$home/data/backlog.md")
 out=$(FM_HOME="$home" "$CLOSE" --review review-closure-behavior) || fail "review-only close by generated name failed: $out"
 assert_contains "$out" "Proposed closure: review-closure-behavior (review-task, t1)" \
   "review did not print the proposed canonical disposition"
+assert_contains "$out" "Lifecycle blocker:" "review did not identify missing acceptance"
 assert_contains "$out" "Review only: nothing changed." "review did not identify its read-only result"
 [ "$before" = "$(cksum "$home/data/backlog.md")" ] || fail "review mutated the backlog"
 assert_absent "$home/state/task-callsigns.tsv" "review allocated a private short reference"
@@ -53,8 +62,9 @@ assert_absent "$home/data/closed-tasks" "review created a closed-task archive"
 row_exists "$home" review-task || fail "review removed the current task"
 pass "close --review is a non-mutating closure proposal"
 
-# Normal close archives useful task material and the compact structured record,
-# removes only the selected Done row, and makes it searchable by id and name.
+# Normal close archives useful task material, explicit acceptance, and the compact
+# structured record, removes only the selected Done row, and makes it searchable.
+accept_for_close "$home" review-task
 out=$(FM_HOME="$home" "$CLOSE" review-task) || fail "normal close failed: $out"
 closure="$home/data/closed-tasks/review-task/closure.json"
 [ -f "$closure" ] || fail "normal close did not publish a closure record"
@@ -69,8 +79,11 @@ printf '%s\n' "$json" | jq -e '
   and .[0].name == "review-closure-behavior"
   and .[0].project == "sample"
   and .[0].kind == "ship"
+  and .[0].version == 2
   and .[0].disposition == "closed"
   and .[0].result == "Delivered to local main"
+  and .[0].lifecycle.acceptance.actor == "test-reviewer"
+  and .[0].lifecycle.acceptance.route == "close"
   and (. [0].dates.completed != null)
   and (. [0].dates.closed != null)
   and (. [0].retainedKnowledge | index("data/closed-tasks/review-task/brief.md") != null)
@@ -104,6 +117,7 @@ FM_HOME="$refusal" "$AXI" add queued-task "Queued task" --kind ship --repo sampl
 if FM_HOME="$refusal" "$CLOSE" queued-task >"$refusal/queued.out" 2>&1; then fail "queued task closed"; fi
 assert_grep "is not Done" "$refusal/queued.out" "queued refusal did not name the terminal-state requirement"
 add_done "$refusal" resource-task "Resource cleanup task"
+accept_for_close "$refusal" resource-task
 printf '#!/usr/bin/env bash\n' > "$refusal/state/resource-task.check.sh"
 chmod 0700 "$refusal/state/resource-task.check.sh"
 if FM_HOME="$refusal" "$CLOSE" resource-task >"$refusal/resource.out" 2>&1; then fail "task with an orphaned resource closed"; fi
@@ -123,6 +137,7 @@ pass "close refuses nonterminal, unsafe-cleanup, and ownerless mutation cases"
 # A mixed batch independently lands successes while preserving failed rows.
 batch=$(make_home batch)
 add_done "$batch" batch-good "Batch good task"
+accept_for_close "$batch" batch-good
 FM_HOME="$batch" "$AXI" add batch-wait "Batch waiting task" --kind ship --repo sample >/dev/null
 if FM_HOME="$batch" "$CLOSE" batch-good batch-wait >"$batch/batch.out" 2>&1; then fail "partial batch reported complete success"; fi
 [ -f "$batch/data/closed-tasks/batch-good/closure.json" ] || fail "successful batch member was rolled back"
@@ -135,6 +150,7 @@ pass "bounded batch closure isolates success from failure"
 # during cooldown, while a deterministic zero-cooldown sync proves later reuse.
 calls=$(make_home callsigns)
 add_done "$calls" old-task "Old callsign task"
+accept_for_close "$calls" old-task
 first=$(FM_HOME="$calls" "$TASKS" --json) || fail "could not allocate the initial reference"
 [ "$(printf '%s\n' "$first" | jq -r '.[0].ref')" = t1 ] || fail "initial task did not receive t1"
 FM_HOME="$calls" "$CLOSE" t1 >/dev/null || fail "close did not accept an active temporary reference"
@@ -152,6 +168,7 @@ pass "closure enforces callsign cooldown and history uses stable identities"
 # before source removal, so the archival disposition does not strand relations.
 links=$(make_home followups)
 add_done "$links" source-task "Source task"
+accept_for_close "$links" source-task
 FM_HOME="$links" "$AXI" add follow-task "Authorized follow task" --kind ship --repo sample --blocked-by source-task >/dev/null
 FM_HOME="$links" "$CLOSE" source-task >/dev/null || fail "close with existing follow-up failed"
 [ "$(FM_HOME="$links" "$AXI" show follow-task --full | sed -n 's/^  deps: *//p')" = none ] \
@@ -168,6 +185,7 @@ cleanup=$(make_home cleanup)
 fakebin="$cleanup/fakebin"
 mkdir -p "$fakebin" "$cleanup/data/cleanup-task"
 add_done "$cleanup" cleanup-task "Cleanup composition task"
+accept_for_close "$cleanup" cleanup-task
 cat > "$cleanup/state/cleanup-task.meta" <<EOF
 window=firstmate:fm-cleanup-task
 endpoint_task_id=cleanup-task

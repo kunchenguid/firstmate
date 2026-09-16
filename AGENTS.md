@@ -87,7 +87,8 @@ config/watched-tools.json  optional list of the tools this home depends on, read
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         current task queue, dependencies, and recent Done rows
-  closed-tasks/      private finalized closure records plus retained task instructions, reports, and notes; bin/fm-close.sh owns publication and bin/fm-history.sh owns lookup
+  closed-tasks/      private finalized closure records plus acceptance, route, retained task instructions, reports, and notes; bin/fm-close.sh owns publication and bin/fm-history.sh owns lookup
+  task-lifecycle/    minimal per-task review, acceptance, route, delivery, and monitoring records that survive runtime cleanup; bin/fm-task-lifecycle.sh owns the schema and transitions
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
@@ -396,11 +397,11 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, the task is Done and remains visible in `/tasks` with outcome `Ready to close`; re-evaluate queued work whose blockers and time gates have cleared.
-When the captain asks to close completed work, load `/close`: routine close proceeds automatically when its deterministic checks pass, while `--review` presents the proposed archive, knowledge routing, and next-work recommendations without mutation.
-`bin/fm-close.sh` owns closure verification, composes guarded cleanup rather than deleting resources, preserves useful private task material, removes the Done row only through the configured backlog owner, and retires its short reference with cooldown.
+[`docs/task-lifecycle.md`](docs/task-lifecycle.md) owns every captain-facing task status, route, acceptance rule, transition, and closure prerequisite; load `task-lifecycle` when the captain starts or finishes review, accepts a result, records delivery or monitoring, or returns a result for correction.
+When the captain asks to close work, load `/close`; `bin/fm-close.sh` owns guarded archival and must preserve the lifecycle evidence without inferring acceptance from completion, tests, delivery, or merge records.
 Never create recommended follow-up work without authorization, and stop for a genuine retention choice, destructive cleanup, unlanded work, unresolved captain call, or undelivered public commitment.
 Closed work leaves `/tasks` and remains available through `/history` by canonical id or human name.
+After successful cleanup or closure, re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.

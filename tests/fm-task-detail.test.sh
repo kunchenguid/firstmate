@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic /task detail tests for current, ready, Done, blocked, missing-date,
+# Deterministic /task detail tests for current, Done, blocked, missing-date,
 # closed, ambiguous, and retired-reference lookup behavior.
 set -u
 
@@ -81,8 +81,8 @@ printf 'done: ready in branch fm/ready-task\n' > "$HOME_DIR/state/ready-task.sta
 active=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" --json active-task) \
   || fail "active task detail lookup failed"
 printf '%s\n' "$active" | jq -e '
-  .schema == "fm-task-detail.v1"
-  and (keys | sort) == ["artifacts","attention","dates","delivery","details","followUps","id","kind","name","nextAction","outcome","project","purpose","ref","retainedKnowledge","schema","source","status"]
+  .schema == "fm-task-detail.v2"
+  and (keys | sort) == ["acceptance","artifacts","attention","closeReady","dates","delivery","details","followUps","id","kind","lifecycle","name","nextAction","outcome","project","purpose","ref","retainedKnowledge","route","schema","source","status"]
   and .source == "current"
   and .ref == "t1"
   and .name == "understandable-task-details"
@@ -98,43 +98,46 @@ printf '%s\n' "$active" | jq -e '
   and (.details | contains("useful durable context"))
   and .outcome == "assembling the deterministic task card"
   and (.artifacts | index("https://example.test/pull/44") != null)
-  and .nextAction == "assembling the deterministic task card"
+  and .nextAction == "Continue the current work"
 ' >/dev/null || fail "active detail omitted composed current records: $active"
 card=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" t1) \
   || fail "active short-reference card failed"
 assert_contains "$card" "Task t1: understandable-task-details" "card heading changed"
 assert_contains "$card" "Canonical ID: active-task" "card omitted canonical identity"
 assert_contains "$card" "Started: 2026-09-10T09:30:00Z" "card omitted authoritative start date"
-assert_contains "$card" "Next action: assembling the deterministic task card" "card omitted active next action"
+assert_contains "$card" "Next action: Continue the current work" "card omitted active next action"
 pass "active task detail composes purpose, dates, state, metadata, and artifacts"
 
 ready=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" --json ready-task) \
   || fail "ready task detail lookup failed"
 printf '%s\n' "$ready" | jq -e '
-  .status == "ready"
-  and .outcome == "ready in branch fm/ready-task; awaiting landing approval"
-  and .delivery == "Local branch awaiting landing approval"
-  and .nextAction == "Awaiting landing approval"
-' >/dev/null || fail "ready task did not explain its landing decision: $ready"
-pass "ready local work names landing approval as the next action"
+  .status == "done"
+  and .outcome == "ready in branch fm/ready-task; candidate ready for review"
+  and .delivery == "Candidate local branch"
+  and .acceptance == null
+  and .nextAction == "Start review"
+' >/dev/null || fail "Done task inferred acceptance or skipped review: $ready"
+pass "completed local work remains a candidate until review records acceptance"
 
 done=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" --json done-task) \
   || fail "Done task detail lookup failed"
 printf '%s\n' "$done" | jq -e '
   .status == "done"
   and .dates.finished == "2026-09-12"
-  and .outcome == "Delivered to local main with the requested behavior."
-  and .nextAction == "Ready to close"
-' >/dev/null || fail "Done task was not presented as awaiting close: $done"
-pass "Done current work remains explicitly ready to close"
+  and .outcome == "Candidate result ready; review has not started"
+  and .acceptance == null
+  and .closeReady == false
+  and .nextAction == "Start review"
+' >/dev/null || fail "Done task was not presented as an unreviewed candidate: $done"
+pass "Done current work names review instead of inferring acceptance"
 
 blocked=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" --json blocked-task) \
   || fail "blocked task detail lookup failed"
 printf '%s\n' "$blocked" | jq -e '
   .status == "blocked"
-  and .outcome == "waiting on blocker-task"
+  and .outcome == "Waiting on blocker-task"
   and .attention == "Blocked by: blocker-task"
-  and .nextAction == "Resolve the blocker"
+  and .nextAction == "Firstmate must resolve the recorded problem"
 ' >/dev/null || fail "blocked task omitted its concrete blocker: $blocked"
 pass "blocked task detail identifies the blocker and next action"
 
@@ -180,7 +183,8 @@ make_closure closed-task archived-task-detail "Delivered the task detail command
 closed=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TASK" --json closed-task) \
   || fail "closed canonical lookup failed"
 printf '%s\n' "$closed" | jq -e '
-  .source == "closed"
+  .schema == "fm-task-detail.v2"
+  and .source == "closed"
   and .ref == "t9 (retired)"
   and .name == "archived-task-detail"
   and .status == "closed"
@@ -191,6 +195,8 @@ printf '%s\n' "$closed" | jq -e '
   and .purpose == "Preserve the archived purpose without reviving its old short reference."
   and .details == "Remember the useful archived detail."
   and .outcome == "Delivered the task detail command"
+  and .acceptance == null
+  and .route == null
   and (.artifacts | index("https://example.test/pull/9") != null)
   and (.retainedKnowledge | index("data/learnings.md") != null)
   and .followUps == ["later-task"]

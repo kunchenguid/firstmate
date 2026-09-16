@@ -187,11 +187,12 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/quiet`           | Enter quiet supervision mode: the same token-saving sub-supervisor tradeoff as `/afk`, for a captain who is staying and chatting - ordinary messages do not exit it, only an explicit `/quiet off` does |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
-| `/tasks`           | Toggle a live Ref, Name, Status, Elapsed, and Current outcome task table; it starts hidden and completed rows remain actionable as `Ready to close` |
-| `/next`            | Show the single highest-value captain action that can restart work, falling back to one completed task ready for `/close` only when no work can move forward |
-| `/task <selector>` | Show one current, recent, or closed task's purpose, lifecycle dates, outcome, delivery state, artifacts, blocker or decision, and next action before choosing `/close` |
-| `/close`           | Review or close completed work, preserving its private task material and moving it from `/tasks` into durable history |
-| `/history`         | Show recent closed work, look up a canonical id or human name, or search the private closure records |
+| `/tasks`           | Toggle the live task table using the statuses and routes defined in the [captain-facing lifecycle](docs/task-lifecycle.md) |
+| `/t`               | Approved task router: bare `/t` toggles the task dashboard, while `/t <selector>` routes to `/task <selector>` |
+| `/next`            | Show the highest-value captain action that restarts work or advances review, acceptance, delivery, or monitoring before closure |
+| `/task <selector>` | Show one current, recent, or closed task's purpose, lifecycle evidence, outcome, artifacts, attention, and next action |
+| `/close`           | Guardedly archive work only after its selected lifecycle route is complete, preserving acceptance and private task material |
+| `/history`         | Show or search closed work with its recorded acceptance and selected route |
 | `/updatefirstmate` | Guardedly update the running firstmate and its secondmates - fast-forward, or reconcile a redundant post-squash-merge divergence - then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
