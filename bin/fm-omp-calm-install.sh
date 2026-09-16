@@ -10,7 +10,9 @@
 # load a second time in home sessions (OMP de-duplicates by absolute path, not
 # realpath), so an identical legacy copy is removed and a divergent one is
 # renamed to .bak with a warning.
-# Uninstall with `omp plugin uninstall fm-calm-omp`.
+# Unload with `omp plugin disable fm-calm-omp` (or delete the linked symlink).
+# `omp plugin uninstall fm-calm-omp` clears the lockfile entry but leaves the
+# symlink, so the extension still loads.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
