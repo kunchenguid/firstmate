@@ -232,19 +232,27 @@ observe() { # canonical GitHub URL -> normalized JSON
     | valid_record' >/dev/null
 }
 
-publish_pending() { # task record-file
-  local task=$1 token key count
-  count=$(jq '.pending | length' "$2")
+publish_pending() { # task canonical-url record-file
+  local task=$1 url=$2 record=$3 token key count emitted status
+  count=$(jq '.pending | length' "$record")
   [ "$count" -gt 0 ] || return 0
   while IFS= read -r token; do
     [ -n "$token" ] || continue
-    key=$(printf '%s\n%s\n' "$task" "$token" | shasum -a 256 | awk '{print $1}')
-    fm_wake_append check "contribution-$key" "check: contributions $task $key" || return 1
-    jq --arg token "$token" '.notified = ((.notified // []) + [$token] | unique)' "$2" > "$TMP/notified.json"
-    mv "$TMP/notified.json" "$2"
-    write_record "$task" "$2"
-    printf 'contribution-wake: check: contributions %s %s\n' "$task" "$key"
-  done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$2")
+    key=$(printf '%s\n%s\n' "$url" "$token" | shasum -a 256 | awk '{print $1}')
+    emitted=0
+    status=0
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+    if ! fm_wake_queued_keys_locked check | grep -Fx "contribution-$key" >/dev/null; then
+      fm_wake_append_locked check "contribution-$key" "check: contributions $task $key" || status=1
+      [ "$status" -ne 0 ] || emitted=1
+    fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+    [ "$status" -eq 0 ] || return 1
+    jq --arg token "$token" '.notified = ((.notified // []) + [$token] | unique)' "$record" > "$TMP/notified.json"
+    mv "$TMP/notified.json" "$record"
+    write_record "$task" "$record"
+    [ "$emitted" -eq 0 ] || printf 'contribution-wake: check: contributions %s %s\n' "$task" "$key"
+  done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
 }
 
 poll() {
@@ -282,7 +290,7 @@ poll() {
       printf 'contributions: observation unavailable for %s\n' "$url"
     fi
     write_record "$task" "$TMP/row.json"
-    publish_pending "$task" "$TMP/row.json"
+    publish_pending "$task" "$url" "$TMP/row.json"
   done < "$TMP/known.tsv"
 }
 

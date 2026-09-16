@@ -2168,18 +2168,20 @@ while :; do
       if [ -n "$out" ]; then
         if [ "$(basename "$c")" = contributions.check.sh ]; then
           contribution_check_output=
-          contribution_check_invalid=0
+          contribution_check_diagnostics=
           while IFS= read -r contribution_check_line; do
             case "$contribution_check_line" in
               'contribution-wake: check: contributions '*)
                 contribution_check_output="${contribution_check_output}${contribution_check_line#contribution-wake: }"$'\n'
                 ;;
-              *) contribution_check_invalid=1 ;;
+              *) contribution_check_diagnostics="${contribution_check_diagnostics}${contribution_check_line}"$'\n' ;;
             esac
           done <<EOF
 $out
 EOF
-          if [ "$contribution_check_invalid" -eq 0 ] && [ -n "$contribution_check_output" ]; then
+          if [ -n "$contribution_check_diagnostics" ]; then
+            out=${contribution_check_diagnostics%$'\n'}
+          elif [ -n "$contribution_check_output" ]; then
             continue
           fi
         fi
