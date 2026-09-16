@@ -678,7 +678,7 @@ NODE
 # the caller; both are already on every plane that delivers an interrupt.
 fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
   local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
-  local log prompt content last='' readable=0 i
+  local log prompt content last='' readable=0 stable=0 i
   log=$(fm_busy_muse_session_log "$state" "$id" 2>/dev/null) || {
     printf 'unprovable: no muse session log resolves for %s' "$id"
     return 0
@@ -705,7 +705,10 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     else
       content=
     fi
-    [ -n "$content" ] && [ "$content" = "$last" ] && break
+    if [ -n "$content" ] && [ "$content" = "$last" ]; then
+      stable=1
+      break
+    fi
     last=$content
     i=$((i - 1))
     [ "$i" -gt 0 ] && sleep 0.2
@@ -716,6 +719,10 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     else
       printf 'empty'
     fi
+    return 0
+  fi
+  if [ "$stable" -eq 0 ]; then
+    printf 'unprovable: the composer for %s never stabilized' "$target"
     return 0
   fi
   case "$prompt" in
