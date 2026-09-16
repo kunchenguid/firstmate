@@ -1,63 +1,42 @@
-// Firstmate's Calm-only animated working presentation.
+// Firstmate's Calm-only animated working presentation, restored to the original
+// two-color sprite: yellow ASCII boat over blue rippling water.
 //
-// Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat while one
+// Calm replaces OMP's stock working row with a tiny SSHHIP-derived boat while one
 // logical agent run is active. This module owns only the sprite geometry, the bounce
 // track, the two animation cadences, the session-scoped freeze/resume state, and the
-// temporary TUI widget; `.pi/extensions/fm-calm.ts` owns when the presentation is
-// installed and removed, and stays the sole caller of setWorkingVisible().
-// docs/calm.md owns the captain-facing contract.
+// widget factory; `fm-calm-omp.ts` owns when the presentation is installed and
+// removed. docs/calm.md owns the captain-facing contract.
 //
-// Cadence: one scheduler drives two linked cadences. Every tick advances the wave by
-// one quarter-cell, and every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the boat
-// one whole cell, so the trough stays phase-locked to a deliberately calm boat.
-// Both cadences stop together when the widget is disposed.
-// Ticks, not wall-clock timestamps, drive every state change, so tests can seek time exactly.
+// Cadence: one scheduler drives two logically independent clocks. Every tick advances
+// the water phase, and only every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the
+// boat, so the water visibly ripples several times between boat steps and the boat
+// itself reads as calm. Both clocks stop together when the widget is disposed. Ticks,
+// not wall-clock timestamps, drive every state change, so tests can seek time exactly.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
-// Pi process and Calm extension lifetime. Disposing the widget freezes column,
+// OMP process and Calm extension lifetime. Disposing the widget freezes column,
 // direction, water phase, and tick cadence without advancing them for hidden wall
 // time. The next working period resumes from that exact logical state. A fresh session
 // or new extension lifetime calls reset() and starts at the normal initial position.
 // State is never a module-level or process-global singleton.
-//
-// Verified against Pi 0.81.1 declarations and the Pi 0.82.0 CLI, which expose
-// ExtensionUIContext.setWidget() with a component factory, per-widget dispose(), and
-// TUI.requestRender(). Pi renders a widget through Component.render(width), so this
-// module recomputes its track from that width on every frame instead of caching a
-// terminal size that a resize would invalidate. A resize while the boat is hidden is
-// applied on the first resumed frame through the same clamp path.
 type Component = { render: (width: number) => readonly string[]; invalidate: () => void; dispose?: () => void };
 type TUI = { requestRender: () => void };
-function visibleWidth(value: string): number { return value.replace(/\x1b\[[0-9;]*m/g, "").length; }
 
-// The asymmetric three-cell sail is centered over a five-cell hull. The one-cell
-// quarter triangle keeps the left sail lighter than the full right sail, and the whole
-// boat (both sail halves, mast, and hull) is one color so the sprite reads as one shape.
-// The hull's inner cells retain zero-height water glyphs instead of interrupting the trough.
-const LEFT_SAIL = "◿";
-const MAST = "│";
-const RIGHT_SAIL = "◣";
-const SAIL = `${LEFT_SAIL}${MAST}${RIGHT_SAIL}`;
-const HULL_LEFT = "╲";
-const HULL_WATER = "▁▁▁";
-const HULL_RIGHT = "╱";
-const HULL = `${HULL_LEFT}${HULL_WATER}${HULL_RIGHT}`;
+// The hull is symmetric and replaces waves on its row rather than adding a third row.
+const HULL = "\\__/";
+// A mainsail extends aft of the mast, so it trails behind the bow relative to travel.
+const SAIL_RIGHT = "<|";
+const SAIL_LEFT = "|>";
+// Centers the two-cell sail over the four-cell hull.
 const SAIL_OFFSET = 1;
-const HULL_WIDTH = visibleWidth(HULL);
-const SAIL_WIDTH = visibleWidth(SAIL);
+const HULL_WIDTH = HULL.length;
+const SAIL_WIDTH = SAIL_RIGHT.length;
 
-// Pi Dictation uses these bottom-aligned one-cell bars for truthful level history.
-// Calm deliberately keeps only its lower half: a long, low ocean swell rather than an
-// audio-sized waveform. Every glyph is one terminal column under Pi TUI's width rules.
-const WAVE_BARS = ["▁", "▂", "▃", "▄"] as const;
-const WAVE_MAX_LEVEL = WAVE_BARS.length - 1;
-const WAVE_HALF_LENGTH_MIN = 9;
-const WAVE_HALF_LENGTH_SPAN = 5;
-const WAVE_TROUGH_RADIUS = 5;
+// Bounded deterministic fixed-cell water phases. Every entry is exactly one column, so
+// advancing the phase ripples the surface without changing visible width or row count.
+const WAVE_CYCLE = ["~", "~", "-", "~"] as const;
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
-// Water is a single blue so the swell reads through glyph height alone; the boat is a
-// single yellow so its sail halves, mast, and hull read as one shape.
 const BLUE = "\u001b[34m";
 const YELLOW = "\u001b[33m";
 // Restores the default foreground so color never bleeds into padding or later frames.
@@ -86,7 +65,7 @@ export type CalmWorkingShipAnimation = {
   position(): number;
   /** Current travel direction: 1 travelling right, -1 travelling left. */
   direction(): number;
-  /** Current quarter-cell wave phase, exposed for deterministic swell assertions. */
+  /** Current water phase, exposed for deterministic ripple assertions. */
   waterPhase(): number;
 };
 
@@ -95,62 +74,6 @@ function trackSpan(width: number): number {
   if (width >= HULL_WIDTH) return width - HULL_WIDTH;
   if (width >= SAIL_WIDTH) return width - SAIL_WIDTH;
   return 0;
-}
-
-/** Stable bounded variation for successive half-waves on either side of the trough. */
-function halfWaveLength(index: number, negative: boolean): number {
-  let value =
-    ((negative ? 0xc411 : 0x5ea1) + Math.imul(index + 1, 0x9e3779b1)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x7feb352d) >>> 0;
-  value ^= value >>> 15;
-  value >>>= 0;
-  return WAVE_HALF_LENGTH_MIN + (value % WAVE_HALF_LENGTH_SPAN);
-}
-
-function smoothstep(value: number): number {
-  const bounded = Math.max(0, Math.min(1, value));
-  return bounded * bounded * (3 - 2 * bounded);
-}
-
-/** Smooth amplitude at one fractional cell in the deterministic variable wave field. */
-function waveAmplitude(coordinate: number): number {
-  const negative = coordinate < 0;
-  let distance = Math.abs(coordinate);
-  let rising = true;
-  for (let index = 0; ; index += 1) {
-    const length = halfWaveLength(index, negative);
-    if (distance <= length) {
-      const eased = smoothstep(distance / length);
-      return (rising ? eased : 1 - eased) * WAVE_MAX_LEVEL;
-    }
-    distance -= length;
-    rising = !rising;
-  }
-}
-
-/**
- * One bottom-aligned bar at an absolute column.
- *
- * The wave advances one quarter-cell on every water tick and exactly one cell on the
- * boat's slower movement tick. Anchoring that displacement to the hull center keeps
- * the boat inside the same broad trough without per-frame randomness or jitter.
- */
-function waveLevel(
-  column: number,
-  hullCenter: number,
-  direction: number,
-  phase: number,
-): number {
-  const displacement =
-    hullCenter + (direction * phase) / CALM_WORKING_SHIP_TICKS_PER_MOVE;
-  const coordinate = column - displacement;
-  if (Math.abs(coordinate) <= WAVE_TROUGH_RADIUS) return 0;
-  const beyondTrough = coordinate - Math.sign(coordinate) * WAVE_TROUGH_RADIUS;
-  return Math.max(
-    0,
-    Math.min(WAVE_MAX_LEVEL, Math.round(waveAmplitude(beyondTrough))),
-  );
 }
 
 export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
@@ -165,8 +88,8 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   let renderedPhase = phase;
   let renderedTicks = ticks;
 
-  // Reversing the moment the boat lands on an endpoint means the endpoint frame already
-  // carries the new wave direction, so the trough follows the next boat movement.
+  // Reversing the moment the boat lands on an endpoint means the endpoint frame itself
+  // already shows the new heading, so no frame at or after a bounce shows the old sail.
   const settleDirectionAtEdges = (): void => {
     if (span <= 0) return;
     if (position >= span) direction = -1;
@@ -200,19 +123,17 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     ticks = renderedTicks;
   };
 
-  /** One colored run of low water covering absolute columns [from, from + count). */
-  const water = (from: number, count: number, hullCenter: number): string => {
+  /** One colored run of water covering absolute columns [from, from + count). */
+  const water = (from: number, count: number): string => {
+    if (count <= 0) return "";
     let cells = "";
     for (let column = from; column < from + count; column += 1) {
-      const level = waveLevel(column, hullCenter, direction, phase);
-      cells += `${BLUE}${WAVE_BARS[level]}${RESET}`;
+      cells += WAVE_CYCLE[(column + phase) % WAVE_CYCLE.length];
     }
-    return cells;
+    return `${BLUE}${cells}${RESET}`;
   };
 
   const boat = (text: string): string => `${YELLOW}${text}${RESET}`;
-  const sail = (): string => boat(SAIL);
-  const hull = (): string => boat(HULL);
 
   return {
     position: () => position,
@@ -236,7 +157,7 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
 
     tick(): void {
       ticks += 1;
-      phase = (phase + 1) % CALM_WORKING_SHIP_TICKS_PER_MOVE;
+      phase = (phase + 1) % WAVE_CYCLE.length;
       if (ticks % CALM_WORKING_SHIP_TICKS_PER_MOVE !== 0) return;
       if (span <= 0) {
         position = 0;
@@ -253,29 +174,25 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
       // immediately rather than trusting a position measured against the old width.
       applyWidth(width);
 
-      const hullCenter =
-        position +
-        (width >= HULL_WIDTH
-          ? Math.floor(HULL_WIDTH / 2)
-          : Math.floor(SAIL_WIDTH / 2));
+      const sail = direction >= 0 ? SAIL_RIGHT : SAIL_LEFT;
 
       let frame: string[];
       if (width < SAIL_WIDTH) {
-        // Too narrow for even the sail: a deterministic single row of low water.
-        frame = [water(0, width, hullCenter)];
+        // Too narrow for even the sail: a deterministic single row of water.
+        frame = [water(0, width)];
       } else if (width < HULL_WIDTH) {
-        // Too narrow for the hull: the sail alone rides inside the water row.
+        // Too narrow for the hull: the sail alone rides the water row.
         frame = [
-          water(0, position, hullCenter) +
-            sail() +
-            water(position + SAIL_WIDTH, width - position - SAIL_WIDTH, hullCenter),
+          water(0, position) +
+            boat(sail) +
+            water(position + SAIL_WIDTH, width - position - SAIL_WIDTH),
         ];
       } else {
         frame = [
-          " ".repeat(position + SAIL_OFFSET) + sail(),
-          water(0, position, hullCenter) +
-            hull() +
-            water(position + HULL_WIDTH, width - position - HULL_WIDTH, hullCenter),
+          " ".repeat(position + SAIL_OFFSET) + boat(sail),
+          water(0, position) +
+            boat(HULL) +
+            water(position + HULL_WIDTH, width - position - HULL_WIDTH),
         ];
       }
 
@@ -286,12 +203,12 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
 }
 
 /**
- * Build the temporary Calm working widget bound to one caller-owned animation.
- * Pi disposes the previous component before installing a replacement under the same
- * key and when it clears extension widgets, so the single scheduler driving both
- * cadences cannot outlive the widget or duplicate. Disposing freezes the shared
- * animation in place; the next widget bound to the same animation resumes without
- * applying hidden wall time.
+ * Build a working widget bound to one caller-owned animation. OMP disposes the
+ * previous component before installing a replacement under the same key and when it
+ * clears extension widgets, so the single scheduler driving both cadences cannot
+ * outlive the widget or duplicate. Disposing freezes the shared animation in place;
+ * the next widget bound to the same animation resumes without applying hidden wall
+ * time.
  */
 export function createCalmWorkingShipWidget(
   tui: TUI,
@@ -303,8 +220,8 @@ export function createCalmWorkingShipWidget(
     animation.tick();
     tui.requestRender();
   }, CALM_WORKING_SHIP_TICK_MS);
-  // The animation must never keep Pi's process alive on its own.
-  (timer as unknown as { unref?: () => void }).unref?.();
+  // The animation must never keep the host process alive on its own.
+  timer.unref?.();
 
   return {
     render: (width) => (disposed ? [] : animation.render(width)),
