@@ -143,8 +143,15 @@ export PATH
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" \
   || fail "could not start the isolated tmux server"
+# Pin the pane's terminal capabilities: the drift guard asserts Muse's real
+# truecolor prompt styling, and Muse downgrades or disables color when the
+# inherited terminal environment says to (COLORTERM unset, or NO_COLOR from
+# the driving shell). The tmux server passes the ambient environment through
+# to panes, so a host running this guard from a colorless harness would fail
+# the glyph check for environmental rather than drift reasons.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n muse -c "$WORKSPACE" -- \
-  env XDG_CONFIG_HOME="$LAB/config" XDG_DATA_HOME="$LAB/data" \
+  env -u NO_COLOR XDG_CONFIG_HOME="$LAB/config" XDG_DATA_HOME="$LAB/data" \
+  TERM=xterm-256color COLORTERM=truecolor \
   MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on \
   "$MUSE_BIN" --provider echo --yolo "firstmate Muse signal drift guard" \
   || fail "could not launch Muse with the echo provider"
