@@ -905,10 +905,10 @@ Each run used `bin/fm-herdr-lab.sh launchagent provision <session> <code root>`,
 
 | Launch shape | launchd job | herdr server | `detached_server_daemon` |
 | --- | --- | --- | --- |
-| guard before this change | pid 19086, ppid 1, pgid 19086, STAT `S` | the job itself | not read in this run; the server does not lead its own session, which is the property the predicate tests |
+| guard exec'ing `herdr server` directly (the shape of a server started before the supervisor existed) | pid 19086, ppid 1, pgid 19086, STAT `S` | the job itself | not read in this run; the server does not lead its own session, which is the property the predicate tests |
 | guard through the supervisor | pid 42902 running `/usr/bin/perl .../fm-remote-herdr-supervisor.pl`, ppid 1, STAT `S` | pid 42980, ppid 42902, pgid 42980, STAT `Ss` | `true` |
 
-- A pane of the supervised server reported `launchctl managername` `Aqua`, audit session `asid 100016 flags 0x6030`, and exit 0 reading a temporary probe item from the login keychain, all identical to a terminal in the Aqua login session and to a pane of the pre-change shape, so leading its own session costs the server nothing in the login session.
+- A pane of the supervised server reported `launchctl managername` `Aqua`, audit session `asid 100016 flags 0x6030`, and exit 0 reading a temporary probe item from the login keychain, all identical to a terminal in the Aqua login session and to a pane of a server the guard exec'ed directly, so leading its own session costs the server nothing in the login session.
 - `bin/fm-remote-herdr-owner-lib.sh` classified the supervised server `launchd` because `launchctl print gui/501/<label>` named its parent, the job, as `pid`, and `fm_remote_herdr_process_leads_session` reported that the server leads its own session.
 - macOS sets `XPC_SERVICE_NAME=0` in every forked child, observed for `perl`, `bash`, and `zsh` forks alike, while `exec` without a fork keeps the value: a supervisor that did not restore it left its server classified `unknown`, and after the supervisor restores it the server's environment carried `XPC_SERVICE_NAME=<the agent's label>` on every generation.
 - A foreground client attached with `bin/fm-herdr-lab.sh viewer start` and detached again with no change to the server pid, the job pid, or the capability.

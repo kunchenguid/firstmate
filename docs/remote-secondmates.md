@@ -291,6 +291,7 @@ bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
 The audit-session facts the guard relies on are recorded with their commands in [runtime backend verification](verification/runtime-backends.md#fm-remote-server-birth-and-login-keychain-access).
+The session-leader shape the supervisor gives that server under real launchd, with its attach, stop, restart, and SIGKILL behavior, is recorded in [the session-leader record](verification/runtime-backends.md#session-leader-fm-remote-server-under-launchd).
 
 For a real-host smoke test, provision a disposable remote account and project, run the doctor and its repair against that account, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
 The deterministic suite is automated; real-host validation is still an operator-run smoke test and is not claimed by the repository tests.
