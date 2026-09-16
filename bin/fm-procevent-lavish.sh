@@ -420,9 +420,8 @@ cmd_silent() {
 # `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
-# is skipped. A time-limited rollout branch accepts the old question/answer
-# shape only for ordinary answers and rejects its bare or annotated reconcile
-# values because old rows do not separate the selected option from its note.
+# is skipped. Schema-less question/answer rows from old boards are not safe to
+# distinguish from freeform prose, so those boards must be rebuilt.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.
@@ -471,33 +470,17 @@ cmd_choice_rows() {
       my $ctx = $1;
       my $data = eval { decode_json($ctx) };
       next unless ref($data) eq "HASH";
-      my ($key, $selected, $note, $answer, $legacy);
-      if (defined($data->{schema}) && !ref($data->{schema})
-          && $data->{schema} eq "fm-bearings-answer.v1") {
-        $key = $data->{question};
-        $selected = $data->{selection};
-        $note = $data->{note};
-        next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
-          || !defined($note) || ref($note);
-        next unless $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
-        next unless length($note) <= 512;
-        $answer = $selected;
-        $legacy = 0;
-      # Time-limited compatibility for captures from pre-change boards; remove
-      # once no board carrying the old question/answer context can remain armed.
-      } elsif (!exists($data->{schema}) && !exists($data->{selection})
-          && !exists($data->{note})) {
-        $key = $data->{question};
-        $answer = $data->{answer};
-        next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
-        next unless length($answer) && length($answer) <= 512;
-        next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
-        $selected = "";
-        $note = "";
-        $legacy = 1;
-      } else {
-        next;
-      }
+      my ($key, $selected, $note, $answer);
+      next unless defined($data->{schema}) && !ref($data->{schema})
+        && $data->{schema} eq "fm-bearings-answer.v1";
+      $key = $data->{question};
+      $selected = $data->{selection};
+      $note = $data->{note};
+      next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
+        || !defined($note) || ref($note);
+      next unless $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      next unless length($note) <= 512;
+      $answer = $selected;
       next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       my $mode = "";
       if (exists $data->{close}) {
@@ -511,13 +494,12 @@ cmd_choice_rows() {
       if (defined $seen{$key}) { $choices[$seen{$key}] = undef }
       $seen{$key} = scalar @choices;
       push @choices, {
-        key => $key, selection => $selected, note => $note, legacy => $legacy,
+        key => $key, selection => $selected, note => $note,
         answer => $answer, label => $label, mode => $mode
       };
     }
     for my $choice (grep { defined } @choices) {
       if ($selection eq "reconciles") {
-        next if $choice->{legacy};
         if ($choice->{selection} eq "reconcile") {
           print length($choice->{note})
             ? "$choice->{key}\t$choice->{note}\n"
