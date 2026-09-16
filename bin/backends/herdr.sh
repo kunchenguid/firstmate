@@ -104,6 +104,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-winproc-lib.sh
 if [ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-winproc-lib.sh" ]; then
   . "$FM_BACKEND_HERDR_ROOT/bin/fm-winproc-lib.sh"
+else
+  fm_winproc_available() { return 1; }
 fi
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
@@ -2237,9 +2239,61 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # fm_backend_herdr_pane_process_state_sample: one instantaneous observation
 # for fm_backend_herdr_pane_process_state, which owns the verdict contract and
 # the settle retry.
+# fm_backend_herdr_process_rows: the "<pid> <ppid> <command>" table the
+# descendant walk reads, from whichever source can answer on this host.
+#
+# `ps -axo` is not one of them under Git Bash: MSYS ps rejects -o entirely, so
+# the walk read `unreadable` for every pane and a registered agent over a
+# shell-only pane could never be proved agent-free. bin/fm-winproc-lib.sh owns
+# the MSYS reading, exactly as it does for every other process fact on this
+# platform. Gated on fm_winproc_available, so a Linux or macOS home, and a
+# Windows home that has not opted in, still read ps exactly as before.
+fm_backend_herdr_process_rows() {
+  local ps_bin
+  if fm_winproc_available; then
+    fm_winproc_process_table
+    return
+  fi
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null
+}
+
+# fm_backend_herdr_process_args <pid>: the fullest command string this host can
+# give for one pid, which is what fm_agent_process_classify reads.
+#
+# Under MSYS that is the procfs argument vector, NOT the image path the process
+# table carries. A harness installed as a symlink runs the target's binary, so
+# every Windows-facing source reports the resolved image and the invoked name is
+# lost; only argv still says `pi`. The image path is the fallback for a process
+# with no procfs entry, so a native Windows process is still described rather
+# than skipped. ps keeps answering with the real argument vector off Windows.
+fm_backend_herdr_process_args() {  # <pid>
+  local ps_bin out
+  if fm_winproc_available; then
+    out=$(fm_winproc_pid_cmdline "$1") && [ -n "$out" ] && {
+      printf '%s\n' "$out"
+      return 0
+    }
+    out=$(fm_winproc_process_table | awk -v p="$1" '
+      $1 == p {
+        line = ""
+        for (i = 3; i <= NF; i++) line = (line == "" ? $i : line " " $i)
+        print line
+        exit
+      }
+    ')
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+    return 0
+  fi
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  LC_ALL=C "$ps_bin" -p "$1" -o args= 2>/dev/null
+}
+
 fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
-  local others=0 ps_bin rows
+  local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict win_argv0
+  local others=0 rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   printf '%s' "$info" | jq -e --arg pane "$pane_id" '
@@ -2279,16 +2333,33 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   # descendant of the pane shell outside the foreground group; only its
   # absence, read from the real process table, is proof of an agent-free pane.
   [ "$others" -eq 0 ] || { printf 'other'; return 0; }
-  ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
+  rows=$(fm_backend_herdr_process_rows) || { printf 'unreadable'; return 0; }
+  [ -n "$rows" ] || { printf 'unreadable'; return 0; }
+  # Herdr names the pane's shell in native Windows pid space, while the table
+  # above walks MSYS parent links. Translate once, here, so every comparison
+  # below is in one space; off Windows this is identity.
+  if fm_winproc_available; then
+    shell_pid=$(fm_winproc_local_pid "$shell_pid") || { printf 'unreadable'; return 0; }
+  fi
   printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' \
     || { printf 'unreadable'; return 0; }
   while IFS=$'\t' read -r pid name; do
     [ -n "$pid" ] || continue
-    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
+    args=$(fm_backend_herdr_process_args "$pid") || continue
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
+    # Under MSYS the invoked identity comes from procfs, and argv[0] is read as
+    # one field: the table's own column carries the RESOLVED image, so a harness
+    # installed as a symlink reads as whatever binary it points at, and
+    # splitting the joined argv on whitespace truncates a spaced install path at
+    # its first space. Both failures look identical downstream - a descendant
+    # that is plainly an agent classifies as something else.
+    if fm_winproc_available; then
+      win_argv0=$(fm_winproc_pid_argv0 "$pid") && [ -n "$win_argv0" ] && {
+        argv0=$win_argv0
+        name=$win_argv0
+      }
+    fi
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
       printf 'agent'
       return 0

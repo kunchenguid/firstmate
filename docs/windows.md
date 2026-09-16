@@ -270,6 +270,9 @@ Each degrades to a documented fallback rather than failing silently.
   That relaxation is reached only once `FM_WINDOWS=1` is set.
   A home that has not opted in keeps the strict exact-mode contract on every filesystem, including one that provably cannot store a mode, so this support cannot weaken a privacy guard for anyone by default.
 - MSYS `ps` supports no `-o` selectors, so process reads are served from `bin/fm-winproc-lib.sh` in native Windows process-id space, and signalling uses `/usr/bin/kill -W` by absolute path because the shell builtin has no `-W` flag.
+  The pane's descendant walk reads the same library rather than `ps -axo`, and it bridges pid spaces explicitly: Herdr names a pane's shell as a Windows process while the processes Firstmate starts are MSYS ones, so the Windows pid is mapped onto its MSYS pid before any parent link is followed.
+  A process is identified by the arguments it was started with, read from the MSYS process filesystem, not by the image it resolves to.
+  Windows records only the resolved image, so a harness installed as a symlink would otherwise read as whatever binary it points at, and an install path containing a space would be truncated at that space.
 - `/usr/bin/kill -W` cannot address a process outside the MSYS runtime at all. That is a safety property rather than a gap, because the signalling path can never reach a process the adapter did not itself resolve.
 - Herdr's pane working directory on Windows tracks the pane's own shell and not a foreground subshell, so no number of polls ever observes a pane entering a worktree.
   Firstmate therefore does not read the pane to find the task copy at all: it leases the copy with `treehouse get --lease --lease-holder <task>` in its own shell and then sends the pane into it.

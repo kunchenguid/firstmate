@@ -278,6 +278,79 @@ pass "fm_winproc_pid_census is inert with the bridge unavailable"
   && fail "the census must refuse a non-numeric pid"
 pass "fm_winproc_pid_census refuses a non-numeric pid"
 
+# --- the whole table: what a relationship walk reads -------------------------
+#
+# A descendant walk needs every row at once. Asking a per-pid accessor once per
+# process would re-read the same memoized snapshot N times and still could not
+# see a parent link the walk has not reached yet, so the table is its own entry
+# point. It is built from `ps -W` rather than the CIM table because only `ps -W`
+# carries MSYS parent links, which is the space a walk down from a shell moves
+# in. It is gated like every other entry point: a home without the opt-in reads
+# nothing at all.
+
+# A shell with one child, so the table has a parent link to follow, plus a row
+# whose image ps cannot read - that row must keep its link and lose only its
+# command, or a walk stops at the first unreadable process in the chain.
+walk_fixture() {
+  printf '%s\n' \
+    "      PID    PPID    PGID     WINPID  TTY    UID    STIME COMMAND" \
+    "      100       1       0 $SHELL_WINPID  ?        0 09:50:36 $SHELL_IMAGE" \
+    "      101     100       0 $HARNESS_WINPID  ?        0 09:50:37 *** unknown ***" \
+    "      102     101       0 4242  ?        0 09:50:38 $HARNESS_IMAGE"
+}
+
+TABLE=$( FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=walk_fixture \
+  fm_winproc_process_table )
+printf '%s\n' "$TABLE" | grep -qxF "100 1 $SHELL_IMAGE" \
+  || fail "the table must carry a row as '<pid> <ppid> <command>', got '$TABLE'"
+pass "fm_winproc_process_table shapes each row as pid, parent, command"
+
+printf '%s\n' "$TABLE" | grep -q '^101 100' \
+  || fail "a row with an unreadable image must keep its parent link, got '$TABLE'"
+pass "fm_winproc_process_table keeps the parent link of an unreadable process"
+
+printf '%s\n' "$TABLE" | grep -q 'PID *PPID' \
+  && fail "the ps header must not appear as a table row"
+pass "fm_winproc_process_table drops the ps header row"
+
+( FM_WINPROC_DISABLE=1 fm_winproc_process_table >/dev/null 2>&1 ) \
+  && fail "the table must be inert when the bridge is unavailable"
+pass "fm_winproc_process_table is inert with the bridge unavailable"
+
+# --- the pid-space bridge ----------------------------------------------------
+#
+# Herdr names a pane's shell in native Windows pid space; the processes
+# firstmate starts are MSYS ones. A bare integer does not say which space it is
+# in, so the MSYS pid is matched FIRST: a WINPID that collides with a live MSYS
+# pid must never rewrite it.
+
+LOCAL=$( FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=walk_fixture \
+  fm_winproc_local_pid "$SHELL_WINPID" )
+[ "$LOCAL" = 100 ] \
+  || fail "a WINPID must resolve to its MSYS pid, got '$LOCAL'"
+pass "fm_winproc_local_pid maps a Windows pid onto its MSYS pid"
+
+LOCAL=$( FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=walk_fixture \
+  fm_winproc_local_pid 100 )
+[ "$LOCAL" = 100 ] \
+  || fail "an MSYS pid must resolve to itself, got '$LOCAL'"
+pass "fm_winproc_local_pid returns an MSYS pid unchanged"
+
+LOCAL=$( FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=walk_fixture \
+  fm_winproc_local_pid 4242 )
+[ "$LOCAL" = 102 ] \
+  || fail "a WINPID must lose to a live MSYS pid of the same number, got '$LOCAL'"
+pass "fm_winproc_local_pid prefers a live MSYS pid over a colliding Windows pid"
+
+( FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=walk_fixture \
+  fm_winproc_local_pid 999999 >/dev/null 2>&1 ) \
+  && fail "a pid in neither space must not resolve"
+pass "fm_winproc_local_pid refuses a pid present in neither space"
+
+( FM_WINPROC_DISABLE=1 fm_winproc_local_pid 100 >/dev/null 2>&1 ) \
+  && fail "the bridge must be inert when the bridge is unavailable"
+pass "fm_winproc_local_pid is inert with the bridge unavailable"
+
 # --- the flush: a deliberate re-observation sees the new truth ----------------
 #
 # Memoization is right for one moment and wrong across an action: a caller that

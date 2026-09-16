@@ -190,6 +190,104 @@ fm_winproc_flush() {
 # the ambiguity a caller proving a process is alone and childless must not
 # have. Raw counts, not a verdict - what "alone" and "childless" mean belongs
 # to the caller holding the proof contract.
+# fm_winproc_process_table: the whole "<pid> <ppid> <command>" table, one row
+# per process, for callers that walk process relationships rather than ask about
+# one pid. Asking a per-pid accessor once per process would re-read the same
+# memoized snapshot N times and still could not see a parent link the walk has
+# not reached yet, so the table is its own entry point.
+#
+# Built from the `ps -W` snapshot rather than the CIM table on purpose. CIM
+# speaks only native Windows pids; `ps -W` is a superset that carries MSYS
+# processes with their real MSYS pid and parent, native Windows processes
+# alongside them, and the WINPID column that maps one space onto the other. A
+# walk down from a shell needs parent links in that shell's own pid space, and
+# only `ps -W` has them.
+#
+# Rows whose image ps cannot read keep their parent link and carry an empty
+# command, so a walk can still pass through them.
+fm_winproc_process_table() {
+  fm_winproc_available || return 1
+  _fm_winproc_ps_load
+  [ -n "$_FM_WINPROC_PS_ROWS" ] || return 1
+  printf '%s\n' "$_FM_WINPROC_PS_ROWS" | awk '
+    NR == 1 && $1 == "PID" { next }
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      line = ""
+      for (i = 8; i <= NF; i++) line = (line == "" ? $i : line " " $i)
+      if (line ~ /^\*\*\* unknown \*\*\*$/) line = ""
+      print $1, $2, line
+    }
+  '
+}
+
+# fm_winproc_pid_cmdline: the argument vector of MSYS pid $1, space-joined.
+#
+# The image path alone is not enough to identify a harness. A process started
+# through a differently named symlink runs the target's image, so every
+# Windows-facing source - CIM, `ps`, and `ps -W` alike - reports the resolved
+# binary and the name the caller actually invoked is gone. The MSYS procfs is
+# the one place that keeps argv, so a process launched as `pi` is still
+# recognisable as `pi` rather than as the `sleep` it resolves to.
+#
+# MSYS pid space, because that is whose procfs this is. Returns 1 for a pid
+# with no procfs entry, which is every native Windows process.
+fm_winproc_pid_cmdline() {  # <msys-pid>
+  local pid=$1 out
+  fm_winproc_available || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  out=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
+  out=${out%"${out##*[![:space:]]}"}
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# fm_winproc_pid_argv0: argv[0] of MSYS pid $1, read as one procfs field.
+#
+# Separate from the joined cmdline above because an install path can contain
+# spaces ("/Library/Application Support/..."), and a caller that splits the
+# joined string on whitespace to recover argv[0] gets a fragment. The NUL
+# delimiter is the only place the boundary actually survives.
+fm_winproc_pid_argv0() {  # <msys-pid>
+  local pid=$1 out
+  fm_winproc_available || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  out=$(cut -z -d '' -f 1 < "/proc/$pid/cmdline" 2>/dev/null | tr -d '\0') || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# fm_winproc_local_pid: the MSYS pid for a pid named in either space, so a
+# caller holding a pid from a Windows-facing source can walk the MSYS process
+# tree with it.
+#
+# Herdr reports a pane's shell in native Windows pid space, while the processes
+# firstmate itself starts are MSYS ones. The WINPID column is the only reliable
+# bridge; a bare integer does not say which space it belongs to. An input that
+# is already an MSYS pid is returned unchanged, which is checked FIRST so a
+# WINPID that happens to collide with a live MSYS pid can never rewrite it.
+fm_winproc_local_pid() {  # <pid>
+  local pid=$1 out
+  fm_winproc_available || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  _fm_winproc_ps_load
+  [ -n "$_FM_WINPROC_PS_ROWS" ] || return 1
+  out=$(printf '%s\n' "$_FM_WINPROC_PS_ROWS" | awk -v p="$pid" '
+    $1 == p { print $1; found = 1; exit }
+    $4 == p { winmatch = $1 }
+    END { if (!found && winmatch != "") print winmatch }
+  ')
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
 fm_winproc_pid_census() {  # <winpid>
   local winpid=$1
   fm_winproc_available || return 1
