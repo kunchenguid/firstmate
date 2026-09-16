@@ -270,27 +270,47 @@ fi
 
 # --- --dsh bounded path ------------------------------------------------------
 # DSH reports stop_hook_active=false on every Stop, so that field cannot bound a
-# re-block loop the way the default mode relies on (and DSH has no async re-wake
-# hook for the --claude auto-arm to ride). The budget is therefore owned here:
-# each Stop consumes one continuation for this session, and an exhausted budget
-# emits one loud attended fail-open instead of re-blocking without limit.
+# re-block loop the way the default mode relies on, and DSH has no async re-wake
+# hook for the --claude auto-arm to ride. The budget is owned here, with three
+# properties a plain counter lacks:
+#
+#   EPISODE, NOT SESSION. The ledger is discarded once it is older than
+#   FM_DSH_TURNEND_BUDGET_WINDOW, so one exhausted lapse does not leave a
+#   long-lived session permanently fail-open.
+#   ALWAYS BOUNDED. A budget lock that cannot be acquired is NOT proof that the
+#   budget is available. Falling through to block_stop made the loop unbounded
+#   exactly when the guard was least able to reason; it now fails open with the
+#   same attended banner.
+#   DURABLE BEFORE DELIVERY. The incremented count is written before the stop is
+#   blocked or allowed, so a killed hook cannot lose a consumed continuation.
 if [ "$DSH_MODE" -eq 1 ]; then
   DSH_BUDGET=${FM_DSH_TURNEND_BLOCK_BUDGET:-3}
   case "$DSH_BUDGET" in ''|*[!0-9]*|0) DSH_BUDGET=3 ;; esac
+  DSH_WINDOW=${FM_DSH_TURNEND_BUDGET_WINDOW:-900}
+  case "$DSH_WINDOW" in ''|*[!0-9]*|0) DSH_WINDOW=900 ;; esac
+  dsh_fail_open() {
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s task(s) in flight, no live watcher holds this home lock, and the DSH Stop-hook block budget (%s) is exhausted or unreadable. Keep this session attended and repair watcher supervision before relying on unattended supervision."}\n' "${FM_SUP_IN_FLIGHT:-0}" "$DSH_BUDGET"
+    exit 0
+  }
   DSH_COUNT=
   if fm_lock_try_acquire "$DSH_BUDGET_LOCK"; then
     old_session=$(sed -n '1s/^session=//p' "$DSH_BUDGET_FILE" 2>/dev/null || true)
     old_count=$(sed -n '2s/^count=//p' "$DSH_BUDGET_FILE" 2>/dev/null || true)
     case "$old_count" in ''|*[!0-9]*) old_count=0 ;; esac
-    [ "$old_session" = "$SESSION_ID" ] || old_count=0
-    DSH_COUNT=$((old_count + 1))
+    # fm_path_age reports 999999 for a missing file, so an absent ledger starts
+    # a fresh episode rather than being read as one.
+    if [ "$old_session" = "$SESSION_ID" ] \
+      && [ "$(fm_path_age "$DSH_BUDGET_FILE")" -lt "$DSH_WINDOW" ]; then
+      DSH_COUNT=$((old_count + 1))
+    else
+      DSH_COUNT=1
+    fi
     printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$DSH_COUNT" > "$DSH_BUDGET_FILE" 2>/dev/null || true
     fm_lock_release "$DSH_BUDGET_LOCK"
+  else
+    dsh_fail_open
   fi
-  if [ -n "$DSH_COUNT" ] && [ "$DSH_COUNT" -gt "$DSH_BUDGET" ]; then
-    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s task(s) in flight, no live watcher holds this home lock, and the DSH Stop-hook block budget (%s) is exhausted. Keep this session attended and repair watcher supervision before relying on unattended supervision."}\n' "${FM_SUP_IN_FLIGHT:-0}" "$DSH_BUDGET"
-    exit 0
-  fi
+  [ "$DSH_COUNT" -le "$DSH_BUDGET" ] || dsh_fail_open
   block_stop
 fi
 

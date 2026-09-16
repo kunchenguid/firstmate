@@ -91,6 +91,104 @@ test_dsh_session_lock_matcher_rejects_firstmate_paths() {
   pass "fm-session-lock-lib: dsh matching adds no false positives"
 }
 
+# A stub firstmate home whose session-start prints whatever the case wants.
+make_digest_home() {  # <name> <stdout-text>
+  local name=$1 text=$2 dir
+  dir="$TMP_ROOT/digest-$name"
+  mkdir -p "$dir/bin" "$dir/state"
+  cat > "$dir/bin/fm-session-start.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$text'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-session-start.sh"
+  printf '%s\n' "$dir"
+}
+
+run_digest() {  # <home> <session-id> -> stdout in $DIGEST_OUT
+  local home=$1 sid=$2
+  DIGEST_OUT=$(printf '{"session_id":"%s"}' "$sid" \
+    | env -u CLAUDE_PROJECT_DIR FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-dsh-sessionstart.sh" 2>/dev/null)
+}
+
+test_dsh_digest_delivers_session_start_stdout_whole() {
+  local home
+  # The digest IS fm-session-start.sh's stdout: a refused-lock banner, the
+  # read-once contract and the operating block all ride it. Rendering only the
+  # operating block would hand the agent instructions without the diagnosis.
+  home=$(make_digest_home whole 'READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED')
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "READ-ONLY SESSION" \
+    "the digest did not carry the session-start banner"
+  assert_contains "$DIGEST_OUT" "additionalContext" \
+    "the digest was not emitted as UserPromptSubmit additionalContext"
+  assert_contains "$DIGEST_OUT" "UserPromptSubmit" \
+    "the emitted payload named the wrong hook event"
+  [ -f "$home/state/.dsh-sessionstart-delivered" ] \
+    || fail "a delivered digest did not record its once-per-session gate"
+  pass "fm-dsh-sessionstart.sh: the whole session-start stdout is delivered"
+}
+
+test_dsh_digest_gate_is_per_session() {
+  local home
+  home=$(make_digest_home gate 'DIGEST-BODY')
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "the first prompt must receive the digest"
+  run_digest "$home" s1
+  [ -z "$DIGEST_OUT" ] || fail "a second prompt in the same session must not re-deliver the digest"
+  run_digest "$home" s2
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "a new session must receive its own digest"
+  pass "fm-dsh-sessionstart.sh: the gate is per session and re-arms for a new one"
+}
+
+test_dsh_digest_retries_when_nothing_was_produced() {
+  local home
+  # fm-session-start.sh exits 0 on every path including a refused lock, so an
+  # empty digest is the only signal that nothing was produced. Recording the
+  # gate before the run would swallow the failure for the whole session.
+  home=$(make_digest_home empty '')
+  run_digest "$home" s1
+  [ -z "$DIGEST_OUT" ] || fail "an empty digest must emit nothing"
+  [ -e "$home/state/.dsh-sessionstart-delivered" ] \
+    && fail "an empty digest must not record the gate; the next prompt must retry" || true
+  pass "fm-dsh-sessionstart.sh: an empty digest leaves the gate unset and retries"
+}
+
+test_dsh_guard_fails_open_when_the_budget_lock_is_unavailable() {
+  local home rc
+  # An unacquirable budget lock is not proof that budget remains. Falling
+  # through to block_stop made the loop unbounded exactly when the guard could
+  # prove the least.
+  home=$(make_guard_home guard-lockheld)
+  printf 'task\n' > "$home/state/t1.meta"
+  mkdir -p "$home/state/.turnend-dsh-blocks.lock"
+  printf '%s\n' "$$" > "$home/state/.turnend-dsh-blocks.lock/pid"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "an unacquirable budget lock must fail open, never re-block"
+  assert_contains "$(cat "$home/stderr.txt")" "" "the fail-open banner rides stdout, not stderr"
+  pass "fm-turnend-guard --dsh: an unavailable budget lock fails open"
+}
+
+test_dsh_guard_budget_is_an_episode_not_a_session() {
+  local home rc
+  home=$(make_guard_home guard-episode)
+  printf 'task\n' > "$home/state/t1.meta"
+  # An exhausted ledger whose episode is older than the window must start over,
+  # so one lapse cannot leave a long-lived session permanently fail-open.
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  touch -t 202001010000 "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an expired episode must start a fresh budget and block"
+  assert_grep 'count=1' "$home/state/.turnend-dsh-blocks" \
+    "the expired episode did not restart its count"
+  # The same ledger inside the window keeps its count and fails open.
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "an exhausted ledger inside the window must fail open"
+  pass "fm-turnend-guard --dsh: the budget is an episode window, not a session lifetime"
+}
+
 test_dsh_ancestry_detects_the_launcher_path() {
   local fakebin out
   fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-node" node \
@@ -252,3 +350,8 @@ test_dsh_guard_fails_open_on_unusable_input
 test_dsh_stop_wrapper_fails_open_without_a_root
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
+test_dsh_digest_delivers_session_start_stdout_whole
+test_dsh_digest_gate_is_per_session
+test_dsh_digest_retries_when_nothing_was_produced
+test_dsh_guard_fails_open_when_the_budget_lock_is_unavailable
+test_dsh_guard_budget_is_an_episode_not_a_session

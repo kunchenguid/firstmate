@@ -13,6 +13,10 @@
 #
 #   dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@<dsh-base version>
 #
+# Launch the primary through bin/fm-dsh-launch.sh so FM_DSH_HARNESS, FM_HOME and
+# the locale are set at process start: a tool call cannot set them, and hook
+# subprocesses inherit whatever the host was given.
+#
 # Applied over a base+web-app profile whose bundle list also carries this
 # checkout's own bundles. Set FM_ROOT to the firstmate checkout before boot.
 - insert:

@@ -28,12 +28,30 @@ Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox a
 Firstmate's `AGENTS.md` is 81127 bytes, so the default silently drops sections 10 through 14 (Backlog contract, Crewmate briefs, Self-update, Agent-only reference skills, Relay) plus the captain-precedence and maintenance sections.
 The captain profile raises `maxBytes` to 262144.
 
+## Launch boundary
+
+DeepSeek Harness publishes no identity marker of its own, so the values that identify a DSH primary
+exist only at process start — a tool call cannot set them and hook subprocesses inherit whatever the
+host was given. `bin/fm-dsh-launch.sh` is that boundary: it exports `FM_DSH_HARNESS=dsh` and an
+explicit `FM_HOME`, pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes
+a byte cap and slices UTF-8), and clears the foreign harness markers so a session started from
+another harness's pane cannot inherit its identity.
+
+Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
+launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.
+
 ## Primary integration
 
 `dsh-hooks-claude-code` runs firstmate's hook scripts unchanged, because DeepSeek Harness implements the Claude Code command-hook dialect. The registration lives in `dsh/hooks.json`, mounted by `dsh/profile.patch.yml`, and three facts about DSH change what that file may contain:
 
 - **`UserPromptSubmit`, not `SessionStart`.** DSH's `SessionStart` hook runs detached and its `additionalContext` lands AFTER the first request as a user-shaped message (verified 2026-09-16), which is the wrong tier for a session-start digest. `UserPromptSubmit` fires before the model call and its `additionalContext` is part of that request, so `bin/fm-dsh-sessionstart.sh` rides it and gates delivery once per session id.
 - **Lowercase `bash` matchers.** DSH's matcher subject is the harness tool name, and its shell tool is `bash`; Claude's `Bash` never matches. The catch-all `.*` group is unaffected.
+- **The digest is `bin/fm-session-start.sh`'s stdout, delivered whole.** That script owns the read-only
+  and STARTUP TRUNCATED banners, the read-once contract, fleet state and the single emitted operating
+  block. An adapter that renders the operating block separately, or discards the run's output, hands
+  the agent operating instructions without the diagnosis that governs them. The once-per-session
+  gate is recorded only after a digest was produced, so a refused or empty startup retries on the
+  next prompt instead of being swallowed for the session.
 - **No `asyncRewake`.** DSH parses command hooks only and runs them synchronously with the configured timeout, so firstmate's Stop-owned auto-arm has no equivalent. `bin/fm-turnend-guard-dsh.sh` calls the shared guard with `--dsh`, which owns a session-scoped block budget instead of trusting `stop_hook_active`, and watcher continuity rides a background job per `docs/supervision-protocols/dsh.md`.
 
 **PreToolUse works, but the bridge version must match the runtime.** The sub-packages' npm `latest` dist-tag is stale (`0.0.1-rc.5` against a `0.1.5-rc.2` runtime), and that old bridge reads `session.events` synchronously - a read DSH deprecated after rc.5. Under the mismatch the bridge's `lastTurn()` throws before any hook is matched and EVERY tool call fails with `Error: agent.session.events is not iterable`, so the guards are both inert and tool-breaking. Install the matching build explicitly:
@@ -43,5 +61,11 @@ dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@0.1.5-rc.2
 ```
 
 With the matched build, `UserPromptSubmit`, the `bash`-matcher PreToolUse rows, and the `.*` row all fire (verified 2026-09-16).
+
+The `--dsh` block budget is an **episode**, not a session lifetime: the ledger is discarded once it is
+older than `FM_DSH_TURNEND_BUDGET_WINDOW` (default 900s), so one exhausted lapse cannot leave a
+long-lived session permanently fail-open. A budget lock that cannot be acquired fails open with the
+same attended banner rather than falling through to an unbounded block, and the incremented count is
+written before the stop is decided so a killed hook cannot lose a consumed continuation.
 
 `--claude` is passed to the PreToolUse guards deliberately: it selects the deny-output dialect, not Claude-specific behavior, and DSH honours that dialect.
