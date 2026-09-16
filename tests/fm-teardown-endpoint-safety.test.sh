@@ -1258,7 +1258,7 @@ test_orca_close_failure_refuses_even_under_force() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
-    "backend=orca" "orca_worktree_id=worktree-9" "kind=ship" "mode=no-mistakes"
+    "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$dir/nonexistent-worktree" "kind=ship" "mode=no-mistakes"
 
   set +e
   env -u TMUX -u TMUX_PANE \
