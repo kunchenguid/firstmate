@@ -42,7 +42,7 @@ mkdir -p "$INSTALL_DIR" || { echo "error: failed to create $INSTALL_DIR" >&2; ex
 if command -v rsync >/dev/null 2>&1; then
   rsync -a --delete "$PKG_DIR/" "$INSTALL_DIR/" || { echo "error: rsync to $INSTALL_DIR failed" >&2; exit 1; }
 else
-  rm -rf "$INSTALL_DIR"/*
+  rm -rf "${INSTALL_DIR:?}/"*
   cp -R "$PKG_DIR/." "$INSTALL_DIR/" || { echo "error: copy to $INSTALL_DIR failed" >&2; exit 1; }
 fi
 
