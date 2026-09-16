@@ -72,6 +72,8 @@ test_dsh_session_lock_matcher_detects_launcher_paths() {
     || fail "the npx .bin/dsh launcher must be a harness process"
   fm_harness_process_matches node "node /g/node_modules/@deepseek-ai/dsh/lib/bin.js web" \
     || fail "the installed dsh bin.js must be a harness process"
+  fm_harness_process_matches node "node /opt/homebrew/bin/dsh web" \
+    || fail "a global npm install's bin/dsh symlink must be a harness process"
   fm_harness_process_matches node "/Users/x/apps/cli/src/bin.ts" \
     || fail "the source-launch bin.ts must be a harness process"
   pass "fm-session-lock-lib: dsh launcher paths are harness processes"
@@ -86,6 +88,8 @@ test_dsh_session_lock_matcher_rejects_firstmate_paths() {
     && fail "firstmate's own fm-dsh-*.sh path must not claim the dsh identity" || true
   fm_harness_process_matches node "node /Users/x/dshish.js" \
     && fail "an unrelated dshish path must not claim the dsh identity" || true
+  fm_harness_process_matches node "node /usr/local/bin/dshish.js" \
+    && fail "a dshish script in a bin directory must not claim the dsh identity" || true
   fm_harness_process_matches claude claude || fail "claude must still be a harness process"
   fm_harness_process_matches omp omp || fail "omp must still be a harness process"
   pass "fm-session-lock-lib: dsh matching adds no false positives"
@@ -226,25 +230,22 @@ test_dsh_guard_budget_is_an_episode_not_a_session() {
   pass "fm-turnend-guard --dsh: the budget is an episode window, not a session lifetime"
 }
 
-test_dsh_protocol_and_seatbelt_agree_on_the_arm_command() {
+test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command() {
   local policy line
-  # Three owners must name the same entry point: the shipped protocol, the
-  # repair line an agent is actually shown, and the PreToolUse seatbelt. Naming
-  # bin/fm-watch.sh in the protocol would be denied as watcher-direct, making
-  # the shipped instructions unrunnable.
-  grep -q 'bin/fm-watch-arm.sh' "$ROOT/docs/supervision-protocols/dsh.md" \
-    || fail "the DSH protocol must arm through bin/fm-watch-arm.sh"
+  # The repair line an agent is actually shown and the PreToolUse seatbelt must
+  # name the same entry point. Naming bin/fm-watch.sh would be denied as
+  # watcher-direct, making the delivered instruction unrunnable.
   policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch-arm.sh')
   [ "$policy" = allow ] \
     || fail "the protocol's arm command must pass the seatbelt, got '$policy'"
   # ...and the direct form it replaced must still be denied, which is why the
-  # protocol cannot name it.
+  # repair line cannot name it.
   policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch.sh')
   case "$policy" in deny*watcher-direct*) : ;; *) fail "a direct bin/fm-watch.sh must stay denied, got '$policy'" ;; esac
-  line=$(FM_DSH_HARNESS=dsh "$ROOT/bin/fm-supervision-instructions.sh" --afk 0 --x-mode 0 --repair-line 2>/dev/null | tail -1)
+  line=$("$ROOT/bin/fm-supervision-instructions.sh" --harness dsh --afk 0 --x-mode 0 --repair-line 2>/dev/null | tail -1)
   assert_contains "$line" "bin/fm-watch-arm.sh" \
     "the dsh repair line must name the blessed arm script"
-  pass "dsh protocol, repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
+  pass "dsh repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
 }
 
 # A synthetic DSH home: <root>/profiles/node_modules holds dsh-base, and the
@@ -269,6 +270,32 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
 run_preflight() {  # <dsh-home> -> stdout in $PREFLIGHT_OUT, exit in $PREFLIGHT_RC
   PREFLIGHT_OUT=$(DSH_HOME="$1" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$1/fmhome" 2>&1)
   PREFLIGHT_RC=$?
+}
+
+test_dsh_launcher_roots_the_host_in_its_checkout() {
+  local dir fakebin elsewhere rc
+  # .dsh/profile.patch.yml resolves the bridge's configPath and projectDir from
+  # FM_ROOT or the cwd, and DSH takes the cwd as its workspace root. Launched
+  # from anywhere else, the bridge finds no hooks file and runs with no guards,
+  # so the launcher must hand the host this checkout whatever the caller's cwd.
+  # The preflight is driven through the launcher too, so a --patch overlay the
+  # host will compose is one the preflight reads.
+  dir=$(make_dsh_home "$TMP_ROOT/launch" 0.1.5-rc.2 0.1.5-rc.2 - 1)
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$dir/overlay.yml"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/dsh" <<SH
+#!/usr/bin/env bash
+printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'
+SH
+  chmod +x "$fakebin/dsh"
+  elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
+  rc=0
+  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the launcher must pass a preflight whose budget is raised by --patch, got rc=$rc"
+  assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
+  assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
+  pass "fm-dsh-launch.sh: the host is rooted in its checkout whatever the caller's cwd"
 }
 
 test_dsh_preflight_rejects_a_mismatched_bridge() {
@@ -302,6 +329,38 @@ test_dsh_preflight_rejects_a_truncating_budget() {
   pass "fm-dsh-preflight.sh: a truncating instruction budget fails loud"
 }
 
+test_dsh_preflight_reads_only_the_agent_instructions_entry() {
+  local home
+  # Another plugin's larger maxBytes says nothing about AGENTS.md: with
+  # agent-instructions left at the default, the chain is still truncated.
+  home=$(make_dsh_home "$TMP_ROOT/pre-otherentry" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  printf -- '- id: other-plugin\n  config:\n    maxBytes: 262144\n- id: agent-instructions\n  config:\n    maxBytes: 65536\n' \
+    > "$home/profiles/p/cordis.patch.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "another entry's maxBytes must not satisfy the budget, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the truncating agent-instructions budget was not named"
+  pass "fm-dsh-preflight.sh: only the agent-instructions entry sets the budget"
+}
+
+test_dsh_preflight_honors_the_later_patch_layers() {
+  local home overlay
+  # DSH composes the profile patch, then $DSH_HOME/cordis.patch.yml, then each
+  # --patch overlay; a raise in a later layer is a real raise, and a later
+  # default undoes an earlier raise.
+  home=$(make_dsh_home "$TMP_ROOT/pre-homelayer" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n' > "$home/cordis.patch.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a raise in the home-level patch must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  home=$(make_dsh_home "$TMP_ROOT/pre-overlay" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  overlay="$home/overlay.yml"
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: 65536\n' > "$overlay"
+  PREFLIGHT_RC=0
+  PREFLIGHT_OUT=$(DSH_HOME="$home" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" --patch "$overlay" 2>&1) || PREFLIGHT_RC=$?
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a --patch overlay lowering the budget must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "$overlay" "the failing budget did not name the layer that set it"
+  pass "fm-dsh-preflight.sh: the home-level patch and --patch overlays compose in DSH's order"
+}
+
 test_dsh_preflight_passes_a_conforming_home() {
   local home
   home=$(make_dsh_home "$TMP_ROOT/pre-good" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
@@ -331,6 +390,17 @@ test_dsh_ancestry_detects_the_installed_bin_js() {
   pass "fm-harness.sh: ancestry detects the installed dsh bin.js"
 }
 
+test_dsh_ancestry_detects_a_global_install() {
+  local fakebin out
+  # npm i -g links <prefix>/bin/dsh to lib/bin.js, and the interpreter is handed
+  # the symlink path it ran through, not the resolved target.
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-global" node 'node /opt/homebrew/bin/dsh web')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "a DSH host must be detected from a global install's bin/dsh symlink, got '$out'"
+  pass "fm-harness.sh: ancestry detects a global npm install of dsh"
+}
+
 test_dsh_ancestry_rejects_unrelated_node_commands() {
   local fakebin out
   fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-neg" node 'node /x/other-tool.js --dsh-flavoured')
@@ -341,6 +411,10 @@ test_dsh_ancestry_rejects_unrelated_node_commands() {
   out=$(PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != dsh ] \
     || fail "a bare dsh fragment in a path must not be detected, got '$out'"
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-neg3" node 'node /usr/local/bin/dshish.js run')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != dsh ] \
+    || fail "a dshish script in a bin directory must not be detected, got '$out'"
   pass "fm-harness.sh: ancestry rejects unrelated dsh mentions"
 }
 
@@ -522,18 +596,12 @@ test_dsh_job_verdict_still_alarms_a_real_lapse() {
   pass "fm-wake-lib: the job model still alarms a genuine lapse"
 }
 
-test_dsh_protocol_states_the_death_window_contract() {
-  local proto="$ROOT/docs/supervision-protocols/dsh.md" policy cmd
-  # The gap is real and cannot be closed from inside DSH, so the protocol must
-  # name it, name the marker and wake that recover it at the next session start,
-  # and the two workarounds it forbids must actually be forbidden - otherwise
-  # the document is describing a safety property the seatbelt does not hold.
-  grep -q 'state/.watcher-down' "$proto" \
-    || fail "the protocol does not name the recovery marker"
-  grep -q 'rearm-resurface' "$proto" \
-    || fail "the protocol does not name the recovery wake it relies on"
-  grep -q 'OS-level scheduler' "$proto" \
-    || fail "the protocol does not name the only out-of-band closure"
+test_dsh_seatbelt_denies_a_detached_watcher() {
+  local policy cmd
+  # The death window cannot be closed from inside DSH, and the two workarounds
+  # the protocol forbids - a nohup or & detached watcher - must actually be
+  # denied, or the protocol describes a safety property the seatbelt does not
+  # hold.
   for cmd in 'nohup bin/fm-watch-arm.sh' 'bin/fm-watch-arm.sh &'; do
     policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command "$cmd")
     case "$policy" in
@@ -541,7 +609,7 @@ test_dsh_protocol_states_the_death_window_contract() {
       *) fail "the protocol forbids '$cmd' but the seatbelt answers '$policy'" ;;
     esac
   done
-  pass "dsh protocol: the death-window contract matches the seatbelt"
+  pass "dsh arm seatbelt: a detached watcher is denied as watcher-background"
 }
 
 test_dsh_delegation_guard_classifies_real_tool_names() {
@@ -633,7 +701,7 @@ test_dsh_refusal_is_an_exact_harness_match() {
 }
 
 test_dsh_tracked_hooks_dispatch_and_fail_safe() {
-  local hooks cmd rc n
+  local hooks cmd rc n out home
   # .dsh/hooks.json is the tracked registration the captain profile mounts, so it
   # is the file that must actually work. Each command is a self-verifying wrapper
   # (the .codex/hooks.json idiom): it re-checks that this file still registers
@@ -645,20 +713,6 @@ test_dsh_tracked_hooks_dispatch_and_fail_safe() {
   hooks="$ROOT/.dsh/hooks.json"
   [ -f "$hooks" ] || fail "$hooks is missing"
   jq -e . "$hooks" >/dev/null 2>&1 || fail "$hooks is not valid JSON"
-
-  # Pin the idiom itself: every command must be a bash -lc wrapper carrying the
-  # self-registration check naming its own script. Dropping either would leave a
-  # hook that runs no matter where it is pointed.
-  n=$(jq '[.hooks[]?[]?.hooks[]?.command? | select(type == "string")] | length' "$hooks")
-  [ "$n" -gt 0 ] || fail "$hooks registers no commands"
-  while IFS= read -r cmd; do
-    # shellcheck disable=SC2016  # '$root' is the literal text inside the wrapper, not a value to expand here
-    case "$cmd" in
-      "bash -lc '"*'command -v jq'*'$root'*'.dsh/hooks.json'*) : ;;
-      "bash -lc '"*) fail "a hook wrapper is missing a guard (jq presence, resolved root, or self-registration): $cmd" ;;
-      *) fail "a hook command is not a bash -lc self-verifying wrapper: $cmd" ;;
-    esac
-  done < <(jq -r '.hooks[]?[]?.hooks[]?.command? | select(type == "string")' "$hooks")
 
   # Dispatch proof: the catch-all PreToolUse row denies a delegation tool. If the
   # wrapper's jq self-check is malformed this exits 0 instead of 2, which is the
@@ -672,18 +726,36 @@ test_dsh_tracked_hooks_dispatch_and_fail_safe() {
   printf '{"tool_name":"bash"}' | CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "the tracked delegation guard must allow an ordinary tool (got rc=$rc)"
 
-  # Fail-safe proof: a wrong root, and an empty payload, are both silent no-ops
-  # rather than a broken tool call the agent cannot act on.
-  rc=0
-  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$TMP_ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "a hook pointed at the wrong root must be a no-op (got rc=$rc)"
-  rc=0
-  CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" </dev/null >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "a hook with no payload must be a no-op (got rc=$rc)"
+  # Fail-safe proof, for every registered wrapper (digest, arm, cd, delegation
+  # and Stop): a wrong root, and an empty payload, are both silent no-ops rather
+  # than a broken tool call the agent cannot act on. Neither case reaches a
+  # script, so the live checkout's state/ is never touched.
+  n=0
+  while IFS= read -r cmd; do
+    n=$((n + 1))
+    rc=0
+    out=$(printf '{"tool_name":"subagent","session_id":"s1"}' | CLAUDE_PROJECT_DIR="$TMP_ROOT" bash -c "$cmd" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && [ -z "$out" ] \
+      || fail "a hook pointed at the wrong root must be a silent no-op (rc=$rc, output '$out'): $cmd"
+    rc=0
+    out=$(CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" </dev/null 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && [ -z "$out" ] \
+      || fail "a hook with no payload must be a silent no-op (rc=$rc, output '$out'): $cmd"
+  done < <(jq -r '.hooks[]?[]?.hooks[]?.command? | select(type == "string")' "$hooks")
+  [ "$n" -gt 0 ] || fail "$hooks registers no commands"
 
-  # The profile patch must mount the tracked file, or none of the above runs.
-  assert_contains "$(cat "$ROOT/.dsh/profile.patch.yml")" "/.dsh/hooks.json" \
-    "the profile patch no longer mounts the tracked hooks file"
+  # Stop dispatch proof, against a fixture home so the live state/ is untouched:
+  # a blind turn end with work in flight must reach the real guard and block.
+  cmd=$(jq -r '[.hooks.Stop[]?.hooks[]?.command? | select(type == "string" and contains("fm-turnend-guard-dsh.sh"))][0]' "$hooks")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "the tracked hooks register no Stop guard"
+  home=$(make_guard_home hooks-stop)
+  mkdir -p "$home/.dsh"
+  cp "$hooks" "$home/.dsh/hooks.json"
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0
+  ( cd "$home" && printf '{"session_id":"s1"}' | env -u FM_ROOT_OVERRIDE CLAUDE_PROJECT_DIR="$home" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c "$cmd" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "the tracked Stop guard must block a blind turn end through its wrapper (got rc=$rc)"
   pass "dsh tracked hooks: wrappers dispatch, self-verify, and fail safe"
 }
 
@@ -696,13 +768,17 @@ test_dsh_digest_gate_is_per_session
 test_dsh_digest_retries_when_nothing_was_produced
 test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
 test_dsh_guard_budget_is_an_episode_not_a_session
-test_dsh_protocol_and_seatbelt_agree_on_the_arm_command
+test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command
 test_dsh_preflight_rejects_a_mismatched_bridge
 test_dsh_preflight_rejects_a_missing_bridge
 test_dsh_preflight_rejects_a_truncating_budget
+test_dsh_preflight_reads_only_the_agent_instructions_entry
+test_dsh_preflight_honors_the_later_patch_layers
 test_dsh_preflight_passes_a_conforming_home
+test_dsh_launcher_roots_the_host_in_its_checkout
 test_dsh_ancestry_detects_the_launcher_path
 test_dsh_ancestry_detects_the_installed_bin_js
+test_dsh_ancestry_detects_a_global_install
 test_dsh_ancestry_rejects_unrelated_node_commands
 test_dsh_marker_requires_real_ancestry
 test_dsh_marker_outranks_an_inherited_claudecode
@@ -714,7 +790,7 @@ test_dsh_stop_wrapper_fails_open_without_a_root
 test_dsh_supervision_model_is_job
 test_dsh_job_verdict_tolerates_the_between_cycles_gap
 test_dsh_job_verdict_still_alarms_a_real_lapse
-test_dsh_protocol_states_the_death_window_contract
+test_dsh_seatbelt_denies_a_detached_watcher
 test_dsh_delegation_guard_classifies_real_tool_names
 test_dsh_is_refused_as_a_crewmate
 test_dsh_refusal_covers_scout_and_secondmate

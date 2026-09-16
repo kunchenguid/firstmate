@@ -17,8 +17,10 @@
 #   comm : node
 #   args : node /Users/<user>/.npm/_npx/<id>/node_modules/.bin/dsh web
 #
-# A source launch reports .../apps/cli/src/bin.ts and a direct package launch
-# .../@deepseek-ai/dsh/lib/bin.js.
+# A source launch reports .../apps/cli/src/bin.ts, a direct package launch
+# .../@deepseek-ai/dsh/lib/bin.js, and a global npm install the symlink it was
+# exec'd through, node <prefix>/bin/dsh, because the interpreter is handed the
+# path the shebang ran from rather than its resolved target.
 #
 # Every pattern is an anchored PATH SHAPE, never a bare *dsh* glob: an ordinary
 # firstmate path such as bin/fm-dsh-sessionstart.sh, or an unrelated dshish.js,
@@ -34,6 +36,7 @@ fm_dsh_args_evidence() {  # <args>
   local args=${1:-}
   case "$args" in
     */.bin/dsh\ *|*/.bin/dsh) printf '%s\n' 'bin-dsh' ;;
+    */bin/dsh\ *|*/bin/dsh) printf '%s\n' 'global-bin-dsh' ;;
     *@deepseek-ai/dsh/lib/bin.js*) printf '%s\n' 'installed-bin-js' ;;
     *apps/cli/src/bin.ts*) printf '%s\n' 'source-bin-ts' ;;
     *) return 1 ;;
@@ -45,12 +48,12 @@ fm_dsh_args_are_dsh() {  # <args>
   fm_dsh_args_evidence "$1" >/dev/null
 }
 
-# The same three launcher shapes as ERE alternation, for a caller that
+# The same launcher shapes as ERE alternation, for a caller that
 # classifies a whole command string in one grep rather than testing it in a case
 # arm (bin/fm-session-lock-lib.sh composes it into FM_HARNESS_RE). Kept beside
 # the case arms above so the two spellings cannot drift apart.
 fm_dsh_args_ere() {
-  printf '%s\n' '/\.bin/dsh([[:space:]]|$)|/@deepseek-ai/dsh/lib/bin\.js|/apps/cli/src/bin\.ts'
+  printf '%s\n' '/\.?bin/dsh([[:space:]]|$)|/@deepseek-ai/dsh/lib/bin\.js|/apps/cli/src/bin\.ts'
 }
 
 # True when a genuine DSH launcher sits within eight parents of [<pid>].

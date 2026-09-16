@@ -20,7 +20,8 @@
 # that the sandbox still permits ps - all three fail silently otherwise.
 #
 # Applied over a base+web-app profile whose bundle list also carries this
-# checkout's own bundles. Set FM_ROOT to the firstmate checkout before boot.
+# checkout's own bundles. The launcher exports FM_ROOT as this checkout and
+# starts DSH from it, so both expressions below resolve here.
 - insert:
     - id: hooks-claude-code
       name: '@deepseek-ai/dsh-hooks-claude-code'

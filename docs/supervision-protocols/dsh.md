@@ -37,5 +37,5 @@ something outside DSH intervenes. Do not paper over this:
   governs. That is an operator deployment decision, not something this protocol can assert.
 
 DeepSeek Harness offers no asynchronous harness hook, so watcher continuity is owned by the background job plus the bounded Stop guard rather than by a Stop-owned auto-arm.
-The guard blocks a turn that would end with work in flight and no live watcher, bounded by `FM_DSH_TURNEND_BLOCK_BUDGET` (default 3) continuations before one attended fail-open.
+The guard blocks a turn that would end with work in flight and no live watcher, bounded by `FM_DSH_TURNEND_BLOCK_BUDGET` (default 3) continuations, then one alarm turn saying supervision is genuinely down, which you must relay to the captain; every later stop is allowed.
 DeepSeek Harness reports `stop_hook_active=false` on every Stop, so the adapter counts its own continuations instead of trusting that field.

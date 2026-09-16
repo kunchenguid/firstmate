@@ -14,8 +14,14 @@
 #                       instead of a retained fallback marker.
 #   FM_HOME             the home this session owns, which bin/fm-send.sh and the
 #                       session lock both need explicitly.
+#   FM_ROOT             this checkout. .dsh/profile.patch.yml resolves the hooks
+#                       bridge's configPath and projectDir from it, so it is set
+#                       from this script's own location, never inherited.
 #   LC_ALL / LC_CTYPE   a locale. Unset, bin/fm-line-cap-lib.sh's character cap
 #                       becomes a byte cap and slices UTF-8 mid-character.
+#
+# DSH takes the invoking directory as its workspace root, so the host is started
+# from this checkout whatever directory the operator launched from.
 #
 # Foreign harness markers are cleared so a session started from another
 # harness's pane cannot inherit its identity. bin/fm-spawn.sh does the same at
@@ -25,8 +31,10 @@
 set -u
 
 ROOT=$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 1
 
 export FM_DSH_HARNESS=dsh
+export FM_ROOT="$ROOT"
 export FM_HOME="${FM_HOME:-$ROOT}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 export LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
@@ -41,16 +49,22 @@ unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null
 # deliberately degraded home.
 if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh" ]; then
   PROFILE=web
-  want_profile=0
+  PATCHES=()
+  want=
   for arg in "$@"; do
-    if [ "$want_profile" -eq 1 ]; then PROFILE=$arg; want_profile=0; continue; fi
+    case "$want" in
+      profile) PROFILE=$arg; want=; continue ;;
+      patch) PATCHES+=(--patch "$arg"); want=; continue ;;
+    esac
     case "$arg" in
-      --profile) want_profile=1 ;;
+      --profile) want='profile' ;;
       --profile=*) PROFILE=${arg#--profile=} ;;
+      --patch) want='patch' ;;
+      --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
       web|headless|acp|sdk|sdk-minimal) [ "$arg" = web ] || PROFILE=$arg ;;
     esac
   done
-  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" || exit 3
+  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" ${PATCHES[@]+"${PATCHES[@]}"} || exit 3
 fi
 
 exec dsh "$@"

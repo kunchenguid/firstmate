@@ -21,13 +21,14 @@
 #      ownership then read "unknown" or "down" rather than reporting a
 #      misconfiguration, so the home looks broken instead of unsandboxed.
 #
-# Usage: fm-dsh-preflight.sh [--profile <name>] [--home <firstmate-home>] [--quiet]
+# Usage: fm-dsh-preflight.sh [--profile <name>] [--home <firstmate-home>] [--patch <path>]... [--quiet]
 # Exit: 0 all required checks passed; 3 at least one required check failed.
 set -u
 
 PROFILE=web
 FM_HOME_OVERRIDE=
 QUIET=0
+PATCH_OVERLAYS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
@@ -38,8 +39,11 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 1 ] || { printf 'error: --home requires a path\n' >&2; exit 2; }
       FM_HOME_OVERRIDE=$2; shift 2 ;;
     --home=*) FM_HOME_OVERRIDE=${1#--home=}; shift ;;
+    --patch)
+      [ "$#" -gt 1 ] || { printf 'error: --patch requires a path\n' >&2; exit 2; }
+      PATCH_OVERLAYS+=("$2"); shift 2 ;;
     --quiet) QUIET=1; shift ;;
-    *) printf 'usage: %s [--profile <name>] [--home <path>] [--quiet]\n' "$(basename -- "$0")" >&2; exit 2 ;;
+    *) printf 'usage: %s [--profile <name>] [--home <path>] [--patch <path>]... [--quiet]\n' "$(basename -- "$0")" >&2; exit 2 ;;
   esac
 done
 
@@ -84,22 +88,37 @@ fi
 AGENTS_MD="$FM_HOME_DIR/AGENTS.md"
 if [ -f "$AGENTS_MD" ]; then
   AGENTS_BYTES=$(wc -c < "$AGENTS_MD" | tr -d ' ')
-  # The profile's own patch layer is where this port raises the budget. The
-  # dsh-base default applies when nothing raises it, and that default is what
-  # silently truncates.
+  # The user layers compose in DSH's order - the profile's patch, then the
+  # home-level patch, then each --patch overlay - so the last layer that sets
+  # the agent-instructions entry's maxBytes wins. Only that entry counts: another
+  # plugin's maxBytes says nothing about AGENTS.md. The dsh-base default applies
+  # when no layer raises it, and that default is what silently truncates.
   MAX_BYTES=65536
   MAX_SOURCE=
   PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
-  if [ -f "$PATCH_FILE" ]; then
-    FOUND=$(sed -n 's/^[[:space:]]*maxBytes:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$PATCH_FILE" | sort -n | tail -1)
-    case "${FOUND:-}" in
-      ''|*[!0-9]*) : ;;
-      *) MAX_BYTES=$FOUND; MAX_SOURCE="$PATCH_FILE" ;;
-    esac
-  fi
+  for layer in "$PATCH_FILE" "$DSH_HOME_DIR/cordis.patch.yml" ${PATCH_OVERLAYS[@]+"${PATCH_OVERLAYS[@]}"}; do
+    [ -f "$layer" ] || continue
+    FOUND=$(awk '
+      /^[[:space:]]*(#|$)/ { next }
+      {
+        indent = match($0, /[^[:space:]]/) - 1
+        line = substr($0, indent + 1)
+        if (line ~ /^-[[:space:]]+id:/ || line ~ /^id:/) {
+          id = line; sub(/^-?[[:space:]]*id:[[:space:]]*/, "", id); gsub(/["'\'']|[[:space:]].*$/, "", id)
+          entry = id; entry_indent = indent; next
+        }
+        if (line ~ /^-/ && indent <= entry_indent) entry = ""
+        if (entry == "agent-instructions" && line ~ /^maxBytes:[[:space:]]*[0-9]+[[:space:]]*(#.*)?$/) {
+          value = line; sub(/^maxBytes:[[:space:]]*/, "", value); sub(/[^0-9].*$/, "", value)
+        }
+      }
+      END { if (value != "") print value }
+    ' "$layer")
+    [ -n "$FOUND" ] && { MAX_BYTES=$FOUND; MAX_SOURCE=$layer; }
+  done
   if [ "$AGENTS_BYTES" -gt "$MAX_BYTES" ]; then
-    fail "AGENTS.md is $AGENTS_BYTES bytes but maxBytes is $MAX_BYTES" \
-      "raise it in $PATCH_FILE (agent-instructions config), and on every DSH home: this truncation is silent"
+    fail "AGENTS.md is $AGENTS_BYTES bytes but maxBytes is $MAX_BYTES${MAX_SOURCE:+ (set in $MAX_SOURCE)}" \
+      "raise the agent-instructions entry's maxBytes in ${MAX_SOURCE:-$PATCH_FILE}, and on every DSH home: this truncation is silent"
   else
     ok "instruction budget $MAX_BYTES fits AGENTS.md ($AGENTS_BYTES bytes)${MAX_SOURCE:+ from $MAX_SOURCE}"
   fi

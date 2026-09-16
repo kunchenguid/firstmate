@@ -11,7 +11,7 @@ The Stop-hook and watcher-continuity measurements were first written into [`supe
 |---|---|
 | Version | DeepSeek Harness 0.1.5-rc.1 (`dsh-base` 0.1.5-rc.2) |
 | Verified | 2026-09-16 |
-| Binary | `dsh`, launched from an npm `npx` cache (`.bin/dsh`), an installed `@deepseek-ai/dsh/lib/bin.js`, or a source `apps/cli/src/bin.ts` |
+| Binary | `dsh`, launched from an npm `npx` cache (`.bin/dsh`), a global npm install's `<prefix>/bin/dsh` symlink, an installed `@deepseek-ai/dsh/lib/bin.js`, or a source `apps/cli/src/bin.ts` |
 | Platform | macOS arm64 (Darwin 27.0.0) |
 | Role | PRIMARY only; refused for crewmate, scout and secondmate |
 
@@ -30,10 +30,10 @@ $ ps -o pid=,comm=,args= -p <host>
   args : node /Users/<user>/.npm/_npx/<id>/node_modules/.bin/dsh web
 ```
 
-`bin/fm-dsh-lib.sh` is the single owner of the three launcher path shapes, in both a shell `case` spelling (`fm_dsh_args_evidence`) and a POSIX ERE (`fm_dsh_args_ere`), kept in one file so the two cannot drift.
+`bin/fm-dsh-lib.sh` is the single owner of the launcher path shapes, in both a shell `case` spelling (`fm_dsh_args_evidence`) and a POSIX ERE (`fm_dsh_args_ere`), kept in one file so the two cannot drift.
 `bin/fm-harness.sh` gained a source line, a `FM_DSH_HARNESS` marker arm and an interpreter-arm delegate; `bin/fm-session-lock-lib.sh` composes its `FM_HARNESS_RE` from `fm_dsh_args_ere`, and `dsh` is deliberately **absent** from `FM_HARNESS_NAMES` there.
 Every pattern is an anchored path shape, never a bare `*dsh*` glob, so `bin/fm-dsh-sessionstart.sh` and an unrelated `dshish.js` cannot claim the identity.
-`tests/fm-dsh-harness.test.sh` pins all three accepted shapes, both false positives, and the precedence rule that `FM_DSH_HARNESS=dsh` is honored **only** when a genuine dsh process is in the ancestry — the marker is an override, never evidence on its own.
+`tests/fm-dsh-harness.test.sh` pins every accepted shape, both false positives, and the precedence rule that `FM_DSH_HARNESS=dsh` is honored **only** when a genuine dsh process is in the ancestry — the marker is an override, never evidence on its own.
 
 That precedence is load-bearing rather than a fast path: the dsh ancestry verdict is only `args` strength, so a DSH host launched from a Claude pane retains `CLAUDECODE`, which would otherwise rename the session.
 A `FM_DSH_HARNESS` that no producer set was the state of the world before this work — every test set it by hand, and the home loaded `unknown.md`.
@@ -147,8 +147,8 @@ DSH reports `stop_hook_active=false` on **every** Stop, so that field cannot bou
 The alarm-turn shape exists because DSH's bridge **logs and drops** a non-blocking `systemMessage` ("not yet surfaced (ignored)"), so the Claude path's loud `terminal_fail_open` produced no operator-visible record at all on DSH — the original "one loud attended fail-open" was attended by nobody.
 The only channel DSH surfaces is a blocking `Stop` decision whose reason is model-visible steering, so the alarm rides that, and it is additionally latched durably at `state/.dsh-turnend-fail-open`, which the session-start digest prepends.
 
-Unit fixture: four consecutive blind stops over one in-flight task returned `2, 2, 2, 0` and left the alarm latched.
-Live: an SDK-driven turn under the same conditions blocked three times, failed open once, and settled, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4` — the live run reproduced the measured 4-firing shape rather than re-blocking.
+Unit fixture: five consecutive blind stops over one in-flight task returned `2, 2, 2, 2, 0` — three budget blocks, one alarm turn, then allow — and left the alarm latched.
+Live: an SDK-driven turn under the same conditions ran the guard four times and settled, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4`. That run predates the alarm turn: it measured three blocks and a non-blocking fail-open, so it is live evidence that the budget bounds the loop, not of the shipped `budget + 1` shape, which has only the unit fixture.
 
 ## Idle wake: the `job` supervision model
 
