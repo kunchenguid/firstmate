@@ -6,8 +6,11 @@
 # whole, and selects the permission preset this supervisor needs: firstmate's
 # health model is built on `ps` process inspection, which workspace-write denies.
 # That preset covers a session's tool calls only. Hooks run with no session and
-# get the host's sandbox-policy mode, which bin/fm-dsh-launch.sh sets through
-# DSH_PERMISSION_MODE rather than this patch.
+# get the host's sandbox-policy mode instead, so that mode is pinned below in
+# this patch rather than left to the ambient DSH_PERMISSION_MODE: a value the
+# composed configuration carries cannot be lost by a caller that forgets to
+# export it, and dsh-base's own `!!js process.env.DSH_PERMISSION_MODE ??
+# 'workspace-write'` default is what silently denies `ps` in every hook.
 #
 # Which row carries that budget depends on the profile. Under dsh-web-app the
 # host `agent-instructions` row is disabled and every session is composed from
@@ -59,3 +62,13 @@
 - id: permission
   config:
     defaultPreset: danger-full-access
+
+# The sandbox mode hooks run under. Pinned literally so it travels with the
+# composed configuration: a session's permission preset does not reach a hook,
+# because the bridge runs hooks with no session. It is set alongside
+# defaultPreset because sandbox-policy.mode on its own leaves the composed
+# sandbox and approval defaults matching no preset, which dsh-permission-presets
+# refuses at load.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access

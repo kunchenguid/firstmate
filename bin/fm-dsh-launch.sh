@@ -50,27 +50,34 @@ unset CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE 
 # GROK_* are checked by name so an unset variable never trips `set -u`.
 unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null || true
 
-# Assert the three DSH misconfigurations that fail silently, before a session
-# starts depending on them. FM_DSH_SKIP_PREFLIGHT=1 is the escape hatch for a
+# The tracked patch is the install step: it mounts the hooks bridge, raises the
+# instruction budget and pins the hook sandbox mode. Collecting it here rather
+# than documenting a copy is what makes the documented launch correct on its
+# own; operator-supplied --patch values follow it and so can override it. It is
+# collected even when the preflight is skipped, because skipping the checks must
+# not also drop the configuration they check.
+PROFILE=web
+PATCHES=(--patch "$ROOT/.dsh/profile.patch.yml")
+want=
+for arg in "$@"; do
+  case "$want" in
+    profile) PROFILE=$arg; want=; continue ;;
+    patch) PATCHES+=(--patch "$arg"); want=; continue ;;
+  esac
+  case "$arg" in
+    --profile) want='profile' ;;
+    --profile=*) PROFILE=${arg#--profile=} ;;
+    --patch) want='patch' ;;
+    --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
+    web|headless|acp|sdk|sdk-minimal) [ "$arg" = web ] || PROFILE=$arg ;;
+  esac
+done
+
+# Assert the DSH misconfigurations that fail silently, before a session starts
+# depending on them. FM_DSH_SKIP_PREFLIGHT=1 is the escape hatch for a
 # deliberately degraded home.
 if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh" ]; then
-  PROFILE=web
-  PATCHES=()
-  want=
-  for arg in "$@"; do
-    case "$want" in
-      profile) PROFILE=$arg; want=; continue ;;
-      patch) PATCHES+=(--patch "$arg"); want=; continue ;;
-    esac
-    case "$arg" in
-      --profile) want='profile' ;;
-      --profile=*) PROFILE=${arg#--profile=} ;;
-      --patch) want='patch' ;;
-      --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
-      web|headless|acp|sdk|sdk-minimal) [ "$arg" = web ] || PROFILE=$arg ;;
-    esac
-  done
-  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" ${PATCHES[@]+"${PATCHES[@]}"} || exit 3
+  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" "${PATCHES[@]}" || exit 3
 fi
 
-exec dsh "$@"
+exec dsh "${PATCHES[@]}" "$@"

@@ -31,10 +31,13 @@ Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox a
 The preset covers a session's tool calls only.
 Hooks are not session tool calls: `dsh-hooks-claude-code` runs them with no session, so `dsh-bash-sandbox` falls back to the host's `sandbox-policy` mode, which `dsh-base` composes as `process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`.
 Under the preset alone every firstmate hook is denied `ps`, and the session-start digest reads READ-ONLY with an unknown harness.
-`bin/fm-dsh-launch.sh` therefore exports `DSH_PERMISSION_MODE=danger-full-access`, which also matches the preset, so the profile still loads.
+`.dsh/profile.patch.yml` therefore pins that row to `danger-full-access` literally, so the mode travels with the composed configuration instead of living in an environment variable a caller can forget to export.
+It is set alongside `permission.defaultPreset` because the mode alone leaves the composed sandbox and approval defaults matching no preset, which `dsh-permission-presets` refuses at load.
+`bin/fm-dsh-launch.sh` exports `DSH_PERMISSION_MODE=danger-full-access` as well, and forwards the tracked patch explicitly, so the documented launch needs no manual install step and is correct even for a profile that does not pin the row.
 
 `bin/fm-dsh-preflight.sh` cannot probe `ps` under either sandbox: it runs in the launching shell before DSH starts, where nothing is sandboxed, so a `ps` there always succeeds.
-It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, whose `!!js` expression it evaluates in its own environment, the one the launcher hands the host.
+It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, whose `!!js` expression it evaluates in the environment it was invoked with, the one the launcher hands the host.
+A profile that does not pin the row therefore still fails when the caller has not supplied that environment, which is what a bare `dsh web` launch is.
 That proves the defaults, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
 
 ## Instruction budget
@@ -70,6 +73,9 @@ the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resol
 and the `firstmate` preset root from `FM_ROOT`), pins `LC_ALL`/`LC_CTYPE` (unset,
 `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), and clears the foreign
 harness markers so a session started from another harness's pane cannot inherit its identity.
+It also forwards the tracked `.dsh/profile.patch.yml` with `--patch`, after any the operator supplied,
+because that file is the install step for the bridge mount, the instruction budget and the pinned hook
+sandbox mode: without it the documented command boots a profile that carries none of the three.
 
 Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
 launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.

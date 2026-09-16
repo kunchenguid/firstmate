@@ -10,7 +10,7 @@
 # patch layer, so "standard plus one change" is not expressible
 # (dsh-agent-presets README, "A copy is a snapshot that drifts").
 # Copied from @deepseek-ai/dsh-agent-presets 0.1.5-rc.2 presets/standard. On
-# every DSH upgrade, re-copy that file and re-apply the maxBytes raise above;
+# every DSH upgrade, re-copy that file and re-apply the maxBytes raise below;
 # bin/fm-dsh-preflight.sh checks the raise, not the rest of the copy.
 #
 # .dsh/profile.patch.yml registers this directory as a `system` preset root and

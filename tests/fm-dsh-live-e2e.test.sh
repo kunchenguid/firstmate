@@ -128,8 +128,12 @@ cat > "$PROFILE_DIR/cordis.patch.yml" <<SH
 SH
 
 # --- 1. the bridge pin is what the preflight expects -------------------------
-if ! "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" >/dev/null 2>&1; then
-  fail "fm-dsh-preflight.sh rejected the freshly pinned profile '$PROFILE' (dsh-base $BASE_VERSION)"
+# Invoked with the tracked patch, because that is what the launcher passes: the
+# patch is the install step for the bridge mount, the instruction budget and the
+# hook sandbox mode, none of which the throwaway profile carries on its own.
+if ! "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
+    --patch "$ROOT/.dsh/profile.patch.yml" >/dev/null 2>&1; then
+  fail "fm-dsh-preflight.sh rejected the freshly pinned profile '$PROFILE' with the tracked patch (dsh-base $BASE_VERSION)"
 fi
 pass "live dsh $BASE_VERSION: a matching bridge pin passes the preflight"
 

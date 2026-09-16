@@ -40,7 +40,7 @@ A `FM_DSH_HARNESS` that no producer set was the state of the world before this w
 
 ## Launch: one boundary for values a tool call cannot set
 
-Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, runs the preflight with the profile and any `--patch` overlays it was given, and `exec`s `dsh`.
+Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, forwards the tracked `.dsh/profile.patch.yml` with `--patch` after any the operator supplied (that file is the install step for the bridge mount, the budget and the pinned hook sandbox mode, and without it the documented command boots a profile carrying none of the three), runs the preflight with the profile and those overlays, and `exec`s `dsh` with them.
 
 ```
 bin/fm-dsh-launch.sh web --port 3080
@@ -71,7 +71,7 @@ Measured against synthetic homes:
 | `dsh --dump-config` fails, or reports no plain-number `agent-instructions` `maxBytes` | FAIL, naming the command to run and the patch file to set |
 | New sessions default to a permission preset other than `danger-full-access`, from the profile or from `$DSH_HOME/settings.yaml`, which outranks it | FAIL, naming the preset and where it came from |
 | No explicit default permission preset, so DSH would infer one from the sandbox knobs | FAIL |
-| The composed `sandbox-policy` mode that hooks run under is not `danger-full-access`: the preflight run without the launcher's `DSH_PERMISSION_MODE`, or a profile pinning another mode | FAIL, naming the mode |
+| The composed `sandbox-policy` mode that hooks run under is not `danger-full-access`: a profile that leaves the row at `dsh-base`'s expression while the caller supplies no `DSH_PERMISSION_MODE`, or one pinning another mode outright | FAIL, naming the mode |
 | Conforming home | pass, all required checks |
 | `lsof` absent | warning, not failure: teardown's stale-lock proof and orphan reap refuse rather than proceed |
 | `jq` or `node` absent | FAIL, because every guard that needs one fails open and becomes a silent no-op |
@@ -96,7 +96,9 @@ That proves the default, not any one session: a resumed session keeps the preset
 That preset still left every hook without `ps`.
 Driven live through the documented `web` launch with every preflight check ok, the digest in a `danger-full-access` session read `READ-ONLY SESSION` and `cannot locate harness process in ancestry`, and a probe hook got `/bin/ps: Operation not permitted`.
 The hooks bridge calls `runHook(ctx.shell, …)` with no session, so `dsh-sandbox-policy` resolves the host default, `process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`, whatever preset the session holds.
-With the host started under `DSH_PERMISSION_MODE=danger-full-access` the same probe ran `ps` and the digest acquired the lock, so the launcher now exports it and the preflight evaluates the composed `sandbox-policy` mode in the launcher's environment.
+With the host started under `DSH_PERMISSION_MODE=danger-full-access` the same probe ran `ps` and the digest acquired the lock.
+The durable fix is that `.dsh/profile.patch.yml` pins the `sandbox-policy` row to `danger-full-access` literally, alongside `permission.defaultPreset` (the mode alone leaves the composed sandbox and approval defaults matching no preset, which `dsh-permission-presets` refuses at load), so the mode travels with the composed configuration rather than with an environment variable a caller can forget.
+`bin/fm-dsh-launch.sh` still exports the variable and now forwards the tracked patch explicitly, and the preflight evaluates whatever composed mode it finds, so a profile that does not pin the row still fails when the caller has not supplied the launcher's environment.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -286,7 +288,7 @@ The adapter was again not actually fine.
 The fix is the documented refresh: both scripts now carry a measured hint (`fm-dsh-harness.test.sh` 15067 ms, `fm-dsh-live-e2e.test.sh` 143 ms, the latter because the live guard skips without its opt-in).
 A new test file is therefore not finished when it passes; it also has to be weighed, and the guard that says so lives in a suite the adapter does not otherwise run.
 
-The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), DSH renaming its own tools out from under the delegation guard's stems, `dsh-base` composing the hook sandbox from something other than `DSH_PERMISSION_MODE` (the launcher exports it and the preflight evaluates the composed expression), and DSH's shipped `standard` preset, which the `firstmate` preset copies.
+The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), DSH renaming its own tools out from under the delegation guard's stems, `dsh-base` or `dsh-web-app` changing how the hook sandbox is composed (the tracked patch pins the `sandbox-policy` row and the preflight evaluates the composed mode, so a new expression form must be re-read), and DSH's shipped `standard` preset, which the `firstmate` preset copies.
 
 ## Not established, blocked, or out of scope
 
