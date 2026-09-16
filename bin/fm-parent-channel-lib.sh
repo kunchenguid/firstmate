@@ -3,10 +3,9 @@
 #
 # WHY THIS EXISTS. A secondmate is a firstmate in its own home, and nobody reads
 # its chat: the captain and the main firstmate see only what is appended to the
-# parent channel. AGENTS.md tells every firstmate to reach the captain and to
-# address the captain in every response, so a mate model reliably "reports" a
-# PR-ready result, a finding, a decision, a blocker, or a failure in its own
-# chat and skips the one status-file append that would actually deliver it.
+# parent channel. A mate can satisfy AGENTS.md's address rule in local chat
+# while skipping the charter's return-channel instruction, so a PR-ready result,
+# finding, decision, blocker, or failure never reaches the parent.
 # Four such misses were observed on 2026-09-02 across two mate homes; the
 # watcher had delivered the parent's request each time and the work was done.
 # The problem is therefore not one missed PR notice but every captain-facing

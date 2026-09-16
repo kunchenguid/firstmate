@@ -3,10 +3,10 @@
 # FM_HOME. Existing OpenCode credentials stay in their managed store.
 set -u
 
-if [ "${FM_OPENCODE_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_OPENCODE_LIVE_E2E=1 to run the interactive OpenCode continuity regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -15,10 +15,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v opencode >/dev/null 2>&1 || fail "opencode not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
-command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 not found"
 
 TMUX=$(command -v tmux)
 SOCKET="fm-opencode-live-e2e-$$"

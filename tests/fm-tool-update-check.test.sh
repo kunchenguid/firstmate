@@ -685,15 +685,15 @@ test_findings_are_reported_once_until_they_change() {
 }
 
 test_an_overlong_report_says_it_was_cut() {
-  local home out report i tools=
+  local home out report i tools_json=
   # Many watched tools can outgrow one line. The report must say it was cut
   # rather than end mid-finding as if that were everything found.
   home=$(make_home long)
   for i in $(seq 1 30); do
-    [ -z "$tools" ] || tools="$tools,"
-    tools="$tools{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+    [ -z "$tools_json" ] || tools_json="$tools_json,"
+    tools_json="$tools_json{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
   done
-  write_config "$home" "{\"tools\":[$tools]}"
+  write_config "$home" "{\"tools\":[$tools_json]}"
   out="$home/out.txt"
   run_check "$home" "$PATH" "$out"
   report=$(cat "$out")
@@ -703,7 +703,7 @@ test_an_overlong_report_says_it_was_cut() {
 }
 
 test_a_finding_past_the_cut_is_still_reported() {
-  local home stale fresh out report i tools=
+  local home stale fresh out report i tools_json=
   # Once a report is long enough to be cut, a new finding lands past the cut and
   # leaves the printed line unchanged. It still has to count as news, or the PATH
   # skew this check exists for would be suppressed for good on a busy home.
@@ -713,17 +713,17 @@ test_a_finding_past_the_cut_is_still_reported() {
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
   for i in $(seq 1 30); do
-    [ -z "$tools" ] || tools="$tools,"
-    tools="$tools{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+    [ -z "$tools_json" ] || tools_json="$tools_json,"
+    tools_json="$tools_json{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
   done
   out="$home/out.txt"
-  write_config "$home" "{\"tools\":[$tools]}"
+  write_config "$home" "{\"tools\":[$tools_json]}"
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   assert_contains "$(cat "$out")" "[truncated]" "the first report was not long enough to be cut, so this case proves nothing"
 
   # The skew tool goes last, so its finding falls past the cut and the printed
   # line is byte identical to the one the first sweep already recorded.
-  write_config "$home" "{\"tools\":[$tools,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  write_config "$home" "{\"tools\":[$tools_json,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   report=$(cat "$out")
   [ -n "$report" ] || fail "a finding past the cut produced no report at all, so it can never reach the watcher"

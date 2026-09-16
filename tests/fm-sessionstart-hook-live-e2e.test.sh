@@ -40,11 +40,10 @@
 #   FM_PI_SESSIONSTART_RACE_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 set -u
 
-if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ] && \
-   [ "${FM_PI_SESSIONSTART_RACE_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_SESSIONSTART_HOOK_LIVE_E2E=1 for the cross-harness guard or FM_PI_SESSIONSTART_RACE_LIVE_E2E=1 for the offline Pi /new race regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_SESSIONSTART_HOOK_LIVE_E2E,FM_PI_SESSIONSTART_RACE_LIVE_E2E tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -55,8 +54,6 @@ fail() {
 }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
-
-command -v tmux >/dev/null 2>&1 || fail "tmux not found; the context-reset checks drive real interactive harnesses"
 
 # Outside the repo on purpose: each lab is its own git repo, and nesting one
 # inside the checkout would show up as an embedded repository in a working tree

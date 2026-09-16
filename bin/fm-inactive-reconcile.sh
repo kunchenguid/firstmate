@@ -121,7 +121,7 @@ if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
 fi
 
 if [ "$(uname)" = Darwin ]; then
-  file_mtime() { stat -f %m "$1" 2>/dev/null; }
+  file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
 else
   file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
@@ -311,15 +311,19 @@ meta_incarnation() { # <meta>
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
 
-pr_for_task() { # <meta> <status> [preferred-line]
-  local meta=$1 status=$2 preferred=${3:-} value
+# The task's delivered PR. Recorded meta pr= is the only authoritative source;
+# the fallback scrape accepts only a preferred terminal line in a mode's
+# ready-signal shape (`done: PR <url>` or `done: PR <url> checks green`), so a
+# PR a worker merely mentioned in prose is never claimed as the delivery.
+# A scout never delivers a PR, so it never carries one.
+pr_for_task() { # <meta> [preferred-line]
+  local meta=$1 preferred=${2:-} value
+  [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
-      | grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' | head -1 || true)
-  fi
-  if [ -z "$value" ] && [ -f "$status" ]; then
-    value=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$status" 2>/dev/null | tail -1 || true)
+      | sed -nE 's|^done: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
+      | head -1 || true)
   fi
   clean_field "$value"
 }
@@ -398,7 +402,7 @@ report_child_ledger_locked() { # <id> <meta>
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
-  pr=$(pr_for_task "$meta" "$status" "$last")
+  pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
@@ -496,7 +500,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  pr=$(pr_for_task "$meta" "$status")
+  pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then

@@ -31,19 +31,22 @@ HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gemini-harness)
 
 test_gemini_marker_outranks_inherited_claudecode() {
-  local out
+  local out fakebin base_path
+  base_path=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+  fakebin=$(fm_fakebin "$TMP_ROOT/marker-ordering")
+  fm_fake_blind_ancestry "$fakebin"
   # This is the exact hazard: gemini does not clear an inherited CLAUDECODE, so
   # a gemini worker under a claude primary carries both markers at once.
-  out=$(CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$fakebin:$base_path" CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "CLAUDECODE + GEMINI_CLI must detect gemini, got '$out'"
   # Drive the two signals apart so the case above cannot go quietly vacuous:
   # each marker alone must still produce its own verdict.
-  out=$(env -u CLAUDECODE GEMINI_CLI=1 "$HARNESS")
+  out=$(env -u CLAUDECODE PATH="$fakebin:$base_path" GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "GEMINI_CLI alone must detect gemini, got '$out'"
-  out=$(env -u GEMINI_CLI CLAUDECODE=1 "$HARNESS")
+  out=$(env -u GEMINI_CLI PATH="$fakebin:$base_path" CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks gemini's, preserving the documented order.
-  out=$(CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$fakebin:$base_path" CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT must still outrank GEMINI_CLI, got '$out'"
   pass "fm-harness.sh: gemini's marker outranks an inherited CLAUDECODE"
 }

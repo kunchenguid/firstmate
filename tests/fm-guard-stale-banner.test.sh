@@ -74,6 +74,23 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# Age the rewake ledger into the past so a passing long-turn case cannot rest on
+# epoch freshness: a handling turn that has already outrun grace still has this
+# shape, which is the false alarm this suite now pins.
+record_aged_rewake_epoch() {
+  local home=$1 session_pid=$2 recovery=${3:-guard-test-generation}
+  printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=%s\n' \
+    "$session_pid" "$recovery" > "$home/state/.claude-autoarm-epoch"
+  printf 'acked:handling:%s\n' "$recovery" > "$home/state/.watcher-down"
+  touch -t 201901010000 "$home/state/.last-watcher-beat"
+  touch -t 202001010000 "$home/state/.claude-autoarm-epoch"
+}
+
+record_session_lock_pid() {
+  local home=$1 pid=$2
+  printf '%s\n' "$pid" > "$home/state/.lock"
+}
+
 # The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
 # down on every actionable wake and spawns the replacement itself, so the lock is
 # legitimately unheld during a hand-off.
@@ -150,6 +167,22 @@ test_first_stale_call_prints_full_banner() {
   assert_contains "$out" "WILL still run" \
     "full banner must keep the guarded-operation continuation line"
   pass "fm-guard stale banner: first stale call prints the full actionable banner"
+}
+
+test_full_banner_names_quiet_mode_when_active() {
+  # kunchenguid/firstmate#2356: the banner's repair line must not misdirect a
+  # captain in quiet mode to /afk - fm-guard.sh threads the flag's declared
+  # mode through to fm-supervision-instructions.sh's --afk-mode.
+  local dir home out
+  dir=$(make_guard_case quiet-mode-banner)
+  home=$(case_home "$dir")
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" \
+    "full banner did not name /quiet for an active quiet-mode flag"
+  assert_not_contains "$out" "Away mode owns watcher supervision" \
+    "full banner misdirected a quiet-mode captain to /afk"
+  pass "fm-guard stale banner: repair line is quiet-mode-aware, not hardcoded to away mode"
 }
 
 test_repeated_same_episode_prints_reminder_only() {
@@ -393,6 +426,133 @@ test_autoarm_stale_episode_is_stable() {
   assert_contains "$out2" "full banner already printed this episode" \
     "second auto-arm stale call did not print the concise reminder"
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
+}
+
+# The send-time false alarm on a long Claude handling turn: the between-turns
+# watcher has already exited, the beacon is older than grace, and the auto-arm
+# ledger still shows a healthy rewake with no failure markers while the session
+# lock names a live pid. Turn-end will re-arm, so the pull guard must stay silent.
+test_autoarm_long_handling_turn_stays_silent() {
+  local dir home out pid
+  dir=$(make_guard_case autoarm-long-turn)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_aged_rewake_epoch "$home" "$pid"
+  record_session_lock_pid "$home" "$pid"
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "a long auto-arm handling turn past grace must stay silent, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a healthy long handling turn must not open a down-episode"
+  pass "fm-guard stale banner: auto-arm long handling turn with a healthy rewake stays silent"
+}
+
+# Drive the long-turn signals apart on the same stale beacon. Losing any one
+# healthy-generation signal must restore the banner; the stale beacon alone
+# is not enough to stay quiet, and adding a failure marker is not either.
+test_autoarm_long_turn_requires_every_healthy_signal() {
+  local dir home out pid replacement_pid='' case_name
+  for case_name in no-epoch failed-outcome failure-notified failure-alarmed dead-lock missing-lock changed-lock moved-recovery later-beacon; do
+    dir=$(make_guard_case "autoarm-long-turn-$case_name")
+    home=$(case_home "$dir")
+    sleep 60 &
+    pid=$!
+    record_aged_rewake_epoch "$home" "$pid"
+    record_session_lock_pid "$home" "$pid"
+    case "$case_name" in
+      no-epoch)
+        rm -f "$home/state/.claude-autoarm-epoch"
+        ;;
+      failed-outcome)
+        printf 'epoch=7 owner_pid=1 outcome=failed updated_at=1\n' > "$home/state/.claude-autoarm-epoch"
+        touch -t 202001010000 "$home/state/.claude-autoarm-epoch"
+        ;;
+      failure-notified)
+        : > "$home/state/.claude-autoarm-failure-notified"
+        ;;
+      failure-alarmed)
+        : > "$home/state/.claude-autoarm-failure-alarmed"
+        ;;
+      dead-lock)
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        pid=
+        ;;
+      missing-lock)
+        rm -f "$home/state/.lock"
+        ;;
+      changed-lock)
+        sleep 60 &
+        replacement_pid=$!
+        record_session_lock_pid "$home" "$replacement_pid"
+        ;;
+      moved-recovery)
+        printf 'pending:handling:later-turn-generation\n' > "$home/state/.watcher-down"
+        ;;
+      later-beacon)
+        touch -t 202101010000 "$home/state/.last-watcher-beat"
+        ;;
+    esac
+    out=$(run_guard_case_autoarm "$dir")
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    [ -z "$replacement_pid" ] || kill "$replacement_pid" 2>/dev/null || true
+    [ -z "$replacement_pid" ] || wait "$replacement_pid" 2>/dev/null || true
+    replacement_pid=
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "auto-arm long-turn health must not survive $case_name; guard output: $out"
+    assert_contains "$out" "no watcher has a fresh beacon" \
+      "a genuine auto-arm lapse with $case_name must still name the stale beacon"
+  done
+  pass "fm-guard stale banner: every auto-arm long-turn healthy signal is load-bearing"
+}
+
+# An open arming claim is between-turn startup, not evidence that the current
+# handling turn came from a healthy rewake.
+test_autoarm_open_claim_does_not_explain_stale_beacon() {
+  local dir home out pid identity
+  dir=$(make_guard_case autoarm-open-claim)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") \
+    || fail "could not compute the open-claim owner identity"
+  [ -n "$identity" ] || fail "open-claim owner identity was empty"
+  printf 'epoch=3 owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+    "$pid" "$(date +%s)" "$identity" > "$home/state/.claude-autoarm-epoch"
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "an open auto-arm claim must not suppress a stale-beacon alarm: $out"
+  pass "fm-guard stale banner: an open auto-arm claim does not explain a stale beacon"
+}
+
+# The long-turn tolerance is a Claude auto-arm carve-out. The same leftover
+# rewake ledger must not silence Pi/extension or persistent primaries.
+test_autoarm_long_turn_does_not_silence_other_models() {
+  local dir home out pid model
+  for model in persistent extension; do
+    dir=$(make_guard_case "autoarm-carveout-$model")
+    home=$(case_home "$dir")
+    sleep 60 &
+    pid=$!
+    record_aged_rewake_epoch "$home" "$pid"
+    record_session_lock_pid "$home" "$pid"
+    if [ "$model" = extension ]; then
+      out=$(run_guard_case_extension "$dir")
+    else
+      out=$(run_guard_case "$dir")
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "a $model primary must still alarm on a stale beacon despite a leftover rewake epoch: $out"
+  done
+  pass "fm-guard stale banner: auto-arm long-turn health does not leak to other models"
 }
 
 test_persistent_no_watcher_banner_names_missing_process() {
@@ -697,11 +857,15 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
 # The cases above pin the model. This one takes the end-user path instead: no
 # FM_SUPERVISION_MODEL at all, so bin/fm-harness.sh must route a Pi primary to the
 # extension model on its own. Without that routing the tolerance would never reach
-# a real Pi home. The foreign markers are cleared because fm-harness.sh tests them
-# ahead of Pi, and the host running this suite may carry one.
+# a real Pi home. Pinning Pi takes both halves of the evidence: the foreign markers
+# are cleared because the host running this suite may carry one, and the ancestry
+# walk is blinded because a structural ancestor of a different harness outranks the
+# Pi marker, so the harness this suite was launched from would otherwise answer.
 test_pi_harness_routes_itself_to_the_extension_model() {
-  local dir home out pid harness
+  local dir home out pid harness blind
   local -a pi_env
+  blind=$(fm_fakebin "$TMP_ROOT/pi-routing-blind")
+  fm_fake_blind_ancestry "$blind"
   for harness in pi pi-signed; do
     pi_env=(PI_CODING_AGENT=true)
     [ "$harness" = pi ] || pi_env+=(FM_PI_HARNESS=pi-signed)
@@ -713,6 +877,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
     touch "$home/state/.last-watcher-beat"
     out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
       "${pi_env[@]}" \
+      PATH="$blind:$PATH" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \
       FM_GUARD_GRACE=999 \
@@ -726,6 +891,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
 }
 
 test_first_stale_call_prints_full_banner
+test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
@@ -741,6 +907,10 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
+test_autoarm_long_handling_turn_stays_silent
+test_autoarm_long_turn_requires_every_healthy_signal
+test_autoarm_open_claim_does_not_explain_stale_beacon
+test_autoarm_long_turn_does_not_silence_other_models
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm

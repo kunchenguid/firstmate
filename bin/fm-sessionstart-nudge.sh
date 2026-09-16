@@ -25,13 +25,22 @@ lock_is_in_ancestry() {
   [ -f "$STATE/.lock" ] || return 1
   IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
   case "$lock_pid" in
-    ''|*[!0-9]*|1) return 1 ;;
+    # A lock pid of 1 is legitimate inside a PID namespace, where the harness
+    # holding the home lock IS pid 1, so it is no longer rejected outright; the
+    # liveness check below still gates it. On a host, a lock file that wrongly
+    # names pid 1 can now make this hook conclude the lock is already held and
+    # stay silent, which is the safe direction for a SessionStart hook whose only
+    # outputs are one nudge line or nothing.
+    ''|*[!0-9]*) return 1 ;;
   esac
   kill -0 "$lock_pid" 2>/dev/null || return 1
   for _ in 1 2 3 4 5 6 7 8; do
     [ "$pid" = "$lock_pid" ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    # Stop only after the top of the chain has been compared, for the same
+    # namespace reason as bin/fm-session-lock-lib.sh's walk.
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$pid" -ge 1 ] || return 1
   done
   return 1
 }

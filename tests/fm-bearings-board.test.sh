@@ -13,22 +13,6 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-# Every home this suite creates, so teardown can stop the listeners its builds
-# start. A detached runner is reparented, so removing the fixture directory
-# does not stop an already-running child.
-BOARD_HOMES=()
-
-board_teardown() {
-  local home
-  for home in ${BOARD_HOMES[@]+"${BOARD_HOMES[@]}"}; do
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-      FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap board_teardown EXIT
-
 # A lavish-axi stub that reproduces the shapes verified against the real
 # lavish-axi 0.1.61, because the build's liveness verdict is read from what the
 # vendor emits. The load-bearing shape is the refusal: opening a session the
@@ -38,7 +22,10 @@ trap board_teardown EXIT
 # plain open refuse, and `refuse-reopen` makes even --reopen leave it dead.
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  BOARD_HOMES+=("$home")
+  # Registered with tests/lib.sh, not with a shell array: make_home is called
+  # inside a command substitution, so an array append here never reaches the
+  # caller and every listener this suite started used to survive the run.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/state" "$home/data" "$home/lavish-state"
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/lavish-axi" <<'SH'
@@ -56,11 +43,20 @@ case "${1-}" in
   poll)
     # A real blocking listener: it returns only when the trigger appears, so a
     # live owner in these tests is a live process rather than a timing artifact.
-    while [ ! -e "$state/poll-trigger" ]; do sleep 0.05; done
+    # Both waits are bounded, so a listener that escapes its test cannot keep
+    # spawning processes for as long as the host stays up.
+    limit=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
+    while [ ! -e "$state/poll-trigger" ]; do
+      [ "$SECONDS" -lt "$limit" ] || exit 75
+      sleep 0.05
+    done
     printf 'session:\n  status: ended\n'
     if [ -e "$state/hold-after-terminal" ]; then
       : > "$state/terminal-emitted"
-      while [ -e "$state/hold-after-terminal" ]; do sleep 0.05; done
+      while [ -e "$state/hold-after-terminal" ]; do
+        [ "$SECONDS" -lt "$limit" ] || exit 75
+        sleep 0.05
+      done
     fi
     exit 0
     ;;
@@ -263,6 +259,20 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   jq 'del(.charted[0].repo)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a fleet row without an explicit repo marker was accepted"
+
+  write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","state":"working",
+    "kind":"ship","doing":"implementing"}]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
+
+  for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29"; do
+    write_valid_payload "$data"
+    jq --arg filed "$invalid_filed" '.charted[0].filed = $filed' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted: $invalid_filed"
+  done
 
   write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
