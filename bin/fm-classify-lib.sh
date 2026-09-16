@@ -2033,24 +2033,33 @@ EOF
 }
 
 # 0 when the task's bounded outcome index covers every byte of its current
-# status log under a matching identity and no steering-inbox activity is newer
+# status log under a matching identity and no steering-inbox RECORD is newer
 # than the status bytes that outcome covers. A steer is work the status log has
 # not reported yet, whoever sent it and whenever the outcome landed relative to
 # it, so coverage stays broken until the worker appends status again: ordering
 # between the steer, the worker's acknowledgement, and the branch's own report
-# is a race no writer serializes. Absent or empty index is uncovered (return 1);
-# an invalid index is also uncovered. Used by watcher absorb proofs that must
-# fail open to surfacing.
+# is a race no writer serializes. Compare against <task>.inbox/*.msg and
+# <task>.inbox/handled/*.msg only: those keep the steer's send time across `mv`,
+# while directory mtime bumps from handled/ moves and ring-ladder cleanup must
+# not count as new work. Absent or empty index is uncovered (return 1); an
+# invalid index is also uncovered. Used by watcher absorb proofs that must fail
+# open to surfacing.
 branch_outcome_index_covers_status() { # <task>
-  local task=$1 f size ident
+  local task=$1 f size ident inbox_dir msg
   load_branch_outcome_index "$task"
   [ "$BRANCH_OUTCOME_INDEX_STATE" = ok ] || return 1
   [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] \
     && [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
     && [ -n "$BRANCH_OUTCOME_INDEX_IDENT" ] || return 1
   f="$STATE/$task.status"
-  if [ -e "$STATE/$task.inbox" ] && [ ! "$f" -nt "$STATE/$task.inbox" ]; then
-    return 1
+  inbox_dir="$STATE/$task.inbox"
+  if [ -d "$inbox_dir" ]; then
+    for msg in "$inbox_dir"/*.msg "$inbox_dir"/handled/*.msg; do
+      [ -f "$msg" ] || continue
+      if [ ! "$f" -nt "$msg" ]; then
+        return 1
+      fi
+    done
   fi
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then
     [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge 0 ] || return 1

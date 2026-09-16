@@ -5565,10 +5565,11 @@ test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
   printf '%s' "$(seen_sig "$state/ackfirst.status")" > "$state/.seen-ackfirst_status"
   # The branch steers the finished worker, the worker acknowledges the steer,
   # and only then does the branch report: the covering outcome is newer than
-  # every inbox byte, so the status log alone still reads as fully covered.
+  # every steering record, so the status log alone still reads as fully covered.
   record_acked_steer "$state" ackfirst
-  backdate_path "$state/ackfirst.inbox"
+  backdate_path "$state/ackfirst.inbox/handled/001.msg"
   backdate_path "$state/ackfirst.inbox/handled"
+  backdate_path "$state/ackfirst.inbox"
   write_covered_outcome_index "$state" ackfirst 21
   # The worker is now working on the steer. No stale sight has armed a throttle.
   [ ! -e "$throttle" ] || fail "the fixture armed a throttle before the busy interval"
@@ -5631,6 +5632,71 @@ test_turn_ended_outcome_covered_branch_order_steer_then_stop_surfaces() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/branchorder.turn-ended" >/dev/null \
     || fail "the branch-order post-steer stop was not queued"
   pass "a steer the covering outcome outlived still surfaces the worker's next stop"
+}
+
+test_turn_ended_outcome_covered_after_reported_steer_still_absorbs() {
+  local dir state fakebin out window key pid
+  dir=$(make_case turn-ended-outcome-reported-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-reportedsteer"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/reportedsteer.meta"
+  # Steer arrived, worker acted and reported, then ack/ring cleanup bumped the
+  # inbox directory after the status bytes. Coverage must recover from the
+  # reported status, not stay broken on directory bookkeeping forever.
+  record_acked_steer "$state" reportedsteer
+  backdate_path "$state/reportedsteer.inbox/handled/001.msg"
+  printf 'done: rebased and force-pushed\n' > "$state/reportedsteer.status"
+  printf '%s' "$(seen_sig "$state/reportedsteer.status")" > "$state/.seen-reportedsteer_status"
+  write_covered_outcome_index "$state" reportedsteer 19
+  : > "$state/reportedsteer.inbox/.ring-state"
+  rm -f "$state/reportedsteer.inbox/.ring-state"
+  touch "$state/reportedsteer.inbox" "$state/reportedsteer.inbox/handled"
+  : > "$state/reportedsteer.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal (outcome-covered)" \
+    || { reap "$pid"; fail "a reported steer stayed uncovered after inbox bookkeeping: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "a reported steer printed a wake reason after bookkeeping: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a reported steer enqueued a durable wake after bookkeeping"
+  [ -s "$state/.turnend-covered-since-$key" ] \
+    || { reap "$pid"; fail "reported-steer absorb did not open a bounded window"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "inbox bookkeeping after a reported steer does not break outcome coverage"
+}
+
+test_turn_ended_outcome_covered_unhandled_steer_surfaces() {
+  local dir state fakebin out drain_out window pid
+  dir=$(make_case turn-ended-outcome-unhandled-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-unhandledsteer"
+  printf 'done: PR https://example.test/pr/51 checks green\n' > "$state/unhandledsteer.status"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/unhandledsteer.meta"
+  write_covered_outcome_index "$state" unhandledsteer 11
+  backdate_path "$state/.unhandledsteer.branch-outcome-index"
+  prime_status_seen "$state/unhandledsteer.status"
+  mkdir -p "$state/unhandledsteer.inbox/handled"
+  printf 'schema=fm-task-inbox.v1\nat=now\n--\nfix the failing CI check\n' \
+    > "$state/unhandledsteer.inbox/001.msg"
+  : > "$state/unhandledsteer.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an outstanding unhandled steer was absorbed behind coverage"
+  grep -F "signal: $state/unhandledsteer.turn-ended" "$out" >/dev/null \
+    || fail "the unhandled-steer turn-end did not print: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the unhandled-steer turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/unhandledsteer.turn-ended" >/dev/null \
+    || fail "the unhandled-steer turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "an outstanding unhandled steer surfaces the worker's next silent stop"
 }
 
 test_status_span_actionable_classifier
@@ -5703,6 +5769,8 @@ test_terminal_stale_outcome_covered_static_pane_resurfaces_on_cadence
 test_terminal_stale_outcome_covered_busy_then_stop_surfaces
 test_turn_ended_outcome_covered_steer_acked_before_report_surfaces
 test_turn_ended_outcome_covered_branch_order_steer_then_stop_surfaces
+test_turn_ended_outcome_covered_after_reported_steer_still_absorbs
+test_turn_ended_outcome_covered_unhandled_steer_surfaces
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
