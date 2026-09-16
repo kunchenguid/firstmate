@@ -45,7 +45,22 @@
 # The writer and replay share one complete-record validator, and teardown stages
 # that record before destructive cleanup, so it never publishes or acts on a close
 # replay would reject. The validator pins the data path to this home's configured
-# root before any recovery mutation, then re-runs exactly that close.
+# root before any recovery mutation, then replays the recorded transition.
+# Legacy Bitbucket --pr markers migrate to the completion-note form owned by
+# bin/fm-teardown.sh's header, using a nonempty hexadecimal merge_commit from
+# metadata with the same spawn_gen. Replay persists that migrated evidence before
+# removing metadata, so a failed backlog mutation can retry without losing it.
+# Missing metadata or missing/invalid merge_commit refuses without changing the
+# marker or metadata; restore the incarnation's landing record before retrying.
+# A marker for a different live spawn_gen keeps the existing stale-marker path:
+# retire the marker without changing that incarnation's metadata or backlog row.
+# GitHub --pr markers are not migrated.
+# Validated --note values survive replay unchanged, except the exact legacy
+# local%20main value, which round-trips as "local main". This is not general
+# percent decoding: embedded local%20main and other percent sequences stay
+# literal. fm_backlog_close_marker_validate owns the bounded character allowlist;
+# tests/fm-backlog-atomicity.test.sh covers legacy migration, missing-evidence
+# refusals, and note preservation across failed replay.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -902,6 +917,21 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
+# Shared URL classification for teardown's completion-evidence contract and the
+# legacy-marker migration described in this library's header.
+fm_backlog_bitbucket_pr_url() {  # <url>
+  local number
+  case "$1" in
+    https://github.com/*) return 1 ;;
+    https://*/*/pull-requests/[1-9]*)
+      number=${1##*/pull-requests/}
+      case "$number" in ''|*[!0-9]*) return 1 ;; esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
@@ -1001,7 +1031,15 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          arg_value=${args[1]}
+          [ "${#arg_value}" -le 8192 ] \
+            && [ -n "$arg_value" ] \
+            && case "$arg_value" in
+              *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@\;,-]*) false ;;
+              *) true ;;
+            esac
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1157,7 +1195,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
+  local id data marker_spawn_gen meta meta_spawn_gen='' row_state cleanup_incomplete mode commit
   local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   fm_backlog_directory_present "$state" "state directory" || return 1
@@ -1175,7 +1213,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = 'local%20main' ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
@@ -1191,6 +1229,21 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
+  fi
+  if [ "${args[0]-}" = --pr ] && fm_backlog_bitbucket_pr_url "${args[1]-}"; then
+    commit=
+    if [ "$meta_spawn_gen" = "$marker_spawn_gen" ]; then
+      commit=$(grep '^merge_commit=' "$meta" | tail -1 | cut -d= -f2- || true)
+    fi
+    case "$commit" in
+      ''|*[!0-9a-fA-F]*)
+        FM_BACKLOG_TRANSITION_ERROR="Bitbucket task $id lacks valid incarnation-matching merge_commit evidence; restore its landing record before replay"
+        return 1
+        ;;
+    esac
+    args=(--note "PR=${args[1]};landed-commit=$commit")
+  fi
+  if [ -n "$meta_spawn_gen" ]; then
     fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
       "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
       || return 1
