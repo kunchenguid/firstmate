@@ -245,22 +245,14 @@ test_secondmate_structured_surfaces_are_projected_once() {
 
 test_cached_secondmate_authority_controls_freshness() {
   local model=$TMP_ROOT/cached-secondmate.json
-  jq '.secondmate_current={
-        records:[{
-          id:"cache-mate",home:"/fleet/mates/cache",provenance:{selected:"structured-home",summary_source:"remote-ledger-cache"},
-          freshness:{status:"cached",observed_at:"2026-09-15T11:00:00Z",age_seconds:3660},
-          active_children:[{id:"cached-work",kind:"ship",state:"working",repo:"cached",name:"Cached implementation",source:"structured-home",started_at:null}],
-          decisions_open:[],queued:[],landed:[],omitted:[]
-        }],total:1,shown:1,truncated:0
-      }' "$FIXTURES/empty.json" \
-    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$model"
-  jq -e '.freshness == "stale" and .age_seconds == 3660
+  "$PROJECTOR" --from-snapshot "$FIXTURES/cached-age.json" --observed-at 2026-09-15T12:01:10Z > "$model"
+  jq -e '.freshness == "stale" and .age_seconds == 310
       and .inventory.status == "partial"
-      and (.inventory.partial_reasons | index("secondmate cache-mate authority cached from remote-ledger-cache at 2026-09-15T11:00:00Z")) != null
-      and (.inventory.partial_reasons | index("secondmate cache-mate authority stale (3660s)")) != null
+      and (.inventory.partial_reasons | index("secondmate cache-mate authority cached from remote-ledger-cache at 2026-09-15T11:56:00Z")) != null
+      and (.inventory.partial_reasons | index("secondmate cache-mate authority stale (310s)")) != null
       and ([.projects[].tasks[] | select(.id == "cache-mate:cached-work")] | length) == 1' "$model" >/dev/null \
-    || fail "cached secondmate authority was presented as fresh parent data"
-  pass "cached secondmate authority propagates provenance and stale age"
+    || fail "cached secondmate authority age did not include elapsed parent snapshot age"
+  pass "cached secondmate authority propagates provenance and advancing stale age"
 }
 
 test_attention_precedes_completed_history_and_project_caps() {

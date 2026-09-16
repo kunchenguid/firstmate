@@ -178,6 +178,10 @@ jq \
     ($actionable == true or $state == "blocked" or $state == "failed");
   def blocked_evidence:
     (.state == "blocked" or .state == "failed" or .gate.status == "blocked" or (.blockers | length) > 0);
+  def source_age_at($parent_age):
+    (.freshness.age_seconds // null) as $source_age
+    | if ($source_age | type) == "number" and $source_age >= 0
+      then $source_age + $parent_age else $parent_age end;
   def task_projection($now):
     . as $task
     | (task_state) as $state
@@ -373,12 +377,11 @@ jq \
   | (($now - $generated_epoch) | floor | if . < 0 then 0 else . end) as $age
   | ([ ($snapshot.secondmate_current.records // [])[]?
        | select(.provenance.selected == "structured-home")
-       | .freshness.age_seconds
-       | select(type == "number" and . >= 0)
+       | source_age_at($age)
      ] | max // 0) as $secondmate_age
   | (any(($snapshot.secondmate_current.records // [])[]?;
        .provenance.selected == "structured-home"
-       and (.freshness.status == "stale" or ((.freshness.age_seconds // 0) > $stale_after)))) as $secondmate_stale
+       and (.freshness.status == "stale" or (source_age_at($age) > $stale_after)))) as $secondmate_stale
   | ([$age,$secondmate_age] | max) as $effective_age
   | ([ $snapshot.tasks[] | task_projection($now) + {_identity:("main:" + .id),_priority:0} ]) as $live_tasks
   | ([ $snapshot.backlog.records[]?
@@ -438,10 +441,10 @@ jq \
            + (($mate.freshness.observed_at | time) // "unknown time")) | text(240)),
       (($snapshot.secondmate_current.records // [])[]?
         | select(.provenance.selected == "structured-home"
-            and (.freshness.status == "stale" or ((.freshness.age_seconds // 0) > $stale_after)))
+            and (.freshness.status == "stale" or (source_age_at($age) > $stale_after)))
         | . as $mate
         | ("secondmate " + (($mate.id | ident) // "unknown") + " authority stale ("
-           + (($mate.freshness.age_seconds // 0) | floor | tostring) + "s)") | text(240)),
+           + (($mate | source_age_at($age)) | floor | tostring) + "s)") | text(240)),
       (($snapshot.secondmate_current.records // [])[]?.omitted[]?
         | select((.surface == "active_children" or .surface == "decisions_open" or .surface == "queued" or .surface == "landed") and (.count // 0) > 0)
         | "secondmate " + .surface + " truncated"),

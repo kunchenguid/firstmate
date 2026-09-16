@@ -36,10 +36,12 @@ replacement=$TMP_ROOT/replacement.json
 empty=$TMP_ROOT/empty.json
 invalid=$TMP_ROOT/invalid.json
 partial=$TMP_ROOT/partial.json
+aged=$TMP_ROOT/aged.json
 home=$TMP_ROOT/home
 model states.json "$states" 2026-09-15T12:01:00Z
 model replacement.json "$replacement" 2026-09-15T12:06:00Z
 model empty.json "$empty" 2026-09-15T12:01:00Z
+model cached-age.json "$aged" 2026-09-15T12:01:10Z
 jq '.main_inventory.valid=false | .main_inventory.reason="inventory fixture invalid"' "$FIXTURES/empty.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
 jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
@@ -75,7 +77,7 @@ states_json=$(jq -c . "$states")
 replacement_json=$(jq -c . "$replacement")
 promoted_json=$(jq -c '.projects |= (map(select(.id == "beta")) + map(select(.id != "beta")))' "$states")
 multiple_decisions_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).decisions=["Choose deployment window","Approve rollback policy"]' "$states")
-aged_json=$(jq -c '.age_seconds=240 | .stale_after_seconds=300 | .freshness="fresh"' "$states")
+aged_json=$(jq -c . "$aged")
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.click(); b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.focus(); window.fmCockpit.replacePayload($states_json); return {state:window.fmCockpit.getState(),focused:document.activeElement.dataset.taskKey};}" \
   '\"focused\":\"healthy-work\\u001fgen-healthy-1\"' "same-generation refresh did not preserve focused task identity"
 assert_eval "() => {window.fmCockpit.replacePayload($replacement_json); return window.fmCockpit.getState();}" \
@@ -86,8 +88,8 @@ assert_eval "() => {window.fmCockpit.replacePayload($multiple_decisions_json); d
   'Approve rollback policy' "inspector omitted a consolidated decision summary"
 assert_eval '() => document.getElementById("task-detail").innerText' \
   'Choose deployment window' "inspector omitted the other consolidated decision summary"
-assert_eval "() => {const original=Date.now; Date.now=()=>Date.parse('2026-09-15T12:02:10Z'); window.fmCockpit.replacePayload($aged_json); const result={age:document.getElementById('snapshot-age').innerText,warning:document.getElementById('inventory-warning').innerText}; Date.now=original; return result;}" \
-  '\"age\":\"5m\",\"warning\":\"STALE SNAPSHOT\"' "cached authority age did not advance from 240 to 310 seconds"
+assert_eval "() => {const original=Date.now; Date.now=()=>Date.parse('2026-09-15T12:02:20Z'); window.fmCockpit.replacePayload($aged_json); const result={age:document.getElementById('snapshot-age').innerText,warning:document.getElementById('inventory-warning').innerText}; Date.now=original; return result;}" \
+  '\"age\":\"6m\",\"warning\":\"STALE SNAPSHOT' "projected cached authority age did not continue from 310 to 380 seconds"
 pass "refresh preserves selection, adopts payload order, and renders consolidated decisions"
 
 empty_json=$(jq -c . "$empty")
