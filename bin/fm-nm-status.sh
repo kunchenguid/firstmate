@@ -54,7 +54,7 @@ branch='' run_id='' status='' findings='' in_run=0 in_steps=0 completed=0 skippe
 # unattributed other_branch_run: block would attribute a stranger's run to this
 # branch. Only an explicit --run ID may cross that boundary.
 explicit_run=0
-for arg in "$@"; do [[ $arg == --run ]] && explicit_run=1; done
+for arg in "$@"; do [[ $arg == --run || $arg == --run=* ]] && explicit_run=1; done
 keys=(intent rebase review test document lint push pr ci)
 names=(意图确认 同步分支 代码审查 自动测试 文档更新 规范检查 上传代码 合并申请 远端验证)
 states=(); counts=(); durations=(); active_fors=(); active_rounds=()

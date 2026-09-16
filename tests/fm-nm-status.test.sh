@@ -22,7 +22,10 @@ cat > "$FAKEBIN/no-mistakes" <<'FAKE'
 id=RUNNONE
 explicit=0
 while [ $# -gt 0 ]; do
-  case "$1" in --run) id=$2; explicit=1; shift ;; esac
+  case "$1" in
+    --run) id=$2; explicit=1; shift ;;
+    --run=*) id=${1#--run=}; explicit=1 ;;
+  esac
   shift
 done
 status=running
@@ -168,6 +171,11 @@ OUT=$(panel --run RUNOTHER); CODE=$?
 expect_code 0 "$CODE" 'panel for a run named with --run on another branch'
 assert_contains "$OUT" '运行编号  RUNOTHER' 'an explicit --run still renders the run id'
 assert_contains "$OUT" '返工 1 次' 'an explicit --run still shows the run rework count'
+
+OUT=$(panel --run=RUNOTHER); CODE=$?
+expect_code 0 "$CODE" 'panel for a run named with the --run=ID form on another branch'
+assert_contains "$OUT" '运行编号  RUNOTHER' 'the --run=ID form still renders the run id'
+assert_contains "$OUT" '返工 1 次' 'the --run=ID form still shows the run rework count'
 
 # A pass that is still running has no step_rounds row yet, so the panel must add
 # the in-flight one instead of reporting the stale stored count.
