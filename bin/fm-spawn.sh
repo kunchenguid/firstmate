@@ -4351,7 +4351,7 @@ spawn_record_traceparent() {
 # GOTMPDIR uses, keeping the pane's own entries behind ours so nothing the
 # backend deliberately added is discarded. Same root cause as the
 # CLAUDE_CONFIG_DIR forward above: the daemon does not inherit our environment.
-if fm_platform_is_msys; then
+if fm_platform_windows_enabled; then
   spawn_send_text_line "$T" "export PATH=$(shell_quote "$PATH"):\"\$PATH\""
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child

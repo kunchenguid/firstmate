@@ -35,12 +35,30 @@
 # on a given filesystem, so a caller can keep its structural guards always and
 # apply the mode equality only where a mode can actually be stored.
 #
+# Opt-in. Native Windows support is off until a home asks for it with
+# FM_WINDOWS=1, so landing this code changes nothing for a home that has not
+# opted in, on any platform.
+# Running under Git Bash is a necessary condition, never a sufficient one: a
+# host is only a candidate, and the captain's FM_WINDOWS=1 is the consent.
+# Two owners, because two different questions are being asked.
+# fm_platform_windows_opt_in is consent alone. fm_platform_windows_enabled is
+# consent plus the platform, and every behavioural Windows path gates on it
+# rather than on the raw platform fact.
+# The mode contract below reads consent alone on purpose. Without the opt-in it
+# keeps the strict exact-mode answer even on a filesystem that provably cannot
+# store a mode, because silently relaxing a privacy guard is not a decision a
+# platform probe is allowed to make. Requiring MSYS there as well would only
+# make the probe unreachable on the hosts CI runs, which is how a guard rots.
+#
 # Env seams, mainly for tests:
+#   FM_WINDOWS           1 opts this home in to native Windows support. Any
+#                        other value, or unset, leaves every Windows path inert.
 #   FM_PLATFORM_UNAME    replace `uname -s`, so the MSYS branch can be driven
 #                        on any host.
 #   FM_FS_MODES_HONORED  override the mode probe: 1 keeps the exact-mode
 #                        contract, 0 declares modes unrepresentable. Unset
-#                        probes the filesystem.
+#                        probes the filesystem. Only consulted once the home has
+#                        opted in, so it cannot weaken a home that has not.
 # FM_PLATFORM_MSYS caches the probed platform verdict for this process, and
 # FM_PLATFORM_MODES_PROBED_* the mode verdict for one directory; empty means
 # the verdict has not been taken yet.
@@ -63,6 +81,20 @@ fm_platform_is_msys() {
   [ "$FM_PLATFORM_MSYS" = 1 ]
 }
 
+# True when this home asked for native Windows support. Consent alone, with no
+# platform claim attached, so a caller whose guard is about consent rather than
+# about MSYS can read it directly and stays exercisable on any host.
+fm_platform_windows_opt_in() {
+  [ "${FM_WINDOWS:-}" = 1 ]
+}
+
+# True when this home has opted in AND the host can actually provide it. Gate
+# platform behaviour on this, never on fm_platform_is_msys: the latter is a
+# platform fact, this is the consent to act on it.
+fm_platform_windows_enabled() {
+  fm_platform_windows_opt_in && fm_platform_is_msys
+}
+
 # Print the form a native Windows binary resolves.
 #
 # cygpath -m yields the mixed form (C:/Users/x): a drive letter with forward
@@ -70,7 +102,7 @@ fm_platform_is_msys() {
 fm_path_native() {  # <path>
   local path=$1 cygpath out
   [ -n "$path" ] || return 0
-  if fm_platform_is_msys && cygpath=$(command -v cygpath 2>/dev/null); then
+  if fm_platform_windows_enabled && cygpath=$(command -v cygpath 2>/dev/null); then
     if out=$("$cygpath" -m -- "$path" 2>/dev/null) && [ -n "$out" ]; then
       printf '%s\n' "$out"
       return 0
@@ -83,7 +115,7 @@ fm_path_native() {  # <path>
 fm_path_posix() {  # <path>
   local path=$1 cygpath out
   [ -n "$path" ] || return 0
-  if fm_platform_is_msys && cygpath=$(command -v cygpath 2>/dev/null); then
+  if fm_platform_windows_enabled && cygpath=$(command -v cygpath 2>/dev/null); then
     if out=$("$cygpath" -u -- "$path" 2>/dev/null) && [ -n "$out" ]; then
       printf '%s\n' "$out"
       return 0
@@ -112,6 +144,13 @@ FM_PLATFORM_MODES_PROBED_DIR=
 FM_PLATFORM_MODES_PROBED_VERDICT=
 fm_platform_fs_honors_modes() {  # <path-on-target-filesystem>
   local dir probe_file mode
+  # Before any probe or seam: a home that has not opted in keeps the strict
+  # exact-mode contract it had before this code existed, so landing the Windows
+  # work cannot relax a privacy guard anywhere by default.
+  # Consent, not platform. A filesystem that cannot store a mode is a fact worth
+  # answering wherever it is true, and tying the answer to MSYS as well would
+  # make the probe unreachable on every host CI actually runs.
+  fm_platform_windows_opt_in || return 0
   case "${FM_FS_MODES_HONORED:-}" in
     0) return 1 ;;
     1) return 0 ;;

@@ -76,12 +76,44 @@ Stop and ask me before installing anything outside that list.
 Report what you did, what you skipped, and anything that failed.
 ```
 
+## Turn Windows support on
+
+Native Windows support is opt-in, and it is inert until you ask for it.
+Set `FM_WINDOWS=1` in the environment of every Firstmate process.
+
+```sh
+export FM_WINDOWS=1
+```
+
+Without it, every Windows-specific path in this repository stays switched off and Firstmate behaves exactly as it does on Linux or macOS.
+That is deliberate: landing this support must change nothing for a home that did not ask for it, on any platform.
+With `FM_WINDOWS` unset, path conversion is the identity, the Windows process bridge never starts, and the exact-mode privacy contract stays strict.
+
+The opt-in is consent, not a platform claim.
+Setting it on Linux or macOS does not switch on any Windows behaviour, because the path and process work also requires a real Git Bash host.
+
+Three things read it:
+
+- `fm_platform_windows_enabled` in [`../bin/fm-platform-lib.sh`](../bin/fm-platform-lib.sh) gates POSIX-to-Windows path conversion.
+- `fm_platform_windows_opt_in` in the same file gates the filesystem mode contract described under "Supported limits".
+- `fm_winproc_available` in [`../bin/fm-winproc-lib.sh`](../bin/fm-winproc-lib.sh) gates the Windows process bridge the session lock depends on.
+
+Set it alongside `MSYS` in the same place, so the two never drift apart.
+A session with `MSYS` set and `FM_WINDOWS` unset takes no session lock and supervises nothing.
+
+Run the test suite with it set too, or the mode assertions in [`../tests/lib.sh`](../tests/lib.sh) will hold this host to a mode its filesystem cannot store.
+
+```sh
+FM_WINDOWS=1 bin/fm-test-run.sh
+```
+
 ## Run
 
 Start the session from Git Bash inside the clone.
 
 ```sh
 cd firstmate
+export FM_WINDOWS=1
 claude
 ```
 
@@ -102,7 +134,7 @@ Three things differ here from those platforms:
 
 - **A worker spawn does not yet complete on Windows.** Herdr reports the pane's own shell as the working directory rather than the foreground subshell, so the spawn never sees `treehouse get` reach the acquired copy and refuses at its deadline. Everything up to that point - cloning, the session lock, supervision, and the whole toolchain - does work. This is the one remaining gap, and "Supported limits" below records what causes it.
 - Watch a worker with `bin/fm-peek.sh` and steer it with `bin/fm-send.sh`, because Herdr's `terminal attach` is unsupported on Windows.
-- Keep `MSYS` intact in every session you launch, because a session without it supervises nothing and reports nothing, as described in the next section.
+- Keep `FM_WINDOWS` and `MSYS` intact in every session you launch, because a session missing either one supervises nothing and reports nothing, as described in "Turn Windows support on" above and in the next section.
 
 ## The one setting you must get right
 
@@ -231,6 +263,8 @@ Each degrades to a documented fallback rather than failing silently.
 - Herdr's `terminal attach` is unsupported, so use `bin/fm-peek.sh` and `bin/fm-send.sh` rather than attaching.
 - Windows Python has no `AF_UNIX`, so native event subscription and presentation-space ordering fall back to polling and flat placement.
 - A `noacl` NTFS mount cannot create a directory at mode 700, so the presentation lock namespace accepts the mode it can get after probing for the capability, while its directory, symbolic-link, and owner checks stay unconditional on every platform.
+  That relaxation is reached only once `FM_WINDOWS=1` is set.
+  A home that has not opted in keeps the strict exact-mode contract on every filesystem, including one that provably cannot store a mode, so this support cannot weaken a privacy guard for anyone by default.
 - MSYS `ps` supports no `-o` selectors, so process reads are served from `bin/fm-winproc-lib.sh` in native Windows process-id space, and signalling uses `/usr/bin/kill -W` by absolute path because the shell builtin has no `-W` flag.
 - `/usr/bin/kill -W` cannot address a process outside the MSYS runtime at all. That is a safety property rather than a gap, because the signalling path can never reach a process the adapter did not itself resolve.
 - Herdr's pane working directory on Windows tracks the pane's own shell and not a foreground subshell, so the spawn-time worktree wait never observes `treehouse get` moving into the acquired copy. A crewmate or scout spawn on the Herdr backend therefore still refuses at its deadline on this platform. That refusal is the isolation guard working, not a silent failure, and it is the one remaining Windows gap on this page.

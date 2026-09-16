@@ -17,6 +17,11 @@ set -u
 LIB="$ROOT/bin/fm-platform-lib.sh"
 TMP_ROOT=$(fm_test_tmproot platform-lib)
 
+# Native Windows support is opt-in. Every case below except the dedicated
+# opt-out section asserts the enabled behaviour, so the opt-in is exported once
+# here rather than repeated per call. The opt-out section unsets it explicitly.
+export FM_WINDOWS=1
+
 # A cygpath that answers from fixtures, so the assertion is the library's
 # handling of the tool's output rather than the tool's own correctness.
 #
@@ -162,6 +167,45 @@ else
     && fail "the probe called a mode-free filesystem honoring (read back $PROBE_MODE)"
   pass "on this mode-free filesystem the probe reports modes-ignored (reads $PROBE_MODE)"
 fi
+
+# --- the opt-in gate --------------------------------------------------------
+#
+# The whole point of FM_WINDOWS. With it unset, a host that is genuinely MSYS
+# and has a working cygpath must still behave exactly as it did before this
+# library existed, and the mode contract must stay strict even where the
+# filesystem provably cannot store a mode. Landing the Windows work must be a
+# no-op for every home that did not ask for it.
+
+run_optout() {  # <uname> <bindir> <func> <input>
+  FM_PLATFORM_UNAME="$1" bash -c '
+    unset FM_WINDOWS
+    PATH=$1
+    export PATH
+    . "$2"
+    "$3" "$4"
+  ' _ "$2" "$LIB" "$3" "$4"
+}
+
+for func in fm_path_native fm_path_posix; do
+  out=$(run_optout MINGW64_NT-fixture "$FAKE_BIN" "$func" /tmp/x)
+  [ "$out" = /tmp/x ] \
+    || fail "without the opt-in $func converted /tmp/x to '$out' on an MSYS host"
+done
+pass "without FM_WINDOWS an MSYS host with a working cygpath converts nothing"
+
+# The seam that declares modes unrepresentable must not reach a home that never
+# opted in: consent gates ahead of it, so this cannot weaken anyone by default.
+bash -c 'unset FM_WINDOWS; FM_FS_MODES_HONORED=0; export FM_FS_MODES_HONORED; . "$1"; fm_platform_fs_honors_modes "$2"' \
+  _ "$LIB" "$PROBE_FILE" \
+  || fail "without the opt-in FM_FS_MODES_HONORED=0 still dropped the mode contract"
+pass "without FM_WINDOWS the exact-mode contract holds even against the override"
+
+# And the opt-in alone is not a platform claim: consent on a Linux host must not
+# start converting paths.
+out=$(run_conv Linux "$FAKE_BIN" fm_path_native /tmp/x)
+[ "$out" = /tmp/x ] \
+  || fail "FM_WINDOWS=1 on a non-MSYS host converted /tmp/x to '$out'"
+pass "FM_WINDOWS=1 off MSYS still converts nothing"
 
 # --- the real host, whichever one this is -----------------------------------
 #

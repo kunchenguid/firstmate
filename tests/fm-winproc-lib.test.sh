@@ -22,6 +22,10 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-session-lock-lib.sh"
 
+# The bridge is opt-in. Everything below asserts the enabled behaviour, so the
+# opt-in is exported once here; the dedicated opt-out case unsets it.
+export FM_WINDOWS=1
+
 # Fixture pids and images. HARNESS_WINPID stands in for a claude.exe and the
 # other two for the Git Bash chain between it and this process.
 HARNESS_WINPID=4242
@@ -107,6 +111,12 @@ bridge_unavailable() {
 FM_WINPROC_DISABLE=1 FM_WINPROC_FORCE=1 bridge_unavailable \
   || fail "FM_WINPROC_DISABLE must win over FM_WINPROC_FORCE"
 pass "FM_WINPROC_DISABLE wins over FM_WINPROC_FORCE"
+
+# The FM_WINDOWS opt-in wins over both. A home that never asked for native
+# Windows support must get the inert bridge no matter what any seam says, so
+# landing this library cannot start a PowerShell process for anyone by default.
+( unset FM_WINDOWS; FM_WINPROC_FORCE=1 bridge_is_inert )   || fail "without the opt-in FM_WINPROC_FORCE still switched the bridge on"
+pass "without FM_WINDOWS the bridge is inert even against FM_WINPROC_FORCE"
 
 # --- source 1 alone: the harness-exported pid --------------------------------
 #

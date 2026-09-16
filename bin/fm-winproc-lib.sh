@@ -14,10 +14,14 @@
 # bin/fm-session-lock-lib.sh remains the single owner of that decision.
 # This file is sourced by scripts and has no side effects on source.
 #
-# Capability, never uname: every entry point gates on fm_winproc_available,
-# which tests the one file the bridge actually reads. A Linux or macOS home has
-# no such file, so every function here returns 1 and callers fall through to
-# their existing path unchanged.
+# Consent, then capability, never uname: every entry point gates on
+# fm_winproc_available, which requires the home's FM_WINDOWS=1 opt-in and then
+# tests the one file the bridge actually reads. A Linux or macOS home has no
+# such file, and a home that has not opted in never asks, so every function here
+# returns 1 and callers fall through to their existing path unchanged.
+# bin/fm-platform-lib.sh owns the opt-in contract; this file reads FM_WINDOWS
+# directly rather than sourcing it, because bin/fm-session-lock-lib.sh sources
+# this file alone and must keep working when the platform lib is unreadable.
 #
 # That probe reads /proc/$$/winpid and not /proc/self/winpid. /proc/self names
 # whichever process performs the read, so `$(cat /proc/self/winpid)` reports
@@ -35,17 +39,21 @@
 # driven apart on a host that has neither, which is the only way CI can prove
 # that losing one source does not silently lose the verdict:
 #   FM_WINPROC_DISABLE=1     force fm_winproc_available to fail on any host.
-#   FM_WINPROC_FORCE=1       force fm_winproc_available to succeed on any host.
+#   FM_WINPROC_FORCE=1       force fm_winproc_available to succeed on an
+#                            opted-in host. It cannot lift the opt-in.
 #   FM_WINPROC_SELF          replace this shell's reported Windows pid.
 #   FM_WINPROC_PS_CMD        replace `ps -W` with a fixture emitting the same
 #                            columns, so source 1 can be supplied or withheld.
 #   FM_WINPROC_TABLE_CMD     replace the CIM command with a fixture producing
 #                            "<pid> <ppid> <image-path>" lines, so source 2 can
 #                            be supplied or withheld.
-# DISABLE wins over FORCE, so a test can always prove the inert path.
+# DISABLE wins over FORCE, so a test can always prove the inert path, and the
+# FM_WINDOWS opt-in wins over both, so no seam can switch the bridge on in a
+# home that never asked for it.
 
-# True when this host exposes the MSYS/Windows pid bridge.
+# True when this home opted in AND this host exposes the MSYS/Windows pid bridge.
 fm_winproc_available() {
+  [ "${FM_WINDOWS:-}" = 1 ] || return 1
   [ "${FM_WINPROC_DISABLE:-0}" = 1 ] && return 1
   [ "${FM_WINPROC_FORCE:-0}" = 1 ] && return 0
   [ -r "/proc/$$/winpid" ]

@@ -530,7 +530,7 @@ fm_backend_herdr_client_select() {  # <session> [force]
 # other herdr call converting normally, because those do pass real paths a
 # native client must receive in native form.
 fm_backend_herdr_cli_literal() {  # <session> <herdr-subcommand-and-args...>
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 fm_backend_herdr_cli "$@"
   else
     fm_backend_herdr_cli "$@"
@@ -1394,7 +1394,7 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid> [guard-
   esac
   # MSYS resolves the shell through the Windows process-facts owner instead of
   # ps, so a missing ps must not stop the close there.
-  if ! fm_platform_is_msys; then
+  if ! fm_platform_windows_enabled; then
     command -v "$ps_bin" >/dev/null 2>&1 || return 1
   fi
   max_attempts=${FM_BACKEND_HERDR_DEATH_CLOSE_POLLS:-40}
@@ -1438,7 +1438,7 @@ fm_backend_herdr_shell_basename() {  # <image-name-or-path>
   name=${name#-}
   name=${name##*/}
   name=${name##*\\}
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     name=${name%.exe}
   fi
   printf '%s' "$name"
@@ -1452,7 +1452,7 @@ fm_backend_herdr_shell_basename() {  # <image-name-or-path>
 # past a shell that ignores HUP. A process outside the MSYS runtime is invisible
 # to -W, so this can never signal something the runtime does not own.
 fm_backend_herdr_signal_shell() {  # <signal> <pid>
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     /usr/bin/kill -W "-$1" "$2" 2>/dev/null || true
   else
     kill "-$1" "$2" 2>/dev/null || true
@@ -1466,7 +1466,7 @@ fm_backend_herdr_signal_shell() {  # <signal> <pid>
 # in Windows-pid space instead.
 fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   local comm
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     comm=$(fm_winproc_command "$2" 2>/dev/null) || return 1
   else
     comm=$("$1" -p "$2" -o comm= 2>/dev/null) || return 1
@@ -1538,7 +1538,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   [ "$argv0" = "$shell_name" ] || return 1
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
 
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     # herdr's shell_pid is a native Windows pid. MSYS ps cannot answer for it
     # twice over: its PID column carries MSYS pids, not Windows ones, so the
     # comparison would silently cross pid namespaces, and it implements no -o
@@ -3082,7 +3082,7 @@ fm_backend_herdr_target_ready() {  # <target>
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local path
-  if fm_platform_is_msys; then
+  if fm_platform_windows_enabled; then
     path=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
       | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
     [ -n "$path" ] || return 0
