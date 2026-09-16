@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
+Verified on 2026-07-25 with Kimi Code CLI 0.29.1; the trust-dialog and composer rows were re-verified on 2026-09-13 with Kimi Code CLI 0.42.0.
 
 ## Operating facts
 
@@ -14,10 +14,10 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None observed on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | Kimi 0.4x records first-launch trust by exact directory, so every fresh pooled worktree prompts; the preselected choice was observed as `Don't trust` on 0.38.0, which exits Kimi when accepted, and as `Trust this folder` on 0.42.0. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text; its status footer sits directly below the box and is recognized through `FM_COMPOSER_KIMI_STATUS_RE_DEFAULT`. |
 | Effort | No verified reasoning-effort flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 
 ## Readiness-gated start
