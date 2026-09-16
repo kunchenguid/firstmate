@@ -62,7 +62,6 @@ No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates and takes current state from `bin/fm-crew-state.sh`.
 An attributed validation run remains observed without a confirmed live worker, even under an old captain-held status: terminal outcomes use normal delivery, and decisions or unverified execution create durable local supervision obligations.
-A persisted parked run remains authoritative when the daemon probe fails because its durable findings still require a decision; only a persisted active run is downgraded to unverified execution.
 Its script owns observation identity, restart continuity, and acknowledgement; observation never creates a worker or run, changes a lease, or answers a decision.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
 A worker reporting a terminal no-mistakes outcome carries the structured return's exact identity in `done [run=<id>]: ...` or `failed [run=<id>]: ...`; the ledger receipt copies that producer-owned identity instead of guessing from a later run-state read.
@@ -91,7 +90,7 @@ During no-mistakes' `ci` monitor phase, it also reads the ci step log tail becau
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 A terminal failed run whose only failure is the ci monitor step, after every substantive step completed and the same marker reads checks green, also reports done with the run's PR URL, because a monitor whose only remaining job is to observe a human merge decision must not convert the absence of that decision into a failure verdict.
 In the coarse runs-ledger fallback, which has no steps table and no ci log, a terminal failed record whose daemon an explicit `daemon status` probe proves down reports unknown as unverified instead: an instrument failure must never read as work failure.
-An active or parked run whose bounded daemon probe is unavailable also reports unknown rather than treating a persisted row as proof that its executor survived.
+That same probe also bounds an active run from either source: a working run whose bounded daemon probe is unavailable reports unknown rather than treating a persisted row as proof that its executor survived, while a parked run stays authoritative because its durable findings still require a decision.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

@@ -923,8 +923,10 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Rechecks confirmed endpoint
-# death before trusting the inherited classification. Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew state
+# itself (the costly check already ran once, at classification time); the stale
+# path's ended_worker_stale_check is what keeps a confirmed-dead endpoint from
+# reaching this timer with an inherited classification. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).

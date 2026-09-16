@@ -84,8 +84,11 @@
 # Polls and restarts preserve an unchanged observation's receipt identity;
 # returning to a gate after observed progress creates a new obligation. A lost
 # response after a known active run reports unverified attribution instead of
-# silently forgetting the run. Observation files survive like outcome receipts;
-# a reused task id cannot inherit an old incarnation's observation.
+# silently forgetting the run. Lines the observer synthesizes itself - lost
+# attribution and coarse ledger-only progress - carry `source: run-observer` so a
+# reader can tell them from a fm-crew-state.sh read. Observation files survive
+# like outcome receipts; a reused task id cannot inherit an old incarnation's
+# observation.
 #
 # The scan reads durable local state, recorded backend liveness, and
 # fm-crew-state.sh; it never invokes
