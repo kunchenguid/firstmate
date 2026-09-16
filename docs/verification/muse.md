@@ -155,6 +155,10 @@ Captured with `tmux capture-pane -p -e`:
 Prompt glyph `⟩` (U+27E9) at luminance ~149.9 against the 128 default ghost threshold; typed text at ~209.8.
 After a single Escape the interrupted prompt is restored into the composer at the same bright ~209.8, and `C-u` clears it.
 
+Re-verified on muse 1.3.0-R3057.1 (2026-09-15): the prompt glyph is now `❯` (U+276F), the composer is framed by a text-bearing `── Voice input … ──` rule above and a pure `─` rule below, and the session log's first line is a `retained_frame` wrapper record ahead of the workspace-binding metadata record.
+The restore is conditional: it fires only when the composer was empty at cancel time - fresh typed input survives the interrupt untouched, and an idle Escape restores nothing.
+The restored text is the cancelled run's `started.prompt` from the session log, restored in full and wrapped across composer rows.
+
 ## The credentialed multi-step smoke (verified 2026-08-06)
 
 This was the one item deferred until a `META_API_KEY` was available, because it is what decides whether a settled log may classify `idle`.
