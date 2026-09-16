@@ -539,12 +539,12 @@ trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  echo "watcher: FAILED - watcher output capture file could not be created in $STATE"
   exit 1
 }
 child_err=$(mktemp "$STATE/.watch-child-stderr.XXXXXX") || {
   rm -f "$child_out" 2>/dev/null || true
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  echo "watcher: FAILED - watcher stderr capture file could not be created in $STATE"
   exit 1
 }
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then

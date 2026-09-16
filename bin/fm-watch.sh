@@ -1171,36 +1171,38 @@ clear_pause_tracking() {  # <window-key>
 # family: .retired-<key>. Without it the window is retired once per three polls
 # forever, because recorded_windows enumerates state/*.meta and the meta stays -
 # each round paying a backend probe and writing another triage line, which is
-# neither "one line" nor free. A marker older than its own meta is stale
-# evidence (the task was relaunched onto that recorded target), so it is dropped
-# and the window rejoins ordinary triage.
+# neither "one line" nor free.
+#
+# The marker holds the mtime of the metadata it was recorded against, and any
+# OTHER mtime there retires the retirement: the task was relaunched onto that
+# recorded target, so the window rejoins ordinary triage. Identity, never
+# "newer": stat_mtime resolves to whole seconds on both platforms, and a
+# relaunch republishing its metadata inside the same second as the retirement -
+# the ordinary tmux timing for `fm-control.sh <id> relaunch` on a window that
+# was wedged at the escalation threshold - would otherwise leave a live window
+# skipped before its capture, silently and for the life of that metadata.
 retire_gone_window_records() {  # <window> <window-key>
-  local w=$1 key=$2
+  local w=$1 key=$2 meta meta_at=
   clear_pause_tracking "$key"
   rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.churn-since-$key"
-  : > "$STATE/.retired-$key"
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  [ -z "$meta" ] || meta_at=$(stat_mtime "$meta")
+  printf '%s' "$meta_at" > "$STATE/.retired-$key"
   triage_log "retired stale records (the backend confirms this endpoint no longer exists): $w"
 }
 
 # 0 when this window was already retired and that retirement is still current.
 window_retired() {  # <window> <window-key>
-  local w=$1 key=$2 meta marker_at meta_at
+  local w=$1 key=$2 meta meta_at recorded_at
   local marker="$STATE/.retired-$key"
   [ -e "$marker" ] || return 1
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
-  if [ -n "$meta" ]; then
-    marker_at=$(stat_mtime "$marker")
-    meta_at=$(stat_mtime "$meta")
-    case "$marker_at" in
-      ''|*[!0-9]*) return 0 ;;
-    esac
-    case "$meta_at" in
-      ''|*[!0-9]*) return 0 ;;
-    esac
-    if [ "$meta_at" -gt "$marker_at" ]; then
-      rm -f "$marker"
-      return 1
-    fi
+  [ -n "$meta" ] || return 0
+  meta_at=$(stat_mtime "$meta")
+  recorded_at=$(cat "$marker" 2>/dev/null || true)
+  if [ "$meta_at" != "$recorded_at" ]; then
+    rm -f "$marker"
+    return 1
   fi
   return 0
 }
@@ -1208,19 +1210,23 @@ window_retired() {  # <window> <window-key>
 # Drop the per-window records of every retired key this home no longer records,
 # so a retirement marker leaves with the metadata it was recorded against
 # instead of outliving it. A home with no retired window pays one glob that
-# matches nothing, and the metadata scan runs only for a marker that exists.
+# matches nothing; a home with any retired window pays ONE metadata scan for
+# the whole poll, not one per marker, and derives its keys inside that single
+# subshell - this runs on the ordinary poll hot path, which the stale loop
+# below protects just as explicitly.
 prune_orphan_window_records() {
-  local marker key w found
+  local marker key w recorded= enumerated=0
   for marker in "$STATE"/.retired-*; do
     [ -e "$marker" ] || continue
+    if [ "$enumerated" -eq 0 ]; then
+      recorded=$(while IFS= read -r w; do window_key "$w"; printf '\n'; done < <(recorded_windows))
+      recorded="|${recorded//$'\n'/|}|"
+      enumerated=1
+    fi
     key=${marker##*/.retired-}
-    found=0
-    while IFS= read -r w; do
-      [ "$(window_key "$w")" = "$key" ] || continue
-      found=1
-      break
-    done < <(recorded_windows)
-    [ "$found" -eq 0 ] || continue
+    case "$recorded" in
+      *"|$key|"*) continue ;;
+    esac
     rm -f "$marker" "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.stale-$key" \
       "$STATE/.stale-since-$key" "$STATE/.churn-since-$key" "$STATE/.wedge-escalations-$key" \
       "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" "$STATE/.paused-$key" \
@@ -2343,14 +2349,18 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
+    # Steering-inbox loss detection runs before the secondmate stale
+    # exemption below, because a mate's steers land in an inbox too, and before
+    # the retirement gate below, because an instruction written AFTER a window
+    # was retired is exactly the loss this check exists to surface. It costs
+    # nothing when no record is due: the ladder answers `quiet` before any
+    # backend read.
+    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     # A window already retired as a proven-gone endpoint costs nothing more:
     # no capture, no backend probe, no second triage line.
     if window_retired "$w" "$key"; then
       continue
     fi
-    # Steering-inbox loss detection runs before the secondmate stale
-    # exemption below, because a mate's steers land in an inbox too.
-    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"

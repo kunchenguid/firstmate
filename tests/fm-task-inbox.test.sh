@@ -692,6 +692,44 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+# Portable mtime in epoch seconds, the form bin/fm-watch.sh records inside a
+# retirement marker (stat_mtime there is platform-detected the same way).
+meta_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1"; else stat -c %Y "$1"; fi
+}
+
+# A window the watcher retired (its endpoint proven gone) is skipped before its
+# capture, which must never swallow a steering-inbox record written AFTER that
+# retirement: that instruction is unreachable by the doorbell, and silently
+# dropping it is exactly the loss this ladder exists to surface. The escalation
+# names the record and asks for worker recovery, and the retirement itself
+# stands - the window is still gone.
+test_watcher_retired_window_still_escalates_an_unread_steer() {
+  local dir state out log pid rec key
+  dir=$(setup_watch_case retired-steer)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  key=sess_fm-t1
+  printf '%s' "$(meta_mtime "$state/t1.meta")" > "$state/.retired-$key"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_TMUX_MISSING=1 FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a retired window swallowed an unread firstmate instruction:"$'\n'"$(cat "$out")"; }
+  [ ! -s "$log" ] || fail "a window whose endpoint is gone was typed into:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a retired window's unread instruction should surface exactly once:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'recover the worker' "$state/.wake-queue" \
+    || fail "the stale wake should ask for worker recovery:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path"
+  [ -f "$rec" ] || fail "the durable record must survive for recovery"
+  [ -e "$state/.retired-$key" ] \
+    || fail "surfacing a lost steer must not un-retire a window that is still gone"
+  pass "watcher: a retired window still surfaces an instruction written after its retirement"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -712,3 +750,4 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_watcher_retired_window_still_escalates_an_unread_steer

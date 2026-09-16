@@ -2064,6 +2064,67 @@ test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
   pass "a stale pane whose endpoint the backend proves is gone has its records retired without a wake, and a live window keeps its own"
 }
 
+# --- a retired window whose METADATA is republished rejoins triage ------------
+# The retirement marker is durable, so the one thing that must release it is a
+# relaunch onto the same recorded target. Both stamps are whole seconds on both
+# platforms, and `fm-control.sh <id> relaunch` on a window that was wedged at
+# the escalation threshold publishes the new metadata well inside the second the
+# retirement was written in: a "newer metadata" rule reads that tie as "still
+# retired" and drops a LIVE window out of triage - no stale detection, no wedge
+# timer, no steering-inbox check - in silence and for the life of that metadata.
+# The marker therefore records the metadata mtime it was taken against, and any
+# other mtime there releases it.
+test_retired_window_returns_to_triage_when_its_metadata_is_republished() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case retired-relaunch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-relaunch"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/relaunch.meta"
+  printf 'working: implementing\n' > "$state/relaunch.status"
+  sig=$(seen_sig "$state/relaunch.status"); printf '%s' "$sig" > "$state/.seen-relaunch_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The metadata this retirement is taken against: the spawn that recorded it.
+  touch -t 202001010000 "$state/relaunch.meta"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  # Phase A: a successful inventory omits the window, so it is retired against
+  # the metadata mtime above.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
+    FM_FAKE_TMUX_CAPTURE="$capture_file"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the watcher woke for a window the backend proves is gone: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
+  [ "$(cat "$state/.retired-$key" 2>/dev/null || true)" = "$(file_mtime "$state/relaunch.meta")" ] \
+    || fail "the retirement did not record the metadata mtime it was taken against"
+
+  # Phase B: the relaunch republishes the metadata for the same recorded target,
+  # in the very second the retirement marker itself carries.
+  touch -t 202401010000 "$state/relaunch.meta" "$state/.retired-$key"
+  [ "$(file_mtime "$state/relaunch.meta")" = "$(file_mtime "$state/.retired-$key")" ] \
+    || fail "the fixture did not reproduce the same-second relaunch"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-relaunch \
+    FM_FAKE_TMUX_CAPTURE="$capture_file"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a relaunched window whose metadata ties the retirement stayed out of triage: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the relaunched window was never triaged again: $(cat "$out")"
+  [ ! -e "$state/.retired-$key" ] \
+    || fail "the retirement marker outlived the metadata it was taken against"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the relaunch cycle"
+  unset FM_FAKE_CREW_STATE
+  pass "a retirement is released when the recorded metadata is republished, including in the same second it was written"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -5009,6 +5070,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_stale_records_retired_when_the_endpoint_is_confirmed_gone
+test_retired_window_returns_to_triage_when_its_metadata_is_republished
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
