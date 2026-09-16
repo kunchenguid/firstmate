@@ -261,7 +261,7 @@ check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [{}] },
 check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [] }, shortNote) === false, "max_tokens without tools");
 check(policy.stepTextIsWorkingNote({ stopReason: "end_turn", toolUses: [{}] }, shortNote) === false, "end_turn");
 check(policy.stepTextIsWorkingNote({ stopReason: null, toolUses: [] }, shortNote) === false, "no response");
-check(policy.workingNoteKey("  note \\n") === "note" && policy.workingNoteKey("   ") === "", "note key");
+check(policy.workingNoteKey("  note \\n") === "note\\n" && policy.workingNoteKey(" note ") === "note" && policy.workingNoteKey("   ") === "", "note key");
 const restored = policy.classifyRestoredTranscript([
   { role: "user", text: "go", toolUses: [] },
   { role: "assistant", text: " own call ", toolUses: [{}] },
@@ -282,9 +282,15 @@ const restored = policy.classifyRestoredTranscript([
   { role: "user", text: "below-threshold case", toolUses: [] },
   { role: "assistant", text: belowThresholdNote, toolUses: [] },
   { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "newline collision", toolUses: [] },
+  { role: "assistant", text: "Checking.\\n", toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "single-line collision", toolUses: [] },
+  { role: "assistant", text: "Checking.", toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
 ]);
-check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row", belowThresholdNote]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
-check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply", multiLineReply, atThresholdReply]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
+check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row", belowThresholdNote, "Checking."]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
+check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply", multiLineReply + "\\n", atThresholdReply, "Checking.\\n"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
 check(policy.userTextIsOperational("\\u2063FIRSTMATE_OP: v1 watcher: x") && !policy.userTextIsOperational("hello"), "operational recognition");
 console.log("policy-ok");
 JS

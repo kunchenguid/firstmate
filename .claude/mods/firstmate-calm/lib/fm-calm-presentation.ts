@@ -91,9 +91,11 @@ export function stepTextIsWorkingNote(step: CalmStepOutcome, text: string): bool
   return midTurn && !shouldPreserveMidTurnText(text);
 }
 
-/** The key a working note is remembered under: its trimmed text; empty text is no note. */
+/** A trimmed text key that retains whether the raw row contained a newline. */
 export function workingNoteKey(text: string): string {
-  return text.trim();
+  const trimmedText = text.trim();
+  if (trimmedText === "") return "";
+  return text.includes("\n") ? `${trimmedText}\n` : trimmedText;
 }
 
 /** The shape of one `$.session.messages()` row this policy reads. */
@@ -135,9 +137,6 @@ export function classifyRestoredTranscript(rows: readonly CalmSessionRow[]): {
   for (const key of finalReplies) notes.delete(key);
   return { workingNotes: [...notes], finalReplies: [...finalReplies] };
 }
-
-/** Compatibility name for callers that consume the restored transcript classification. */
-export const restoredAssistantText = classifyRestoredTranscript;
 
 /** Whether a user row's text is a canonically classified Firstmate operational input. */
 export function userTextIsOperational(text: string): boolean {

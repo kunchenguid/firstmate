@@ -395,11 +395,19 @@ describe("mid-turn working notes", () => {
         { role: "user", text: "below threshold", toolUses: [] },
         { role: "assistant", text: belowThreshold, toolUses: [] },
         { role: "assistant", text: "", toolUses: [{}] },
+        { role: "user", text: "newline collision", toolUses: [] },
+        { role: "assistant", text: "Checking.\n", toolUses: [] },
+        { role: "assistant", text: "", toolUses: [{}] },
+        { role: "user", text: "single-line collision", toolUses: [] },
+        { role: "assistant", text: "Checking.", toolUses: [] },
+        { role: "assistant", text: "", toolUses: [{}] },
       ],
     });
     expect(isStock(await $.ui.render(assistantMessage(multiLine)))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage(atThreshold)))).toBe(true);
     expect(isHidden(await $.ui.render(assistantMessage(belowThreshold)))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking.\n")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Checking.")))).toBe(true);
   });
 
   test("seeds notes from a restored transcript without hiding a colliding final reply", async ($, on) => {
