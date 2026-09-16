@@ -140,20 +140,35 @@ D=$FM_FAKE_DIR
 printf '%s\n' "$*" >> "$D/herdr-calls"
 case "${1:-} ${2:-}" in
   "status --json")
-    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ] \
+        && [ ! -e "$D/server-started" ]; then
+      printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n'
+    else
+      printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    fi
+    ;;
+  "server --session")
+    : > "$D/server-started"
     ;;
   "workspace list")
-    printf '{"result":{"workspaces":[{"workspace_id":"workspace-1","label":"firstmate"}]}}\n'
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"workspace-home","label":"firstmate"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[{"workspace_id":"workspace-1","label":"firstmate"}]}}\n'
+    fi
     ;;
   "tab list")
-    printf '{"result":{"tabs":[]}}\n'
+    printf '{"result":{"tabs":[{"tab_id":"tab-sibling","label":"sibling"}]}}\n'
     ;;
   "tab create")
     : > "$D/endpoint-created"
     printf '{"result":{"tab":{"tab_id":"tab-replacement"},"root_pane":{"pane_id":"pane-recorded"}}}\n'
     ;;
   "pane get")
-    if [ -e "$D/endpoint-created" ]; then
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ] \
+        && [ ! -e "$D/server-started" ]; then
+      printf '{"error":{"code":"server_not_running"}}\n'
+    elif [ -e "$D/endpoint-created" ]; then
       printf '{"result":{"pane":{"pane_id":"pane-recorded","foreground_cwd":"%s"}}}\n' "$(cat "$D/cwd")"
     else
       printf '{"error":{"code":"pane_not_found"}}\n'
@@ -268,6 +283,9 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_HERDR_SCENARIO="${FM_FAKE_HERDR_SCENARIO:-}" \
+    HERDR_ENV= HERDR_PANE_ID= HERDR_SOCKET_PATH= HERDR_SESSION= \
+    HERDR_TAB_ID= HERDR_WORKSPACE_ID= \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -280,6 +298,8 @@ run_spawn() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    HERDR_ENV= HERDR_PANE_ID= HERDR_SOCKET_PATH= HERDR_SESSION= \
+    HERDR_TAB_ID= HERDR_WORKSPACE_ID= \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -419,8 +439,10 @@ test_missing_herdr_endpoint_relaunch_uses_the_control_transaction() {
   printf 'validation_run=run-17\n' >> "$meta"
   printf 'unfinished bytes\n' > "$dir/wt/unfinished.txt"
 
-  out=$(run_control "$dir" rl45 relaunch --note "resume the preserved validation run"); rc=$?
+  out=$(FM_FAKE_HERDR_SCENARIO=stopped-missing-workspace \
+    run_control "$dir" rl45 relaunch --note "resume the preserved validation run"); rc=$?
   expect_code 0 "$rc" "a supported relaunch should recreate a positively missing Herdr endpoint"$'\n'"$out"
+  assert_present "$dir/fake/server-started" "missing-endpoint recovery did not restore the recorded session"
   assert_present "$dir/fake/endpoint-created" "the spawn owner did not recreate the endpoint"
   assert_present "$dir/fake/agent-launched" "the spawn owner did not launch the replacement agent"
   [ "$(meta_field "$dir" rl45 endpoint_task_id)" = rl45 ] \
@@ -429,6 +451,8 @@ test_missing_herdr_endpoint_relaunch_uses_the_control_transaction() {
     || fail "missing-endpoint recovery changed the worktree holding the task"
   [ "$(meta_field "$dir" rl45 validation_run)" = run-17 ] \
     || fail "missing-endpoint recovery discarded prior validation custody"
+  [ "$(meta_field "$dir" rl45 herdr_workspace_id)" = workspace-home ] \
+    || fail "missing-endpoint recovery did not use the exact home-workspace fallback"
   [ "$(meta_field "$dir" rl45 herdr_tab_id)" = tab-replacement ] \
     || fail "missing-endpoint recovery did not publish the replacement endpoint"
   [ "$(journal_field "$dir" rl45 phase)" = complete ] \

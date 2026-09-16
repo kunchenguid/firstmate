@@ -1533,6 +1533,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     }
   fi
   if [ "$BACKEND" = herdr ]; then
+    RELAUNCH_HERDR_LAUNCHER_PANE_ID=${HERDR_PANE_ID:-}
+    RELAUNCH_HERDR_LAUNCHER_SESSION=${HERDR_SESSION:-}
+    RELAUNCH_HERDR_LAUNCHER_SOCKET_PATH=${HERDR_SOCKET_PATH:-}
     HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
@@ -3015,20 +3018,59 @@ else
     HERDR_PROJECTED=0
     if [ "$RELAUNCH_MISSING" -eq 1 ]; then
       [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
-      [ "$(fm_backend_herdr_server_running_state "$HERDR_SES")" = running ] || {
-        echo "error: task $ID's recorded Herdr session '$HERDR_SES' is not positively running; refusing endpoint recreation" >&2
-        exit 1
-      }
-      [ "$(fm_backend_herdr_workspace_presence_state "$HERDR_SES" "$HERDR_WORKSPACE_ID")" = present ] || {
-        echo "error: task $ID's recorded Herdr workspace '$HERDR_WORKSPACE_ID' is not positively present; refusing endpoint recreation" >&2
-        exit 1
-      }
-      HERDR_CONTAINER_RAW="$HERDR_SES:$HERDR_WORKSPACE_ID"
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$HERDR_CONTAINER_RAW" "$W" "$PROJ_ABS" "") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      fm_backend_herdr_version_check || exit 1
+      fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
+      RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+      case "$RELAUNCH_STATE" in
+      dead)
+        HERDR_PROJECTED=1
+        ;;
+      missing)
+        HERDR_RECOVERY_WORKSPACE_ID=$HERDR_WORKSPACE_ID
+        HERDR_RECOVERY_SEEDED_TAB_ID=""
+        case "$(fm_backend_herdr_workspace_presence_state "$HERDR_SES" "$HERDR_WORKSPACE_ID")" in
+        present) ;;
+        dead)
+          FM_HOME="$HERDR_LABEL_HOME" \
+            HERDR_PANE_ID="$RELAUNCH_HERDR_LAUNCHER_PANE_ID" \
+            HERDR_SESSION="$RELAUNCH_HERDR_LAUNCHER_SESSION" \
+            HERDR_SOCKET_PATH="$RELAUNCH_HERDR_LAUNCHER_SOCKET_PATH" \
+            fm_backend_herdr_workspace_ensure \
+              "$HERDR_SES" "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP" >/dev/null || exit 1
+          HERDR_RECOVERY_WORKSPACE_ID=$FM_BACKEND_HERDR_WS_ID
+          HERDR_RECOVERY_SEEDED_TAB_ID=$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID
+          ;;
+        *)
+          echo "error: task $ID's recorded Herdr workspace '$HERDR_WORKSPACE_ID' is not positively absent or present; refusing endpoint recreation" >&2
+          exit 1
+          ;;
+        esac
+        RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+        case "$RELAUNCH_STATE" in
+        dead)
+          HERDR_PROJECTED=1
+          ;;
+        missing)
+          HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
+          HERDR_CONTAINER_RAW="$HERDR_SES:$HERDR_WORKSPACE_ID"
+          HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
+            "$HERDR_CONTAINER_RAW" "$W" "$PROJ_ABS" "$HERDR_RECOVERY_SEEDED_TAB_ID") || exit 1
+          read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-      HERDR_PROJECTED=1
+          HERDR_PROJECTED=1
+          ;;
+        *)
+          echo "error: task $ID's recorded Herdr endpoint became '$RELAUNCH_STATE' while preparing recovery; refusing to create a replacement" >&2
+          exit 1
+          ;;
+        esac
+        ;;
+      *)
+        echo "error: task $ID's recorded Herdr endpoint became '$RELAUNCH_STATE' after its session was restored; refusing to create a replacement" >&2
+        exit 1
+        ;;
+      esac
     fi
     if [ "$RELAUNCH_MISSING" -eq 0 ] && [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
