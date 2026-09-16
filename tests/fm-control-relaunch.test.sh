@@ -477,6 +477,36 @@ test_relaunch_keeps_an_armed_pr_poll_valid() {
   pass "fm-control relaunch: an armed PR poll survives replacement record publication"
 }
 
+test_trace_on_relaunch_keeps_an_armed_pr_poll_valid() {
+  local dir out rc traceparent last_line
+  dir=$(new_case trace-armed-poll rl46)
+  add_ship_task "$dir" rl46 claude
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/trace-context"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  arm_pr_poll "$dir" rl46 "https://github.com/example/repo/pull/46" \
+    || fail "the fixture PR poll could not be armed"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl46 "$PR_POLL" \
+    || fail "the fixture PR poll was not valid before the trace-on relaunch"
+
+  out=$(run_control "$dir" rl46 relaunch --note "keep watching the PR with tracing on"); rc=$?
+  expect_code 0 "$rc" "a trace-on relaunch should succeed"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl46 "$PR_POLL" \
+    || fail "a trace-on relaunch invalidated the armed PR poll"
+  [ "$(meta_field "$dir" rl46 pr)" = "https://github.com/example/repo/pull/46" ] \
+    || fail "the recorded PR identity must survive a trace-on relaunch"
+  traceparent=$(meta_field "$dir" rl46 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "a trace-on relaunch must record a valid trace carrier"
+  last_line=$(tail -n 1 "$dir/home/state/rl46.meta")
+  case "$last_line" in
+    pr=*|pr_head=*) ;;
+    *) fail "the pr=/pr_head= tail must stay last after a trace-on relaunch, got '$last_line'" ;;
+  esac
+  pass "fm-control relaunch: a trace-on relaunch keeps an armed PR poll valid and records its carrier before the PR tail"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -1732,6 +1762,7 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_an_armed_pr_poll_valid
+test_trace_on_relaunch_keeps_an_armed_pr_poll_valid
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
