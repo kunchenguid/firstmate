@@ -921,6 +921,7 @@ Measured 2026-09-16 on macOS arm64 against Herdr 0.8.2 protocol 20 in a generate
 A controlled interactive zsh startup question used the same shell-owned one-character read as the reported Oh My Zsh update prompt.
 Herdr's `pane process-info` described that waiting question as one lone foreground zsh, so process identity cannot distinguish it from a settled prompt and is not a sufficient readiness barrier.
 Firstmate's fixed-command transport now retries a harmless split marker command until its output proves that input reaches the shell prompt, then sends the complete command in a separate atomic `pane run` request.
+The proof uses a literal match through the adapter's protocol-14 and later CLI forms and remains bounded by the spawn's 30-second startup budget.
 Two consecutive startup readers consumed input before the readiness marker ran; afterward `treehouse get` remained byte-complete, the isolated worktree was acquired, and the trivial worker command ran.
 
 ```sh

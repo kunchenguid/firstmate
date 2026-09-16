@@ -226,8 +226,8 @@ An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
-Spawn-time fixed commands use Herdr's atomic run primitive with one leading blank line in the same request.
-The blank line is a no-op at a settled shell and sacrificial input for a shell-startup line or character question that accepts blank input, so that question consumes it rather than the first byte of `treehouse get` or a later fixed command.
+Spawn-time fixed commands first retry a harmless split marker through Herdr's atomic run primitive until its output proves that the shell is ready, then send the complete command in a separate atomic request.
+The readiness probe uses a literal output match and shares the spawn's 30-second startup budget; the adapter normalizes protocol 14's `wait output` form and the later `pane wait-output` form.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.

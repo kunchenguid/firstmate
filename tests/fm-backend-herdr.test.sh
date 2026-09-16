@@ -70,6 +70,17 @@ if [ "${1:-}" = pane ] && [ "${2:-}" = run ] && [[ "${4:-}" == *fm-herdr-ready-*
   exit 0
 fi
 if [ "${1:-}" = pane ] && [ "${2:-}" = wait-output ]; then
+  [ "${FM_HERDR_FAKE_LEGACY_WAIT:-0}" -eq 1 ] && exit 2
+  case "$*" in
+    *--regex*|*--source*) exit 2 ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = wait ] && [ "${2:-}" = output ]; then
+  [ "${FM_HERDR_FAKE_LEGACY_WAIT:-0}" -eq 1 ] || exit 2
+  case "$*" in
+    *--regex*|*--source*) exit 2 ;;
+  esac
   exit 0
 fi
 n=$next
@@ -3659,17 +3670,29 @@ test_send_key_normalizes_and_targets_pane() {
 }
 
 test_send_text_line_waits_for_shell_readiness() {
-  local dir log resp fb ready_line command_line
+  local dir log resp fb ready_line command_line ready_call legacy_line
   dir="$TMP_ROOT/sendline-startup-guard"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "treehouse get"' "$ROOT"
   expect_code 0 $? "send_text_line should succeed"
+  ready_call=$(grep $'\x1f''pane'$'\x1f''wait-output'$'\x1f''w1:p2' "$log")
   ready_line=$(grep -n $'\x1f''pane'$'\x1f''wait-output'$'\x1f''w1:p2' "$log" | cut -d: -f1)
   command_line=$(grep -n $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''treehouse get' "$log" | cut -d: -f1)
   [ -n "$ready_line" ] && [ -n "$command_line" ] && [ "$ready_line" -lt "$command_line" ] \
     || fail "send_text_line did not prove shell readiness before sending the byte-complete command"
-  pass "fm_backend_herdr_send_text_line: proves shell readiness before sending the command"
+  assert_contains "$ready_call" $'\x1f''--match'$'\x1f' \
+    "send_text_line did not use the literal wait-output contract"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_FAKE_LEGACY_WAIT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "treehouse get"' "$ROOT"
+  expect_code 0 $? "send_text_line should support the protocol-14 wait command"
+  legacy_line=$(grep -n $'\x1f''wait'$'\x1f''output'$'\x1f''w1:p2' "$log" | cut -d: -f1)
+  command_line=$(grep -n $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''treehouse get' "$log" | cut -d: -f1)
+  [ -n "$legacy_line" ] && [ -n "$command_line" ] && [ "$legacy_line" -lt "$command_line" ] \
+    || fail "send_text_line did not use the protocol-14 wait fallback before the command"
+  pass "fm_backend_herdr_send_text_line: proves shell readiness before sending the command on both CLI generations"
 }
 
 test_kill_is_best_effort() {

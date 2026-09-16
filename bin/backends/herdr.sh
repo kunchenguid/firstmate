@@ -2949,6 +2949,23 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_wait_marker: wait for one literal marker across both accepted
+# CLI generations. Protocol 14 exposes `wait output`; later clients moved the
+# same request to `pane wait-output`. Only a usage refusal selects the legacy
+# form, while a normal timeout lets the caller retry without a second wait.
+fm_backend_herdr_wait_marker() {  # <pane-id> <marker>
+  local pane=$1 marker=$2 rc=0
+  if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output "$pane" \
+    --match "$marker" --timeout 250 >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || return "$rc"
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" wait output "$pane" \
+    --match "$marker" --timeout 250 >/dev/null 2>&1
+}
+
 # fm_backend_herdr_wait_shell_ready: prove that pane input reaches a shell prompt
 # before sending a fixed spawn-time command. Startup readers can consume any
 # finite input prefix, so retry a harmless marker command and wait for its output
@@ -2958,11 +2975,10 @@ fm_backend_herdr_wait_shell_ready() {  # <pane-id>
   marker="fm-herdr-ready-$$-${RANDOM:-0}"
   left=${marker%????????}
   right=${marker#"$left"}
-  while [ "$attempt" -lt 20 ]; do
+  while [ "$attempt" -lt 120 ]; do
     fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$pane" \
       "printf '%s%s\\n' '$left' '$right'" >/dev/null 2>&1 || return 1
-    if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output "$pane" \
-      --regex "(^|\\n)${marker}(\\r?\\n|$)" --source recent-unwrapped --timeout 250 >/dev/null 2>&1; then
+    if fm_backend_herdr_wait_marker "$pane" "$marker"; then
       return 0
     fi
     attempt=$((attempt + 1))
