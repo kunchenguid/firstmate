@@ -19,6 +19,6 @@
   config:
     maxBytes: 262144
 
-- id: sandbox-policy
+- id: permission
   config:
-    mode: danger-full-access
+    defaultPreset: danger-full-access
