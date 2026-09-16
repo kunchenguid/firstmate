@@ -361,7 +361,6 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.write_json(result_receipt, {
             "type": "result", "session_id": "claude-shared-session", "num_turns": 1,
             "modelUsage": {"claude-sonnet-5": {"canonicalModel": "claude-sonnet-5",
-                                                  "provider": "firstParty",
                                                   "inputTokens": 5, "outputTokens": 2,
                                                   "cacheReadInputTokens": 0,
                                                   "cacheCreationInputTokens": 0}},
@@ -719,6 +718,51 @@ class RoutingOutcomesTest(unittest.TestCase):
         billing = self.latest_record()["billing"]
         self.assertIsNone(billing["api_equivalent_usd"])
         self.assertEqual(self.latest_record()["native"]["native_reported_cost_usd"], 0.5)
+
+    def test_missing_model_provider_keeps_whole_receipt_price_unknown(self):
+        receipt = self.dir / "claude-missing-model-provider.json"
+        prices = self.dir / "claude-missing-model-provider-prices.json"
+        self.write_json(receipt, {
+            "type": "result", "session_id": "claude-missing-provider", "num_turns": 1,
+            "modelUsage": {
+                "claude-sonnet-5": {"canonicalModel": "claude-sonnet-5",
+                                    "provider": "firstParty", "inputTokens": 10,
+                                    "outputTokens": 3, "cacheReadInputTokens": 0,
+                                    "cacheCreationInputTokens": 0},
+                "claude-haiku-4-5": {"canonicalModel": "claude-haiku-4-5",
+                                     "inputTokens": 4, "outputTokens": 1,
+                                     "cacheReadInputTokens": 0,
+                                     "cacheCreationInputTokens": 0},
+            },
+        })
+        price_entries = []
+        for model in ("claude-sonnet-5", "claude-haiku-4-5"):
+            price_entries.append({
+                "provider": "anthropic", "model": model, "context_tier": "all",
+                "service_tier": "standard", "source_url": "https://example.test/claude-prices",
+                "effective_from": "2029-01-01T00:00:00Z", "effective_to": None,
+                "currency": "USD", "reasoning": "included_in_output",
+                "per_million_tokens": {"input": 1, "output": 1,
+                                       "cache_read": 1, "cache_write": 1},
+            })
+        self.write_json(prices, {"schema": "fm-routing-prices.v1",
+                                 "observed_at": "2030-01-01T00:00:00Z",
+                                 "entries": price_entries})
+        manifest = self.manifest(
+            receipt={"kind": "claude-result", "path": str(receipt),
+                     "requested_model": "claude-sonnet-5", "requested_effort": "high"},
+            outcome="unresolved")
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5",
+                                  "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        self.import_manifest(manifest, prices=prices)
+        billing = self.latest_record()["billing"]
+        self.assertIsNone(billing["api_equivalent_usd"])
+        self.assertEqual(billing["unpriced_models"], ["claude-haiku-4-5"])
+        self.assertEqual([row["model"] for row in billing["price_sources"]],
+                         ["claude-sonnet-5"])
 
     def test_empty_native_usage_keeps_api_equivalent_cost_unknown(self):
         receipt = self.dir / "claude-empty-usage.json"

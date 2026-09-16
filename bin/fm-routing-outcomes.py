@@ -808,7 +808,7 @@ def apply_prices(native: dict[str, Any], route: dict[str, Any], finished_at: str
     missing = []
     for row in native["models"]:
         model = row.get("model")
-        provider = row.get("provider") or native.get("provider")
+        provider = row.get("provider")
         service = row.get("service_tier") or route.get("service_tier")
         context = route.get("context_tier")
         candidates = []
@@ -995,8 +995,6 @@ def import_attempt(args: argparse.Namespace) -> dict[str, Any]:
             native = record["native"]
             same_session = (native.get("session_id") is not None
                             and native.get("session_id") == other.get("session_id")
-                            and native.get("provider") is not None
-                            and native.get("provider") == other.get("provider")
                             and native.get("api") is not None
                             and native.get("api") == other.get("api"))
             same_source = (native.get("kind") == other.get("kind")
