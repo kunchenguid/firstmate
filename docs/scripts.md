@@ -18,7 +18,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-home-summary-refresh.sh` | Atomically publish this home's structured summary ledger                         |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
-| `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
+| `fm-report.sh`            | Render the durable Markdown `/report` briefing and its `/bearings` compatibility route from structured owners |
+| `fm-bearings-board.sh`   | Build and arm the stable interactive `/report lavish` fleet board                    |
 | `fm-task-lifecycle.sh`    | Project and guard the captain-facing review, acceptance, delivery, monitoring, and return-to-work lifecycle |
 | `fm-tasks.sh`             | Render the compact current-task table and maintain private short references and human names |
 | `fm-next.sh`              | Select and render the single highest-value captain action or last-resort closure candidate |

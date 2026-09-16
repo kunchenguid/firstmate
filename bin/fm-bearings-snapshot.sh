@@ -242,7 +242,7 @@ HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
 # --- optional live GitHub PR enrichment -------------------------------------
-PR_STATUS='not_requested (run: /bearings include PRs)'
+PR_STATUS='not_requested (run: /report include PRs)'
 CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0

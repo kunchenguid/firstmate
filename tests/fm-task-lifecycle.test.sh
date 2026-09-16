@@ -28,7 +28,7 @@ EOF
 
 add_done() {  # <home> <id> <title>
   FM_HOME="$1" "$AXI" add "$2" "$3" --kind scout --repo sample >/dev/null || fail "could not add $2"
-  FM_HOME="$1" "$AXI" done "$2" --note "candidate result" >/dev/null || fail "could not finish $2"
+  FM_HOME="$1" "$AXI" 'done' "$2" --note "candidate result" >/dev/null || fail "could not finish $2"
 }
 
 run_life() {  # <home> <time> <args...>

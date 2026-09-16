@@ -185,8 +185,9 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/quiet`           | Enter quiet supervision mode: the same token-saving sub-supervisor tradeoff as `/afk`, for a captain who is staying and chatting - ordinary messages do not exit it, only an explicit `/quiet off` does |
-| `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
-| `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
+| `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to `/report` when invoked as the session's first real captain message |
+| `/report`          | Write the durable Markdown fleet report into conversation history, with lifecycle tables and leverage-ordered recommendations from the structured fleet snapshot |
+| `/bearings`        | Compatibility alias for `/report`, including the explicit `file`, `lavish`, and `include PRs` variants |
 | `/tasks`           | Toggle the live task table using the statuses and routes defined in the [captain-facing lifecycle](docs/task-lifecycle.md) |
 | `/t`               | Approved task router: bare `/t` toggles the task dashboard, while `/t <selector>` routes to `/task <selector>` |
 | `/next`            | Show the highest-value captain action that restarts work or advances review, acceptance, delivery, or monitoring before closure |
@@ -196,12 +197,17 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/updatefirstmate` | Guardedly update the running firstmate and its secondmates - fast-forward, or reconcile a redundant post-squash-merge divergence - then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
-Bearings invocation examples:
+Fleet command guide:
 
-- `/bearings` returns the fresh four-section digest in chat only.
-- `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
-- `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
-- `/bearings file include PRs` combines the dated report with live PR enrichment.
+- `/report` writes the readable, durable fleet briefing into normal conversation history; `/bearings` is its compatibility alias and produces the same report.
+- `/tasks` only toggles the live Pi dashboard and does not write a report into conversation history.
+- `/t` toggles that dashboard when bare and opens one task's durable detail when followed by a reference or name.
+- `/next` narrows the same lifecycle evidence to one highest-leverage action instead of showing the fleet.
+- `/history` searches work that has already passed guarded archival closure; it is not a current-work view.
+- `/report include PRs` opts into live PR enrichment while remaining chat-only.
+- `/report file` explicitly replaces today's `data/status-report-<YYYY-MM-DD>.md` in addition to returning the report in chat.
+- `/report lavish` explicitly adds the interactive board without replacing the report in chat.
+- The `/bearings` alias preserves all three explicit variants.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

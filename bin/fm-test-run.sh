@@ -379,7 +379,7 @@ family_for_basename() {
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-report.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -678,11 +678,13 @@ tests/fm-backlog-handoff.test.sh 52291
 tests/fm-bearings-board-render.test.sh 1528
 tests/fm-bearings-board.test.sh 4195
 tests/fm-bearings-snapshot.test.sh 116374
+tests/fm-report.test.sh 600
 tests/fm-bootstrap-network-parallel.test.sh 8214
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
 tests/fm-busy-adapter-wiring.test.sh 49731
 tests/fm-busy-state.test.sh 2926
+tests/fm-callsigns.test.sh 7500
 tests/fm-calm-pi-extension.test.sh 256
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
@@ -1519,6 +1521,9 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh|bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    bin/fm-report.sh)
+      printf '%s\n' __script__:fm-report.test.sh
+      ;;
     bin/fm-fleet-snapshot.sh)
       printf '%s\n' snapshot-bearings
       printf '%s\n' __script__:fm-pi-tasks-widget.test.sh
@@ -1551,6 +1556,9 @@ families_for_changed_path() {
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
+      ;;
+    .agents/skills/report/SKILL.md|.agents/skills/bearings/SKILL.md)
+      printf '%s\n' __script__:fm-report.test.sh
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit

@@ -287,7 +287,7 @@ project_model() {  # <snapshot-json> <callsigns-json> <selector>
 }
 
 project_command() {
-  local snapshot_path= callsigns_json= selector= snapshot
+  local snapshot_path='' callsigns_json='' selector='' snapshot
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --snapshot) [ "$#" -ge 2 ] || { usage >&2; return 2; }; snapshot_path=$2; shift 2 ;;
@@ -343,7 +343,7 @@ transition_record() {  # <command> <id> <actor> <evidence> <route> <limitations>
   now=$(now_utc)
   case "$command" in
     review-start)
-      if ! require_status "$id" done; then unlock_task; return 1; fi
+      if ! require_status "$id" 'done'; then unlock_task; return 1; fi
       if [ "$old" != null ] && [ "$(printf '%s\n' "$old" | jq -r '.stage')" != working ]; then
         fail "task $id already has an active lifecycle stage"
         unlock_task
@@ -361,7 +361,7 @@ transition_record() {  # <command> <id> <actor> <evidence> <route> <limitations>
       else
         stage=$(printf '%s\n' "$old" | jq -r 'if . == null then "none" else .stage end')
         case "$stage" in
-          none|working) if ! require_status "$id" done; then unlock_task; return 1; fi ;;
+          none|working) if ! require_status "$id" 'done'; then unlock_task; return 1; fi ;;
           reviewing) if ! require_status "$id" reviewing; then unlock_task; return 1; fi ;;
           *) fail "task $id cannot combine acceptance and closure from $stage"; unlock_task; return 1 ;;
         esac
@@ -434,7 +434,7 @@ transition_record() {  # <command> <id> <actor> <evidence> <route> <limitations>
 }
 
 transition_command() {
-  local command=$1 selector=${2:-} actor= evidence= route= limitations='none declared' reason= id
+  local command=$1 selector=${2:-} actor='' evidence='' route='' limitations='none declared' reason='' id
   [ -n "$selector" ] || { usage >&2; return 2; }
   shift 2
   while [ "$#" -gt 0 ]; do

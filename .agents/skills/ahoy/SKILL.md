@@ -27,9 +27,9 @@ Give the captain a concise session-only recap without gathering fresh state.
    Do not exclude an ordinary captain message merely because it begins with U+2063 followed by other text, contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or embeds a current operational message after ordinary captain text, quotes or mentions the legacy session-start payload, or adds any text to that payload.
    Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message: `Captain quote: ` followed by that current prefix is a captain boundary.
    Apply the legacy startup exclusion as a literal whole-message match: ``Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` is a captain boundary.
-3. If no prior real captain message exists, load [`../bearings/SKILL.md`](../bearings/SKILL.md) and follow it exactly.
-   Bearings alone owns its gathering, artifact, and response contract.
-   Do not restate that contract or combine a session recap with Bearings output.
+3. If no prior real captain message exists, load [`../report/SKILL.md`](../report/SKILL.md) and follow it exactly.
+   Report alone owns its gathering, artifact, and response contract.
+   Do not restate that contract or combine a session recap with report output.
 4. If a prior real captain message exists, preserve the ordinary recap interval: recap what happened after that message and before the current invocation.
    Include concrete outcomes, landed work, failures, decisions made, new decisions needed, and work still running only when those events appear in that visible interval.
    Use captain-facing outcome language and preserve every full PR URL present in that interval.

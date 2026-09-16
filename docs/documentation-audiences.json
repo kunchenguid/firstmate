@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/report/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quiet/SKILL.md",
       "audience": "agent-runtime"
     },

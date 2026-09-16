@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# fm-bearings-board.sh - build and arm the /bearings lavish fleet board.
+# fm-bearings-board.sh - build and arm the /report lavish fleet board.
 #
-# The board is the captain-facing interactive surface of /bearings lavish: the
+# The board is the optional interactive surface of /report lavish (and its
+# /bearings compatibility alias): the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
 # injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
 # the invoking agent's per-run work stays "compose the JSON, run build" - the

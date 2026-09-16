@@ -67,6 +67,8 @@ A durable lifecycle record also retains the task's short reference and current-t
 
 ## Command surfaces
 
+- `/report` writes the durable Markdown fleet briefing into normal conversation history, while `/bearings` remains its compatibility alias.
+  It uses the structured fleet snapshot and this lifecycle projection for breadth, keeps the live `/tasks` display separate, and adds recommendations rather than changing lifecycle state.
 - `/tasks [status] [project]` lists only current work with the statuses above, concise outcomes, and elapsed time for `working`, `reviewing`, `delivering`, and `monitoring`.
   The approved Pi `/t` router is its compact alias: bare `/t` toggles this dashboard, while `/t <selector>` routes to `/task <selector>`.
   Its JSON also provides `next_action`, `route`, `close_ready`, and the durable lifecycle record.
