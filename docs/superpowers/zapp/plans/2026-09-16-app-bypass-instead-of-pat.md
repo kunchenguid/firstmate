@@ -138,3 +138,145 @@ If it did not:
 - Restore `is_poc`, recreate ruleset 20475255 from `repo-20475255.json`, and put the `@BankrateBot` lines back in `CODEOWNERS` **at the end of the file** — CODEOWNERS resolves by last match, and an earlier `/.github/` line otherwise wins for `dependabot.yml`. List both `.yml` and `.yaml`.
 - Verify the restore by merging nothing: confirm an unapproved Dependabot PR is blocked again.
 - Report what failed and why. PLAT-1327 stands, and the PAT still needs rotating before 2026-12-01.
+
+---
+
+# Findings — 2026-09-16
+
+**Verdict: inconclusive, not negative.** An earlier reading of this experiment
+called it a clean negative. That reading was wrong. Double-checking it found two
+problems with the test itself, so the question the experiment was built to answer
+is still open.
+
+Everything changed on `platform-cicd-v2-demo` has been restored and verified.
+
+## What the experiment actually established
+
+These are measured, not inferred.
+
+**1. The org ruleset never applied to the test repo.** `platform-cicd-v2-demo`
+carries `is_poc: true`, and org ruleset 15978123 has that exact property in its
+`repository_property.exclude` list. Only repo ruleset 20475255 governs `main`
+here. So Chase's instinct that the org ruleset was the blocker is wrong for this
+repo, and the plan's own warning about a false pass held up.
+
+```
+$ gh api orgs/bankrate/rulesets/15978123 --jq '.conditions.repository_property.exclude'
+[{"name":"is_poc","property_values":["true"],"source":"custom"}]
+```
+
+**2. zapp has exactly one way to merge and exactly one way to approve.**
+
+| | call | identity |
+|---|---|---|
+| approve | `POST /repos/{r}/pulls/{n}/reviews` `{event: APPROVE}` — `src/pipeline/05-actuate/approver.ts:67` | `BankrateBot`, PAT |
+| merge | GraphQL `enablePullRequestAutoMerge` — `src/pipeline/05-actuate/actuator.ts:201` | `bankrate-bender` App |
+
+There is no merge-endpoint call anywhere in `src/`. zapp arms auto-merge and
+GitHub finishes the job later.
+
+**3. GitHub credits an armed auto-merge to the App that armed it.** This is the
+finding that killed the earlier conclusion. On `platform-cicd-v2-demo#63` and
+`#62`, `merged_by` is `bankrate-bender[bot]` and the timeline's `merged` event
+names bender too. The claim that "GitHub merges as itself, so the App's bypass
+never applies" is not supported.
+
+**4. bender cannot merge directly today.** Its installation permissions are
+exactly `metadata: read` and `pull_requests: write` (`README.md:255`). A
+`PUT /pulls/{n}/merge` needs `contents: write`. Note what that combination
+means: bender arms auto-merge and gets credited with the merge while holding no
+write access to repository contents. GitHub is doing privileged work on bender's
+behalf, which is why the attribution question above is not the same as the
+authorization question.
+
+**5. A direct merge call IS evaluated against the caller's bypass.** Confirmed
+twice, on `#66` and `#67`. Both were `mergeable: MERGEABLE`,
+`mergeStateStatus: BLOCKED`, `reviewDecision: REVIEW_REQUIRED`, and both merged
+on a `PUT /pulls/{n}/merge` because of a `RepositoryRole:5:pull_request` bypass.
+So bypasses do work on the merge path. The open question is only whether they
+reach the auto-merge path.
+
+## Why the result is inconclusive
+
+**The `always` state was never exercised.** Bypass mode went to `always` at
+13:56:02 UTC. The last event on PR #49 was 13:44:31 UTC. Nothing touched the PR
+after the ruleset changed.
+
+```
+ruleset 20475255 history       PR #49 timeline
+13:17:46  Integration:pull_request   13:43:37  auto_merge_enabled (bender)
+                                     13:43:39  reviewed APPROVED (BankrateBot)
+                                     13:44:31  unlabeled (recheck toggle)
+13:56:02  Integration:always         (nothing)
+14:47:59  restored
+```
+
+Auto-merge is event-driven. A ruleset edit is not an event on the pull request,
+so GitHub had no reason to re-evaluate. Reading `mergeStateStatus: BLOCKED`
+afterward measured a stale decision.
+
+**The window that WAS exercised had a second blocker.** During the
+`pull_request`-mode window, PR #49's head branch was behind `main`. Repo ruleset
+20475255 sets `strict_required_status_checks_policy: true`, and GitHub does not
+bring a behind branch up to date for an armed auto-merge. That parks the merge
+on its own, with or without a review bypass. So the one real observation cannot
+distinguish "the bypass didn't apply" from "the branch was behind."
+
+A note in the working record claimed the branch was current. It was not.
+
+## What a clean re-test needs
+
+1. A pull request whose head is **current with `main`**, or `strict` switched off
+   for the duration.
+2. The bypass in place **before** auto-merge is armed.
+3. `BankrateBot` not a code owner, so reviews are the only remaining blocker.
+4. A real trigger **after** the last ruleset change — a push, a check completion,
+   or a review event. Not a ruleset edit.
+5. Read `mergeStateStatus` only after that trigger.
+
+Cost is roughly fifteen minutes and one throwaway PR on the demo repo.
+
+## The three routes off the PAT, ranked
+
+**A. Ruleset bypass for bender.** Best outcome if it works: no new permissions,
+no policy relaxed, no code change in zapp. Status: unproven, needs the re-test
+above.
+
+**B. Drop `require_code_owner_review` and let bender approve.** bender already
+holds `pull_requests: write`, which is the permission needed to submit an
+approving review. No PAT, no bypass, no new grant. Two problems. The code-owner
+requirement lives on the ruleset, not on a path, so dropping it drops it for
+everything landing on `main`. And no GitHub App has ever submitted an approving
+review in `platform-cicd-v2-demo`, `conductor-api`, or `zapp` — the reviewer
+histories there are `iscooter`, `chaseconey`, `Halima-RV`, and `BankrateBot`,
+all user accounts. App approval is documented GitHub behavior but untested in
+this org, so it needs its own five-minute probe before anyone plans around it.
+
+**C. bender merges directly instead of arming auto-merge.** This works
+mechanically — finding 5 proves the bypass applies to a merge call. It costs
+more than it looks. It needs `contents: write` added to bender, which is the
+exact permission this design deliberately withheld. And it gives up the one
+thing auto-merge provides: GitHub *holding* the PR until conditions are met. A
+direct call means zapp decides the moment is now, on a gate-12 snapshot that may
+already be stale. That race is
+[PLAT-1192](https://redventures.atlassian.net/browse/PLAT-1192), and auto-merge
+absorbs it for free today. It also inverts the ordering rule this design runs
+on: add the dangerous capability last, remove it first. A single merge call has
+no rung below it.
+
+Order of work: probe A, then probe B's App-approval question, and treat C as the
+fallback that needs a design conversation rather than an experiment.
+
+## Restore — verified
+
+| item | state |
+|---|---|
+| repo ruleset 20475255 | restored, `diff` against the pre-experiment snapshot is empty |
+| `.github/CODEOWNERS` | restored via [#67](https://github.com/bankrate/platform-cicd-v2-demo/pull/67), byte-identical to backup |
+| repo custom properties | never changed (`is_poc: true` was pre-existing) |
+| `test/plat-1184-app-bypass` | already deleted on #66's merge |
+| `restore/codeowners-bankratebot` | deleted on #67's merge |
+
+PR #49 still has auto-merge armed by bender with a `BankrateBot` approval. That
+is zapp's normal behavior on an enrolled repo, not experiment residue, so it was
+left alone.
