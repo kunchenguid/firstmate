@@ -521,6 +521,39 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertIsNone(
             quota["window_deltas"][0]["attributed_consumption_percent_points"])
 
+    def test_incomparable_quota_window_sets_keep_aggregate_reset_unknown(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
+        before = json.loads(self.quota_before.read_text())
+        before["providers"][0]["windows"].append({
+            "id": "daily", "label": "day", "kind": "daily",
+            "resetsAt": "2030-01-02T00:00:00Z", "percentRemaining": 50,
+        })
+        self.write_json(self.quota_before, before)
+        manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertIsNone(quota["reset_crossed"])
+        self.assertEqual(quota["window_deltas"][0]["window_id"], "weekly")
+        self.assertFalse(quota["window_deltas"][0]["reset_crossed"])
+        self.assertEqual(
+            quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
+
+        self.write_pi(self.pi, task="task-two", session_id="session-2",
+                      assistant_provider="codex", request_provider="codex")
+        before["providers"][0]["windows"] = [before["providers"][0]["windows"][0]]
+        before["providers"][0]["windows"][0]["id"] = "before-only"
+        after = json.loads(self.quota_after.read_text())
+        after["providers"][0]["windows"][0]["id"] = "after-only"
+        self.write_json(self.quota_before, before)
+        self.write_json(self.quota_after, after)
+        second = self.manifest(task="task-two", attempt="attempt-two")
+        second["route"]["provider"] = "codex"
+        self.import_manifest(second)
+        second_quota = self.latest_record()["quota"]
+        self.assertIsNone(second_quota["reset_crossed"])
+        self.assertEqual(second_quota["window_deltas"], [])
+
     def test_quota_chronology_and_increases_do_not_create_consumption(self):
         self.write_quota(self.quota_before, 95, "2030-01-02T00:00:00Z",
                          generated_at="2030-01-01T00:01:00Z")
@@ -887,13 +920,21 @@ class RoutingOutcomesTest(unittest.TestCase):
                                          "requested_effort": "high"}, outcome="unresolved")
         manifest["route"].update({"harness": "claude", "provider": "anthropic",
                                   "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z",
+                         provider="anthropic")
+        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z",
+                         provider="anthropic", generated_at="2030-01-01T00:02:00Z")
+        manifest["quota"]["provider"] = "anthropic"
         manifest["requirements"] = None
         self.bind_task("task-one", harness="claude")
         self.import_manifest(manifest, prices=prices)
         record = self.latest_record()
         self.assertEqual(record["native"]["tokens"]["input"], 8)
         self.assertIsNone(record["native"]["models"][0]["model"])
+        self.assertIsNone(record["native"]["models"][0]["provider"])
+        self.assertIsNone(record["native"]["provider"])
         self.assertIsNone(record["native"]["effective_model"])
+        self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
         self.assertEqual(record["native"]["completeness"]["usage"], "complete")
         self.assertIsNone(record["billing"]["api_equivalent_usd"])
         self.assertEqual(record["billing"]["unpriced_models"], ["unknown"])

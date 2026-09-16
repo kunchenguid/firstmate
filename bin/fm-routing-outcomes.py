@@ -443,7 +443,7 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
             models.append(row)
     if not models and isinstance(receipt.get("usage"), dict):
         usage = receipt["usage"]
-        models.append(token_row(None, "anthropic", usage, {
+        models.append(token_row(None, None, usage, {
             "input": "input_tokens", "output": "output_tokens",
             "cache_read": "cache_read_input_tokens", "cache_write": "cache_creation_input_tokens",
         }, service_tier=usage.get("service_tier")))
@@ -633,7 +633,9 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
                              and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
         delta = left_percent - right_percent if attributable and known_percentages and left_percent >= right_percent else None
         deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": window_reset_crossed, "attributed_consumption_percent_points": delta})
-    reset_crossed = True if True in reset_states else (None if None in reset_states else False)
+    comparable_windows = before_windows.keys() & after_windows.keys()
+    window_sets_match = bool(comparable_windows) and before_windows.keys() == after_windows.keys()
+    reset_crossed = (True if True in reset_states else (None if None in reset_states else False)) if window_sets_match else None
     return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent,
             "attribution": attribution, "reset_crossed": reset_crossed,
             "attempt_bracketed": attempt_bracketed, "route_provider_binding": route_provider_binding,
