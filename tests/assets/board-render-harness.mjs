@@ -2,11 +2,11 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html> [--interactions]
-// Prints one JSON document. The optional interaction mode submits each
-// Captain's Call freeform control and first explicit option through the page's
-// public Lavish queue interface, then includes the captured calls and
-// protocol-shaped Lavish results in the document.
+// Usage: node board-render-harness.mjs <built-board.html> [--freeform-interactions|--choice-interactions]
+// Prints one JSON document. An interaction mode submits the named control on
+// every Captain's Call card through the page's public Lavish queue interface,
+// then includes the rendered state, captured calls, and protocol-shaped Lavish
+// results in the document.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -198,8 +198,16 @@ const lavishResult = (calls) => {
 };
 
 const interactions = [];
-if (process.argv[3] === "--interactions") {
+const interactionMode = process.argv[3] || "";
+if (interactionMode === "--freeform-interactions" || interactionMode === "--choice-interactions") {
   const callDeck = byId.get("bb-call") || new Node("div");
+  const stackCount = byId.get("bb-stack-count") || new Node("div");
+  const stackPrev = byId.get("bb-stack-prev") || new Node("button");
+  const stackNext = byId.get("bb-stack-next") || new Node("button");
+  const refreshStack = () => {
+    stackNext.dispatch("click");
+    stackPrev.dispatch("click");
+  };
   callDeck.children.forEach((card) => {
     const nodes = descendants(card);
     const freeform = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform"));
@@ -207,23 +215,28 @@ if (process.argv[3] === "--interactions") {
     const choiceForm = nodes.find((node) => node.attributes["data-lavish-question"] && node !== freeformForm);
     const label = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform-label"));
     const question = choiceForm?.attributes["data-lavish-question"] || freeformForm?.attributes["data-lavish-question"] || "";
-    let cardQueuedAfterFreeform = false;
-    if (freeform && freeformForm) {
+    if (interactionMode === "--freeform-interactions" && freeform && freeformForm) {
       freeform.value = "Need more context for " + question;
       freeformForm.dispatch("submit");
-      cardQueuedAfterFreeform = card.classList.contains("is-queued");
     }
-    const radio = nodes.find((node) => node.type === "radio" && node.value !== "reconcile");
-    if (radio && choiceForm) {
-      radio.checked = true;
-      choiceForm.dispatch("submit");
+    if (interactionMode === "--choice-interactions") {
+      const radio = nodes.find((node) => node.type === "radio" && node.value !== "reconcile");
+      if (radio && choiceForm) {
+        radio.checked = true;
+        choiceForm.dispatch("submit");
+      }
     }
+    refreshStack();
     interactions.push({
       question,
+      hasFreeform: Boolean(freeform && freeformForm),
       freeformLabel: label?.textContent || "",
       freeformPlaceholder: freeform?.placeholder || "",
-      cardQueuedAfterFreeform,
-      cardQueuedAfterChoice: card.classList.contains("is-queued"),
+      messageQueued: Boolean(freeformForm?.classList.contains("is-queued")),
+      choiceQueued: Boolean(choiceForm?.classList.contains("is-queued")),
+      cardQueued: card.classList.contains("is-queued"),
+      cardAnswered: card.classList.contains("is-answered"),
+      stackStatus: stackCount.textContent,
     });
   });
 }

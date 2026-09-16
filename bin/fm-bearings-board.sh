@@ -54,8 +54,9 @@
 # hidden is worse than a card wrongly shown. Cleanup is therefore a normal
 # rebuild effect rather than a committed migration or direct state mutation.
 #
-# CAPTAIN'S CALL CONTROLS. Every card with an explicit option also carries a
-# separate freeform path, injected here so composers cannot forget it. The
+# CAPTAIN'S CALL CONTROLS. Every card with multiple effective options carries
+# a separate freeform path, injected here so composers cannot forget it. A
+# payload may explicitly enable the same path on a card with fewer options. The
 # freeform path queues supervisor context and never a keyed answer; only an
 # explicit option uses the choice channel. Every decision card also carries the
 # standard `reconcile` option, and the payload validator reserves that value
@@ -289,9 +290,9 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
 }
 
 # Drop every stale decision card, give every surviving decision card the
-# standard reconcile choice, and enable the separate freeform path on every
-# card with explicit options. Injecting both controls here makes them board
-# properties rather than composer conventions.
+# standard reconcile choice, and enable the separate freeform path when the
+# effective option list has multiple choices. An explicit payload opt-in on a
+# card with fewer choices remains intact.
 effective_payload() {  # <data.json> <dest.json>
   local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0
   landed_keys=$(jq -c '
@@ -333,7 +334,7 @@ effective_payload() {  # <data.json> <dest.json>
           hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
         }]
         else . end
-      | if (.options | length) > 0 then .allow_freeform = true else . end
+      | if (.options | length) > 1 then .allow_freeform = true else . end
     ]' "$data" > "$dest" || return 1
 }
 
