@@ -5538,9 +5538,13 @@ test_terminal_stale_outcome_covered_busy_then_stop_surfaces() {
   printf 'working on the follow-up\nCtrl+c:cancel' > "$capture_file"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "the watcher exited while the worker was busy: $(cat "$out")"
+  case "$(cat "$state/.outcome-busy-$key" 2>/dev/null)" in
+    outcome-covered:14:*) ;;
+    *) fail "a busy pane did not break the outcome-covered window: $(cat "$state/.outcome-busy-$key" 2>/dev/null)" ;;
+  esac
   case "$(cat "$throttle" 2>/dev/null)" in
-    busy:outcome-covered:14:*) ;;
-    *) fail "a busy pane did not break the outcome-covered window: $(cat "$throttle" 2>/dev/null)" ;;
+    outcome-covered:14:*) ;;
+    *) fail "the busy observation wrote a foreign declaration into the shared re-surface throttle: $(cat "$throttle" 2>/dev/null)" ;;
   esac
   prime_stale_pane "$state" "$key" "$capture_file" 'Should I also bump the version?'
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
@@ -5571,10 +5575,12 @@ test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
   printf 'rebasing the branch\nCtrl+c:cancel' > "$capture_file"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "the watcher exited while the steered worker was busy: $(cat "$out")"
-  case "$(cat "$throttle" 2>/dev/null)" in
-    busy:outcome-covered:21:*) ;;
-    *) fail "a busy steered worker was not recorded against its covering outcome: $(cat "$throttle" 2>/dev/null)" ;;
+  case "$(cat "$state/.outcome-busy-$key" 2>/dev/null)" in
+    outcome-covered:21:*) ;;
+    *) fail "a busy steered worker was not recorded against its covering outcome: $(cat "$state/.outcome-busy-$key" 2>/dev/null)" ;;
   esac
+  [ ! -e "$throttle" ] \
+    || fail "the busy observation claimed the shared re-surface throttle: $(cat "$throttle" 2>/dev/null)"
   # It stops with a question in the pane and no new status line.
   printf 'Should I force-push the rebase?' > "$capture_file"
   : > "$state/ackfirst.turn-ended"
@@ -5590,6 +5596,41 @@ test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/ackfirst.turn-ended" >/dev/null \
     || fail "the post-steer silent stop was not queued"
   pass "a worker steered before its covering outcome still surfaces the stop that follows"
+}
+
+test_turn_ended_outcome_covered_branch_order_steer_then_stop_surfaces() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-outcome-branch-order); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-branchorder"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/branchorder.meta"
+  printf 'done: PR https://example.test/pr/41 checks green\n' > "$state/branchorder.status"
+  backdate_path "$state/branchorder.status"
+  printf '%s' "$(seen_sig "$state/branchorder.status")" > "$state/.seen-branchorder_status"
+  # Exactly the order bin/fm-branch-prompt.sh documents: the branch steers the
+  # finished worker and reports in its next step, so the covering outcome is the
+  # newest byte in play and the index needs no backdating to look covering. The
+  # worker then ends its turn seconds later, writing no status, so no poll ever
+  # had the chance to sample it busy.
+  record_acked_steer "$state" branchorder
+  write_covered_outcome_index "$state" branchorder 33
+  [ ! -e "$state/.outcome-busy-$key" ] || fail "the fixture recorded a busy interval it must not need"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "the fixture armed a throttle it must not need"
+  printf 'Should I force-push the rebase?' > "$capture_file"
+  : > "$state/branchorder.turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a short silent stop after a branch-order steer stayed hidden"; }
+  grep -F "signal: $state/branchorder.turn-ended" "$out" >/dev/null \
+    || fail "the branch-order post-steer stop did not print: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the branch-order post-steer stop failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/branchorder.turn-ended" >/dev/null \
+    || fail "the branch-order post-steer stop was not queued"
+  pass "a steer the covering outcome outlived still surfaces the worker's next stop"
 }
 
 test_status_span_actionable_classifier
@@ -5661,6 +5702,7 @@ test_terminal_stale_outcome_covered_post_steer_death_surfaces
 test_terminal_stale_outcome_covered_static_pane_resurfaces_on_cadence
 test_terminal_stale_outcome_covered_busy_then_stop_surfaces
 test_turn_ended_outcome_covered_steer_acked_before_report_surfaces
+test_turn_ended_outcome_covered_branch_order_steer_then_stop_surfaces
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

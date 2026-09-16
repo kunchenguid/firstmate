@@ -716,7 +716,7 @@ signal_turnend_outcome_covered() {  # <file> ...
   local rec_task task_index i j count declaration
   local max_absorb_secs=9223372036854775807
   local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=() snapshot_windows=() snapshot_keys=()
-  local -a signal_indexes=() covered_keys=() missing_keys=() created_keys=()
+  local -a covered_keys=() missing_keys=() created_keys=()
   [ "$#" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
@@ -764,7 +764,6 @@ signal_turnend_outcome_covered() {  # <file> ...
     [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
     declaration=$(outcome_covered_declaration "$task") || return 1
     ! outcome_covered_window_saw_busy "$key" "$declaration" || return 1
-    signal_indexes+=("$task_index")
     covered_keys+=("$key")
   done
   [ "${#covered_keys[@]}" -gt 0 ] || return 1
@@ -1515,12 +1514,15 @@ captain_call_stale_bound() {  # <window-key> <task>
 outcome_covered_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2 throttle
   STALE_WAIT_DECLARATION=$(outcome_covered_declaration "$task") || return 1
+  if outcome_covered_window_saw_busy "$key" "$STALE_WAIT_DECLARATION"; then
+    return 1
+  fi
   throttle="$STATE/.paused-resurfaced-$key"
-  case "$(cat "$throttle" 2>/dev/null || true)" in
-    "$STALE_WAIT_DECLARATION") stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" ;;
-    "busy:$STALE_WAIT_DECLARATION") return 1 ;;
-    *) printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle" ;;
-  esac
+  if [ "$(cat "$throttle" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  else
+    printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle"
+  fi
 }
 
 # The coverage identity a covered absorb is bound to: the covering outcome's
@@ -1538,7 +1540,7 @@ outcome_covered_throttle_armed() {  # <window-key>
   local throttle="$STATE/.paused-resurfaced-$1"
   [ -f "$throttle" ] || return 1
   case "$(cat "$throttle" 2>/dev/null || true)" in
-    outcome-covered:*|busy:outcome-covered:*) return 0 ;;
+    outcome-covered:*) return 0 ;;
   esac
   return 1
 }
@@ -1546,26 +1548,22 @@ outcome_covered_throttle_armed() {  # <window-key>
 # 0 when this window was seen busy under the CURRENT coverage identity: the
 # worker ran after the outcome that covers its status log, so whatever it does
 # next is news the outcome cannot vouch for. A newer outcome, or any new status
-# byte, changes the identity and retires the observation with it.
+# byte, changes the identity and retires the observation with it. The record is
+# this proof's own .outcome-busy-<key> marker rather than the shared re-surface
+# throttle, whose contents the declared-wait and captain-call cadences own and
+# whose gates a foreign declaration would skip.
 outcome_covered_window_saw_busy() {  # <window-key> <declaration>
-  [ "$(cat "$STATE/.paused-resurfaced-$1" 2>/dev/null || true)" = "busy:$2" ]
+  [ "$(cat "$STATE/.outcome-busy-$1" 2>/dev/null || true)" = "$2" ]
 }
 
-# Record that a covered pane is working again. Runs on every busy poll, not only
-# after a covered stale sight armed the throttle, because the branch may steer a
-# finished worker and report the steer as the covering outcome: nothing else then
-# marks the turn that steer starts. A declaration this window does not own - a
-# declared wait, a captain call - is never overwritten.
+# Record that a covered pane is working again, so the stop that ends this turn
+# is not absorbed as a finished result that was already delivered.
 note_outcome_covered_busy() {  # <window-key> <task>
-  local key=$1 task=$2 throttle recorded declaration
-  throttle="$STATE/.paused-resurfaced-$key"
-  recorded=$(cat "$throttle" 2>/dev/null || true)
-  case "$recorded" in
-    ''|outcome-covered:*|busy:outcome-covered:*) ;;
-    *) return 0 ;;
-  esac
+  local key=$1 task=$2 marker declaration
+  marker="$STATE/.outcome-busy-$key"
   declaration=$(outcome_covered_declaration "$task") || return 0
-  [ "$recorded" = "busy:$declaration" ] || printf 'busy:%s' "$declaration" > "$throttle"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$declaration" ] \
+    || printf '%s' "$declaration" > "$marker"
 }
 
 surface_terminal_stale() {  # <window> <window-key> <hash>
@@ -1577,7 +1575,7 @@ surface_terminal_stale() {  # <window> <window-key> <hash>
     rm -f "$STATE/.paused-resurfaced-$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.outcome-busy-$key"
   clear_write_tracking "$key"
   stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
   stale_record=$(status_span_first_actionable_record "$stale_status" 0)
