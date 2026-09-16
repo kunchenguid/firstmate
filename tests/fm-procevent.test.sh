@@ -1084,6 +1084,39 @@ assert_absent "$CLAIM" "the replacement claim generation is released after compl
 assert_absent "$HC/state/procevent/.stale-src.stale-token.output" "stale claim recovery removes its abandoned staging generation"
 pass "stale-owner recovery removes abandoned output without displacing a live owner"
 
+# The claim shape that held a fleet board's answer channel dead for a week: the
+# holder is long gone and its claim records the owning state root's full
+# identity, but that recorded identity no longer matches the directory it names
+# (a reboot renumbered the volume's device), and the state root has no
+# capture-reservation directory at all. The reservation tidy-up cannot vouch
+# for that recorded root, and that must stay a veto only while the generation
+# is not provably gone: once the holder is dead and its group is empty, `start`
+# reclaims the source instead of refusing with "cannot claim source".
+HDRIFT="$TMP_ROOT/hdrift"; new_home "$HDRIFT"
+HDRIFT_STATE=$(cd -P -- "$HDRIFT/state" && pwd -P)
+pe_register "$HDRIFT" lavish drifted-src -- /bin/echo recovered >/dev/null
+pr_lib() { bash -c '. "$1/bin/fm-pr-lib.sh"; "$2" "$3"' _ "$ROOT" "$@"; }
+drifted_reg_identity=$(pr_lib fm_pr_file_identity "$HDRIFT_STATE/procevent/drifted-src.source") \
+  || fail "could not read the drifted fixture registration identity"
+drifted_device=$(pr_lib fm_pr_file_device "$HDRIFT_STATE") || fail "could not read the drifted fixture state device"
+drifted_inode=$(pr_lib fm_pr_file_inode "$HDRIFT_STATE") || fail "could not read the drifted fixture state inode"
+drifted_mode=$(pr_lib fm_pr_file_mode "$HDRIFT_STATE") || fail "could not read the drifted fixture state mode"
+kill -0 999999 2>/dev/null && fail "fixture invalid: the drifted claim names a live pid"
+kill -0 -999999 2>/dev/null && fail "fixture invalid: the drifted claim's process group is alive"
+printf '%s\n%s\ndrifted-token\ndrifted-identity\n%s\n%s\nactive\n%s\n%s\n%s\n%s\n%s\n' \
+  "$HDRIFT" 999999 "$HDRIFT_STATE/procevent" "$drifted_reg_identity" \
+  "$HDRIFT_STATE" "$((drifted_device + 7))" "$drifted_inode" "$(id -u)" "$drifted_mode" \
+  > "$FM_PROCEVENT_CLAIM_ROOT/drifted-src.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/drifted-src.claim"
+assert_absent "$HDRIFT_STATE/procevent-capture-reservations" \
+  "the drifted-claim fixture must start without a capture-reservation directory"
+out=$(pe "$HDRIFT" start drifted-src 2>&1) \
+  || fail "start refused a provably dead holder whose recorded state identity drifted: $out"
+assert_contains "$out" "captured:" "the reclaimed source did not run to capture: $out"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/drifted-src.claim" \
+  "the replacement generation did not release its claim after completion"
+pass "start reclaims a dead holder whose recorded state-root identity no longer matches"
+
 HC_OLD="$TMP_ROOT/hc-old"; new_home "$HC_OLD"
 HC_NEW="$TMP_ROOT/hc-new"; new_home "$HC_NEW"
 HC_OLD_STATE="$TMP_ROOT/hc-old-state"

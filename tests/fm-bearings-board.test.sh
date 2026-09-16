@@ -619,10 +619,72 @@ test_build_starts_a_listener_for_an_already_armed_board() {
   sleep 1
 
   out=$(run_board "$home" build "$data") || fail "the rebuild failed"
-  assert_contains "$out" "already-armed: $sid" "the rebuild re-registered the source: $out"
+  assert_not_contains "$out" "already-armed: " \
+    "the rebuild called a dead answer channel armed: $out"
+  assert_contains "$out" "not-listening: $sid (observed owner: none)" \
+    "the rebuild did not report the dead listener it found: $out"
+  assert_contains "$out" "listening: live" "the rebuild did not report its replacement: $out"
   [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
     || fail "the rebuilt board is registered but nothing is listening"
-  pass "a rebuild starts a listener when an already-armed board has none"
+  pass "a rebuild reports and replaces a registered listener that died instead of calling it armed"
+}
+
+test_rebuild_reports_already_armed_only_for_a_live_listener() {
+  local home data board out sid
+  home=$(make_home live-rearm)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  sid=$(run_lavish_source_id "$home" "$board")
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
+    || fail "the first build left no live listener to rebuild over"
+
+  out=$(run_board "$home" build "$data") || fail "the rebuild failed"
+  assert_contains "$out" "already-armed: $sid" "a live listener was not reported as armed: $out"
+  assert_not_contains "$out" "not-listening: " "a live listener was reported dead: $out"
+  assert_not_contains "$out" "listening: live" "a live listener was replaced: $out"
+  pass "already-armed is printed only over a listener that is verified live"
+}
+
+test_rebuild_over_a_dead_claim_with_drifted_state_identity_replaces_it() {
+  local home data board out sid claim device
+  home=$(make_home drifted-claim)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  sid=$(run_lavish_source_id "$home" "$board")
+
+  # The shape a board sat silent behind: the runner is long dead and the claim
+  # still records the state root's identity from before a reboot changed the
+  # volume's device number, so the recorded identity no longer matches the
+  # directory it names. Registration presence alone must not read as armed,
+  # and the dead generation must still be displaced by a live replacement.
+  claim="$home/procevent-claims/$sid.claim"
+  assert_present "$claim" "the first build left no listener to lose"
+  kill -KILL -"$(sed -n '2p' "$claim")" 2>/dev/null || true
+  kill -KILL "$(sed -n '2p' "$claim")" 2>/dev/null || true
+  sleep 1
+  [ "$(wc -l < "$claim" | tr -d ' ')" -eq 12 ] \
+    || fail "the claim does not record a state-root identity to drift: $(cat "$claim")"
+  device=$(sed -n '9p' "$claim")
+  case "$device" in ''|*[!0-9]*) fail "the claim's device line is not numeric: $device" ;; esac
+  awk -v line=9 -v value="$((device + 7))" 'NR == line { print value; next } { print }' "$claim" > "$claim.drifted" \
+    || fail "cannot rewrite the claim's recorded device"
+  chmod 0600 "$claim.drifted" && mv -f -- "$claim.drifted" "$claim"
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = none ] \
+    || fail "the drifted dead claim is not reported as unowned before the rebuild"
+
+  out=$(run_board "$home" build "$data") || fail "the rebuild over the drifted dead claim failed: $out"
+  assert_not_contains "$out" "already-armed: " \
+    "the rebuild called a dead answer channel armed: $out"
+  assert_contains "$out" "not-listening: $sid (observed owner: none)" \
+    "the rebuild did not report the dead listener it found: $out"
+  assert_contains "$out" "listening: live" "the rebuild did not report its replacement: $out"
+  [ "$(run_procevent "$home" list | awk -v id="$sid" 'NR > 1 && $1 == id { print $3 }')" = live ] \
+    || fail "the rebuilt board is registered but nothing is listening"
+  pass "a rebuild over a dead claim with a drifted state-root identity reports it and replaces it"
 }
 
 # --- part 2: a landed subject is not a live call ----------------------------
@@ -789,6 +851,8 @@ test_build_reopens_a_session_the_captain_ended
 test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
+test_rebuild_reports_already_armed_only_for_a_live_listener
+test_rebuild_over_a_dead_claim_with_drifted_state_identity_replaces_it
 test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener

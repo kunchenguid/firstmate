@@ -28,7 +28,10 @@
 #              served: <path>
 #              bound: <source-id>
 #              armed: <source-id>            (first registration)
-#              already-armed: <source-id>    (registration already present)
+#              already-armed: <source-id>    (registered AND its listener is live)
+#              not-listening: <source-id> (observed owner: <owner>)
+#                                            (registered, but no live listener;
+#                                            a replacement is started below)
 #              listening: <owner>            (only when a replacement was needed)
 #            Every dropped card is named on stderr as a `dropped-landed-card:`
 #            line, so a rebuild states what it removed instead of quietly
@@ -44,7 +47,11 @@
 # generation through the guarded adapter path, arms a fresh registration, and
 # accepts only the replacement listener as live. A registered board with no
 # live owner also gets a replacement before build returns, because
-# `already-armed` is not the same fact as `listening`.
+# `already-armed` is not the same fact as `listening`: `already-armed` is
+# printed only over a listener `bin/fm-procevent.sh list` reports as live, and
+# a registration whose claim is dead, orphaned, or uncertain is reported as
+# `not-listening` with the observed owner, so a rebuild over a dead answer
+# channel can never read as healthy.
 #
 # CAPTAIN'S CALL HYGIENE. A decision card is dropped when its work item, PR, or
 # structured artifact/version subject appears among the payload's own landed
@@ -430,8 +437,14 @@ command_build() {
       || fail "cannot arm a fresh board source after reopening"
     printf 'armed: %s\n' "$sid"
     owner=$(source_owner "$sid")
-  elif [ -n "$owner" ]; then
+  elif [ "$owner" = live ]; then
     printf 'already-armed: %s\n' "$sid"
+  elif [ -n "$owner" ]; then
+    # Registration presence is not a listener. A claim whose runner died, or
+    # one nobody can vouch for, is a channel every board answer would fall
+    # into and vanish, so name that before the replacement below is attempted
+    # rather than calling it armed.
+    printf 'not-listening: %s (observed owner: %s)\n' "$sid" "$owner"
   else
     "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
       || fail "cannot arm the board as a process-event source"
