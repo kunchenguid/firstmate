@@ -1015,6 +1015,31 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_unknown_pane_preserves_open_decision() {
+  local home fakebin out
+  home=$(make_home unknown-pane-decision)
+  mkdir -p "$home/projects/unknown-pane"
+  fm_write_meta "$home/state/unknown-pane.meta" \
+    "window=firstmate:fm-unknown-pane" \
+    "worktree=$home/projects/unknown-pane" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'needs-decision [key=route]: choose a route\n' > "$home/state/unknown-pane.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "unknown-pane")
+    | .current_state.state == "unknown"
+      and .current_state.source == "pane"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "route"
+  ' >/dev/null || fail "an uncertain pane read erased an open decision: $out"
+  pass "an uncertain pane read preserves an open decision"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -1127,6 +1152,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_unknown_pane_preserves_open_decision
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
