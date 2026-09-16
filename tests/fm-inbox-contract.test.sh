@@ -72,6 +72,7 @@ pass "a re-recorded outcome replaces the earlier one (latest wins)"
 
 # ---------------------------------------------------------------- export schema
 
+sleep 1
 id2=$(queue_note "note with no outcome yet")
 json=$(run_inbox list --json)
 ID1="$id" ID2="$id2" python3 - "$json" <<'PY' || fail "list --json must emit a stable, valid schema"

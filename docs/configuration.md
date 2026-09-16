@@ -941,6 +941,7 @@ Never describe this path as at-least-once, no-loss, or lossless.
 
 `bin/fm-inbox.sh` is the surface an external tool (the sheets bridge) hands a captain message to firstmate through and reads back what became of it; the script's own header owns the exact commands.
 `note` queues one durable note and appends one `check` wake, `outcome <id> <text>` records a latest-wins result summary for that note, and `list --json` exports every note, pending or handled, newest first, as one JSON array of `{id, state, outcome, outcome_at}` with null fields when no outcome was recorded, so a poller reads progress without touching firstmate's private state files.
+When firstmate finishes processing a captain inbox note, it records a short outcome summary with `outcome <id> <short summary>` so the bridge can read progress back into the sheet, then acknowledges the note with `drain --ack <id>`.
 A note without an outcome stays valid, an unknown id is refused, and none of these three subcommands needs the spoken-interface configuration below.
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
