@@ -187,16 +187,16 @@ jq \
     (.freshness.age_seconds // null) as $source_age
     | if ($source_age | type) == "number" and $source_age >= 0
       then $source_age + $parent_age else $parent_age end;
-  def open_decision_summaries:
+  def open_decisions:
     reduce ((.hints.open_decisions // []) | arr[]
       | select(type == "object"
                and ((.key // null) | ident) != null
                and (.verb == "needs-decision" or .verb == "blocked"))
-      | {key:(.key | ident),summary:((.summary // null) | text(240))}
+      | {key:(.key | ident),verb:.verb,summary:((.summary // null) | text(240))}
       | select(.summary != null)) as $decision
       ({seen:{},items:[]};
        if .seen[$decision.key] then .
-       else .seen[$decision.key] = true | .items += [$decision.summary]
+       else .seen[$decision.key] = true | .items += [$decision]
        end)
     | .items;
   def task_projection($now):
@@ -207,7 +207,9 @@ jq \
        | if ["live","blocked","dated","aged","superseded","resolved"] | index($bucket)
          then $bucket else null end) as $hold_bucket
     | (lane_for($state; ($work.state // null); $hold_bucket)) as $lane
-    | ($task | open_decision_summaries) as $open_decisions
+    | ($task | open_decisions) as $open_decision_records
+    | ($open_decision_records | map(.summary)) as $open_decisions
+    | ($open_decision_records | map(select(.verb == "blocked") | .summary)) as $open_blockers
     | (($work.hold_reason // null) | text(240)) as $hold_question
     | (if $hold_bucket == null or $hold_question == null then $open_decisions
        else reduce $open_decisions[] as $summary
@@ -266,6 +268,7 @@ jq \
         _truncated:(($blockers | length) > $max_blockers or ($decisions | length) > $max_decisions),
         gate:(if (($work.unresolved_blocker_ids // []) | arr | length) > 0 then
                  {status:"blocked",label:(((($work.unresolved_blocker_ids // []) | arr | map(text(80)) | join(", ")) | text(240)))}
+              elif ($open_blockers | length) > 0 then {status:"blocked",label:(($open_blockers | join(" · ")) | text(240))}
               elif $hold_bucket != null then {status:$hold_bucket,label:(($work.hold_reason // "Captain hold") | text(240))}
               elif $has_open_decision then {status:"decision",label:(($open_decisions | join(" · ")) | text(240))}
               else {status:"unavailable",label:"Unavailable"} end),

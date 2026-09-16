@@ -117,7 +117,10 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
         {key:"third",verb:"blocked",summary:"Choose fallback"}
       ]' "$FIXTURES/main-open-decision.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$keyed"
-  jq -e '.projects[0].tasks[0].decisions == ["Approve","Approve","Choose fallback"]' "$keyed" >/dev/null \
+  jq -e '.counts.blocked == 1 and .projects[0].blocker_count == 1
+      and (.projects[0].tasks[0]
+        | .decisions == ["Approve","Approve","Choose fallback"]
+          and .gate == {status:"blocked",label:"Choose fallback"})' "$keyed" >/dev/null \
     || fail "main decisions lost keyed identity, canonical order, or same-key deduplication"
 
   jq --argjson count 20 '
