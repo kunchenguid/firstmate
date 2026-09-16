@@ -232,6 +232,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+TURNEND_OUTCOME_ABSORB_SECS=${FM_TURNEND_OUTCOME_ABSORB_SECS:-900}  # longest a task's
+                                      # bare turn-ends may ride an already-handled
+                                      # outcome-index coverage proof before one wake
+                                      # surfaces and the window restarts
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -695,6 +699,113 @@ signal_turnend_panes_churned() {  # <file> ...
       return 1
     fi
   done
+  return 0
+}
+
+# Default-on proof for batches that contain ONLY bare .turn-ended markers: each
+# referenced task already has a valid branch-outcome index covering its whole
+# current status log under a matching identity. Reuses the same bounded per-task
+# index the drain trusts for its lost-wake backstop. Any .status file, absent or
+# invalid index, identity mismatch, new status bytes, unresolvable task, or an
+# exhausted per-window FM_TURNEND_OUTCOME_ABSORB_SECS bound returns 1 so the wake
+# surfaces exactly as before. The bound is mandatory for the same reason the
+# churn absorb's is: a worker that loops forever without appending status would
+# otherwise hide behind unchanged coverage while churn defeats the stale backbone.
+signal_turnend_outcome_covered() {  # <file> ...
+  local f base task meta kind w key now_s absorb_secs marker since age created
+  local rec_task task_index i j count declaration
+  local max_absorb_secs=9223372036854775807
+  local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=() snapshot_windows=() snapshot_keys=()
+  local -a covered_keys=() missing_keys=() created_keys=()
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status)     return 1 ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            return 1 ;;
+    esac
+    [ -n "$task" ] || return 1
+    task_index=-1
+    for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+      [ "${signal_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    if [ "$task_index" -lt 0 ]; then
+      signal_tasks+=("$task")
+    fi
+  done
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    rec_task=${meta##*/}
+    rec_task=${rec_task%.meta}
+    kind=$(fm_meta_get "$meta" kind)
+    w=$(fm_backend_target_of_meta "$meta")
+    key=
+    [ -n "$w" ] && key=$(window_key "$w")
+    snapshot_tasks+=("$rec_task")
+    snapshot_kinds+=("$kind")
+    snapshot_windows+=("$w")
+    snapshot_keys+=("$key")
+  done
+  for task in "${signal_tasks[@]}"; do
+    task_index=-1
+    for ((i = 0; i < ${#snapshot_tasks[@]}; i++)); do
+      [ "${snapshot_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
+    done
+    [ "$task_index" -ge 0 ] || return 1
+    w=${snapshot_windows[$task_index]}
+    key=${snapshot_keys[$task_index]}
+    [ -n "$w" ] && [ -n "$key" ] || return 1
+    count=0
+    for ((j = 0; j < ${#snapshot_keys[@]}; j++)); do
+      [ "${snapshot_keys[$j]}" = "$key" ] && count=$((count + 1))
+    done
+    [ "$count" -eq 1 ] || return 1
+    [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
+    declaration=$(outcome_covered_declaration "$task") || return 1
+    ! outcome_covered_window_saw_busy "$key" "$declaration" || return 1
+    covered_keys+=("$key")
+  done
+  [ "${#covered_keys[@]}" -gt 0 ] || return 1
+  [[ $TURNEND_OUTCOME_ABSORB_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  if [ "${#TURNEND_OUTCOME_ABSORB_SECS}" -gt "${#max_absorb_secs}" ] \
+    || { [ "${#TURNEND_OUTCOME_ABSORB_SECS}" -eq "${#max_absorb_secs}" ] \
+      && [[ $TURNEND_OUTCOME_ABSORB_SECS -gt $max_absorb_secs ]]; }; then
+    return 1
+  fi
+  absorb_secs=$((10#$TURNEND_OUTCOME_ABSORB_SECS))
+  now_s=$(date +%s)
+  for key in "${covered_keys[@]}"; do
+    marker="$STATE/.turnend-covered-since-$key"
+    if [ ! -e "$marker" ]; then
+      [ ! -L "$marker" ] || return 1
+      missing_keys+=("$key")
+      continue
+    fi
+    since=$(cat "$marker" 2>/dev/null) || return 1
+    [[ $since =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    if [ "${#since}" -gt "${#now_s}" ] \
+      || { [ "${#since}" -eq "${#now_s}" ] && [[ $since > $now_s ]]; }; then
+      return 1
+    fi
+    age=$((10#$now_s - 10#$since))
+    if [ "$age" -ge "$absorb_secs" ]; then
+      rm -f "$marker"
+      return 1
+    fi
+  done
+  for key in ${missing_keys[@]+"${missing_keys[@]}"}; do
+    marker="$STATE/.turnend-covered-since-$key"
+    if (set -C; printf '%s' "$now_s" > "$marker") 2>/dev/null; then
+      created_keys+=("$key")
+      continue
+    fi
+    for created in ${created_keys[@]+"${created_keys[@]}"}; do
+      rm -f "$STATE/.turnend-covered-since-$created"
+    done
+    return 1
+  done
+  FM_TURNEND_OUTCOME_COVERED=1
   return 0
 }
 
@@ -1389,6 +1500,74 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# Bound a terminal-status stale alarm whose latest status log is already covered
+# by a branch outcome. The finished result was already delivered; a new idle-pane
+# hash has nothing new to say until status bytes or a newer outcome change the
+# coverage identity, or the pane was seen busy under that identity. Only that
+# NEW-hash repetition is absorbed here - a stable hash stays as inert after a
+# first terminal alarm as it already was before this bound, matching the open
+# captain-call contract above. No cadence re-surface: a forgotten teardown is
+# not a supervision-noise problem this absorb exists to solve, and inventing a
+# recurring wake would reverse the intent.
+# Leaves STALE_WAIT_DECLARATION alone so a surface after busy cannot claim the
+# shared .paused-resurfaced-* throttle with an outcome-covered body.
+outcome_covered_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 declaration
+  declaration=$(outcome_covered_declaration "$task") || return 1
+  ! outcome_covered_window_saw_busy "$key" "$declaration"
+}
+
+# The coverage identity a covered absorb is bound to: the covering outcome's
+# sequence plus the whole status-log signature. Fails when the task is not
+# covered, so every caller falls through to surfacing.
+outcome_covered_declaration() {  # <task>
+  local task=$1 sig
+  branch_outcome_index_covers_status "$task" || return 1
+  [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] || return 1
+  sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
+  printf 'outcome-covered:%s:%s' "$BRANCH_OUTCOME_INDEX_SEQ" "$sig"
+}
+
+# 0 when this window was seen busy under the CURRENT coverage identity: the
+# worker ran after the outcome that covers its status log, so whatever it does
+# next is news the outcome cannot vouch for. A newer outcome, or any new status
+# byte, changes the identity and retires the observation with it. The record is
+# this proof's own .outcome-busy-<key> marker rather than the shared re-surface
+# throttle, whose contents the declared-wait and captain-call cadences own and
+# whose gates a foreign declaration would skip.
+outcome_covered_window_saw_busy() {  # <window-key> <declaration>
+  [ "$(cat "$STATE/.outcome-busy-$1" 2>/dev/null || true)" = "$2" ]
+}
+
+# Record that a covered pane is working again, so the stop that ends this turn
+# is not absorbed as a finished result that was already delivered.
+note_outcome_covered_busy() {  # <window-key> <task>
+  local key=$1 task=$2 marker declaration
+  marker="$STATE/.outcome-busy-$key"
+  declaration=$(outcome_covered_declaration "$task") || return 0
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$declaration" ] \
+    || printf '%s' "$declaration" > "$marker"
+}
+
+surface_terminal_stale() {  # <window> <window-key> <hash>
+  local w=$1 key=$2 h=$3 stale_status stale_record stale_end stale_rest stale_ident
+  fm_wake_append stale "$w" "stale: $w" || exit 1
+  if [ -n "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_record "$key"
+  fi
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.outcome-busy-$key"
+  clear_write_tracking "$key"
+  stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+  stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+  case $? in
+    0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+    *) stale_end=''; stale_ident='' ;;
+  esac
+  mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
+  wake "stale: $w"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2260,6 +2439,7 @@ EOF
     # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
+    FM_TURNEND_OUTCOME_COVERED=0
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
@@ -2275,7 +2455,9 @@ EOF
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { ! signal_crew_provably_working $files \
+        && ! signal_turnend_panes_churned $files \
+        && ! signal_turnend_outcome_covered $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -2333,7 +2515,11 @@ $pending
 EOF
         wake "$reason"
       fi
-      triage_log "absorbed benign $reason"
+      if [ "${FM_TURNEND_OUTCOME_COVERED:-0}" -eq 1 ]; then
+        triage_log "absorbed benign signal (outcome-covered)"
+      else
+        triage_log "absorbed benign $reason"
+      fi
     fi
   fi
 
@@ -2378,6 +2564,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    [ "$busy_now" -ne 0 ] || note_outcome_covered_busy "$key" "$task"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2434,20 +2621,17 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              stale_wait_record "$key"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && outcome_covered_stale_bound "$key" "$task"; then
+              # A branch outcome already covered this terminal status. Further
+              # NEW pane hashes of the same finished state are noise until a new
+              # status event / newer outcome changes the coverage, or the pane
+              # was seen busy under that identity. A stable hash stays silent.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
-              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
-              case $? in
-                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
-                *) stale_end=''; stale_ident='' ;;
-              esac
-              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
-              wake "stale: $w"
+              triage_log "absorbed stale (outcome-covered): $w"
+            else
+              surface_terminal_stale "$w" "$key" "$h"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

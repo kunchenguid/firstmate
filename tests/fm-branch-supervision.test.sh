@@ -50,8 +50,8 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
-    *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
+    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*"set action to none only for a display-only finished result"*"When genuinely in doubt about action, choose main."*) ;;
+    *) fail "branch prompt lost the requested-result, progress-routine, routine-silence, or action rules" ;;
   esac
   case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
@@ -837,6 +837,75 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
   pass "the branch cannot force a teardown or bypass fm-control for a relaunch"
 }
 
+test_outcome_action_field_and_display_only_marker() {
+  local home store marker out status
+  home="$TMP_ROOT/store-action-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  marker="$home/state/.branch-outcomes-processed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'display only result' --action none >/dev/null \
+    || fail "action none captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'needs main' --action main >/dev/null \
+    || fail "action main captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-c --verdict routine --summary 'routine default' >/dev/null \
+    || fail "default-action routine append failed"
+
+  python3 - "$store" <<'PY' || fail "action field was not stored correctly"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert rows[0]["action"] == "none" and rows[1]["action"] == "main" and rows[2]["action"] == "main", rows
+PY
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-d --verdict routine --summary 'bad none' --action none 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted action none on a routine row"
+  assert_contains "$out" "action none is only valid on captain outcomes" \
+    "routine action-none refusal lost its diagnostic"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-e --verdict captain --summary 'bad action' --action maybe 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted an unknown action value"
+
+  # Legacy rows without action remain valid and read as main for display-only.
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-legacy","wake":"","verdict":"captain","summary":"legacy captain","silent":false,"statusEndpoint":0,"statusIdent":"-"}' \
+    >> "$store"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread >/dev/null \
+    || fail "legacy row without action was refused by unread"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "mark-read through display-only failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 --display-only \
+    || fail "display-only mark-processed refused a pure action:none span"
+  [ "$(cat "$marker")" = 1 ] || fail "display-only marker was not written"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "mark-read through main failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 --display-only 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "display-only mark-processed accepted an action:main row"
+  assert_contains "$out" "action:main" "display-only main refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 1 ] || fail "refused display-only mark moved the processed marker"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 4 --display-only 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "display-only mark-processed advanced past the read cursor"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 4 || fail "mark-read through legacy failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 4 --display-only 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "display-only mark-processed accepted a legacy/main span"
+  [ "$(cat "$marker")" = 1 ] || fail "refused legacy display-only mark moved the processed marker"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 \
+    || fail "ordinary mark-processed failed on action:main"
+  [ "$(cat "$marker")" = 2 ] || fail "ordinary mark-processed did not advance"
+  pass "outcome action field defaults safely and display-only mark-processed refuses main rows"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -846,6 +915,7 @@ test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
+test_outcome_action_field_and_display_only_marker
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
