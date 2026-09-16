@@ -46,6 +46,8 @@ model empty.json "$empty" 2026-09-15T12:01:00Z
 model cached-age.json "$aged" 2026-09-15T12:01:10Z
 model secondmate-generation-a.json "$secondmate_a" 2026-09-15T12:00:00Z
 model secondmate-generation-b.json "$secondmate_b" 2026-09-15T13:00:00Z
+states_json=$(jq -c . "$states")
+credential_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")).artifacts.pr_url="https://user:token@example.com/pull/1"' "$states")
 jq '.main_inventory.valid=false | .main_inventory.reason="inventory fixture invalid"' "$FIXTURES/empty.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
 jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
@@ -62,6 +64,10 @@ assert_eval '() => ({unsafe:[...document.links].some(a=>a.protocol!=="https:"),r
   '\"unsafe\":false' "renderer created an unsafe link"
 assert_eval '() => ({resources:performance.getEntriesByType("resource").filter(e=>!e.name.startsWith("file:")).length})' \
   '\"resources\":0' "renderer made an external resource request"
+assert_eval "() => {window.fmCockpit.replacePayload($credential_json); document.querySelector('.task-button').click(); return {credentialLinks:[...document.querySelectorAll('#task-detail a')].map(a=>a.href)};}" \
+  '\"credentialLinks\":[]' "renderer exposed a credential-bearing HTTPS link"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); return window.fmCockpit.getState();}" \
+  'healthy-work' "credential-link defense did not allow the safe fixture to be restored"
 
 assert_eval '() => {const b=document.querySelector(".project-button"); b.focus(); return {project:b.dataset.projectId,focused:document.activeElement===b}}' \
   '\"focused\":true' "project navigation could not receive keyboard focus"
@@ -77,7 +83,6 @@ chrome-devtools-axi press Enter >/dev/null || fail "Enter could not activate a t
 assert_eval '() => window.fmCockpit.getState()' 'queued-work' "Enter did not select the focused task"
 pass "desktop rendering, safe links, offline resources, landmarks, and keyboard navigation work in Chrome"
 
-states_json=$(jq -c . "$states")
 replacement_json=$(jq -c . "$replacement")
 promoted_json=$(jq -c '.projects |= (map(select(.id == "beta")) + map(select(.id != "beta")))' "$states")
 multiple_decisions_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).decisions=["Choose deployment window","Approve rollback policy"]' "$states")

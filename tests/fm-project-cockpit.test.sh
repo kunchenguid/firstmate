@@ -70,7 +70,8 @@ test_projection_is_deterministic_and_allowlisted() {
 
 test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
   local model=$TMP_ROOT/main-decision.json held=$TMP_ROOT/main-decision-held.json
-  local exact=$TMP_ROOT/main-decisions-exact.json over=$TMP_ROOT/main-decisions-over.json invalid=$TMP_ROOT/main-decision-invalid.json
+  local keyed=$TMP_ROOT/main-decisions-keyed.json exact=$TMP_ROOT/main-decisions-exact.json
+  local over=$TMP_ROOT/main-decisions-over.json invalid=$TMP_ROOT/main-decision-invalid.json
   project main-open-decision.json "$model"
   jq -e '
     .counts == {running:0,waiting:1,blocked:0,attention:1}
@@ -93,6 +94,16 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
       | .attention == true and .hold.question == "Choose API v1 or v2" and .decisions == []
         and .gate == {status:"live",label:"Choose API v1 or v2"}' "$held" >/dev/null \
     || fail "same-task canonical decision and hold were not merged without duplication"
+
+  jq '.tasks[0].hints.open_decisions = [
+        {key:"first",verb:"needs-decision",summary:"Approve"},
+        {key:"second",verb:"needs-decision",summary:"Approve"},
+        {key:"first",verb:"needs-decision",summary:"Superseded duplicate"},
+        {key:"third",verb:"blocked",summary:"Choose fallback"}
+      ]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$keyed"
+  jq -e '.projects[0].tasks[0].decisions == ["Approve","Approve","Choose fallback"]' "$keyed" >/dev/null \
+    || fail "main decisions lost keyed identity, canonical order, or same-key deduplication"
 
   jq --argjson count 20 '
       .tasks[0].hints.open_decisions = [range(0;$count) | {
@@ -121,8 +132,10 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
 
 test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   local first=$TMP_ROOT/secondmate-generation-a.json second=$TMP_ROOT/secondmate-generation-b.json
+  local parked=$TMP_ROOT/secondmate-generation-parked.json paused=$TMP_ROOT/secondmate-generation-paused.json
   local unproven=$TMP_ROOT/secondmate-generation-unproven.json done_one=$TMP_ROOT/done-1201.json
-  local done_two=$TMP_ROOT/done-1301.json working=$TMP_ROOT/working-1301.json
+  local done_two=$TMP_ROOT/done-1301.json stopped_one=$TMP_ROOT/stopped-1201.json
+  local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-a.json" --observed-at 2026-09-15T12:00:00Z > "$first"
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-b.json" --observed-at 2026-09-15T13:00:00Z > "$second"
   jq -e '.projects[0].tasks[0]
@@ -133,6 +146,16 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
       | .id == "mate-one:child" and .spawn_gen == "child-gen-b" and .state == "blocked"
         and .started_at == "2026-09-15T12:30:00Z"' "$second" >/dev/null \
     || fail "replacement secondmate child generation was not preserved"
+  jq '(.secondmate_current.records[0].active_children[0].state)="parked"' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$parked"
+  jq '(.secondmate_current.records[0].active_children[0].state)="paused"' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$paused"
+  jq -e '.projects[0].tasks[0]
+      | .spawn_gen == "child-gen-b" and .state == "parked" and .lane == "waiting"' "$parked" >/dev/null \
+    || fail "parked secondmate child generation was not consumed by the cockpit"
+  jq -e '.projects[0].tasks[0]
+      | .spawn_gen == "child-gen-b" and .state == "paused" and .lane == "waiting"' "$paused" >/dev/null \
+    || fail "paused secondmate child generation was not consumed by the cockpit"
   jq 'del(.secondmate_current.records[0].active_children[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven"
   jq -e '.projects[0].tasks[0]
@@ -146,6 +169,14 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
     || fail "done task invented elapsed time at the first projection clock"
   jq -e '.projects[0].tasks[0] | .state == "done" and .elapsed_seconds == null' "$done_two" >/dev/null \
     || fail "done task elapsed time grew at a later projection clock"
+  jq '(.tasks[0].current_state.state)="stopped"' "$FIXTURES/terminal-elapsed.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$stopped_one"
+  jq '(.tasks[0].current_state.state)="stopped"' "$FIXTURES/terminal-elapsed.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:01:00Z > "$stopped_two"
+  jq -e '.projects[0].tasks[0] | .state == "stopped" and .elapsed_seconds == null' "$stopped_one" >/dev/null \
+    || fail "stopped task invented elapsed time at the first projection clock"
+  jq -e '.projects[0].tasks[0] | .state == "stopped" and .elapsed_seconds == null' "$stopped_two" >/dev/null \
+    || fail "stopped task elapsed time grew at a later projection clock"
   jq '(.tasks[0].current_state.state)="working"' "$FIXTURES/terminal-elapsed.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:01:00Z > "$working"
   jq -e '.projects[0].tasks[0] | .state == "working" and .elapsed_seconds == 9060' "$working" >/dev/null \
@@ -299,7 +330,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
     and ([.projects[].tasks[] | select(.id == "mate-one:release-call")][0]
       | .lane == "waiting" and .attention == true and .hold.actionable == true
-        and .hold.question == "Pick blue or green")
+        and .hold.question == "Pick blue or green" and .decisions == [])
     and ([.projects[].tasks[] | select(.id == "mate-one:status-call")][0]
       | .lane == "waiting" and .attention == true and .project_id == "omega"
         and .state == "working" and .state_source == "structured-home"
@@ -386,7 +417,7 @@ test_attention_precedes_completed_history_and_project_caps() {
 
 test_builder_is_fail_closed_and_atomic() {
   local home=$TMP_ROOT/builder-home model=$TMP_ROOT/builder.json prior altered out rc before after field
-  local large=$TMP_ROOT/builder-large.json bytes
+  local large=$TMP_ROOT/builder-large.json bytes unsafe_url
   project states.json "$model"
   out=$(FM_HOME="$home" "$BOARD" build "$model") || fail "valid cockpit build failed: $out"
   assert_contains "$out" "board: $home/.lavish/project-cockpit.html" "builder did not report the stable path"
@@ -399,15 +430,20 @@ test_builder_is_fail_closed_and_atomic() {
   ! grep -Fq '</script><script>globalThis.injected=true' "$prior" || fail "script-closing text survived unescaped"
   grep -Fq '\u003c/script>' "$prior" || fail "script-closing text was not safely JSON escaped"
   before=$(sha256sum "$prior" | awk '{print $1}')
-  jq '.projects[0].tasks[0].artifacts.pr_url="http://unsafe.example/pull/1"' "$model" > "$altered"
-  set +e
-  out=$(FM_HOME="$home" "$BOARD" build "$altered" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "builder accepted an unsafe artifact URL"
-  assert_contains "$out" "does not satisfy fm-project-cockpit.v1" "unsafe URL refusal did not name the schema"
-  after=$(sha256sum "$prior" | awk '{print $1}')
-  [ "$before" = "$after" ] || fail "failed validation replaced the previous artifact"
+  for unsafe_url in \
+    'http://unsafe.example/pull/1' \
+    'https://user:token@example.com/pull/1' \
+    'https://user@example.com/pull/1'; do
+    jq --arg url "$unsafe_url" '.projects[0].tasks[0].artifacts.pr_url=$url' "$model" > "$altered"
+    set +e
+    out=$(FM_HOME="$home" "$BOARD" build "$altered" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "builder accepted unsafe artifact URL: $unsafe_url"
+    assert_contains "$out" "does not satisfy fm-project-cockpit.v1" "unsafe URL refusal did not name the schema"
+    after=$(sha256sum "$prior" | awk '{print $1}')
+    [ "$before" = "$after" ] || fail "failed URL validation replaced the previous artifact"
+  done
   for field in attention_count active_count blocker_count latest_phase last_observed_at oldest_active_seconds total_task_count; do
     jq --arg field "$field" 'del(.projects[0][$field])' "$model" > "$altered"
     set +e

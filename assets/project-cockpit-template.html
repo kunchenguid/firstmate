@@ -238,7 +238,10 @@ __FM_PROJECT_COCKPIT_DATA__
       return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
     };
     const safeUrl = (value) => {
-      try { const url = new URL(value); return url.protocol === "https:" ? url.href : null; }
+      try {
+        const url = new URL(value);
+        return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
+      }
       catch (_) { return null; }
     };
     const el = (tag, className, content) => {

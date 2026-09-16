@@ -1039,7 +1039,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[]
-         | select(.id == $work.id and .current_state.state == "working")
+         | select(.id == $work.id
+                  and (.current_state.state as $state
+                       | ["working","parked","paused","blocked"] | index($state)) != null)
          | {id,spawn_gen,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),

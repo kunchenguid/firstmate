@@ -183,13 +183,17 @@ jq \
     | if ($source_age | type) == "number" and $source_age >= 0
       then $source_age + $parent_age else $parent_age end;
   def open_decision_summaries:
-    ((.hints.open_decisions // []) | arr
-     | map(select(type == "object"
-                  and ((.key // null) | ident) != null
-                  and (.verb == "needs-decision" or .verb == "blocked"))
-           | ((.summary // null) | text(240)))
-     | map(select(. != null and . != ""))
-     | unique);
+    reduce ((.hints.open_decisions // []) | arr[]
+      | select(type == "object"
+               and ((.key // null) | ident) != null
+               and (.verb == "needs-decision" or .verb == "blocked"))
+      | {key:(.key | ident),summary:((.summary // null) | text(240))}
+      | select(.summary != null and .summary != "")) as $decision
+      ({seen:{},items:[]};
+       if .seen[$decision.key] then .
+       else .seen[$decision.key] = true | .items += [$decision.summary]
+       end)
+    | .items;
   def task_projection($now):
     . as $task
     | (task_state) as $state
@@ -219,7 +223,7 @@ jq \
         state_detail_status:"unavailable",
         observed_at:$observed,
         started_at:$started_at,
-        elapsed_seconds:(if $started_at == null or $state == "done" or $state == "failed" or ($work.state // null) == "done"
+        elapsed_seconds:(if $started_at == null or $state == "done" or $state == "failed" or $state == "stopped" or ($work.state // null) == "done"
           then null
           else (($now - ($started_at | fromdateiso8601)) | floor | if . < 0 then 0 else . end)
           end),
@@ -423,7 +427,12 @@ jq \
        | . + {_identity:("secondmate:" + .id),_priority:2} ]) as $secondmate_queued
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
+       | ([ $mate.queued[]?
+            | select(.captain_actionable == true and .hold_bucket != null)
+            | .id ]) as $structured_hold_ids
        | (($mate.decisions_open // [])
+          | map(select((.verb == "captain-hold"
+                        and (.id as $id | $structured_hold_ids | index($id) != null)) | not))
           | sort_by([.id,(if .hold_bucket != null then 0 else 1 end),(.key // ""),(.verb // ""),(.summary // "")])
           | group_by(.id)[]) as $decision_group
        | $decision_group[0] as $decision

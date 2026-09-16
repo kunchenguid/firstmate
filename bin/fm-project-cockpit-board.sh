@@ -54,7 +54,7 @@ validate_payload() {  # <data.json>
     def stamp: type == "string" and (try fromdateiso8601 catch null) != null;
     def date_or_stamp: type == "string" and (test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") or (try fromdateiso8601 catch null) != null);
     def nonnegative_integer: type == "number" and . >= 0 and floor == .;
-    def https: . == null or (text(500) and test("^https://[^[:space:]<>]+$"));
+    def https: . == null or (text(500) and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]<>]*)?$"));
     def task:
       type == "object"
       and (.id | text(128))

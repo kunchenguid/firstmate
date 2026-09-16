@@ -487,6 +487,57 @@ test_event_hints_follow_reconciled_current_state() {
   pass "snapshot event hints follow reconciled current state"
 }
 
+test_home_summary_preserves_nonterminal_child_generations() {
+  local home fakebin out child state child_gen
+  home=$(make_home summary-nonterminal-generations)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] working-child - Working child (repo: alpha) (kind: ship)
+- [ ] parked-child - Parked child (repo: alpha) (kind: ship)
+- [ ] paused-child - Paused child (repo: alpha) (kind: ship)
+- [ ] blocked-child - Blocked child (repo: alpha) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  for child in working-child parked-child paused-child blocked-child; do
+    mkdir -p "$home/projects/$child"
+    fm_write_meta "$home/state/$child.meta" \
+      "window=firstmate:fm-$child" \
+      "worktree=$home/projects/$child" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=ship" \
+      "spawn_gen=gen-$child" \
+      "started_at=2026-09-15T11:00:00Z"
+  done
+  child_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" working-child)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" working-child busy --gen "$child_gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'working: implementing\n' > "$home/state/working-child.status"
+  record_claude_idle "$home/state" parked-child
+  printf 'needs-decision [key=route]: choose a route\n' > "$home/state/parked-child.status"
+  record_claude_idle "$home/state" paused-child
+  printf 'paused: awaiting upstream\n' > "$home/state/paused-child.status"
+  record_claude_idle "$home/state" blocked-child
+  printf 'blocked: missing access\n' > "$home/state/blocked-child.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  for state in working parked paused blocked; do
+    printf '%s' "$out" | jq -e --arg id "$state-child" --arg state "$state" '
+      .active_children[] | select(.id == $id)
+      | .state == $state and .spawn_gen == ("gen-" + $id)
+        and .started_at == "2026-09-15T11:00:00Z"
+    ' >/dev/null || fail "$state child lost canonical generation-bearing summary evidence: $out"
+  done
+  printf '%s' "$out" | jq -e '
+    .counts.active_children == 4 and (.active_children | length) == 4
+  ' >/dev/null || fail "nonterminal child summary count omitted a held lifecycle state: $out"
+  pass "home-summary preserves generation for every nonterminal child lifecycle state"
+}
+
 test_scout_reports_include_teardown_reports() {
   local home out
   home=$(make_home teardown-reports)
@@ -1058,6 +1109,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_home_summary_preserves_nonterminal_child_generations
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
