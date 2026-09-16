@@ -233,13 +233,12 @@ Three dependencies surfaced, all now installed:
 - The scout independently diagnosed the missing `tasks-axi` and recorded it as a `blocked:` status line. That line is what the classifier reads as an open captain decision, so `complete --none` is refused until a `resolved:` line closes it — the escalation machinery working exactly as designed.
 - `no-mistakes` was installed through its documented `curl | sh` script after reading it (2.6 KB, installs under `$HOME` and links into `~/.local/bin` without sudo). It does **not** verify a checksum, unlike firstmate's own pinned installers for `treehouse` and `herdr`.
 
-## Keeping the fork mergeable: the upstream sync
+## Staying mergeable against upstream
 
-The branch is shaped to be mergeable rather than merely working: 13 added files (an upstream merge cannot conflict on them) and 15 modified upstream files (the entire conflict surface), each modified additively — a case arm, a new mode, a new function or a call site, never a reorder or a rename.
-An upstream change outside those 15 files cannot conflict, and one inside them conflicts at the added line rather than at a rewritten one.
+The adapter is shaped to stay mergeable rather than merely to work: 12 added files, which an upstream merge cannot conflict on, and 18 modified upstream files, which are the entire conflict surface.
+Each modified file is modified additively — a case arm, a new mode, a new function or a call site, never a reorder or a rename — so an upstream change outside those 18 files cannot conflict, and one inside them conflicts at the added line rather than at a rewritten one.
 
-**First sync, 2026-09-16.** Upstream `main` had advanced by one commit (`7111081c`), touching four files, none of them on the conflict surface; the rebase replayed all 24 commits with zero conflicts.
-The branch is now 27 commits ahead of `upstream-main`.
+**First sync, 2026-09-16.** Upstream `main` had advanced by one commit (`7111081c`), touching four files, none of them on the conflict surface; the rebase replayed every commit with zero conflicts.
 
 The lesson is the reason this section exists: the rebase was clean and **the adapter was still broken**.
 Because `bin/fm-session-lock-lib.sh` gained a source dependency, three upstream test fixtures that copy scripts by explicit list needed the new `bin/fm-dsh-lib.sh`; `fm-turnend-guard.test.sh` failed with `fm-session-lock-lib.sh: line 19: .../bin/fm-dsh-lib.sh: No such file or directory`.
