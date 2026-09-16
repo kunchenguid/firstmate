@@ -8,6 +8,9 @@ Must-work continuity now lives above that process boundary instead of depending 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
+Pi's and omp's retry after a failed or unexpected close arms cold, carrying no predecessor arm pid, so `bin/fm-watch-arm.sh` starts the next cycle without `FM_WATCH_HANDLING_SUCCESSOR` and that cycle reopens the `state/.watcher-down` marker exactly as a hand-run `bin/fm-watch-arm.sh --restart` does.
+The predecessor pid is carried only on the healthy handoff after a real wake close.
+Because such a cold cycle can itself close actionable on `check: rearm-resurface` before it has supervised anything, `FM_WATCH_REARM_RETRY_LIMIT` bounds consecutive unhealthy cycles in those two adapters: an actionable close clears the count only when its reason is something other than `check: rearm-resurface`, or when that arm had already been running for at least 120 seconds, so a watcher that keeps dying reaches the typed restoration failure instead of waking firstmate once per retry lap.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`: an owning `session_start` arms the replacement generation without waiting for a model turn, and a state-scoped replacement handoff carries every actionable close whose delivery overlapped `session_shutdown`, including a main follow-up Pi accepted but had not yet consumed, branch handling, and a retiring child that reports after the bounded shutdown wait.
 A main follow-up counts as delivered once Pi accepts it, never once the model reads it, because a follow-up queued while main is streaming joins the running run without a `before_agent_start`; the extension header owns how consumption is observed and why it only decides what a replacement replays.
 omp's replacement follows the same generation-owner contract in `.omp/extensions/fm-primary-omp-watch.ts`, whose header owns the one difference: omp reports no shutdown reason, so every shutdown with a pending actionable close persists the handoff for the next owning `session_start` to replay.
@@ -106,6 +109,11 @@ The arm layer appends one tab-separated record per observed cycle to `state/.wat
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
+
+The arm layer also captures the watcher child's stderr, relays it unchanged to its own stderr, and appends it under one `[timestamp] arm_pid=<pid> watcher_pid=<pid>` header to `state/.watch-arm-stderr.log`, serialized against concurrent arms in the same home.
+That file is where a failed or signaled cycle's `watcher: FAILED - <reason>` line survives: an adapter that keeps the arm's stderr in memory, as the omp and Pi extensions do, drops it the moment the arm exits.
+A cycle whose own stderr already carried that typed line is reported with it rather than the arm's generic synthesized failure.
+The file is size-capped at 262144 bytes, trimmed to the newest 1000 lines.
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.

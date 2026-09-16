@@ -47,8 +47,11 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # `env` and not a bare "$@": a word produced by expansion is a command word,
+  # never an assignment, so the positional form silently ran `VAR=value` as the
+  # command and never launched the watcher at all.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -1969,6 +1972,159 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- stale pane whose ENDPOINT the backend proves is gone: records retired ----
+# The 2026-09-15 case: three closed Herdr panes kept waking firstmate. Nothing on
+# this path re-read a recorded window's presence, so each husk still captured,
+# hashed stably, tripped the stale threshold, and wedge-escalated with a rising
+# count - wakes no supervision action could ever clear. Proof of absence now
+# retires that window's per-window records silently, while a window the backend
+# does NOT prove gone keeps every record and still surfaces. One poll drives both
+# halves apart: state/*.meta is globbed in order, so the ghost is triaged first
+# and the live window's own stale is what ends the cycle.
+test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
+  local dir state fakebin out drain_out capture_file ghost live ghost_key live_key pane_hash sig pid retirements
+  dir=$(make_case stale-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  ghost="test:fm-a-ghost"; live="test:fm-z-live"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$ghost" > "$state/a-ghost.meta"
+  printf 'window=%s\nkind=ship\n' "$live" > "$state/z-live.meta"
+  printf 'working: implementing\n' > "$state/a-ghost.status"
+  printf 'working: implementing\n' > "$state/z-live.status"
+  sig=$(seen_sig "$state/a-ghost.status"); printf '%s' "$sig" > "$state/.seen-a-ghost_status"
+  sig=$(seen_sig "$state/z-live.status"); printf '%s' "$sig" > "$state/.seen-z-live_status"
+  ghost_key=$(printf '%s' "$ghost" | tr ':/.' '___')
+  live_key=$(printf '%s' "$live" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  # Both panes are one poll away from stale, and both already carry the marker
+  # set a long-running window accumulates.
+  for key in "$ghost_key" "$live_key"; do
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf 'an-older-hash' > "$state/.stale-$key"
+    date +%s > "$state/.stale-since-$key"
+    date +%s > "$state/.churn-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+  done
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # The session inventory names only the live window, which is what makes the
+  # ghost's absence PROVEN rather than merely unreadable.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "watcher did not surface the live window's stale"
+  grep -Fx "stale: $live" "$out" >/dev/null || fail "the live window's stale was not surfaced: $(cat "$out")"
+  grep -F "$ghost" "$out" >/dev/null && fail "a window the backend proves is gone must never wake firstmate"
+  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$ghost" >/dev/null \
+    || fail "the confirmed-gone window's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  for suffix in hash count stale stale-since churn-since wedge-escalations; do
+    [ ! -e "$state/.$suffix-$ghost_key" ] \
+      || fail ".$suffix-$ghost_key survived the retirement of a confirmed-gone endpoint"
+  done
+  [ -e "$state/.retired-$ghost_key" ] || fail "the retirement itself was not recorded durably"
+  # Retirement is scoped to that one key: the live window keeps its own records,
+  # with the stale suppressor advanced by the surface exactly as before.
+  [ -e "$state/.churn-since-$live_key" ] || fail "retirement removed a live window's records"
+  [ "$(cat "$state/.stale-$live_key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "the live window's stale suppressor was not advanced on surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$live" >/dev/null || fail "the live stale wake was not queued"
+  grep -F "$ghost" "$drain_out" >/dev/null && fail "a confirmed-gone window reached the durable queue"
+
+  # Durability: a second cycle must not re-probe the backend and retire the same
+  # window again. The ghost is skipped outright, so the triage log gains no
+  # second retirement line while the live window surfaces exactly as before.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first cycle"
+  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
+  printf '1\n' > "$state/.count-$live_key"
+  printf 'an-older-hash' > "$state/.stale-$live_key"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "the second cycle did not surface the live window's stale"
+  retirements=$(grep -c -F "retired stale records" "$state/.watch-triage.log")
+  [ "$retirements" = 1 ] \
+    || fail "a retired window was retired again on a later cycle ($retirements triage lines)"
+
+  # The marker leaves with the metadata it was recorded against, together with
+  # the rest of that key's now-orphaned records.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second cycle"
+  rm -f "$state/a-ghost.meta"
+  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
+  printf '1\n' > "$state/.count-$live_key"
+  printf 'an-older-hash' > "$state/.stale-$live_key"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "the third cycle did not surface the live window's stale"
+  [ ! -e "$state/.retired-$ghost_key" ] \
+    || fail "the retirement marker outlived the metadata it was recorded against"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the third cycle"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane whose endpoint the backend proves is gone has its records retired without a wake, and a live window keeps its own"
+}
+
+# --- a retired window whose METADATA is republished rejoins triage ------------
+# The retirement marker is durable, so the one thing that must release it is a
+# relaunch onto the same recorded target. Both stamps are whole seconds on both
+# platforms, and `fm-control.sh <id> relaunch` on a window that was wedged at
+# the escalation threshold publishes the new metadata well inside the second the
+# retirement was written in: a "newer metadata" rule reads that tie as "still
+# retired" and drops a LIVE window out of triage - no stale detection, no wedge
+# timer, no steering-inbox check - in silence and for the life of that metadata.
+# The marker therefore records the metadata mtime it was taken against, and any
+# other mtime there releases it.
+test_retired_window_returns_to_triage_when_its_metadata_is_republished() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case retired-relaunch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-relaunch"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/relaunch.meta"
+  printf 'working: implementing\n' > "$state/relaunch.status"
+  sig=$(seen_sig "$state/relaunch.status"); printf '%s' "$sig" > "$state/.seen-relaunch_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The metadata this retirement is taken against: the spawn that recorded it.
+  touch -t 202001010000 "$state/relaunch.meta"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  # Phase A: a successful inventory omits the window, so it is retired against
+  # the metadata mtime above.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
+    FM_FAKE_TMUX_CAPTURE="$capture_file"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the watcher woke for a window the backend proves is gone: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
+  [ "$(cat "$state/.retired-$key" 2>/dev/null || true)" = "$(file_mtime "$state/relaunch.meta")" ] \
+    || fail "the retirement did not record the metadata mtime it was taken against"
+
+  # Phase B: the relaunch republishes the metadata for the same recorded target,
+  # in the very second the retirement marker itself carries.
+  touch -t 202401010000 "$state/relaunch.meta" "$state/.retired-$key"
+  [ "$(file_mtime "$state/relaunch.meta")" = "$(file_mtime "$state/.retired-$key")" ] \
+    || fail "the fixture did not reproduce the same-second relaunch"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-relaunch \
+    FM_FAKE_TMUX_CAPTURE="$capture_file"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a relaunched window whose metadata ties the retirement stayed out of triage: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the relaunched window was never triaged again: $(cat "$out")"
+  [ ! -e "$state/.retired-$key" ] \
+    || fail "the retirement marker outlived the metadata it was taken against"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the relaunch cycle"
+  unset FM_FAKE_CREW_STATE
+  pass "a retirement is released when the recorded metadata is republished, including in the same second it was written"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -3086,6 +3242,59 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation did not print the stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge"
   pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
+}
+
+# --- BUSY husk whose ENDPOINT the backend proves is gone: records retired -----
+# The sibling path of the stale-scan retirement above, and the same 2026-09-15
+# case: a pane closed mid-turn keeps its last frame, harness busy footer and all,
+# so window_is_busy still reads busy and the window never reaches the stale
+# scan's own probe. Its completed-turn bound is long past, so busy_turn_bound_check
+# hands it to the wedge timer and every FM_STALE_ESCALATE_SECS produces one more
+# stale wake with a higher escalation count for an endpoint nobody can inspect.
+# Proof of absence retires it instead, with no wake and no escalation, while a
+# window the inventory still names escalates exactly as it always did
+# (test_busy_pane_stable_hash_escalates_past_turn_age_bound covers that half).
+test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-husk-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-husk"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-husk.meta"
+  record_pi_busy "$state" busy-husk
+  printf 'working: setup complete\n' > "$state/busy-husk.status"
+  sig=$(seen_sig "$state/busy-husk.status"); printf '%s' "$sig" > "$state/.seen-busy-husk_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'an-older-hash' > "$state/.stale-$key"
+  printf 'date-of-birth' > "$state/.churn-since-$key"
+  # No completed turn ever recorded for this task: age the spawn record itself,
+  # and put the wedge timer past its threshold so this poll is the one that
+  # would have escalated.
+  touch -t 200001010000 "$state/busy-husk.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+
+  # The session inventory succeeds and names another window, which is what makes
+  # this endpoint's absence PROVEN rather than merely unreadable.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a busy husk whose endpoint is proven gone still woke firstmate: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a confirmed-gone busy husk printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a confirmed-gone busy husk enqueued a wake: $(cat "$state/.wake-queue")"
+  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$window" >/dev/null \
+    || fail "the confirmed-gone busy husk's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  for suffix in hash count stale stale-since churn-since wedge-escalations; do
+    [ ! -e "$state/.$suffix-$key" ] \
+      || fail ".$suffix-$key survived the retirement of a confirmed-gone busy husk"
+  done
+  [ -e "$state/.retired-$key" ] || fail "the busy husk's retirement was not recorded durably"
+  pass "a busy husk whose endpoint the backend proves is gone is retired instead of wedge-escalated"
 }
 
 # Regression fixture for the incident's actual masking condition: Pi's rendered
@@ -4850,6 +5059,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
+test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
@@ -4859,6 +5069,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_stale_records_retired_when_the_endpoint_is_confirmed_gone
+test_retired_window_returns_to_triage_when_its_metadata_is_republished
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

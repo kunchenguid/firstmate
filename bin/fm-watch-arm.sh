@@ -47,9 +47,11 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
-# state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# lock identity before and after close, and successor disposition. The child's
+# own stderr is relayed unchanged and kept in state/.watch-arm-stderr.log, so a
+# failed or signaled cycle's reason line outlives this arm (see the
+# ARM_STDERR_LOG block below). The separate state/.watch-triage.log remains
+# exclusively the watcher's absorbed-wake debug log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -86,6 +88,20 @@ CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+# Durable watcher stderr. A FAILED cycle names its reason on stderr, but the
+# watcher child inherits THIS arm's stderr, and a persistent adapter that keeps
+# that stream in memory (the omp and Pi watch extensions both do) loses it the
+# moment the arm exits. That is why the 2026-09-15 exit-1 cascade left nothing
+# to read: five silent cycles, empty arm-output temp files, and no reason
+# anywhere. The child's stderr is captured, relayed unchanged to this arm's
+# stderr, and kept in this bounded log.
+ARM_STDERR_LOG="$STATE/.watch-arm-stderr.log"
+ARM_STDERR_LOCK="$STATE/.watch-arm-stderr.lock"
+ARM_STDERR_MAX_BYTES=262144
+ARM_STDERR_KEEP_LINES=1000
+# Set once a flushed stderr carried its own typed `watcher: FAILED` line, so the
+# arm never synthesizes a vaguer one over the watcher's own reason.
+CHILD_STDERR_EXPLAINED=
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -372,6 +388,51 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+# Relay and persist whatever the watcher child wrote to stderr. Call only after
+# the child has been reaped, so a signal trap's final reason line is already on
+# disk. Best-effort and bounded: losing this evidence must never stall a cycle.
+child_stderr_flush() {
+  local size i=0
+  [ -n "$child_err" ] || return 0
+  if [ -s "$child_err" ]; then
+    grep -q '^watcher: FAILED' "$child_err" 2>/dev/null && CHILD_STDERR_EXPLAINED=1
+    # The relay to this arm's own stderr is unconditional; only the shared file
+    # takes the lock its sibling ledger already takes, so two arms in one home
+    # cannot interleave a multi-line append with the other's trim. A lock this
+    # arm cannot get within the bound drops the durable copy rather than
+    # stalling the cycle - the reason is already on the adapter's stream.
+    cat "$child_err" >&2 || true
+    while ! fm_lock_try_acquire "$ARM_STDERR_LOCK"; do
+      if [ "$i" -ge 20 ]; then
+        rm -f "$child_err" 2>/dev/null || true
+        child_err=
+        return 0
+      fi
+      sleep 0.02
+      i=$((i + 1))
+    done
+    {
+      printf '[%s] arm_pid=%s watcher_pid=%s\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ARM_PID" "$(cycle_clean_field "$cycle_watcher_pid")"
+      cat "$child_err"
+    } >> "$ARM_STDERR_LOG" 2>/dev/null || true
+    size=$(wc -c < "$ARM_STDERR_LOG" 2>/dev/null | tr -d '[:space:]')
+    case "$size" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$size" -ge "$ARM_STDERR_MAX_BYTES" ]; then
+          tail -n "$ARM_STDERR_KEEP_LINES" "$ARM_STDERR_LOG" > "$ARM_STDERR_LOG.tmp.$ARM_PID" 2>/dev/null \
+            && mv -f "$ARM_STDERR_LOG.tmp.$ARM_PID" "$ARM_STDERR_LOG" 2>/dev/null
+          rm -f "$ARM_STDERR_LOG.tmp.$ARM_PID" 2>/dev/null || true
+        fi
+        ;;
+    esac
+    fm_lock_release "$ARM_STDERR_LOCK"
+  fi
+  rm -f "$child_err" 2>/dev/null || true
+  child_err=
+}
+
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
@@ -448,6 +509,7 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+child_err=
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -455,6 +517,9 @@ cleanup_child() {
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
+  # $child_err is deliberately NOT removed here: every caller kills the child,
+  # waits it, and only then flushes, so the trap's final reason line still
+  # reaches child_stderr_flush - which owns that file's removal.
 }
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
@@ -465,6 +530,7 @@ handle_arm_signal() {
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
   fi
+  child_stderr_flush
   cycle_log_append "$rc" "$signal" arm-interrupted none
   cleanup_child
   exit "$rc"
@@ -475,13 +541,18 @@ trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  echo "watcher: FAILED - watcher output capture file could not be created in $STATE"
+  exit 1
+}
+child_err=$(mktemp "$STATE/.watch-child-stderr.XXXXXX") || {
+  rm -f "$child_out" 2>/dev/null || true
+  echo "watcher: FAILED - watcher stderr capture file could not be created in $STATE"
   exit 1
 }
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" 2>"$child_err" &
 else
-  "$WATCH" >"$child_out" &
+  "$WATCH" >"$child_out" 2>"$child_err" &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
@@ -490,6 +561,10 @@ child_done=0
 owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
+  # Relay and persist the child's own stderr before this arm prints anything,
+  # so the watcher's reason line is on disk even when the classification below
+  # has to fall back to a synthesized one.
+  child_stderr_flush
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
@@ -529,7 +604,7 @@ owned_child_finished() {
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
-  if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
+  if [ -z "$CHILD_STDERR_EXPLAINED" ] && ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
     echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
   fi
   rm -f "$child_out" 2>/dev/null || true
@@ -553,6 +628,7 @@ while :; do
       if ! handling_generation=$(handling_successor_generation); then
         cleanup_child
         wait "$child" 2>/dev/null || true
+        child_stderr_flush
         cycle_log_append 1 none handling-handoff-failed none
         echo "watcher: FAILED - established successor could not inspect handling state"
         exit 1
@@ -590,6 +666,7 @@ print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
+child_stderr_flush
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1

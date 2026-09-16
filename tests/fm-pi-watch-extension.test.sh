@@ -1652,7 +1652,7 @@ test_pi_empty_close_retries_instead_of_disappearing() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'arm=%s pred=[%s]\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then exit 0; fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -1689,6 +1689,10 @@ for (let i = 0; i < 250; i += 1) {
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`clean empty close was ignored: ${rows.join(" | ")}`);
+// A retry follows a FAILED cycle, so it must arm cold: handing the dead
+// predecessor's pid to fm-watch-arm.sh makes the next child a handling
+// successor, which skips the state/.watcher-down reopen that recovers the home.
+if (!/ pred=\[\]$/.test(rows[1])) throw new Error(`the retry after a failed cycle must arm as a cold start: ${rows[1]}`);
 if (prompts !== 0) throw new Error(`restored transient close surfaced ${prompts} failure prompts`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
@@ -1749,6 +1753,127 @@ EOF
   expect_code 0 "$status" "Pi established clean closes must honor the continuity retry limit"
   [ -z "$out" ] || fail "Pi established-empty-close retry test printed output: $out"
   pass "Pi established clean closes stop at the configured retry limit"
+}
+
+# A cold retry's own cycle recovers the home by reopening state/.watcher-down,
+# which closes that cycle ACTIONABLE on `check: rearm-resurface` before it has
+# supervised anything. While that close cleared the consecutive-failure count,
+# a watcher that kept dying looped failure -> cold retry -> resurface forever:
+# FM_WATCH_REARM_RETRY_LIMIT never terminated it and firstmate was woken once
+# per lap, which is the 2026-09-15 cascade with its bound removed.
+test_pi_rearm_resurface_cycles_still_reach_the_retry_limit() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-resurface-limit-root"
+  home="$TMP_ROOT/pi-resurface-limit-home"
+  log="$TMP_ROOT/pi-resurface-limit.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s pred=[%s]\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ -z "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-resurface-limit", {}, undefined, undefined, {});
+for (let i = 0; i < 600 && !prompt.includes("after 2 retries"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("could not restore watcher continuity after 2 retries")) {
+  throw new Error(`a watcher that only resurfaces never exhausted its retry bound: ${prompt}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi resurface-only cycles must still reach the continuity retry limit"
+  [ -z "$out" ] || fail "Pi resurface-limit test printed output: $out"
+  pass "Pi cycles that only recover and resurface still reach the retry limit"
+}
+
+# The other half of the same rule: a GENUINE wake proves the watcher did its
+# job, so it clears the consecutive-failure count and the bound never fires for
+# a home that keeps delivering real wakes between restarts.
+test_pi_genuine_wake_clears_the_failure_count() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-wake-clears-root"
+  home="$TMP_ROOT/pi-wake-clears-home"
+  log="$TMP_ROOT/pi-wake-clears.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s pred=[%s]\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ -z "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'stale: test:fm-worker\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-wake-clears", {}, undefined, undefined, {});
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : []);
+for (let i = 0; i < 600 && armRows().length < 6; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = armRows();
+if (rows.length < 6) throw new Error(`the extension stopped re-arming after ${rows.length} cycles: ${rows.join(" | ")}`);
+if (prompt.includes("could not restore watcher continuity")) {
+  throw new Error(`a genuine wake between failures must clear the failure count: ${prompt}`);
+}
+if (!prompt.includes("stale: test:fm-worker")) throw new Error(`the genuine wakes were never delivered: ${prompt}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi genuine wakes must clear the continuity failure count"
+  [ -z "$out" ] || fail "Pi genuine-wake reset test printed output: $out"
+  pass "Pi genuine wakes between failed cycles clear the consecutive-failure count"
 }
 
 test_pi_actionable_close_rechecks_session_lock() {
@@ -3995,6 +4120,8 @@ test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
+test_pi_rearm_resurface_cycles_still_reach_the_retry_limit
+test_pi_genuine_wake_clears_the_failure_count
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner

@@ -103,7 +103,7 @@ type SessionGeneration = {
   // A verified successor's failure close that arrived while the pipeline was
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
-  deferredClose: { message: string; predecessorArmPid: string } | null;
+  deferredClose: { message: string } | null;
 };
 
 function refreshWatchToolShell(
@@ -375,6 +375,20 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   } catch (error) {
     if (nodeErrorCode(error) !== "ENOENT") throw error;
   }
+}
+
+// A cold retry's OWN cycle closes actionable on `check: rearm-resurface`, the
+// line the reopened state/.watcher-down marker emits before that cycle has
+// supervised anything. Clearing the consecutive-failure count on it lets a
+// watcher that keeps dying alternate failure, cold retry and resurface without
+// bound - FM_WATCH_REARM_RETRY_LIMIT never terminates it, and firstmate is woken
+// once per lap instead of once by `could not restore watcher continuity`. Only a
+// genuine wake, or a cycle that lived long enough to have supervised anything,
+// clears the count.
+const healthyCycleMs = 120000;
+function closeClearsRetryFailures(message: string, startedAt: number): boolean {
+  if (Date.now() - startedAt >= healthyCycleMs) return true;
+  return message.split(/\r?\n/)[0].trim() !== "check: rearm-resurface";
 }
 
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
@@ -824,7 +838,7 @@ export default function (pi: ExtensionAPI) {
         const deferred = owner.deferredClose;
         owner.deferredClose = null;
         if (deferred && !owner.child && !owner.retryTimer) {
-          scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
+          scheduleRetry(owner, deferred.message);
         }
       }
     }
@@ -907,7 +921,17 @@ export default function (pi: ExtensionAPI) {
     return { failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries` };
   }
 
-  function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
+  // A retry follows a cycle that FAILED, never a real wake close, so it arms as
+  // a COLD start: no predecessor arm pid, hence no FM_WATCH_HANDLING_SUCCESSOR
+  // in bin/fm-watch-arm.sh. That is what lets the next child reopen the
+  // state/.watcher-down marker and surface `check: rearm-resurface`, which is
+  // exactly the recovery a hand-run `bin/fm-watch-arm.sh --restart` performs.
+  // Passing the dead predecessor here made every retry a handling successor,
+  // which skips that reopen path - five such retries in a row is how the
+  // 2026-09-15 cascade exhausted the bound with nothing recovered. The
+  // predecessor pid stays only on the healthy handoff in
+  // restoreAfterActionableClose.
+  function scheduleRetry(owner: SessionGeneration, message: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
@@ -922,7 +946,7 @@ export default function (pi: ExtensionAPI) {
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
       if (!generationIsLive(owner)) return;
-      const result = startArm(owner, predecessorArmPid);
+      const result = startArm(owner);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
       }
@@ -963,6 +987,7 @@ export default function (pi: ExtensionAPI) {
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
     };
+    const armStartedAt = Date.now();
     const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
       env,
@@ -1027,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
         enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
-        owner.retryFailures = 0;
+        if (closeClearsRetryFailures(classification.message, armStartedAt)) owner.retryFailures = 0;
         void processPendingActionables(owner);
         return;
       }
@@ -1038,11 +1063,11 @@ export default function (pi: ExtensionAPI) {
         // bounded retry for the end of that delivery; an unready child closing
         // here was retired by the restoration itself.
         if (verified && !armRetired.has(armChild)) {
-          owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+          owner.deferredClose = { message: classification.message };
         }
         return;
       }
-      scheduleRetry(owner, classification.message, predecessor);
+      scheduleRetry(owner, classification.message);
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
@@ -1052,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
       releaseChild();
       if (!generationIsLive(owner)) return;
       if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`);
     });
     return {
       ok: true,
