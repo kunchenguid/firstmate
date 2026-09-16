@@ -5,13 +5,13 @@
 # logic against synthetic fixtures. It cannot catch a DSH release changing hook
 # semantics, which is what this guard exists for: it builds a throwaway profile,
 # installs the hooks bridge at the running dsh-base version, and drives real
-# headless sessions to prove the three integration contracts still hold.
+# headless sessions to prove the integration contracts below still hold.
 #
 # Run explicitly with FM_DSH_LIVE_E2E=1 after a dsh upgrade, and before trusting
 # a refreshed docs/verification/supervision.md DSH entry. It fails naming the
 # harness and version rather than degrading quietly.
 #
-# The three contracts, each of which was once assumed and later measured:
+# The contracts, each of which was once assumed and later measured:
 #   1. UserPromptSubmit delivers additionalContext BEFORE the first request.
 #      DSH's SessionStart hook runs detached and lands after it, so the digest
 #      rides UserPromptSubmit; if that ever stops holding, the session-start
@@ -20,6 +20,8 @@
 #      blocks the call. The delegation guard and both seatbelts rest on it.
 #   3. A Stop hook that exits 2 forces one more model step, and the terminal
 #      alarm turn is bounded rather than looping.
+#   4. A hook subprocess inherits the host's environment, which is the premise
+#      bin/fm-dsh-launch.sh's exported marker depends on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,6 +41,7 @@ PROBE="$TMP_ROOT/probe"
 HOOKLOG="$WORK/hooks.log"
 STOPCOUNT="$WORK/stop-count"
 SENTINEL="$WORK/deny-sentinel"
+HOOKENV="$WORK/hook-env"
 mkdir -p "$WORK" "$PROBE"
 
 cleanup() {
@@ -64,6 +67,7 @@ cat > "$PROBE/ups.sh" <<SH
 #!/usr/bin/env bash
 cat >/dev/null 2>&1 || true
 printf 'UserPromptSubmit\n' >> "$HOOKLOG"
+printf '%s\n' "\${FM_DSH_HARNESS:-unset}" >> "$HOOKENV"
 printf '%s' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"FM-DSH-LIVE-TOKEN-4242"}}'
 exit 0
 SH
@@ -141,9 +145,10 @@ run_headless "Run the bash tool exactly once to execute: touch '$SENTINEL' -- th
 if ! grep -q '^PreToolUse$' "$HOOKLOG"; then
   fail "live dsh $BASE_VERSION: the model did not call the shell tool, so the PreToolUse deny is UNPROVEN (inconclusive, not passing)"
 fi
-[ -e "$SENTINEL" ] \
-  && fail "live dsh $BASE_VERSION: the PreToolUse deny fired but the command still ran" \
-  || pass "live dsh $BASE_VERSION: the bash-matcher PreToolUse deny blocked the command"
+if [ -e "$SENTINEL" ]; then
+  fail "live dsh $BASE_VERSION: the PreToolUse deny fired but the command still ran"
+fi
+pass "live dsh $BASE_VERSION: the bash-matcher PreToolUse deny blocked the command"
 
 # --- 4. the Stop hook blocks once, then allows ------------------------------
 : > "$HOOKLOG"; rm -f "$STOPCOUNT"
@@ -154,4 +159,23 @@ stops=$(cat "$STOPCOUNT" 2>/dev/null || echo 0)
 case "$out" in
   *CONTINUED*) pass "live dsh $BASE_VERSION: the Stop hook forced one bounded continuation (${stops} firings)" ;;
   *) pass "live dsh $BASE_VERSION: the Stop hook fired ${stops}x and the run settled (continuation not echoed)" ;;
+esac
+
+# --- 5. a hook subprocess inherits the host environment ---------------------
+# bin/fm-dsh-launch.sh is the launch boundary precisely because DSH exposes no
+# identity of its own: it exports FM_DSH_HARNESS=dsh and clears foreign markers
+# at process start, on the premise that hook and tool subprocesses then inherit
+# it. Nothing verified that premise, and if it were false the marker would reach
+# no guard - detection would fall back to ancestry alone, which under DSH is only
+# args strength. Export it here rather than through the launcher so the assertion
+# is about inheritance and not about the launcher's own correctness.
+: > "$HOOKENV"
+export FM_DSH_HARNESS=dsh
+run_headless "Without using any tools, reply with ONLY the word PING." >/dev/null 2>&1 || true
+unset FM_DSH_HARNESS
+hookenv=$(cat "$HOOKENV" 2>/dev/null || true)
+case "$hookenv" in
+  dsh) pass "live dsh $BASE_VERSION: a hook subprocess inherits the host's harness marker" ;;
+  "") fail "live dsh $BASE_VERSION: the UserPromptSubmit probe wrote no marker, so hook inheritance is UNPROVEN (inconclusive, not passing)" ;;
+  *) fail "live dsh $BASE_VERSION: a hook subprocess saw FM_DSH_HARNESS='$hookenv', not the host's value; the launch boundary cannot reach the guards" ;;
 esac

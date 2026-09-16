@@ -25,7 +25,7 @@
     - id: hooks-claude-code
       name: '@deepseek-ai/dsh-hooks-claude-code'
       config:
-        configPath: !!js (process.env.FM_ROOT || process.cwd()) + '/dsh/hooks.json'
+        configPath: !!js (process.env.FM_ROOT || process.cwd()) + '/.dsh/hooks.json'
         projectDir: !!js process.env.FM_ROOT || process.cwd()
 
 - id: agent-instructions

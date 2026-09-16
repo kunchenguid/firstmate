@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=${CLAUDE_PROJECT_DIR:-}; [ -n \"$root\" ] || root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-dsh-sessionstart.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.dsh/hooks.json\" ] || exit 0; jq -e \"any(.hooks.UserPromptSubmit[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-dsh-sessionstart.sh\\\"))\" \"$root/.dsh/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-dsh-sessionstart.sh\"'",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=${CLAUDE_PROJECT_DIR:-}; [ -n \"$root\" ] || root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.dsh/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-arm-pretool-check.sh\\\"))\" \"$root/.dsh/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-arm-pretool-check.sh\" --claude'",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=${CLAUDE_PROJECT_DIR:-}; [ -n \"$root\" ] || root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.dsh/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-cd-pretool-check.sh\\\"))\" \"$root/.dsh/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-cd-pretool-check.sh\" --claude'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=${CLAUDE_PROJECT_DIR:-}; [ -n \"$root\" ] || root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-subagent-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.dsh/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-subagent-pretool-check.sh\\\"))\" \"$root/.dsh/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-subagent-pretool-check.sh\" --claude'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=${CLAUDE_PROJECT_DIR:-}; [ -n \"$root\" ] || root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-turnend-guard-dsh.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.dsh/hooks.json\" ] || exit 0; jq -e \"any(.hooks.Stop[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard-dsh.sh\\\"))\" \"$root/.dsh/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard-dsh.sh\"'",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

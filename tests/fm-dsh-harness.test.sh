@@ -632,6 +632,61 @@ test_dsh_refusal_is_an_exact_harness_match() {
   pass "fm-spawn: the dsh refusal matches the harness name exactly"
 }
 
+test_dsh_tracked_hooks_dispatch_and_fail_safe() {
+  local hooks cmd rc n
+  # .dsh/hooks.json is the tracked registration the captain profile mounts, so it
+  # is the file that must actually work. Each command is a self-verifying wrapper
+  # (the .codex/hooks.json idiom): it re-checks that this file still registers
+  # that very script and that the resolved root looks like a firstmate checkout,
+  # and exits 0 when either is untrue. A malformed jq expression inside that
+  # check makes the wrapper a silent no-op, which no live run would distinguish
+  # from a hook that fired and allowed - so prove dispatch through observable
+  # script behavior instead of trusting the file's shape.
+  hooks="$ROOT/.dsh/hooks.json"
+  [ -f "$hooks" ] || fail "$hooks is missing"
+  jq -e . "$hooks" >/dev/null 2>&1 || fail "$hooks is not valid JSON"
+
+  # Pin the idiom itself: every command must be a bash -lc wrapper carrying the
+  # self-registration check naming its own script. Dropping either would leave a
+  # hook that runs no matter where it is pointed.
+  n=$(jq '[.hooks[]?[]?.hooks[]?.command? | select(type == "string")] | length' "$hooks")
+  [ "$n" -gt 0 ] || fail "$hooks registers no commands"
+  while IFS= read -r cmd; do
+    # shellcheck disable=SC2016  # '$root' is the literal text inside the wrapper, not a value to expand here
+    case "$cmd" in
+      "bash -lc '"*'command -v jq'*'$root'*'.dsh/hooks.json'*) : ;;
+      "bash -lc '"*) fail "a hook wrapper is missing a guard (jq presence, resolved root, or self-registration): $cmd" ;;
+      *) fail "a hook command is not a bash -lc self-verifying wrapper: $cmd" ;;
+    esac
+  done < <(jq -r '.hooks[]?[]?.hooks[]?.command? | select(type == "string")' "$hooks")
+
+  # Dispatch proof: the catch-all PreToolUse row denies a delegation tool. If the
+  # wrapper's jq self-check is malformed this exits 0 instead of 2, which is the
+  # exact failure the escaping bug produced.
+  cmd=$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("fm-subagent-pretool-check.sh"))][0]' "$hooks")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "the tracked hooks register no delegation guard"
+  rc=0
+  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "the tracked delegation guard must deny through its wrapper (got rc=$rc); a malformed self-check makes it a silent no-op"
+  rc=0
+  printf '{"tool_name":"bash"}' | CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "the tracked delegation guard must allow an ordinary tool (got rc=$rc)"
+
+  # Fail-safe proof: a wrong root, and an empty payload, are both silent no-ops
+  # rather than a broken tool call the agent cannot act on.
+  rc=0
+  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$TMP_ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "a hook pointed at the wrong root must be a no-op (got rc=$rc)"
+  rc=0
+  CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" </dev/null >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "a hook with no payload must be a no-op (got rc=$rc)"
+
+  # The profile patch must mount the tracked file, or none of the above runs.
+  assert_contains "$(cat "$ROOT/.dsh/profile.patch.yml")" "/.dsh/hooks.json" \
+    "the profile patch no longer mounts the tracked hooks file"
+  pass "dsh tracked hooks: wrappers dispatch, self-verify, and fail safe"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -664,3 +719,4 @@ test_dsh_delegation_guard_classifies_real_tool_names
 test_dsh_is_refused_as_a_crewmate
 test_dsh_refusal_covers_scout_and_secondmate
 test_dsh_refusal_is_an_exact_harness_match
+test_dsh_tracked_hooks_dispatch_and_fail_safe

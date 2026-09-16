@@ -13,7 +13,13 @@ Verified on 2026-09-16 with DeepSeek Harness 0.1.5-rc.1 (dsh-base 0.1.5-rc.2).
 | Model flag | None on the command line. The session model comes from the `agent-default-model` settings section (`$DSH_HOME/settings.yaml`), overridden per session through the model picker. |
 | Effort flag | None on the command line. `reasoningEffort` in the same settings section carries the effort axis. |
 | Model discovery | The model picker, backed by the `llm-pi-ai` route catalog when that adapter is mounted. |
-| Marker | None. DSH is a node process (`ps` reports `comm=node`) whose launcher name is visible only in argv, and it hands tool and hook subprocesses no identity variable. `FM_DSH_HARNESS=dsh` is a Firstmate-OWNED launch marker and a PRECEDENCE override, honored only when a genuine dsh process is in the ancestry. Because the ancestry verdict is `args` strength, an inherited `CLAUDECODE` outranks it, so the launch marker is load-bearing rather than a fast path. |
+| Marker | None. DSH is a node process (`ps` reports `comm=node`) whose launcher name is visible only in argv, and it hands tool and hook subprocesses no identity variable. `FM_DSH_HARNESS=dsh` is a Firstmate-OWNED launch marker, honored only when a genuine dsh process is in the ancestry, and evaluated ahead of the inherited-marker arms. That ordering is what keeps identity correct: the dsh ancestry verdict is only `args` strength, so a DSH host launched from a Claude pane retains `CLAUDECODE`, which would otherwise rename the session. The marker is therefore load-bearing rather than a fast path, and it is never evidence on its own. |
+
+## Role: primary only
+
+DSH is a verified PRIMARY adapter and is deliberately absent from every crewmate/scout enumeration - the launch table in `../../../bin/fm-spawn.sh`, `fm_control_kind_supported` in `../../../bin/fm-control-lib.sh`, the busy-state sources in `../../../bin/fm-busy-lib.sh`, and the spawn enumerations in [`docs/architecture.md`](../../../../../docs/architecture.md) and [`docs/trace-context.md`](../../../../../docs/trace-context.md).
+It exposes no endpoint, interrupt, exit or per-task busy-state control plane, so a dispatched worker could not be steered, inspected or stopped.
+`refuse_dsh_crewmate` in `bin/fm-spawn.sh` enforces that on every resolution path, and the refusal is an exact harness-name match, so a raw launch command that merely mentions dsh is not caught by it.
 
 ## Sandbox requirement
 
@@ -50,7 +56,7 @@ denies `ps` (harness ancestry, the PID-strict watcher lock and away-mode ownersh
 
 ## Primary integration
 
-`dsh-hooks-claude-code` runs firstmate's hook scripts unchanged, because DeepSeek Harness implements the Claude Code command-hook dialect. The registration lives in `dsh/hooks.json`, mounted by `dsh/profile.patch.yml`, and three facts about DSH change what that file may contain:
+`dsh-hooks-claude-code` runs firstmate's hook scripts unchanged, because DeepSeek Harness implements the Claude Code command-hook dialect. The registration lives in `.dsh/hooks.json`, mounted by `.dsh/profile.patch.yml`, and three facts about DSH change what that file may contain:
 
 - **`UserPromptSubmit`, not `SessionStart`.** DSH's `SessionStart` hook runs detached and its `additionalContext` lands AFTER the first request as a user-shaped message (verified 2026-09-16), which is the wrong tier for a session-start digest. `UserPromptSubmit` fires before the model call and its `additionalContext` is part of that request, so `bin/fm-dsh-sessionstart.sh` rides it and gates delivery once per session id.
 - **Lowercase `bash` matchers.** DSH's matcher subject is the harness tool name, and its shell tool is `bash`; Claude's `Bash` never matches. The catch-all `.*` group is unaffected.
