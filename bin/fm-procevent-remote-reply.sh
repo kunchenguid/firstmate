@@ -570,7 +570,9 @@ EOF
     || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
   status_additions="$tmp/status-additions"
   source_additions="$tmp/source-additions"
-  : > "$status_additions" && : > "$source_additions" \
+  : > "$status_additions" \
+    || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
+  : > "$source_additions" \
     || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
   stage_mirror_lines "$normalized_payload" "$mirrored" "$source_record" "$status_file" \
     "$status_additions" "$source_additions" \
