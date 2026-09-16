@@ -49,6 +49,12 @@ if ! raw=$(no-mistakes axi status "$@" 2>&1); then
   rule ╰ ╯; exit 1
 fi
 branch='' run_id='' status='' findings='' in_run=0 in_steps=0 completed=0 skipped=0 count=0 no_run=0
+# A run from another branch may only be shown when the caller named it: bare
+# `axi status` answers with whatever run happens to be current, and accepting an
+# unattributed other_branch_run: block would attribute a stranger's run to this
+# branch. Only an explicit --run ID may cross that boundary.
+explicit_run=0
+for arg in "$@"; do [[ $arg == --run ]] && explicit_run=1; done
 keys=(intent rebase review test document lint push pr ci)
 names=(意图确认 同步分支 代码审查 自动测试 文档更新 规范检查 上传代码 合并申请 远端验证)
 states=(); counts=(); durations=(); active_fors=(); active_rounds=()
@@ -57,7 +63,10 @@ while IFS= read -r line; do
   case "$line" in
     current_branch:*) branch=${line#*: } ;;
     'runs_on_current_branch: 0') no_run=1 ;;
-    run:|other_branch_run:) in_run=1; continue ;;
+    run:) in_run=1; continue ;;
+    other_branch_run:)
+      if ((explicit_run)); then in_run=1; else in_run=0; fi
+      continue ;;
   esac
   ((in_run)) || continue
   if [[ $line =~ ^\ \ ([a-z_]+):\ (.*)$ ]]; then

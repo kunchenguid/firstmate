@@ -13,20 +13,31 @@ NM_HOME="$TMP/nm"
 mkdir -p "$NM_HOME"
 
 # The fake daemon answers `axi status [--run ID]` with the TOON shape the panel
-# parses; the run id is whatever --run named so one fake serves every case.
+# parses. With no --run the current branch has no record and another branch's run
+# is the only thing axi would offer (`other_branch_run:`); naming a run with
+# --run returns it under its own key. RUNOTHER stands in for a run that lives on
+# another branch even though --run named it.
 cat > "$FAKEBIN/no-mistakes" <<'FAKE'
 #!/usr/bin/env bash
 id=RUNNONE
-status=running
+explicit=0
 while [ $# -gt 0 ]; do
-  case "$1" in --run) id=$2; shift ;; esac
+  case "$1" in --run) id=$2; explicit=1; shift ;; esac
   shift
 done
-case "$id" in RUNPASSED) status=completed ;; esac
+case "$id" in RUNPASSED) status=completed ;; *) status=running ;; esac
+block=run
+branch=fm/demo
+if [ "$explicit" -eq 0 ] || [ "$id" = RUNOTHER ]; then
+  block=other_branch_run
+  branch=fm/other
+  [ "$explicit" -eq 0 ] && id=RUNOTHER
+fi
+[ "$explicit" -eq 0 ] && echo 'runs_on_current_branch: 0'
 cat <<TOON
-run:
+$block:
   id: "$id"
-  branch: fm/demo
+  branch: $branch
   status: $status
   head: abc12345
   findings: none
@@ -62,6 +73,9 @@ INSERT INTO step_rounds VALUES ('r-many-t2', 's-many-test', 2, 'auto_fix');
 INSERT INTO step_results VALUES ('s-passed-review', 'RUNPASSED', 'review');
 INSERT INTO step_rounds VALUES ('r-passed-1', 's-passed-review', 1, 'initial');
 INSERT INTO step_rounds VALUES ('r-passed-2', 's-passed-review', 2, 'auto_fix');
+INSERT INTO step_results VALUES ('s-other-review', 'RUNOTHER', 'review');
+INSERT INTO step_rounds VALUES ('r-other-1', 's-other-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-other-2', 's-other-review', 2, 'auto_fix');
 SQL
 
 panel() {
@@ -90,6 +104,18 @@ expect_code 0 "$CODE" 'panel with an unreadable record keeps rendering'
 assert_contains "$OUT" '返工次数不可读' 'an unreadable record is reported, not shown as zero'
 assert_contains "$OUT" '09  远端验证' 'the step table still renders after the failed read'
 assert_not_contains "$OUT" '未返工' 'an unreadable record never reads as no rework'
+
+OUT=$(panel); CODE=$?
+expect_code 0 "$CODE" 'panel with no run on the current branch'
+assert_contains "$OUT" '当前分支还没有验收记录' 'an unattributed other-branch run reads as no local record'
+assert_not_contains "$OUT" 'fm/other' 'another branch name never leaks into the panel'
+assert_not_contains "$OUT" 'RUNOTHER' 'another branch run id never leaks into the panel'
+assert_not_contains "$OUT" '返工' 'another branch rework count is never shown'
+
+OUT=$(panel --run RUNOTHER); CODE=$?
+expect_code 0 "$CODE" 'panel for a run named with --run on another branch'
+assert_contains "$OUT" '运行编号  RUNOTHER' 'an explicit --run still renders the run id'
+assert_contains "$OUT" '返工 1 次' 'an explicit --run still shows the run rework count'
 
 OUT=$(panel --help)
 assert_contains "$OUT" '返工次数' 'help explains the rework count'
