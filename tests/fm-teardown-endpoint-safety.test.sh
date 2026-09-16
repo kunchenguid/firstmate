@@ -972,6 +972,372 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# The tmux shim used by the endpoint-close tests below: every subcommand
+# reaches the real isolated server, so presence is always read from real tmux.
+# When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
+# which is a close that genuinely could not do its job - the recorded window is
+# demonstrably still there afterwards. Real tmux cannot be made to accept a
+# kill-window and leave the window alive, so blocking the call is the only way
+# to reach that state against a real endpoint.
+# When FM_TEST_UNREADABLE_LIST is set, `list-windows` fails with a response
+# that is NOT one of tmux's definitive missing-session/server answers, which is
+# the transient-server and tmux-absent-from-PATH shape: the read never happened,
+# so it proves nothing about whether the window survived.
+# The socket stays a RELATIVE name reached from <dir>, matching the isolated
+# case above: this fixture's absolute path is longer than a unix socket path
+# may be on macOS.
+write_close_failing_tmux_shim() {  # <dir> <socket-name> <real-tmux>
+  local dir=$1 socket=$2 real=$3
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+if [ -n "\${FM_TEST_BLOCK_KILL:-}" ] && [ "\${1:-}" = kill-window ]; then
+  echo "can't find window" >&2
+  exit 1
+fi
+if [ -n "\${FM_TEST_UNREADABLE_LIST:-}" ] && [ "\${1:-}" = list-windows ]; then
+  echo "lost server" >&2
+  exit 1
+fi
+cd '$dir'
+exec '$real' -S '$socket' "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+}
+
+# write_endpoint_close_meta: a task record whose worktree and project do not
+# exist, which keeps the cases below on the endpoint close itself - the pool
+# return and its own refusals are covered elsewhere in this file.
+write_endpoint_close_meta() {  # <case-dir> <id> <window>
+  fm_write_meta "$1/home/state/$2.meta" \
+    "window=$3" "endpoint_task_id=$2" \
+    "worktree=$1/nonexistent-worktree" "project=$1/nonexistent-project" \
+    "kind=ship" "mode=no-mistakes"
+}
+
+test_failed_endpoint_close_refuses_before_removing_the_record() {
+  local dir socket session='close failure' id=strand-task rc
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case close-failure)
+  socket=dedicated.sock
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    || fail "fixture did not create the task window"
+
+  write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+
+  set +e
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/failed.out" 2> "$dir/failed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown reported success after a close that failed: $(cat "$dir/failed.err")"
+  assert_no_grep "teardown $id complete" "$dir/failed.out" \
+    "teardown announced a completed cleanup after a close that failed"
+  assert_grep "kill-window" "$dir/runtime.log" "teardown never attempted the recorded close"
+  assert_grep "is still present after its close" "$dir/failed.err" \
+    "the backend's own close failure was swallowed instead of reported"
+  assert_grep "could not be closed" "$dir/failed.err" \
+    "teardown did not refuse on the reported close failure"
+  # The refusal exists so the endpoint is not STRANDED: the record is the only
+  # thing naming what survived, so it has to outlive the refusal.
+  assert_present "$dir/home/state/$id.meta" \
+    "teardown deleted the only durable record naming an endpoint it could not close"
+  # That retention is this run's, not a durable one - a task carrying a backlog
+  # transition has the next session's pending-close replay remove the retained
+  # record - so the refusal has to say so instead of sending the operator away
+  # trusting it.
+  assert_grep "not durable across a session start" "$dir/failed.err" \
+    "the refusal promised a retention teardown does not own"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    || fail "the surviving endpoint disappeared, so this case no longer proves the hazard"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" control \
+    || fail "the refused cleanup removed an independent window"
+
+  # Same task, same records, with the close working again: the retained record
+  # is what lets the rerun finish, so the refusal is recoverable, not terminal.
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/rerun.out" 2> "$dir/rerun.err" \
+    || fail "the rerun after a recovered close still failed: $(cat "$dir/rerun.err")"
+  assert_absent "$dir/home/state/$id.meta" "the recovered rerun left the task record behind"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    && fail "the recovered rerun did not close the recorded endpoint"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" control \
+    || fail "the recovered rerun removed an independent window"
+
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+  pass "fm-teardown: a close that genuinely failed refuses and keeps the record naming the surviving endpoint, and the same teardown finishes once the close works"
+}
+
+test_forced_teardown_continues_past_a_close_it_could_not_make() {
+  local dir socket session='forced close failure' id=forced-task rc
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case forced-close-failure)
+  socket=dedicated.sock
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+
+  # Exactly the same case run twice, so the only difference is the operator's
+  # explicit authority. Unforced it still refuses, which is what makes --force
+  # an override rather than the absence of a gate.
+  set +e
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/unforced.out" 2> "$dir/unforced.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the unforced run did not refuse a close that failed: $(cat "$dir/unforced.err")"
+  assert_present "$dir/home/state/$id.meta" "the unforced refusal removed the task record"
+  grep -qF -- "--force" "$dir/unforced.err" \
+    || fail "the refusal did not name the override that lets an operator through"
+
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force \
+    > "$dir/forced.out" 2> "$dir/forced.err" \
+    || fail "--force did not get past a close that failed: $(cat "$dir/forced.err")"
+  assert_grep "teardown $id complete" "$dir/forced.out" "the forced cleanup did not finish"
+  assert_absent "$dir/home/state/$id.meta" "the forced cleanup kept the task record"
+  # Forced cleanup is the case that leaves nothing on disk naming the endpoint,
+  # so the operator who forced it has to be told exactly what may survive.
+  assert_grep "tmux" "$dir/forced.err" "the forced run did not name the backend it could not close"
+  assert_grep "$session:fm-$id" "$dir/forced.err" \
+    "the forced run did not name the endpoint it could not close"
+  assert_grep "could not be closed" "$dir/forced.err" \
+    "the forced run hid the close failure it continued past"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    || fail "the forced run closed the window after all, so this case no longer proves the override"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" control \
+    || fail "the forced cleanup removed an independent window"
+
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+  pass "fm-teardown: --force continues past a close it could not make while still reporting it, and the same case refuses without --force"
+}
+
+test_unreadable_close_read_refuses_while_a_definitive_absence_completes() {
+  local dir socket='dedicated.sock' session='unreadable read' id=unreadable-task rc
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+
+  # A close that failed, followed by an inventory read that could not run at
+  # all. Nothing here shows the window absent, so treating it as closed would
+  # strand exactly the endpoint the refusal exists to keep named.
+  dir=$(make_case unreadable-close-read)
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+
+  set +e
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 FM_TEST_UNREADABLE_LIST=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/unreadable.out" 2> "$dir/unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unreadable inventory passed for proof the window closed: $(cat "$dir/unreadable.err")"
+  assert_grep "could not be read after its close" "$dir/unreadable.err" \
+    "the refusal did not come from the close re-read that could not run"
+  assert_no_grep "teardown $id complete" "$dir/unreadable.out" \
+    "teardown announced a cleanup it never verified"
+  assert_present "$dir/home/state/$id.meta" \
+    "teardown deleted the only durable record naming an endpoint it never saw close"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    || fail "the unread endpoint disappeared, so this case no longer proves the hazard"
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+
+  # The other direction, twice: tmux answering DEFINITIVELY that the session,
+  # or its whole server, is absent is proof the window is gone, so an endpoint
+  # that outlived its session is still ordinary silent cleanup.
+  dir=$(make_case missing-session-close-read)
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s survivor -n control )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_endpoint_close_meta "$dir" "$id" "gone session:fm-$id"
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/missing-session.out" 2> "$dir/missing-session.err" \
+    || fail "a definitively absent session refused its own cleanup: $(cat "$dir/missing-session.err")"
+  assert_grep "teardown $id complete" "$dir/missing-session.out" \
+    "an endpoint whose session is definitively gone did not complete cleanup"
+  assert_no_grep "could not be closed" "$dir/missing-session.err" \
+    "an endpoint whose session is definitively gone produced a close refusal"
+  assert_absent "$dir/home/state/$id.meta" \
+    "an endpoint whose session is definitively gone left its task record behind"
+  isolated_tmux_window_exists "$dir" "$socket" survivor control \
+    || fail "cleaning up an absent session disturbed a live one"
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+
+  dir=$(make_case missing-server-close-read)
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/missing-server.out" 2> "$dir/missing-server.err" \
+    || fail "a definitively absent server refused its own cleanup: $(cat "$dir/missing-server.err")"
+  assert_grep "teardown $id complete" "$dir/missing-server.out" \
+    "an endpoint whose server is definitively gone did not complete cleanup"
+  assert_no_grep "could not be closed" "$dir/missing-server.err" \
+    "an endpoint whose server is definitively gone produced a close refusal"
+  assert_absent "$dir/home/state/$id.meta" \
+    "an endpoint whose server is definitively gone left its task record behind"
+
+  pass "fm-teardown: a close re-read that could not run refuses, while a definitively absent session or server still completes silently"
+}
+
+test_forced_secondmate_child_close_failure_still_refuses() {
+  local dir socket='dedicated.sock' session='child close failure' mate parent=mate-task child=child-task rc
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case secondmate-child-close-failure)
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$child" )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=$session:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$child.meta" \
+    "window=$session:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "kind=ship" "harness=echo"
+
+  # Forced secondmate cleanup is the ONLY way into the child close path, so
+  # --force cannot also be the way past it: honoring force here would delete
+  # the refusal rather than override it, and discard a child home whose
+  # endpoint is still live.
+  set +e
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$parent" --force \
+    > "$dir/child.out" 2> "$dir/child.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate cleanup continued past a child close that failed: $(cat "$dir/child.err")"
+  assert_grep "child $child" "$dir/child.err" \
+    "the refusal did not name the child whose endpoint could not be closed"
+  assert_grep "could not be closed" "$dir/child.err" \
+    "forced secondmate cleanup swallowed the child close failure"
+  assert_no_grep "teardown $parent complete" "$dir/child.out" \
+    "forced secondmate cleanup reported a cleanup it stopped short of"
+  assert_present "$mate/state/$child.meta" \
+    "forced secondmate cleanup removed the record naming a child endpoint it could not close"
+  assert_present "$dir/home/state/$parent.meta" \
+    "forced secondmate cleanup removed the secondmate's own record after refusing"
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$child" \
+    || fail "the surviving child endpoint disappeared, so this case no longer proves the hazard"
+
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+  pass "fm-teardown: forced secondmate cleanup still refuses on a child endpoint close that failed"
+}
+
+test_orca_close_failure_refuses_even_under_force() {
+  local dir orca_free id=orca-strand rc
+  dir=$(make_case orca-close-failure)
+  orca_free=$(fm_test_base_path_sans "$PATH" orca)
+  ! PATH="$dir/fakebin:$orca_free" command -v orca >/dev/null 2>&1 \
+    || fail "the orca-free search path still resolved orca"
+  # The Orca arm reports a close its missing CLI never attempted, and the step
+  # right after this close removes the Orca worktree through that same CLI, so
+  # a forced continue could only die there having removed nothing. --force
+  # therefore changes nothing at this site.
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "backend=orca" "orca_worktree_id=worktree-9" "kind=ship" "mode=no-mistakes"
+
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$orca_free" "$TEARDOWN" "$id" --force \
+    > "$dir/orca-forced.out" 2> "$dir/orca-forced.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a forced Orca cleanup continued past a close that never happened: $(cat "$dir/orca-forced.err")"
+  assert_grep "could not be closed" "$dir/orca-forced.err" \
+    "the forced Orca run did not report the close it could not make"
+  assert_no_grep "--force authorizes continuing" "$dir/orca-forced.err" \
+    "the forced Orca run announced a continue it cannot carry out"
+  assert_no_grep "teardown $id complete" "$dir/orca-forced.out" \
+    "the forced Orca run reported a completed cleanup"
+  assert_present "$dir/home/state/$id.meta" \
+    "the forced Orca refusal removed the only durable record naming the terminal"
+  # Unforced is not the interesting direction here: an Orca record whose CLI is
+  # gone never reaches this close without --force, because the worktree
+  # preflight above already refuses. --force is the only way in, and it still
+  # stops - unlike the generic site, where
+  # test_forced_teardown_continues_past_a_close_it_could_not_make proves the
+  # same operator authority does get through.
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$orca_free" "$TEARDOWN" "$id" \
+    > "$dir/orca-unforced.out" 2> "$dir/orca-unforced.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unforced Orca cleanup completed with no CLI to close its terminal: $(cat "$dir/orca-unforced.err")"
+  assert_present "$dir/home/state/$id.meta" \
+    "the unforced Orca refusal removed the only durable record naming the terminal"
+
+  pass "fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal"
+}
+
+test_already_gone_endpoint_still_completes_without_a_refusal() {
+  local dir socket session='already gone' id=gone-task
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case already-gone)
+  socket=dedicated.sock
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  # The whole point of this case: the recorded window has already exited, so
+  # its close cannot succeed and must still be the ordinary silent cleanup.
+  isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
+    && fail "the already-gone fixture unexpectedly has its task window"
+
+  write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/gone.out" 2> "$dir/gone.err" \
+    || fail "an already-exited endpoint refused cleanup: $(cat "$dir/gone.err")"
+  assert_grep "teardown $id complete" "$dir/gone.out" \
+    "an already-exited endpoint did not report a completed cleanup"
+  assert_no_grep "could not be closed" "$dir/gone.err" \
+    "an already-exited endpoint produced a close refusal"
+  assert_no_grep "is still present after its close" "$dir/gone.err" \
+    "an already-exited endpoint was reported as a surviving endpoint"
+  assert_absent "$dir/home/state/$id.meta" \
+    "an already-exited endpoint left its task record behind"
+
+  # A server that is already gone entirely is the same ordinary case, and the
+  # adapter is driven directly so no other teardown refusal can stand in for it.
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+  # shellcheck disable=SC2016 # $1 and $2 expand inside the isolated child shell.
+  env -u TMUX -u TMUX_PANE FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_kill tmux "$2"' _ "$ROOT" "$session:fm-$id" \
+    > "$dir/deadserver.out" 2> "$dir/deadserver.err" \
+    || fail "closing an endpoint whose whole server is gone reported a failure: $(cat "$dir/deadserver.err")"
+  [ ! -s "$dir/deadserver.err" ] \
+    || fail "closing an endpoint whose whole server is gone was not silent: $(cat "$dir/deadserver.err")"
+
+  pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -980,6 +1346,12 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_failed_endpoint_close_refuses_before_removing_the_record
+test_forced_teardown_continues_past_a_close_it_could_not_make
+test_unreadable_close_read_refuses_while_a_definitive_absence_completes
+test_forced_secondmate_child_close_failure_still_refuses
+test_orca_close_failure_refuses_even_under_force
+test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses

@@ -306,6 +306,23 @@ test_away_reentry_refuses_pending_return_gate() {
   pass "away-mode re-entry fails closed while the prior return catch-up is pending"
 }
 
+test_return_is_mode_agnostic_for_quiet_mode() {
+  # kunchenguid/firstmate#2356's /quiet off calls this exact script, unchanged
+  # - it must behave identically whether state/.afk declares "away" or
+  # "quiet", since return_guard/return_reconcile only ever test presence.
+  local dir out
+  dir="$TMP_ROOT/quiet-mode-return"
+  install_runner "$dir"
+  printf 'quiet\n%s\n' "$(date +%s)" > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+
+  out=$(run_return "$dir" begin) || fail "return did not succeed cleanly against a quiet-mode flag: $out"
+  assert_contains "$out" 'catch-up clear' "quiet-mode return did not announce ordinary work may proceed"
+  [ ! -e "$dir/home/state/.afk" ] || fail "quiet-mode return left the mode flag behind"
+  [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "quiet-mode return did not stop the daemon exactly once"
+  pass "/quiet off's return path behaves identically for a quiet-content flag as for a legacy away-content one"
+}
+
 test_check_retries_recorded_terminal_teardown() {
   local dir gate out rc
   dir="$TMP_ROOT/terminal-teardown"
@@ -660,6 +677,24 @@ test_return_brief_health_leads_with_a_gap() {
   pass "the return brief leads with supervisor health and names every detected gap"
 }
 
+test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
+  local dir out
+  dir="$TMP_ROOT/brief-acked-marker"
+  install_runner "$dir"
+  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
+  # An episode that was detected and fully handled during the away window
+  # leaves the marker behind in an acked state (fm-wake-lib.sh
+  # _fm_recovery_marker_ack); that is not an open gap.
+  printf 'acked:downtime:fixture-generation\n' > "$dir/home/state/.watcher-down"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a clean fleet with only a handled marker should clear the gate: $out"
+  assert_not_contains "$out" 'GAP: watcher downtime was detected' "an acked recovery marker was reported as an open gap"
+  assert_contains "$out" 'no detected gap' "a fully acked window was not reported as clean"
+  pass "the return brief does not report an already-acked watcher-down marker as an open gap"
+}
+
 test_return_brief_without_a_record_reports_the_legacy_flag() {
   local dir out
   dir="$TMP_ROOT/brief-legacy"
@@ -754,6 +789,7 @@ test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
+test_return_is_mode_agnostic_for_quiet_mode
 test_check_retries_recorded_terminal_teardown
 test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
@@ -766,4 +802,5 @@ test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
+test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

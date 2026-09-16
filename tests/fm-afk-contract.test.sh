@@ -617,6 +617,65 @@ test_archive_drops_live_grants() {
   pass "archive removes live grants so archived copies are not consulted"
 }
 
+# The record-mutating commands share one lock with the subsystems that read this
+# record's authority and then act on it (bin/fm-pr-merge.sh reads the grants and
+# merges). While a reader holds that lock, confirm and archive must refuse and
+# change nothing, so no publication, replacement, or archive can land inside the
+# window between that read and the action it authorized.
+test_record_changes_refuse_while_a_reader_holds_the_lock() {
+  local home lock holder_pid i rc out before
+  home=$(make_home lock-contended)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "lock-contended: proposal failed"
+  contract "$home" confirm >/dev/null || fail "lock-contended: confirm failed"
+  before=$(cat "$home/state/.afk-contract")
+  lock="$home/state/.afk-contract.lock"
+
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/holder.ready" "$home/release" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$home/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$home/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the fixture never took the lock"; }
+
+  set +e
+  out=$(FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 contract "$home" archive 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: archive ran while the record was locked"; }
+  assert_contains "$out" 'locked by live process' "lock-contended: the archive refusal did not name the live holder"
+  [ -f "$home/state/.afk-contract" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the refused archive still moved the record"; }
+
+  contract "$home" propose --grant task-other >/dev/null || fail "lock-contended: replacement proposal failed"
+  set +e
+  out=$(FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 contract "$home" confirm 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: confirm replaced the record while it was locked"; }
+  assert_contains "$out" 'locked by live process' "lock-contended: the confirm refusal did not name the live holder"
+  [ "$(cat "$home/state/.afk-contract")" = "$before" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: the refused confirm changed the standing record"; }
+  [ "$(contract "$home" grants)" = task-x1 ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "lock-contended: a read subcommand did not see the unchanged grants"; }
+
+  : > "$home/release"
+  wait "$holder_pid" || fail "lock-contended: the fixture holder did not release cleanly"
+  contract "$home" confirm >/dev/null 2>&1 || fail "lock-contended: confirm failed once the lock cleared"
+  [ "$(contract "$home" grants)" = task-other ] \
+    || fail "lock-contended: the released replacement did not take effect"
+  contract "$home" archive >/dev/null || fail "lock-contended: archive failed once the lock cleared"
+  pass "confirm and archive refuse while the record is locked, and proceed once it clears"
+}
+
 test_fields_refuse_each_missing_part_by_name
 test_omitted_stop_confirms_as_no_stop
 test_never_set_flags_without_refusing_and_never_over_matches
@@ -641,4 +700,5 @@ test_merge_grants_empty_form_and_usage_errors
 test_legacy_record_without_merge_grants_reads_empty
 test_malformed_merge_grants_refuse_validation
 test_archive_drops_live_grants
+test_record_changes_refuse_while_a_reader_holds_the_lock
 

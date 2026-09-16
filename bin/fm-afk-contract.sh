@@ -112,9 +112,27 @@
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
 #
-# Sourceable: with the BASH_SOURCE guard, other scripts get the path and
-# presence helpers (fm_afk_contract_path, fm_afk_contract_present,
-# fm_afk_contract_proposal_path, fm_afk_contract_archive_dir) without running main.
+# CROSS-SUBSYSTEM LOCK (state/.afk-contract.lock; this script is its one owner).
+# This record is authority another subsystem reads and then ACTS on outside this
+# script: bin/fm-pr-merge.sh reads the merge grants and afterwards hands a merge
+# to the forge. A publication, replacement, or archive landing between that read
+# and the forge handoff would land a merge on authority that no longer holds, so
+# the two subsystems share one lock instead of each locking its own records: the
+# record-mutating subcommands (confirm, archive) hold it across their mutation,
+# and a reader that acts on the record holds it across both its read and that
+# action (fm_afk_contract_lock_hold / fm_afk_contract_lock_release). The
+# read-only subcommands never take it, so a holder can still read the record it
+# locked. Neither side ever proceeds without it: the acquire is bounded, and a
+# bound that is hit refuses and names the live holder rather than racing. That
+# fixed bound is 120 seconds, sized so only a genuinely wedged holder trips it.
+# A lock left by a killed process is reclaimed
+# by the ordinary stale-owner recovery in bin/fm-wake-lib.sh, which owns the lock
+# primitive itself.
+#
+# Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
+# and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
+# fm_afk_contract_proposal_path, fm_afk_contract_archive_dir,
+# fm_afk_contract_lock_hold, fm_afk_contract_lock_release) without running main.
 set -u
 
 FM_AFK_CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -129,6 +147,10 @@ FM_AFK_CONTRACT_VERSION=1
 FM_AFK_CONTRACT_VERBS="merge land prerelease install rerun dispatch abort-run answer discard wake-me"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
+# Generous against the longest legitimate holder, a merge waiting on the forge,
+# so the bound only ever trips on something genuinely wedged.
+_FM_AFK_CONTRACT_LOCK_TIMEOUT=120
+FM_AFK_CONTRACT_LOCK_HELD=
 
 fm_afk_contract_path() {  # [state-dir]
   printf '%s/.afk-contract' "${1:-$FM_AFK_CONTRACT_STATE}"
@@ -144,6 +166,54 @@ fm_afk_contract_archive_dir() {  # [state-dir]
 
 fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
+}
+
+fm_afk_contract_lock_path() {  # [state-dir]
+  printf '%s/.afk-contract.lock' "${1:-$FM_AFK_CONTRACT_STATE}"
+}
+
+# Lazily reach the lock primitive. bin/fm-wake-lib.sh is a canonical lint root
+# in its own right, so keep this an analysis boundary for the same reason
+# bin/fm-lease-lib.sh's fm_lease_lock_helpers does.
+fm_afk_contract_lock_helpers() {
+  command -v fm_lock_acquire_wait_bounded >/dev/null 2>&1 && return 0
+  # shellcheck source=/dev/null
+  . "$FM_AFK_CONTRACT_DIR/fm-wake-lib.sh"
+}
+
+# fm_afk_contract_lock_hold [state-dir]: take the cross-subsystem lock described
+# in the header. The acquire is bounded so a wedged holder is refused instead of
+# blocking a merge or a captain return forever, and returns 1 WITHOUT the lock so
+# every caller refuses rather than proceeding unlocked.
+fm_afk_contract_lock_hold() {  # [state-dir]
+  local lock rc=0 STATE timeout
+  STATE=${1:-$FM_AFK_CONTRACT_STATE}
+  lock=$(fm_afk_contract_lock_path "$STATE")
+  timeout=${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}
+  fm_afk_contract_lock_helpers || {
+    fm_afk_contract_log "could not load the lock primitive for $lock"
+    return 1
+  }
+  fm_lock_acquire_wait_bounded "$lock" "$timeout" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      fm_afk_contract_log "the away-posture record is locked by live process $FM_LOCK_HELD_PID (an in-flight merge, or another change to this record); nothing was changed"
+    else
+      fm_afk_contract_log "could not take the away-posture record lock at $lock; nothing was changed"
+    fi
+    return 1
+  fi
+  FM_AFK_CONTRACT_LOCK_HELD=$lock
+}
+
+# Release the lock taken by fm_afk_contract_lock_hold. Idempotent, so callers can
+# invoke it unconditionally from their own cleanup.
+fm_afk_contract_lock_release() {
+  local lock=$FM_AFK_CONTRACT_LOCK_HELD
+  [ -n "$lock" ] || return 0
+  FM_AFK_CONTRACT_LOCK_HELD=
+  fm_afk_contract_lock_helpers || return 1
+  fm_lock_release "$lock"
 }
 
 fm_afk_contract_log() { printf 'fm-afk-contract: %s\n' "$*" >&2; }
@@ -874,13 +944,28 @@ fm_afk_contract_select_path() {  # <args...> -> prints the record path chosen by
   printf '%s' "$path"
 }
 
+# The record-mutating subcommands run inside the cross-subsystem lock, so no
+# publication, replacement, or archive can land between another subsystem's
+# authority read and the action it takes on that authority.
+fm_afk_contract_locked_cmd() {  # <command> [args...]
+  local rc=0
+  fm_afk_contract_lock_hold || return 1
+  trap 'fm_afk_contract_lock_release || true' EXIT
+  "$@" || rc=$?
+  trap - EXIT
+  fm_afk_contract_lock_release || true
+  return "$rc"
+}
+
 fm_afk_contract_main() {
   local cmd=${1:-} path
   [ -n "$cmd" ] || { fm_afk_contract_usage >&2; return 2; }
   shift
   case "$cmd" in
     propose) fm_afk_contract_cmd_propose "$@" ;;
-    confirm) [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }; fm_afk_contract_cmd_confirm ;;
+    confirm)
+      [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }
+      fm_afk_contract_locked_cmd fm_afk_contract_cmd_confirm ;;
     readback)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
@@ -917,7 +1002,7 @@ fm_afk_contract_main() {
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
       fm_afk_contract_read_grants "$path" ;;
-    archive) fm_afk_contract_cmd_archive ;;
+    archive) fm_afk_contract_locked_cmd fm_afk_contract_cmd_archive ;;
     archived)
       [ "$#" -eq 1 ] || { fm_afk_contract_usage >&2; return 2; }
       path="$(fm_afk_contract_archive_dir)/$1.afk-contract"

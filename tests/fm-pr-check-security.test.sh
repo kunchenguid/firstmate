@@ -138,25 +138,30 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' \
-      'state=MERGED' \
-      'merged=true' \
-      'queued=false' \
+      "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
+      "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
+      "queued=${FM_TEST_GH_GRAPHQL_QUEUED:-false}" \
       'base=main'
     exit 0
     ;;
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
         ;;
     esac
+    ;;
+  "pr merge")
+    [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
+    exit 0
     ;;
 esac
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
@@ -201,10 +206,14 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# Extra "field=value" arguments are written before pr=, because
+# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
 write_poll_meta() {
   local state=$1 id=$2 url=$3
+  shift 3
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "$@" \
     "pr=$url"
 }
 
@@ -624,9 +633,10 @@ SH
 
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
+  local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="$check_timeout" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -2135,12 +2145,290 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# --- poll-path merge authority ----------------------------------------------
+
+write_away_record() {  # <dir> [<fm-afk-contract.sh propose args>...]
+  local dir=$1
+  shift
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" propose "$@" >/dev/null \
+    || fail "could not propose an away-posture record"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
+    || fail "could not confirm an away-posture record"
+}
+
+archive_away_record() {  # <dir>
+  FM_HOME="$1/home" FM_STATE_OVERRIDE="$1/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "could not archive the away-posture record"
+}
+
+# The durable queue is TSV (epoch, sequence, kind, key, payload).
+merged_ledger_row() {  # <state> <task-id>
+  awk -F'\t' -v prefix="check: merge landed: $2 " \
+    'index($5, prefix) == 1 { print $5 }' "$1/.wake-queue"
+}
+
+run_merged_poll_cycle() {  # <dir>
+  local dir=$1 rc=0
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged poll watcher failed: $(cat "$dir/watch.err")"
+}
+
+queue_merge() {  # <dir> <url>
+  local dir=$1 url=$2 rc=0
+  set +e
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    run_merge_entry "$dir" task-a "$url" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "queued merge failed: $(cat "$dir/merge.err")"
+  assert_grep "is queued" "$dir/merge.out" "the forge did not queue the merge"
+  [ -f "$dir/home/state/task-a.merge-authority" ] \
+    || fail "the accepted queued merge did not persist its authority"
+}
+
+test_merged_poll_row_carries_the_merge_authority() {
+  local dir state url expected posture
+  url=https://github.com/o/r/pull/1
+
+  for posture in yolo grant; do
+    dir=$(make_case "queued-merge-authority-$posture")
+    state="$dir/home/state"
+    write_task_meta "$dir" task-a
+    if [ "$posture" = yolo ]; then
+      printf 'yolo=on\n' >> "$state/task-a.meta"
+      write_away_record "$dir"
+      expected=yolo
+    else
+      write_away_record "$dir" --grant task-a
+      expected=away-grant
+    fi
+    run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+      || fail "$posture: could not arm the merge poll"
+    queue_merge "$dir" "$url"
+    archive_away_record "$dir"
+    run_merged_poll_cycle "$dir"
+    [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url $expected" ] \
+      || fail "$posture: archived posture lost persisted authority: $(merged_ledger_row "$state" task-a)"
+    [ ! -e "$state/task-a.merge-authority" ] \
+      || fail "$posture: published merge left its authority record behind"
+  done
+
+  pass "queued merges retain yolo and away-grant after captain return"
+}
+
+test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case queued-merge-authority-attended)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "attended: could not arm the merge poll"
+  queue_merge "$dir" "$url"
+  run_merged_poll_cycle "$dir"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url" ] \
+    || fail "attended queued merge was tagged: $(merged_ledger_row "$state" task-a)"
+
+  dir=$(make_case merged-poll-authority-external)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir"
+  seed_canonical_poll "$dir" task-a "$url"
+  run_merged_poll_cycle "$dir"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url external" ] \
+    || fail "external merge was attributed from live away posture: $(merged_ledger_row "$state" task-a)"
+  assert_poll_absent "$state" task-a
+
+  pass "poll distinguishes attended authorization from external landing"
+}
+
+test_authority_persistence_refuses_rebound_metadata() {
+  local dir state url_a url_b rc
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-rebound-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "rebind: could not arm the original poll"
+  cat > "$dir/rebind.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+SH
+  chmod +x "$dir/rebind.sh"
+  set +e
+  FM_TEST_GH_MERGE_HOOK="$dir/rebind.sh" \
+    FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    run_merge_entry "$dir" task-a "$url_a" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rebind: accepted merge persisted against rebound metadata"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "rebind: merge hook did not replace the canonical identity"
+  [ ! -e "$state/task-a.merge-authority" ] \
+    || fail "rebind: authority was published for the wrong canonical identity"
+  pass "accepted merge authority refuses rebound task metadata"
+}
+
+test_authority_persists_before_control_unlock() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-control-lock)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "control lock: could not arm the merge poll"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.merge-authority "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+    queue_merge "$dir" "$url"
+  pass "accepted merge authority persists under the lifecycle lock"
+}
+
+test_teardown_cannot_race_authority_consumption() {
+  local dir state url watcher_pid rc i
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-teardown-race)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=on'
+  write_away_record "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "teardown race: could not arm the merge poll"
+  queue_merge "$dir" "$url"
+  archive_away_record "$dir"
+  FM_TEST_GH_STATE_STARTED="$dir/poll-started" FM_TEST_GH_STATE=MERGED \
+    FM_TEST_GH_SLEEP=0.5 FM_TEST_CHECK_TIMEOUT=3 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  i=0
+  while [ ! -e "$dir/poll-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    if [ "$i" -ge 500 ]; then
+      kill "$watcher_pid" 2>/dev/null || true
+      wait "$watcher_pid" 2>/dev/null || true
+      fail "teardown race: watcher did not begin its validated poll"
+    fi
+  done
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown race: cleanup crossed the active poll transaction"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "teardown race: refused cleanup removed persisted authority"
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "teardown race: watcher failed with $rc: $(cat "$dir/watch.err")"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
+    || fail "teardown race: concurrent cleanup downgraded the merge authority"
+  pass "teardown cannot race merged-poll authority consumption"
+}
+
+test_authority_retirement_preserves_replacement() {
+  local dir state url_a url_b rc i
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-retirement-replacement)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "replacement: could not arm the original poll"
+  queue_merge "$dir" "$url_a"
+  cat > "$dir/replace-authority.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+(
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
+  FM_TEST_GH_GRAPHQL_QUEUED=true \\
+  "$PR_MERGE" task-a "$url_b" > "$dir/replacement-merge.out" 2> "$dir/replacement-merge.err"
+  printf '%s\n' \$? > "$dir/replacement-merge.rc"
+) &
+SH
+  chmod +x "$dir/replace-authority.sh"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_MV" "$@" || exit $?
+case " $* " in
+  *"task-a.pr-poll-merge-notified "*)
+    if [ ! -e "$FM_TEST_REPLACEMENT_RAN" ]; then
+      : > "$FM_TEST_REPLACEMENT_RAN"
+      "$FM_TEST_REPLACEMENT_SCRIPT"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REPLACEMENT_RAN="$dir/replacement-ran" \
+    FM_TEST_REPLACEMENT_SCRIPT="$dir/replace-authority.sh" \
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch-a.out" 2> "$dir/watch-a.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "replacement: original poll failed: $(cat "$dir/watch-a.err")"
+  i=0
+  while [ ! -e "$dir/replacement-merge.rc" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "replacement: serialized replacement merge did not finish"
+  done
+  [ "$(cat "$dir/replacement-merge.rc")" -eq 0 ] \
+    || fail "replacement: serialized replacement merge failed: $(cat "$dir/replacement-merge.err")"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "replacement: original poll retirement deleted the replacement authority"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "replacement: replacement poll was not armed"
+  ack_watcher_cycle "$state" || fail "replacement: could not acknowledge the original wake"
+  rm -f "$dir/fakebin/mv" "$state/.last-check"
+  run_merged_poll_cycle "$dir"
+  awk -F'\t' -v expected="check: merge landed: task-a $url_b" \
+    '$5 == expected { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "replacement: replacement merge lost its attended authority"
+  pass "poll retirement preserves a replacement authority record"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
+test_merged_poll_row_carries_the_merge_authority
+test_merged_poll_row_names_no_authority_when_no_record_grants_one
+test_authority_persistence_refuses_rebound_metadata
+test_authority_persists_before_control_unlock
+test_teardown_cannot_race_authority_consumption
+test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only

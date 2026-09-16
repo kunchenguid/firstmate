@@ -65,7 +65,7 @@ write_github_live_json() {
   local case_dir=$1 head=$2
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
 JSON
 }
 
@@ -73,7 +73,42 @@ write_github_red_json() {
   local case_dir=$1 head=$2 name=$3
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
+JSON
+}
+
+# One CheckRun rollup entry the way GitHub reports it. A conclusion or timestamp
+# of "-" is emitted as JSON null. Args: name status conclusion [startedAt]
+# [completedAt]
+check_run() {
+  local name=$1 status=$2 conclusion=$3 started=${4:--} completed=${5:-${4:--}}
+  local conclusion_json='null' started_json='null' completed_json='null'
+  [ "$conclusion" = - ] || conclusion_json="\"$conclusion\""
+  [ "$started" = - ] || started_json="\"$started\""
+  [ "$completed" = - ] || completed_json="\"$completed\""
+  printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":%s,"startedAt":%s,"completedAt":%s}' \
+    "$name" "$status" "$conclusion_json" "$started_json" "$completed_json"
+}
+
+status_context() {
+  local name=$1 state=$2
+  printf '{"__typename":"StatusContext","context":"%s","state":"%s"}' "$name" "$state"
+}
+
+# Live GitHub JSON whose rollup holds the given entries verbatim, so a test can
+# put several runs of one check name at the same head the way GitHub does after
+# it cancels a pull request's in-flight run and re-triggers it. mergeStateStatus
+# stays CLEAN because that is what GitHub reports for exactly this case.
+# Args: case_dir head_sha <rollup-entry-json>...
+write_github_rollup_json() {
+  local case_dir=$1 head=$2 entry rollup=''
+  shift 2
+  for entry in "$@"; do
+    rollup="${rollup:+$rollup,}$entry"
+  done
+  printf '%s\n' "$head" > "$case_dir/github-head"
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[$rollup]}
 JSON
 }
 
@@ -124,6 +159,17 @@ case "${1:-} ${2:-}" in
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
       cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     fi
+    # The forge call runs inside the merge's critical section, so a real
+    # away-record change attempted from here is the TOCTOU itself: whatever
+    # happens to it happens between the authority read and the merge.
+    if [ -x "${FM_TEST_AWAY_MUTATE_AT_MERGE:-}" ]; then
+      away_rc=0
+      "$FM_TEST_AWAY_MUTATE_AT_MERGE" > "$FM_TEST_AWAY_MUTATE_OUT" 2>&1 || away_rc=$?
+      printf '%s\n' "$away_rc" > "$FM_TEST_AWAY_MUTATE_RC"
+      "$FM_TEST_ROOT/bin/fm-afk-contract.sh" grants \
+        > "$FM_TEST_AWAY_GRANTS_AT_MERGE" 2>/dev/null \
+        || printf 'no-live-record\n' > "$FM_TEST_AWAY_GRANTS_AT_MERGE"
+    fi
     if [ -n "${FM_TEST_GH_MERGE_OUTPUT:-}" ]; then
       printf '%s\n' "$FM_TEST_GH_MERGE_OUTPUT"
     else
@@ -144,6 +190,10 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
+    if [ -f "${FM_TEST_GH_RULES_FAIL_BODY:-}" ]; then
+      cat "$FM_TEST_GH_RULES_FAIL_BODY" >&2
+      exit 1
+    fi
     if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
       exit 1
     fi
@@ -243,6 +293,7 @@ write_mr_json() {
   local file=$1 kv key value
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
+  local merge_when_pipeline_succeeds=false merge_after=null
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -256,6 +307,8 @@ write_mr_json() {
       pipeline_sha) pipeline_sha=$value ;;
       pipeline_status) pipeline_status=$value ;;
       pipeline) pipeline=$value ;;
+      merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
+      merge_after) merge_after=$value ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
@@ -264,8 +317,10 @@ write_mr_json() {
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s}\n' \
+  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
+  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
+    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
@@ -330,8 +385,14 @@ run_pr_merge() {
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
+  FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
+  FM_TEST_ROOT="$ROOT" \
+  FM_TEST_AWAY_MUTATE_AT_MERGE="${FM_TEST_AWAY_MUTATE_AT_MERGE:-}" \
+  FM_TEST_AWAY_MUTATE_OUT="$case_dir/away-mutate-output" \
+  FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
+  FM_TEST_AWAY_GRANTS_AT_MERGE="$case_dir/away-grants-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
@@ -775,6 +836,61 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
   assert_no_grep 'retry with:' "$case_dir/stderr" \
     "github-unreadable-queue-rules: retry flags were named from rules nothing could read"
   pass "fm-pr-merge distinguishes unreadable branch rules from a base with no merge queue"
+}
+
+# A repository whose plan does not expose branch rules answers the rules
+# endpoint with a 403 whose body is GitHub's own plan-upgrade message, not a
+# generic auth or rate-limit failure. That repository cannot have a
+# merge_queue rule either, so it must read as no queue rather than unreadable
+# - an attended read still fails the merge here only because the queue-aware
+# outcome read (api graphql) was never set up for this case, exactly like the
+# no-queue-rule case below; the queue read itself is proven by the absence of
+# 'merge-queue' wording in the refusal.
+test_github_plan_gated_403_reads_as_no_queue() {
+  local case_dir rc
+  case_dir=$(make_case github-plan-gated-403)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8989898989898989898989898989898989898989
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-plan-gated-403: an unproved merge must fail"
+  assert_no_grep 'merge queue' "$case_dir/stderr" \
+    "github-plan-gated-403: a plan-gated 403 was read as an unreadable or present queue rule"
+  assert_no_grep 'could not be read' "$case_dir/stderr" \
+    "github-plan-gated-403: a plan-gated 403 was reported as an unreadable rules response"
+  pass "fm-pr-merge reads a plan-gated 403 on branch rules as no merge queue, not unreadable"
+}
+
+# The practical effect of the fix: while away under a standing yolo=on
+# posture (no per-task merge grant), a private repository's plan-gated 403
+# must no longer refuse the merge the way any other unreadable queue response
+# does.
+test_away_plan_gated_403_does_not_block_the_merge() {
+  local case_dir rc url head
+  head=cececececececececececececececececececece
+  url=https://github.com/example/repo/pull/91
+  case_dir=$(make_case away-plan-gated-403)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  printf '\nyolo=on\n' >> "$case_dir/state/task-x1.meta"
+  write_away_record "$case_dir"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-plan-gated-403: a private repo's plan-gated 403 must not block an away merge"
+  assert_logged_gh_merge "$case_dir" 91 example/repo --squash
+  pass "away merge proceeds on a plan-gated 403 because that repository cannot have a merge queue"
 }
 
 test_github_no_queue_rule_says_nothing_about_a_queue() {
@@ -2046,6 +2162,7 @@ test_github_accepted_queue_flags_do_not_echo_back_the_same_command
 test_github_mismatched_queue_flags_still_name_the_retry
 test_github_unrecognised_queue_method_still_names_the_queue
 test_github_unreadable_queue_rules_are_not_reported_as_no_queue
+test_github_plan_gated_403_reads_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
 test_github_unmerged_fallback_cannot_replace_queue_aware_read
 test_github_auto_merge_without_queue_refuses_legibly
@@ -2284,6 +2401,246 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+# When the base branch advances, GitHub cancels a pull request's in-flight run
+# and re-triggers it, leaving the cancelled run in the rollup beside the passing
+# re-run while reporting the pull request itself CLEAN. The merge must follow the
+# current run rather than the one that re-run replaced.
+test_superseded_failed_check_run_no_longer_refuses() {
+  local case_dir head
+  head=cccccccccccccccccccccccccccccccccccccccc
+  case_dir=$(make_case github-superseded-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED CANCELLED 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-superseded-red: a failed run replaced by a passing re-run must merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 90 example/repo --squash
+  pass "fm-pr-merge merges when a failed check run was replaced by a passing re-run"
+}
+
+# Legacy status contexts remain independent from check runs, even when their
+# reported names match.
+test_check_runs_never_supersede_status_contexts() {
+  local case_dir rc head
+  head=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+  case_dir=$(make_case github-cross-check-kind)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(status_context ci FAILURE)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/97 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-cross-check-kind: a failing status context must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-cross-check-kind: the status context was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-cross-check-kind: a passing check run hid a failing status context"
+  pass "fm-pr-merge never lets a check run supersede a legacy status context"
+}
+
+# The inverse, and the one that matters most: a check whose current run failed is
+# still red however many earlier runs of it passed.
+test_current_failed_check_run_still_refuses() {
+  local case_dir rc head
+  head=dddddddddddddddddddddddddddddddddddddddd
+  case_dir=$(make_case github-current-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-current-red: a currently failing check must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-current-red: the red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-current-red: gh pr merge ran on a currently failing check"
+  pass "fm-pr-merge still refuses when a check's current run failed after an earlier pass"
+}
+
+# Run generation follows startedAt rather than the order overlapping runs finish.
+test_late_finishing_old_success_does_not_hide_current_failure() {
+  local case_dir rc head
+  head=dededededededededededededededededededede
+  case_dir=$(make_case github-old-success-finishes-last)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z 2026-01-01T00:00:10Z)" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:09Z 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/98 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-old-success-finishes-last: the later-started failure must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-old-success-finishes-last: the current failure was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-old-success-finishes-last: completion order hid the current failure"
+  pass "fm-pr-merge uses start order when the old success finishes last"
+}
+
+# A cancelled old run may settle after the passing re-run that superseded it.
+test_late_finishing_old_cancellation_is_superseded() {
+  local case_dir head
+  head=dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf
+  case_dir=$(make_case github-old-cancellation-finishes-last)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED CANCELLED 2026-01-01T00:00:01Z 2026-01-01T00:00:10Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z 2026-01-01T00:00:09Z)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/99 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-old-cancellation-finishes-last: the passing re-run must merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 99 example/repo --squash
+  pass "fm-pr-merge supersedes an old cancellation that finishes last"
+}
+
+# A re-run that has not finished proves nothing, so it can neither be superseded
+# nor supersede: the check stays red whether the run it replaces passed or failed.
+test_unfinished_rerun_keeps_a_check_red() {
+  local case_dir rc head prior
+  head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  for prior in FAILURE SUCCESS; do
+    case_dir=$(make_case "github-pending-rerun-$prior")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" \
+      "$(check_run ci COMPLETED "$prior" 2026-01-01T00:00:01Z)" \
+      "$(check_run ci IN_PROGRESS - -)"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-pending-rerun-$prior: an unfinished re-run must refuse"
+    assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+      "github-pending-rerun-$prior: the pending check was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-pending-rerun-$prior: gh pr merge ran with a re-run still in flight"
+  done
+  pass "fm-pr-merge keeps a check red while its re-run is still in flight"
+}
+
+# Supersession is scoped to one check name, which is also the name --allow-red
+# matches, so a newer passing check never clears a different check's failure.
+test_supersession_never_crosses_check_names() {
+  local case_dir rc head
+  head=ffffffffffffffffffffffffffffffffffffffff
+  case_dir=$(make_case github-cross-name)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-cross-name: another check passing must not clear this failure"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "github-cross-name: the red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-cross-name: gh pr merge ran on a red check of a different name"
+  pass "fm-pr-merge never lets one check's pass clear another check's failure"
+}
+
+# Supersession has to be proven from the forge's own start timestamps, so a run
+# GitHub dated in any other way is treated as undated and clears nothing.
+test_undated_runs_never_supersede() {
+  local case_dir rc spec label older newer
+  local head=0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a
+  set -- \
+    'undated-failure|-|2026-01-01T00:00:09Z' \
+    'undated-pass|2026-01-01T00:00:01Z|-' \
+    'fractional-pass|2026-01-01T00:00:01Z|2026-01-01T00:00:09.500Z' \
+    'offset-pass|2026-01-01T00:00:01Z|2026-01-01T00:00:09+00:00'
+  for spec in "$@"; do
+    label=${spec%%|*}
+    older=${spec#*|}
+    older=${older%%|*}
+    newer=${spec##*|}
+    case_dir=$(make_case "github-undated-$label")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" \
+      "$(check_run ci COMPLETED FAILURE "$older")" \
+      "$(check_run ci COMPLETED SUCCESS "$newer")"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/94 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-undated-$label: an unproven supersession must refuse"
+    assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+      "github-undated-$label: the red check was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-undated-$label: gh pr merge ran on an unproven supersession"
+  done
+  pass "fm-pr-merge clears a failure only on a proven later pass of the same check"
+}
+
+# A superseded failure changes nothing about the waiver: --allow-red still covers
+# exactly the named check, still needs every other check green, and the merge is
+# still bound to the verified head.
+test_allow_red_still_waives_only_the_current_failure() {
+  local case_dir rc head
+  head=0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+  case_dir=$(make_case github-superseded-allow-red-wrong-name)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/95 \
+    --allow-red ci > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "superseded-allow-red-wrong-name: waiving the green check must not merge"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "superseded-allow-red-wrong-name: the unwaived red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "superseded-allow-red-wrong-name: gh pr merge ran with an unwaived red check"
+
+  case_dir=$(make_case github-superseded-allow-red-named)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/96 \
+    --allow-red lint > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "superseded-allow-red-named: the named waiver should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 96 example/repo --squash
+  pass "fm-pr-merge keeps --allow-red scoped to its named check beside a superseded failure"
+}
+
 test_allow_red_is_refused_while_away() {
   local case_dir rc head
   head=abababababababababababababababababababab
@@ -2411,6 +2768,79 @@ test_away_grant_and_yolo_and_hold_for_return() {
   pass "away merges require yolo or a grant, and --attended-override does not skip that"
 }
 
+test_away_posture_refuses_asynchronous_merge_paths() {
+  local case_dir rc url head merge_line
+  head=abababababababababababababababababababab
+  url=https://github.com/example/repo/pull/89
+
+  case_dir=$(make_case away-auto-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --attended-override -- --auto --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-auto-refused: auto-merge must be attended-only"
+  assert_grep '--auto is attended-only' "$case_dir/stderr" \
+    "away-auto-refused: refusal did not name the asynchronous flag"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-auto-refused: gh pr merge ran for an away auto-merge request"
+
+  case_dir=$(make_case away-queue-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-queue-refused: a required merge queue must refuse before submission"
+  assert_grep 'merge-queue state does not prove an immediate merge' "$case_dir/stderr" \
+    "away-queue-refused: refusal did not explain the away restriction"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-queue-refused: gh received a merge that could enter its queue"
+
+  case_dir=$(make_gitlab_case away-gitlab-auto)
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --attended-override -- --auto-merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-gitlab-auto: GitLab auto-merge must refuse"
+  assert_grep 'GitLab auto-merge is attended-only' "$case_dir/stderr" \
+    "away-gitlab-auto: refusal did not name auto-merge"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "away-gitlab-auto: glab received an asynchronous merge"
+
+  case_dir=$(make_gitlab_case away-gitlab-configured merge_when_pipeline_succeeds=true)
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-gitlab-configured: configured auto-merge must refuse"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "away-gitlab-configured: glab received a configured asynchronous merge"
+
+  case_dir=$(make_gitlab_case away-gitlab-sync)
+  write_away_record "$case_dir" --grant task-x1
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-gitlab-sync: an immediate granted merge should succeed"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  case "$merge_line" in
+    *" --auto-merge=false") ;;
+    *) fail "away-gitlab-sync: the final glab flag did not force an immediate merge: '$merge_line'" ;;
+  esac
+  pass "away posture permits immediate merges but refuses every asynchronous path"
+}
+
 test_away_grant_does_not_bypass_red_or_identity() {
   local case_dir rc head
   head=adadadadadadadadadadadadadadadadadadadad
@@ -2464,6 +2894,164 @@ test_unreadable_away_record_refuses_merge() {
   pass "an unreadable away-posture record refuses the merge instead of skipping the grant"
 }
 
+# The race this closes: the away record is read for merge authority and the
+# forge is called afterwards, so an archive (the captain's return) or a grant
+# revocation landing in between would merge on authority that no longer holds.
+# away_change_script writes the change the gh mock attempts from inside the
+# forge call, which IS that window. Its body drives the real away-record
+# commands /afk and the return use, never a file edit, and takes a one-second
+# lock bound so a contended case refuses quickly instead of waiting.
+away_change_script() {  # <case-dir> <name>; script body on stdin
+  local case_dir=$1 name=$2 path
+  path="$case_dir/$name"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -eu\n'
+    printf 'export FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1\n'
+    printf 'CONTRACT="%s/bin/fm-afk-contract.sh"\n' "$ROOT"
+    cat
+  } > "$path"
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+# Two away-record changes, each attempted from inside the merge's critical
+# section: the archive a captain return performs, and the replacement that
+# revokes a grant. Neither may land there, and the merge must still complete on
+# the authority it read.
+test_away_record_cannot_change_between_the_authority_read_and_the_merge() {
+  local case_dir rc mutate
+  case_dir=$(make_case away-archive-at-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b
+  write_away_record "$case_dir" --grant task-x1
+  mutate=$(away_change_script "$case_dir" archive-at-merge <<'SH'
+"$CONTRACT" archive
+SH
+  )
+
+  export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AWAY_MUTATE_AT_MERGE
+
+  expect_code 0 "$rc" "away-archive-at-merge: the granted green merge should still land"
+  [ -s "$case_dir/away-mutate-rc" ] \
+    || fail "away-archive-at-merge: the archive was never attempted inside the merge"
+  [ "$(cat "$case_dir/away-mutate-rc")" != 0 ] \
+    || fail "away-archive-at-merge: the archive landed inside the merge's critical section"
+  assert_grep 'locked by live process' "$case_dir/away-mutate-output" \
+    "away-archive-at-merge: the refused archive did not name the live holder"
+  assert_equals task-x1 "$(cat "$case_dir/away-grants-at-merge" 2>/dev/null || true)" \
+    "away-archive-at-merge: the grant this merge read was not still standing at the forge call"
+  assert_grep "merge landed: task-x1 https://github.com/example/repo/pull/71 away-grant" \
+    "$case_dir/state/.wake-queue" \
+    "away-archive-at-merge: the landed merge was not recorded under the grant it read"
+  # The lock goes with the merge rather than leaking: the captain's return
+  # archives the record on its first try once the merge is done.
+  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "away-archive-at-merge: the record stayed locked after the merge"
+
+  case_dir=$(make_case away-revoke-at-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
+  write_away_record "$case_dir" --grant task-x1
+  mutate=$(away_change_script "$case_dir" revoke-at-merge <<'SH'
+"$CONTRACT" propose --grant task-other
+"$CONTRACT" confirm
+SH
+  )
+  export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AWAY_MUTATE_AT_MERGE
+
+  expect_code 0 "$rc" "away-revoke-at-merge: the granted green merge should still land"
+  [ "$(cat "$case_dir/away-mutate-rc" 2>/dev/null || true)" != 0 ] \
+    || fail "away-revoke-at-merge: the replacement landed inside the critical section"
+  assert_equals task-x1 "$(cat "$case_dir/away-grants-at-merge" 2>/dev/null || true)" \
+    "away-revoke-at-merge: the grant was revoked inside the merge's critical section"
+  pass "no away-record archive or grant revocation lands between the authority read and the merge"
+}
+
+# The same serialization from the other side. A revocation that wins the race
+# lands BEFORE the in-lock authority read, and the merge then refuses: the lock
+# decides an order, it never lets a stale grant through.
+test_a_grant_revoked_before_the_merge_refuses_it() {
+  local case_dir rc
+  case_dir=$(make_case away-revoked-before-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d
+  write_away_record "$case_dir"
+  mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+  write_away_record "$case_dir" --grant task-x1
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "away-revoked-before-merge: a revoked grant must refuse"
+  assert_grep 'held for the captain return' "$case_dir/stderr" \
+    "away-revoked-before-merge: refusal did not name hold-for-return"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-revoked-before-merge: gh pr merge ran on a revoked grant"
+  pass "a grant revoked before the merge's own authority read refuses the merge"
+}
+
+# Fail closed. The lock is what makes the authority read and the merge one
+# action, so a merge that cannot take it has no locked window to merge in and
+# refuses - including on this attended case, where the record is absent and
+# there is no grant to check at all.
+test_merge_refuses_when_the_away_record_cannot_be_locked() {
+  local case_dir rc holder_pid i lock
+  case_dir=$(make_case away-lock-unavailable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e
+  lock="$case_dir/state/.afk-contract.lock"
+
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$case_dir/holder.ready" "$case_dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$case_dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$case_dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "away-lock-unavailable: the fixture never took the record lock"; }
+
+  export FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT
+  : > "$case_dir/release-holder"
+  wait "$holder_pid" || fail "away-lock-unavailable: the fixture holder did not release cleanly"
+
+  expect_code 1 "$rc" "away-lock-unavailable: an unlockable away record must refuse the merge"
+  assert_grep 'could not be locked for the merge' "$case_dir/stderr" \
+    "away-lock-unavailable: refusal did not name the lock it could not take"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-lock-unavailable: gh pr merge ran without the away-record lock"
+  pass "a merge that cannot lock the away record refuses instead of merging unlocked"
+}
+
 test_allow_red_refused_on_gitlab() {
   local case_dir rc
   case_dir=$(make_gitlab_case gitlab-allow-red)
@@ -2499,9 +3087,23 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_superseded_failed_check_run_no_longer_refuses
+test_check_runs_never_supersede_status_contexts
+test_current_failed_check_run_still_refuses
+test_late_finishing_old_success_does_not_hide_current_failure
+test_late_finishing_old_cancellation_is_superseded
+test_unfinished_rerun_keeps_a_check_red
+test_supersession_never_crosses_check_names
+test_undated_runs_never_supersede
+test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
+test_away_posture_refuses_asynchronous_merge_paths
+test_away_plan_gated_403_does_not_block_the_merge
 test_away_grant_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
+test_away_record_cannot_change_between_the_authority_read_and_the_merge
+test_a_grant_revoked_before_the_merge_refuses_it
+test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
