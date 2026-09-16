@@ -143,7 +143,7 @@ If it did not:
 
 # Findings — 2026-09-16
 
-**Verdict: inconclusive, not negative.** An earlier reading of this experiment
+**Verdict: inconclusive, not negative.** Tracked as [PLAT-1332](https://redventures.atlassian.net/browse/PLAT-1332); the clean re-test protocol is `2026-09-16-bender-bypass-retest.md`. An earlier reading of this experiment
 called it a clean negative. That reading was wrong. Double-checking it found two
 problems with the test itself, so the question the experiment was built to answer
 is still open.
