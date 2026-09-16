@@ -278,6 +278,30 @@ test_muse_interrupt_clears_the_restored_prompt() {
   pass "fm-send --key Escape: muse composer holding the restored prompt is cleared"
 }
 
+test_muse_interrupt_normalizes_multiline_prompt() {
+  local dir fb home log screen err rc sample expected
+  dir="$TMP_ROOT/muse-multiline"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home musemultiline); log="$dir/tmux.log"; err="$dir/send.err"
+  screen=$(muse_clobber_fixture "$dir" "$home" $'first  line\n\n  second\tline')
+  for sample in 'first line second line' 'line second line' 'first linesecond line'; do
+    : > "$log"
+    printf 'transcript row\n\xe2\x9d\xaf %s\n' "$sample" > "$screen"
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
+      "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
+    expect_code 0 "$rc" "multiline prompt interrupt should be delivered"
+    assert_contains "$(cat "$log")" "arg=Escape" "the interrupt should be delivered"
+    expected="$(cat "$log")"
+    if [ "$sample" = 'first linesecond line' ]; then
+      assert_not_contains "$expected" "arg=C-u" "fresh joined words must not match a newline boundary"
+      assert_contains "$(cat "$err")" "left untouched" "fresh input should be preserved"
+    else
+      assert_contains "$expected" "arg=C-u" "multiline restored prompt or suffix should be cleared"
+    fi
+  done
+  pass "fm-send --key Escape: multiline prompt boundaries normalize without joining words"
+}
+
 test_muse_interrupt_preserves_fresh_input() {
   local dir fb home log screen err rc
   dir="$TMP_ROOT/muse-clobber"; mkdir -p "$dir"
@@ -358,6 +382,7 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_muse_interrupt_clears_the_restored_prompt
+test_muse_interrupt_normalizes_multiline_prompt
 test_muse_interrupt_preserves_fresh_input
 test_muse_interrupt_skips_clear_when_unprovable
 test_muse_interrupt_empty_composer_needs_no_clear

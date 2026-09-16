@@ -688,7 +688,7 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     return 0
   }
   fm_composer_normalize_spaces_var prompt
-  prompt=$(printf '%s\n' "$prompt" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  prompt=$(printf '%s\n' "$prompt" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
   [ -n "$prompt" ] || {
     printf 'unprovable: the recorded run prompt in %s is empty' "$log"
     return 0
@@ -733,7 +733,7 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     return 0
   fi
   fm_composer_normalize_spaces_var content
-  content=$(printf '%s\n' "$content" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  content=$(printf '%s\n' "$content" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
   case "$prompt" in
     *"$content") printf 'restored' ;;
     *) printf 'other' ;;
