@@ -147,7 +147,11 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        if [ -n "${FM_TEST_GH_VIEW_JSON:-}" ]; then
+          cat "$FM_TEST_GH_VIEW_JSON"
+        else
+          printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        fi
         exit 0
         ;;
       *headRefOid,reviewDecision*)
@@ -2271,6 +2275,120 @@ test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
   pass "poll distinguishes attended authorization from external landing"
 }
 
+# --- yolo merge posture applied by the poll ----------------------------------
+
+test_yolo_poll_merges_a_green_pr() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-merge)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "yolo merge watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "yolo merge did not emit the landed wake: $(cat "$dir/watch.out")" ;; esac
+  assert_grep "pr merge 1 --repo o/r --match-head-commit" "$dir/gh.log" \
+    "yolo merge did not reach the guarded forge merge"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
+    || fail "yolo merge outcome was not tagged yolo: $(merged_ledger_row "$state" task-a)"
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/task-a.merge-authority" ] \
+    || fail "yolo merge left its consumed authority record behind"
+  pass "a yolo task's still-open green PR merges through the guarded path and reports the landing"
+}
+
+test_yolo_poll_reports_only_for_non_yolo_and_red() {
+  local dir state url rc posture
+  url=https://github.com/o/r/pull/1
+
+  for posture in absent off; do
+    dir=$(make_case "yolo-poll-report-$posture")
+    state="$dir/home/state"
+    ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+    if [ "$posture" = off ]; then
+      write_poll_meta "$state" task-a "$url" yolo=off
+    else
+      write_poll_meta "$state" task-a "$url"
+    fi
+    seed_canonical_poll "$dir" task-a "$url"
+    add_stop_custom_check "$dir"
+    set +e
+    FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+      FM_TEST_GLAB_LOG="$dir/glab.log" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$posture.out" 2> "$dir/$posture.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$posture watcher failed: $(cat "$dir/$posture.err")"
+    case "$(cat "$dir/$posture.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$posture did not reach the control check: $(cat "$dir/$posture.out")" ;; esac
+    assert_no_grep 'pr merge' "$dir/gh.log" "a non-yolo ($posture) task attempted a forge merge"
+    [ -f "$state/task-a.check.sh" ] || fail "$posture poll was retired without a merge"
+    [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "$posture recorded a merge outcome"
+    ack_watcher_cycle "$state" || fail "$posture control wake acknowledgement failed"
+  done
+
+  dir=$(make_case yolo-poll-red)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  cat > "$dir/red-view.json" <<'JSON'
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]}
+JSON
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_VIEW_JSON="$dir/red-view.json" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/red.out" 2> "$dir/red.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "red watcher failed: $(cat "$dir/red.err")"
+  case "$(cat "$dir/red.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "red did not reach the control check: $(cat "$dir/red.out")" ;; esac
+  assert_no_grep 'pr merge' "$dir/gh.log" "a red PR was merged under yolo"
+  assert_grep 'yolo merge attempt for task-a' "$state/.watch-triage.log" \
+    "the refused yolo merge attempt left no triage record"
+  [ -f "$state/task-a.check.sh" ] || fail "red poll was retired without a merge"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "a red PR recorded a merge outcome"
+  pass "non-yolo tasks never attempt a merge and a red PR is refused by the guarded path"
+}
+
+test_yolo_poll_queued_merge_keeps_polling() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-queued)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "queued watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "queued merge did not reach the control check: $(cat "$dir/watch.out")" ;; esac
+  assert_grep "pr merge 1 --repo o/r --match-head-commit" "$dir/gh.log" \
+    "queued merge did not reach the guarded forge merge"
+  [ -f "$state/task-a.check.sh" ] || fail "a queued merge retired its armed poll"
+  [ -f "$state/task-a.merge-authority" ] || fail "a queued merge lost its persisted authority"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "a queued merge recorded a landed outcome"
+  pass "a queued yolo merge persists its authority and keeps the poll armed"
+}
+
+
 test_authority_persistence_refuses_rebound_metadata() {
   local dir state url_a url_b rc
   url_a=https://github.com/o/r/pull/1
@@ -2444,6 +2562,9 @@ test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
+test_yolo_poll_merges_a_green_pr
+test_yolo_poll_reports_only_for_non_yolo_and_red
+test_yolo_poll_queued_merge_keeps_polling
 test_authority_persistence_refuses_rebound_metadata
 test_authority_persists_before_control_unlock
 test_teardown_cannot_race_authority_consumption

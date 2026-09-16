@@ -2126,6 +2126,7 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      pr_poll_self_merged=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -2154,6 +2155,38 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # A still-open poll on a task whose recorded merge posture is yolo=on
+          # invokes the same guarded merge path firstmate runs by hand
+          # (bin/fm-pr-merge.sh): its own live verification is what decides the
+          # PR is open, mergeable, and green, so a red or unverifiable PR is
+          # refused there and the poll simply stays armed for the next cycle.
+          # The merge takes this task's control lock itself, so the poll's hold
+          # on it must be released first and retaken afterwards. A confirmed
+          # landing is recognized by the merge-notified marker the merge path
+          # commits with its durable outcome, which also covers a queued or
+          # unconfirmed acceptance that must keep polling.
+          if [ -z "$out" ] \
+            && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
+            pr_poll_control_release || exit 1
+            merge_attempt_rc=0
+            merge_attempt_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+              FM_ROOT_OVERRIDE="$FM_ROOT" \
+              "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" 2>&1) \
+              || merge_attempt_rc=$?
+            if [ "$merge_attempt_rc" -eq 0 ] \
+              && fm_pr_poll_merge_already_notified "$STATE" "$id" \
+                "$provider" "$host" "$path" "$number"; then
+              pr_poll_self_merged=1
+              out=merged
+              # The merge re-armed this poll while it ran, so the cycle-start
+              # snapshot is stale; refresh it so the merged handling below
+              # retires the re-armed artifacts instead of deferring a cycle.
+              fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+                || triage_log "yolo merge for $id left a poll snapshot that could not be refreshed; retirement defers to the next cycle"
+            elif [ "$merge_attempt_rc" -ne 0 ]; then
+              triage_log "yolo merge attempt for $id refused or failed (rc=$merge_attempt_rc): $merge_attempt_out"
+            fi
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
@@ -2210,7 +2243,8 @@ EOF
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
-          if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
+          if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ] \
+            && [ "$pr_poll_self_merged" -eq 0 ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
