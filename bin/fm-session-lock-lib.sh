@@ -15,6 +15,8 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-dsh-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-dsh-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
@@ -26,13 +28,18 @@
 # interpreter arm below greps. The alternatives are anchored path shapes rather
 # than a bare `dsh` alternative, so an ordinary firstmate path such as
 # bin/fm-dsh-sessionstart.sh cannot claim the identity.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|/\.bin/dsh([[:space:]]|$)|/@deepseek-ai/dsh/lib/bin\.js|/apps/cli/src/bin\.ts'
+# The dsh alternative comes from bin/fm-dsh-lib.sh, the one owner of that
+# launcher shape, so this registry cannot drift from the ancestry walk.
+FM_HARNESS_RE="claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|$(fm_dsh_args_ere)"
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp dsh)
+# dsh is deliberately ABSENT: a DSH host is a node process, so no executable
+# NAME identifies it and the path-component matcher below can never see it. Its
+# identity reaches this registry only through the regex above.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

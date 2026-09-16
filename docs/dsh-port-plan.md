@@ -65,6 +65,9 @@ larger than the work completed above, not smaller.
 
 This document supersedes the phased plan discussed before the audit.
 
+[Keeping this fork current with upstream firstmate](dsh-upstream-sync.md) owns the conflict surface,
+the update procedure, and the gates to re-run after merging an upstream change.
+
 The audit covered all 180 `bin/` scripts, 30 `docs/` pages, 21 skills, all 16 `AGENTS.md` sections
 and the 7 per-harness integration directories, producing 3823 capability rows and four consolidated
 gap digests. Raw inventories and the four consolidated digests are preserved at
