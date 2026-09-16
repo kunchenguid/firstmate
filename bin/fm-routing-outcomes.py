@@ -311,6 +311,13 @@ def total_tokens(models: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def usage_completeness(models: list[dict[str, Any]], fields: tuple[str, ...]) -> str:
+    values = [row["tokens"].get(field) for row in models for field in fields]
+    if not values or all(value is None for value in values):
+        return "missing"
+    return "complete" if all(value is not None for value in values) else "partial"
+
+
 def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
     raw, source_digest = read_private(source.get("path"), "native_receipt.path")
     rows = json_lines(raw, "native_receipt.path")
@@ -340,8 +347,10 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
     unmatched = [row for row in latest.values() if row.get("parentId") not in request_ids]
     if unmatched:
         fail("native Pi session has assistant response without a matching routing request")
-    response_parents = {row.get("parentId") for row in latest.values()}
-    if request_ids - response_parents:
+    response_parents = [row.get("parentId") for row in latest.values()]
+    if len(response_parents) != len(set(response_parents)):
+        fail("native Pi session has multiple assistant responses for one routing request")
+    if request_ids - set(response_parents):
         fail("native Pi session has routing request without an assistant response")
     assistants = list(latest.values())
     models: list[dict[str, Any]] = []
@@ -393,7 +402,7 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
         ),
         "completeness": {
             "request_payload": "complete" if request_data else "missing",
-            "usage": "complete" if assistants and all(value is not None for value in total_tokens(models).values()) else "partial",
+            "usage": usage_completeness(models, TOKEN_KEYS),
             "effort": "provider-request" if payload_effort else "unknown",
             "attribution": "task-incarnation-entry" if task_id and spawn_gen else "manifest-only",
         },
@@ -420,8 +429,7 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
             models.append(row)
     if not models and isinstance(receipt.get("usage"), dict):
         usage = receipt["usage"]
-        model = source.get("requested_model")
-        models.append(token_row(model, "anthropic", usage, {
+        models.append(token_row(None, "anthropic", usage, {
             "input": "input_tokens", "output": "output_tokens",
             "cache_read": "cache_read_input_tokens", "cache_write": "cache_creation_input_tokens",
         }, service_tier=usage.get("service_tier")))
@@ -443,7 +451,7 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
         "first_native_at": None, "last_native_at": None,
         "native_duration_ms": receipt.get("duration_api_ms") if isinstance(receipt.get("duration_api_ms"), (int, float)) else None,
         "native_reported_cost_usd": receipt.get("total_cost_usd") if isinstance(receipt.get("total_cost_usd"), (int, float)) else None,
-        "completeness": {"request_payload": "unavailable", "usage": "complete" if models else "missing", "effort": "requested-only", "attribution": "manifest-plus-session"},
+        "completeness": {"request_payload": "unavailable", "usage": usage_completeness(models, ("input", "output", "cache_read", "cache_write")), "effort": "requested-only", "attribution": "manifest-plus-session"},
     }
 
 
@@ -485,7 +493,7 @@ def parse_claude_session(source: dict[str, Any]) -> dict[str, Any]:
         "first_native_at": min(timestamps) if timestamps else None,
         "last_native_at": max(timestamps) if timestamps else None,
         "native_duration_ms": None, "native_reported_cost_usd": None,
-        "completeness": {"request_payload": "unavailable", "usage": "complete" if models else "missing", "effort": "requested-only", "attribution": "manifest-plus-session"},
+        "completeness": {"request_payload": "unavailable", "usage": usage_completeness(models, ("input", "output", "cache_read", "cache_write")), "effort": "requested-only", "attribution": "manifest-plus-session"},
     }
 
 
@@ -527,7 +535,7 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
         "first_native_at": None, "last_native_at": None,
         "native_duration_ms": duration * 1000 if isinstance(duration, (int, float)) else None,
         "native_reported_cost_usd": None,
-        "completeness": {"request_payload": "selected-model-log" if log_digest else "unavailable", "usage": "complete" if usage else "missing", "effort": "native-model-label" if effective_effort else "requested-only", "attribution": "manifest-plus-conversation"},
+        "completeness": {"request_payload": "selected-model-log" if log_digest else "unavailable", "usage": usage_completeness([model_row], ("input", "output", "cache_read", "reasoning", "total")), "effort": "native-model-label" if effective_effort else "requested-only", "attribution": "manifest-plus-conversation"},
     }
 
 

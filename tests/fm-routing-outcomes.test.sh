@@ -85,10 +85,14 @@ class RoutingOutcomesTest(unittest.TestCase):
                          "selectedThinkingLevel": "max", "api": "openai-codex-responses",
                          "payloadModel": "gpt-5.6-luna", "payloadReasoningEffort": effort},
             })
-            if extra_request is not None:
+            if extra_request is not None or second_response:
                 extra = copy.deepcopy(rows[-1])
                 extra["id"] = "request-2"
-                extra["data"].update(extra_request)
+                extra["timestamp"] = "2030-01-01T00:00:02Z"
+                extra["data"]["requestSequence"] = 2
+                extra["data"]["at"] = "2030-01-01T00:00:02Z"
+                if extra_request is not None:
+                    extra["data"].update(extra_request)
                 rows.append(extra)
         assistant = {
             "type": "message", "id": "assistant-1", "parentId": "request-1",
@@ -101,17 +105,12 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "cost": {"total": 0.5}}},
         }
         rows.append(assistant)
-        if extra_request is not None:
+        if extra_request is not None or second_response:
             paired = copy.deepcopy(assistant)
             paired["id"] = "assistant-extra"
             paired["parentId"] = "request-2"
             paired["timestamp"] = "2030-01-01T00:00:04Z"
             rows.append(paired)
-        if second_response:
-            second = copy.deepcopy(assistant)
-            second["id"] = "assistant-2"
-            second["timestamp"] = "2030-01-01T00:00:04Z"
-            rows.append(second)
         if duplicate:
             rows.append(copy.deepcopy(assistant))
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -232,6 +231,16 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         result = self.import_manifest(self.manifest(), ok=False)
         self.assertIn("without a matching routing request", json.loads(result.stdout)["error"])
+
+        self.write_pi(self.pi)
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        assistant = next(row for row in rows if row.get("type") == "message")
+        duplicate_response = copy.deepcopy(assistant)
+        duplicate_response["id"] = "assistant-2"
+        rows.append(duplicate_response)
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("multiple assistant responses for one routing request", json.loads(result.stdout)["error"])
 
     def test_concurrent_duplicate_import_is_one_revision(self):
         manifest = self.manifest()
@@ -663,6 +672,96 @@ class RoutingOutcomesTest(unittest.TestCase):
         billing = self.latest_record()["billing"]
         self.assertIsNone(billing["api_equivalent_usd"])
         self.assertEqual(billing["unpriced_models"], ["unknown"])
+        self.assertEqual(self.latest_record()["native"]["completeness"]["usage"], "missing")
+
+    def test_claude_top_level_usage_keeps_model_and_price_unknown(self):
+        receipt = self.dir / "claude-top-level-usage.json"
+        prices = self.dir / "claude-top-level-prices.json"
+        self.write_json(receipt, {
+            "type": "result", "session_id": "claude-top-level", "num_turns": 1,
+            "usage": {"input_tokens": 8, "output_tokens": 2,
+                      "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0},
+        })
+        self.write_json(prices, {
+            "schema": "fm-routing-prices.v1", "observed_at": "2030-01-01T00:00:00Z",
+            "entries": [{"provider": "anthropic", "model": "claude-sonnet-5",
+                         "context_tier": "all", "service_tier": "standard",
+                         "source_url": "https://example.test/claude-prices",
+                         "effective_from": "2029-01-01T00:00:00Z", "effective_to": None,
+                         "currency": "USD", "reasoning": "included_in_output",
+                         "per_million_tokens": {"input": 1, "output": 1,
+                                                "cache_read": 1, "cache_write": 1}}],
+        })
+        manifest = self.manifest(receipt={"kind": "claude-result", "path": str(receipt),
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"}, outcome="unresolved")
+        manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                  "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        manifest["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        self.import_manifest(manifest, prices=prices)
+        record = self.latest_record()
+        self.assertEqual(record["native"]["tokens"]["input"], 8)
+        self.assertIsNone(record["native"]["models"][0]["model"])
+        self.assertIsNone(record["native"]["effective_model"])
+        self.assertEqual(record["native"]["completeness"]["usage"], "complete")
+        self.assertIsNone(record["billing"]["api_equivalent_usd"])
+        self.assertEqual(record["billing"]["unpriced_models"], ["unknown"])
+
+    def test_usage_completeness_uses_validated_adapter_fields(self):
+        claude_result = self.dir / "claude-missing-tokens.json"
+        self.write_json(claude_result, {
+            "type": "result", "session_id": "claude-missing", "num_turns": 1,
+            "modelUsage": {"claude-sonnet-5": {"canonicalModel": "claude-sonnet-5",
+                                                  "provider": "firstParty"}},
+        })
+        result_manifest = self.manifest(
+            task="claude-result-task", outcome="unresolved",
+            receipt={"kind": "claude-result", "path": str(claude_result),
+                     "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        result_manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                         "requested_model": "claude-sonnet-5",
+                                         "requested_effort": "high"})
+        result_manifest["requirements"] = None
+        self.bind_task("claude-result-task", harness="claude")
+        self.import_manifest(result_manifest)
+        self.assertEqual(self.latest_record()["native"]["completeness"]["usage"], "missing")
+
+        claude_session = self.dir / "claude-partial-tokens.jsonl"
+        claude_session.write_text(json.dumps({
+            "type": "assistant", "sessionId": "claude-partial", "uuid": "one",
+            "timestamp": "2030-01-01T00:00:01Z",
+            "message": {"id": "one", "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 4}},
+        }) + "\n", encoding="utf-8")
+        session_manifest = self.manifest(
+            task="claude-session-task", outcome="unresolved",
+            receipt={"kind": "claude-session", "path": str(claude_session),
+                     "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        session_manifest["route"].update({"harness": "claude", "provider": "anthropic",
+                                          "requested_model": "claude-sonnet-5",
+                                          "requested_effort": "high"})
+        session_manifest["requirements"] = None
+        self.bind_task("claude-session-task", harness="claude")
+        self.import_manifest(session_manifest)
+        self.assertEqual(self.latest_record()["native"]["completeness"]["usage"], "partial")
+
+        agy_result = self.dir / "agy-partial-tokens.json"
+        self.write_json(agy_result, {"conversation_id": "agy-partial", "num_turns": 1,
+                                     "usage": {"input_tokens": 3}})
+        agy_manifest = self.manifest(
+            task="agy-task", outcome="unresolved",
+            receipt={"kind": "agy-result", "path": str(agy_result),
+                     "requested_model": "gemini-3.8-flash-medium",
+                     "requested_effort": "medium"})
+        agy_manifest["route"].update({"harness": "agy", "provider": "google",
+                                      "auth_category": "oauth",
+                                      "requested_model": "gemini-3.8-flash-medium",
+                                      "requested_effort": "medium"})
+        agy_manifest["requirements"] = None
+        self.bind_task("agy-task", harness="agy")
+        self.import_manifest(agy_manifest)
+        self.assertEqual(self.latest_record()["native"]["completeness"]["usage"], "partial")
 
     def test_independent_grade_and_actual_receipt_are_required_for_acceptance(self):
         manifest = self.manifest()
