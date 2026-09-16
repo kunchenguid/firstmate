@@ -4580,8 +4580,19 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# Stage the launch command in a private file and type only a short line that
+# sources it. A fresh pane shell can still be starting up when the text arrives,
+# and while it is busy the typed bytes wait in the terminal line buffer, which
+# silently truncates input past about 1,024 bytes on macOS. A long launch then
+# lands as an unfinished command line and no agent starts. Sourcing runs the
+# command in the pane shell exactly as if it had been typed.
+LAUNCH_FILE="$TASK_TMP/launch.sh"
+if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_FILE"); then
+  echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
+  exit 1
+fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
