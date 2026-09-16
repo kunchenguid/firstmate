@@ -223,11 +223,13 @@ jq \
     | (attention_for($state; (($work.captain_actionable // false) or $has_open_decision))) as $attention
     | (($task.started_at // null) | time) as $started_at
     | (($task.current_state.observed_at // null) | time) as $observed
+    | (($task.spawn_gen // null) | if . == null then null else ident end) as $spawn_gen
     | (($task.paths.report.path // null) | text(500)) as $report_path
     | (($work.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null))) as $blockers
     | {
         id:(($task.id | ident) // "invalid-task"),
-        spawn_gen:(($task.spawn_gen // null) | if . == null then null else ident end),
+        spawn_gen:$spawn_gen,
+        identity_scope:(if $spawn_gen == null then "snapshot" else "generation" end),
         name:((($work.title // null) | text(160)) // (($task.id // "Unnamed task") | text(128))),
         project_id:project_id,
         lane:$lane,
@@ -288,7 +290,7 @@ jq \
   def queued_projection:
     ((.unresolved_blocker_ids // []) | arr | map(ident) | map(select(. != null))) as $blockers
     | {
-      id:((.id | ident) // "invalid-queued"),spawn_gen:null,
+      id:((.id | ident) // "invalid-queued"),spawn_gen:null,identity_scope:"canonical",
       name:((.title | text(160)) // ((.id // "Unnamed queued item") | text(128))),
       project_id:backlog_project_id,lane:(if (.captain_actionable // false) == true then "waiting" else "queued" end),state:"queued",state_source:"backlog",
       state_detail:null,state_detail_status:"unavailable",observed_at:null,started_at:null,elapsed_seconds:null,
@@ -307,7 +309,7 @@ jq \
     };
   def completed_projection:
     {
-      id:((.id | ident) // "invalid-completed"),spawn_gen:null,
+      id:((.id | ident) // "invalid-completed"),spawn_gen:null,identity_scope:"canonical",
       name:((.title | text(160)) // ((.id // "Unnamed completed item") | text(128))),
       project_id:backlog_project_id,lane:"recently_completed",state:"done",state_source:"backlog",
       state_detail:null,state_detail_status:"unavailable",observed_at:null,completed_at:(.completion.date | date_or_time),started_at:null,elapsed_seconds:null,
@@ -409,6 +411,16 @@ jq \
       end;
   def secondmate_completed_projection($owner; $record):
     ($record + {id:scoped_id($owner; $record),repo:($record.repo // null)} | completed_projection);
+  def secondmate_current_records($owner):
+    (($owner.active_children // []) as $active
+     | ($owner.endpoints // []) as $endpoints
+     | (($active
+         | map(. as $child
+               | select(any($endpoints[]?; .id == $child.id and .state != "working") | not)))
+        + ($endpoints
+           | map(. as $endpoint
+                 | select($endpoint.state != "working"
+                          or (any($active[]?; .id == $endpoint.id) | not)))))[]);
   . as $snapshot
   | ($observed_at | fromdateiso8601) as $now
   | ($snapshot.generated | fromdateiso8601) as $generated_epoch
@@ -431,9 +443,7 @@ jq \
        | completed_projection + {_identity:("main:" + .id),_priority:3} ]) as $completed
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")
-       | (($mate.active_children // [])
-          + [ $mate.endpoints[]?
-              | select((.state as $state | ["parked","paused","blocked"] | index($state)) != null) ])[] as $current_record
+       | secondmate_current_records($mate) as $current_record
        | (if (($current_record.spawn_gen // null) | ident) == null then null
           else ([ $mate.queued[]? | select(.id == $current_record.id and .hold_bucket != null) ][0] // null)
           end) as $held_record
@@ -458,13 +468,8 @@ jq \
        | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null))) as $decision_summaries
        | ($decision_group | map(select(.verb == "blocked") | ((.summary // null) | text(240))) | map(select(. != null))) as $blocked_summaries
        | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
-       | (([ $mate.active_children[]?
-             | select(.id == $decision.id and ((.spawn_gen // null) | ident) != null) ][0])
-          // ([ $mate.endpoints[]?
-                | select(.id == $decision.id
-                         and ((.state as $state | ["parked","paused","blocked"] | index($state)) != null)
-                         and ((.spawn_gen // null) | ident) != null) ][0])
-          // null) as $current_record
+       | ([ secondmate_current_records($mate)
+            | select(.id == $decision.id and ((.spawn_gen // null) | ident) != null) ][0] // null) as $current_record
        | secondmate_decision_projection($mate; $decision; $decision_summaries; $blocked_summaries; $queued_record; $current_record; $now)
        | . + {_identity:("secondmate:" + .id),_priority:0} ]) as $secondmate_decisions
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate

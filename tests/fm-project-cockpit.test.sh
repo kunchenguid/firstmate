@@ -43,7 +43,8 @@ test_projection_is_deterministic_and_allowlisted() {
     and .counts == {running:1,waiting:3,blocked:1,attention:2}
     and [.projects[].id] == ["alpha","beta","delta","gamma"]
     and ([.projects[].tasks[] | select(.id == "healthy-work")][0]
-      | .state == "working" and .crew.summary == "1 LIVE" and .elapsed_seconds == 5460)
+      | .state == "working" and .identity_scope == "generation"
+        and .crew.summary == "1 LIVE" and .elapsed_seconds == 5460)
     and ([.projects[].tasks[] | select(.id == "captain-call")][0]
       | .hold.classification == "live" and .hold.actionable == true
         and .hold.question == "Keep legacy readers or require version 2?"
@@ -53,7 +54,7 @@ test_projection_is_deterministic_and_allowlisted() {
     and ([.projects[].tasks[] | select(.id == "unknown-work")][0]
       | .lane == "waiting" and .state == "unknown" and .crew.summary == "UNKNOWN")
     and ([.projects[].tasks[] | select(.id == "done-work")][0]
-      | .lane == "recently_completed" and .elapsed_seconds == null
+      | .lane == "recently_completed" and .identity_scope == "canonical" and .elapsed_seconds == null
         and .artifacts.pr_url == "https://github.com/example/gamma/pull/7")
   ' "$one" >/dev/null || fail "projected state semantics, stable ordering, elapsed time, or safe links are wrong"
   for unsafe in PRIVATE-INBOX-TEXT-MUST-NOT-LEAK SECRET-STATUS-DETAIL SECRET-RAW-LINE PRIVATE-EVENT-TEXT PRIVATE-DECISION-TEXT FORBIDDEN-CONTROL-TEXT; do
@@ -175,9 +176,10 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
 test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   local first=$TMP_ROOT/secondmate-generation-a.json second=$TMP_ROOT/secondmate-generation-b.json
   local parked=$TMP_ROOT/secondmate-generation-parked.json paused=$TMP_ROOT/secondmate-generation-paused.json
+  local lifecycle=$TMP_ROOT/secondmate-lifecycle.json replacement=$TMP_ROOT/secondmate-replacement.json
   local unproven=$TMP_ROOT/secondmate-generation-unproven.json done_one=$TMP_ROOT/done-1201.json
   local done_two=$TMP_ROOT/done-1301.json stopped_one=$TMP_ROOT/stopped-1201.json
-  local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json
+  local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json state
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-a.json" --observed-at 2026-09-15T12:00:00Z > "$first"
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-b.json" --observed-at 2026-09-15T13:00:00Z > "$second"
   jq -e '.projects[0].tasks[0]
@@ -198,10 +200,37 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   jq -e '.projects[0].tasks[0]
       | .spawn_gen == "child-gen-b" and .state == "paused" and .lane == "waiting"' "$paused" >/dev/null \
     || fail "paused secondmate child generation was not consumed by the cockpit"
+  for state in failed unknown stopped "done"; do
+    jq --arg state "$state" '(.secondmate_current.records[0].endpoints[0].state)=$state' "$FIXTURES/secondmate-generation-b.json" \
+      | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$lifecycle"
+    jq -e --arg state "$state" '
+      .inventory.status == "valid"
+      and ([.projects[].tasks[]] | length) == 1
+      and ([.projects[].tasks[]][0]
+        | .spawn_gen == "child-gen-b" and .identity_scope == "generation" and .state == $state
+          and .lane == (if $state == "done" then "recently_completed" else "waiting" end)
+          and .elapsed_seconds == (if $state == "unknown" then 1800 else null end)
+          and .attention == ($state == "failed"))
+      and .counts.running == 0
+      and .counts.waiting == (if $state == "done" then 0 else 1 end)
+      and .counts.blocked == (if $state == "failed" then 1 else 0 end)
+      and .counts.attention == (if $state == "failed" then 1 else 0 end)
+    ' "$lifecycle" >/dev/null || fail "$state secondmate endpoint lifecycle was omitted or misclassified"
+  done
+  jq '(.secondmate_current.records[0].active_children)=[{
+        id:"child",spawn_gen:"child-gen-a",kind:"ship",state:"working",repo:"omega",
+        name:"Remote child",source:"structured-home",started_at:"2026-09-15T11:30:00Z"
+      }]' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$replacement"
+  jq -e '([.projects[].tasks[]] | length) == 1
+      and ([.projects[].tasks[]][0]
+        | .spawn_gen == "child-gen-b" and .state == "blocked" and .lane == "waiting")' "$replacement" >/dev/null \
+    || fail "replacement endpoint generation did not supersede the stale working child row"
   jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven"
   jq -e '.projects[0].tasks[0]
-      | .spawn_gen == null and .state == "unknown" and .state_source == "generation-unavailable"
+      | .spawn_gen == null and .identity_scope == "snapshot"
+        and .state == "unknown" and .state_source == "generation-unavailable"
         and .observed_at == null and .started_at == null and .elapsed_seconds == null' "$unproven" >/dev/null \
     || fail "unproven secondmate generation retained mutable child evidence"
 
@@ -223,7 +252,7 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:01:00Z > "$working"
   jq -e '.projects[0].tasks[0] | .state == "working" and .elapsed_seconds == 9060' "$working" >/dev/null \
     || fail "adjacent nonterminal task lost canonical running elapsed time"
-  pass "secondmate replacement identity and terminal elapsed time fail closed"
+  pass "secondmate lifecycle inventory, replacement identity, and terminal elapsed time fail closed"
 }
 
 test_stale_partial_invalid_empty_and_replacement_states() {

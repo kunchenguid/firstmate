@@ -59,6 +59,9 @@ validate_payload() {  # <data.json>
       type == "object"
       and (.id | text(128))
       and (.spawn_gen | nullable_text(128))
+      and ((.identity_scope == "generation" and (.spawn_gen | text(128)))
+           or (.identity_scope == "canonical" and .spawn_gen == null)
+           or (.identity_scope == "snapshot" and .spawn_gen == null))
       and (.name | text(160))
       and (.project_id | text(128))
       and (.lane == "running" or .lane == "waiting" or .lane == "queued" or .lane == "recently_completed")

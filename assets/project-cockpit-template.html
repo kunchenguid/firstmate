@@ -228,7 +228,7 @@ __FM_PROJECT_COCKPIT_DATA__
       ["recently_completed", "Recently completed"]
     ];
     const text = (value, fallback = "Unavailable") => value === null || value === undefined || value === "" ? fallback : String(value);
-    const taskKey = (task, payload = state.payload) => `${task.id}\u001f${task.spawn_gen || `unproven:${payload?.generated || "unavailable"}`}`;
+    const taskKey = (task, payload = state.payload) => `${task.id}\u001f${task.spawn_gen || (task.identity_scope === "canonical" ? "canonical" : `unproven:${payload?.generated || "unavailable"}`)}`;
     const upper = (value) => text(value).replaceAll("_", " ").toUpperCase();
     const duration = (seconds) => {
       if (!Number.isFinite(seconds)) return "Unavailable";
