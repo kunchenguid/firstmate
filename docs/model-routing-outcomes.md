@@ -118,9 +118,10 @@ The tool displays its literal windows and semantics beside separately labeled he
 
 ## Scorecard interpretation
 
-The scorecard groups attempt-route observations by category, task shape, harness, provider, effective model, and effective effort.
+The scorecard groups attempt-route observations by category, task shape, harness, provider, effective model, effective effort, authentication category, context tier, and service tier.
 When effective model or effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
 Multi-model native results use an explicit whole-session label.
+Task count reports unique task IDs, while task-incarnation count separately reports observed lifecycle incarnations.
 The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual observation for every task incarnation and attempt.
 It also prints each heuristic shadow suggestion, raw quota context when present, and the recorded eligibility, capability-class fit, runway, spend priority, explanation, and uncertainty.
 

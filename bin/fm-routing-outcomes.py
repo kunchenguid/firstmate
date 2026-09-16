@@ -548,6 +548,10 @@ def quota_record(value: Any) -> Any:
     provider = need_text(quota.get("provider"), "quota.provider")
     before = sanitize_quota(quota.get("before_path"), provider, "quota.before_path")
     after = sanitize_quota(quota.get("after_path"), provider, "quota.after_path")
+    before_time = parse_time(before.get("generated_at"), "quota.before.generated_at")
+    after_time = parse_time(after.get("generated_at"), "quota.after.generated_at")
+    if after_time < before_time:
+        fail("quota.after.generated_at must not precede quota.before.generated_at")
     concurrent = quota.get("concurrent_activity")
     if concurrent not in (True, False, None):
         fail("quota.concurrent_activity must be true, false, or null")
@@ -565,7 +569,9 @@ def quota_record(value: Any) -> Any:
             reset_crossed = True
         left_percent, right_percent = left.get("percentRemaining"), right.get("percentRemaining")
         attributable = concurrent is False and attribution == "exclusive" and same_reset
-        delta = left_percent - right_percent if attributable and isinstance(left_percent, (int, float)) and isinstance(right_percent, (int, float)) else None
+        known_percentages = (isinstance(left_percent, (int, float)) and not isinstance(left_percent, bool)
+                             and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
+        delta = left_percent - right_percent if attributable and known_percentages and left_percent >= right_percent else None
         deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": not same_reset, "attributed_consumption_percent_points": delta})
     return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent, "attribution": attribution, "reset_crossed": reset_crossed, "window_deltas": deltas,
             "note": "Window deltas are never summed; shared and model windows may describe the same allowance use."}
@@ -1039,7 +1045,8 @@ def route_name(record: dict[str, Any]) -> str:
     else:
         effective_model = record["native"].get("effective_model") or f"requested-only:{route['requested_model']}"
     effective_effort = record["native"].get("effective_effort") or f"requested-only:{route['requested_effort']}"
-    return f"{route['harness']}/{route['provider']}/{effective_model}/{effective_effort}"
+    return (f"{route['harness']}/{route['provider']}/{effective_model}/{effective_effort} "
+            f"[auth={route['auth_category']}, context={route['context_tier']}, service={route['service_tier']}]")
 
 
 def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
@@ -1052,6 +1059,9 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     for (category, shape, route), items in sorted(groups.items()):
         route_groups.append({
             "category": category, "task_shape": shape, "route": route,
+            "auth_category": items[0]["route"]["auth_category"],
+            "context_tier": items[0]["route"]["context_tier"],
+            "service_tier": items[0]["route"]["service_tier"],
             "measurement_scope": "whole-session" if any(len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},
@@ -1086,9 +1096,11 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                      "grader_overhead": record["grading"]["overhead"],
                      "aggregation_status": "individual-attempt-only"}
                     for record in sorted(records, key=lambda item: (item["task_id"], item["spawn_gen"], item["attempt_id"]))]
-    task_count = len({(record["task_id"], record["spawn_gen"]) for record in records})
+    task_count = len({record["task_id"] for record in records})
+    task_incarnation_count = len({(record["task_id"], record["spawn_gen"]) for record in records})
     return {"schema": "fm-routing-scorecard.v1", "generated_at": now_iso(), "attempt_count": len(records),
-            "task_count": task_count, "routes": route_groups, "observations": observations,
+            "task_count": task_count, "task_incarnation_count": task_incarnation_count,
+            "routes": route_groups, "observations": observations,
             "accepted_journey_aggregation": "deferred-across-task-incarnations",
             "shadow_recommendations": [{"task_id": row["task_id"], "decision_id": row["decision_id"], "category": row["category"],
                                          "task_shape": row["task_shape"], "recommended_route": route_name({"route": row["recommended_route"], "native": {"effective_model": None, "effective_effort": None}}),
@@ -1125,7 +1137,7 @@ def format_optional(value: Any) -> str:
 
 
 def render_markdown(scorecard: dict[str, Any]) -> str:
-    lines = ["# Model-routing scorecard", "", f"Attempts: {scorecard['attempt_count']} across {scorecard['task_count']} tasks.", "",
+    lines = ["# Model-routing scorecard", "", f"Attempts: {scorecard['attempt_count']} across {scorecard['task_count']} tasks and {scorecard['task_incarnation_count']} task incarnations.", "",
              "## Route and whole-session observations", "", "| Category | Task shape | Route / scope | n | Native-bound accepted | Input tokens | Output tokens | Actual incremental | Fixed subscription | Execution API-equivalent | End-to-end | Grader time | Uncertainty |",
              "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for row in scorecard["routes"]:

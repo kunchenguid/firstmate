@@ -110,7 +110,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     def write_quota(self, path, remaining, reset, *, provider="codex", status="known", unresolved=None,
-                    effective_availability=None):
+                    effective_availability=None, generated_at="2030-01-01T00:00:00Z"):
         row = {
             "provider": provider,
             "windows": [{"id": "weekly", "label": "week", "kind": "weekly",
@@ -120,7 +120,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         }
         if unresolved is not None:
             row["quotaSemantics"]["unresolvedWindowIds"] = unresolved
-        self.write_json(path, {"schemaVersion": 5, "generatedAt": "2030-01-01T00:00:00Z", "providers": [row]})
+        self.write_json(path, {"schemaVersion": 5, "generatedAt": generated_at, "providers": [row]})
 
     def manifest(self, *, receipt=None, task="task-one", spawn_gen="spawn-1",
                  attempt="attempt-one", outcome="accepted"):
@@ -219,6 +219,24 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(score["accepted_journey_aggregation"], "deferred-across-task-incarnations")
         self.assertEqual(score["routes"][0]["fixed_subscription_usd"]["aggregation"], "not-applicable")
 
+    def test_scorecard_separates_route_tiers(self):
+        self.import_manifest(self.manifest(attempt="attempt-one"))
+        self.write_pi(self.pi, session_id="session-2")
+        second = self.manifest(attempt="attempt-two")
+        second["route"].update({"auth_category": "api-key", "context_tier": "extended",
+                                "service_tier": "priority"})
+        self.import_manifest(second)
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(len(score["routes"]), 2)
+        self.assertEqual({(row["auth_category"], row["context_tier"], row["service_tier"])
+                          for row in score["routes"]},
+                         {("subscription", "all", "standard"), ("api-key", "extended", "priority")})
+        self.assertTrue(all(row["attempts"] == 1 for row in score["routes"]))
+        self.assertTrue(any("auth=api-key, context=extended, service=priority" in row["route"]
+                            for row in score["routes"]))
+
     def test_import_requires_current_task_incarnation(self):
         manifest = self.manifest()
         manifest["task_binding"]["spawn_gen"] = "stale"
@@ -237,9 +255,14 @@ class RoutingOutcomesTest(unittest.TestCase):
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertEqual(score["attempt_count"], 2)
-        self.assertEqual(score["task_count"], 2)
+        self.assertEqual(score["task_count"], 1)
+        self.assertEqual(score["task_incarnation_count"], 2)
         self.assertEqual({row["spawn_gen"] for row in score["observations"]}, {"spawn-1", "spawn-2"})
         self.assertEqual(score["accepted_journey_aggregation"], "deferred-across-task-incarnations")
+        markdown = self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "markdown").stdout
+        self.assertIn("across 1 tasks and 2 task incarnations", markdown)
 
     def test_native_session_cannot_be_reused_across_attempts(self):
         self.import_manifest(self.manifest(attempt="attempt-one"))
@@ -263,7 +286,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         score = json.loads(self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
-        self.assertEqual(score["routes"][0]["route"], "pi/openai-codex/gpt-5.6-luna/max")
+        self.assertEqual(score["routes"][0]["route"],
+                         "pi/openai-codex/gpt-5.6-luna/max [auth=subscription, context=all, service=standard]")
         self.assertEqual(score["routes"][0]["measurement_scope"], "attempt-route")
         self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 200)
 
@@ -327,6 +351,24 @@ class RoutingOutcomesTest(unittest.TestCase):
         quota = self.latest_record()["quota"]
         self.assertTrue(quota["reset_crossed"])
         self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
+
+    def test_quota_chronology_and_increases_do_not_create_consumption(self):
+        self.write_quota(self.quota_before, 95, "2030-01-02T00:00:00Z",
+                         generated_at="2030-01-01T00:01:00Z")
+        self.write_quota(self.quota_after, 90, "2030-01-02T00:00:00Z",
+                         generated_at="2030-01-01T00:00:00Z")
+        reversed_result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("must not precede", json.loads(reversed_result.stdout)["error"])
+
+        self.write_quota(self.quota_before, 95, "2030-01-02T00:00:00Z",
+                         generated_at="2030-01-01T00:00:00Z")
+        self.write_quota(self.quota_after, 100, "2030-01-02T00:00:00Z",
+                         generated_at="2030-01-01T00:01:00Z")
+        self.import_manifest(self.manifest())
+        delta = self.latest_record()["quota"]["window_deltas"][0]
+        self.assertEqual(delta["before_percent_remaining"], 95)
+        self.assertEqual(delta["after_percent_remaining"], 100)
+        self.assertIsNone(delta["attributed_consumption_percent_points"])
 
     def test_refreshable_auth_uncertainty_is_not_converted_to_zero(self):
         self.write_quota(self.quota_before, None, "2030-01-02T00:00:00Z", status="unknown")
@@ -459,7 +501,8 @@ class RoutingOutcomesTest(unittest.TestCase):
             "--format", "json").stdout)
         self.assertEqual(
             score["routes"][0]["route"],
-            "agy/google/requested-only:gemini-3.8-flash-medium/requested-only:medium")
+            "agy/google/requested-only:gemini-3.8-flash-medium/requested-only:medium "
+            "[auth=oauth, context=all, service=standard]")
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"
