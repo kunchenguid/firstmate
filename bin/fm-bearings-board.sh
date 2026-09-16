@@ -32,7 +32,7 @@
 #              not-listening: <source-id> (observed owner: <owner>)
 #                                            (registered, but no live listener;
 #                                            a replacement is started below)
-#              listening: <owner>            (only when a replacement was needed)
+#              listening: live               (only when a replacement was needed)
 #            Every dropped card is named on stderr as a `dropped-landed-card:`
 #            line, so a rebuild states what it removed instead of quietly
 #            shrinking Captain's Call.
