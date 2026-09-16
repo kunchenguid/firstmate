@@ -158,7 +158,7 @@ registered_checks() {
 }
 
 test_incoming_signal() { # comment|review|inline
-  local type=$1 home out count fixture
+  local type=$1 home out count fixture wake_count
   case "$type" in comment) fixture=comments ;; review) fixture=reviews ;; *) fixture=inline ;; esac
   home=$(new_home "incoming-$type")
   forge_home "$home"
@@ -173,10 +173,13 @@ test_incoming_signal() { # comment|review|inline
   registered_checks "$home" >/dev/null
   jq -e '.records[0].pending | length == 1' "$home/data/delivery/contributions.json" >/dev/null \
     || fail "new maintainer $type must survive as a pending outward signal"
-  count=$(awk 'END { print NR }' "$home/state/.wake-queue")
-  [ "$count" = 1 ] || fail "new maintainer $type must enqueue exactly one ordinary durable wake"
+  [ -s "$home/state/.wake-queue" ] || fail "new maintainer $type must enqueue an ordinary durable wake"
+  count=$(wc -l < "$home/state/.wake-queue")
+  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ "$wake_count" = 1 ] || fail "new maintainer $type must enqueue exactly one ordinary durable wake"
   registered_checks "$home" >/dev/null
-  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated an already enqueued event'
+  [ "$(wc -l < "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated an already enqueued event'
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$wake_count" ] || fail 're-poll duplicated an already enqueued event'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
   printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "maintainer"' >/dev/null \
     || fail 'supervisor cannot retrieve captured signal'
@@ -197,6 +200,7 @@ test_ready_issue_wake() {
     || ! jq -e 'any(.records[].pending[]; .type == "ready-for-pr")' "$home/data/filed/contributions.json" >/dev/null; then
     fail 'ready-for-pr on an explicitly filed issue must become a planning wake'
   fi
+  [ -s "$home/state/.wake-queue" ] || fail 'ready-for-pr signal never reached the durable wake path'
   count=$(awk 'END { print NR }' "$home/state/.wake-queue")
   [ "$count" = 1 ] || fail 'ready-for-pr signal must enqueue exactly one durable wake'
   registered_checks "$home" >/dev/null
