@@ -133,6 +133,38 @@ fm_composer_strip_ansi() {
   LC_ALL=C sed "s/${esc}\\[[0-9;:?]*[[:alpha:]]//g"
 }
 
+# fm_composer_classify_dialog: recognize a rendered approval/question dialog
+# without treating ordinary busy output as one. This is intentionally narrower
+# than the composer classifier: a dialog must contain a question or an explicit
+# permission/install prompt and a yes/no choice or two numbered choices. It is
+# used only after a bounded no-progress delay by supervision, never on the hot
+# composer or busy-state paths. Prints approval|question|none.
+fm_composer_classify_dialog() {  # [<captured-screen>]
+  local screen=${1-} plain lower options=0 numbered=0 question=0
+  [ "$#" -gt 0 ] || screen=$(cat)
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  lower=$(printf '%s' "$plain" | tr '[:upper:]' '[:lower:]')
+  if printf '%s\n' "$lower" | grep -Eq '(^|[[:space:]])(yes|no)([[:space:]/,.)]|$)'; then
+    options=1
+  fi
+  numbered=$(printf '%s\n' "$plain" | awk '
+    /^[[:space:]]*[0-9]+[.)][[:space:]]+/ { count++ }
+    END { print count + 0 }
+  ')
+  if [ "$numbered" -ge 2 ]; then options=1; fi
+  if printf '%s\n' "$plain" | grep -Eq '\?' \
+    || printf '%s\n' "$lower" | grep -Eq '(^|[[:space:]])(select|choose)[[:space:]]+(an?[[:space:]]+)?(option|choice)([[:space:]]|:|$)|(^|[[:space:]])options?:'; then
+    question=1
+  fi
+  [ "$options" -eq 1 ] && [ "$question" -eq 1 ] || { printf 'none'; return 0; }
+  if printf '%s\n' "$lower" | grep -Eq 'not[[:space:]]+found' \
+    && printf '%s\n' "$lower" | grep -Eq 'install[[:space:]].*globally[[:space:]]*\?'; then
+    printf 'approval'
+  else
+    printf 'question'
+  fi
+}
+
 # Every code point Unicode gives the property White_Space=Yes that lies OUTSIDE
 # ASCII, as UTF-8 byte sequences. Built from octal escapes rather than written
 # literally so each entry stays reviewable in source instead of being an

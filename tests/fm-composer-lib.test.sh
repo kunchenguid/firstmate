@@ -806,6 +806,23 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+test_dialog_classifier_requires_a_real_choice() {
+  local out
+  out=$(fm_composer_classify_dialog $'Working...\n\n')
+  [ "$out" = none ] || fail "ordinary busy output became a dialog: $out"
+  out=$(fm_composer_classify_dialog $'agent-browser: command not found\nInstall agent-browser globally? Yes / No\n')
+  [ "$out" = approval ] || fail "the agent-browser approval dialog was not recognized: $out"
+  out=$(fm_composer_classify_dialog $'Should I keep going?\n  1. Yes, continue\n  2. Stop, do not act\n')
+  [ "$out" = question ] || fail "a numbered question dialog was not recognized: $out"
+  out=$(fm_composer_classify_dialog $'The task asks whether to continue, but this is ordinary transcript text.\n')
+  [ "$out" = none ] || fail "ordinary transcript text became a dialog: $out"
+  out=$(fm_composer_classify_dialog $'Working through yes/no checks in the background.\n')
+  [ "$out" = none ] || fail "ordinary yes/no prose became a dialog: $out"
+  pass "fm_composer_classify_dialog: explicit approval and question choices are recognized without busy-output false positives"
+}
+
+test_dialog_classifier_requires_a_real_choice
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)

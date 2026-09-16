@@ -3560,6 +3560,56 @@ SH
 # anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
 # wedge timer, while one 66 minutes old must - bracketing the default around 3600
 # without waiting a literal hour.
+test_busy_dialog_is_surfaced_after_bounded_no_progress() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case busy-dialog-inspection); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-dialog"
+  printf 'agent-browser: command not found\nInstall agent-browser globally? Yes / No\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/dialog.meta"
+  record_pi_busy "$state" dialog
+  touch -t 200001010000 "$state/dialog.meta"
+  printf 'working: setup complete\n' > "$state/dialog.status"
+  prime_status_seen "$state" "$state/dialog.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_DIALOG_INSPECT_SECS=1 FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a busy pane parked on an approval dialog was not surfaced: $(cat "$out")"; }
+  grep -F "interactive approval dialog" "$out" >/dev/null \
+    || fail "approval dialog wake did not identify the manual inspection: $(cat "$out")"
+  grep -F $'\tstale\t' "$state/.wake-queue" >/dev/null \
+    || fail "approval dialog wake was not queued"
+  [ -s "$state/.busy-dialog-inspected-$key" ] \
+    || fail "approval dialog inspection was not recorded"
+  pass "a Herdr/Pi-style approval dialog is surfaced after bounded no-progress without waiting for a wedge timeout"
+}
+
+test_busy_dialog_inspection_ignores_ordinary_busy_output() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case busy-dialog-negative); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-dialog-negative"
+  printf 'Working... (301s)\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/dialog-negative.meta"
+  record_pi_busy "$state" dialog-negative
+  touch -t 200001010000 "$state/dialog-negative.meta"
+  printf 'working: setup complete\n' > "$state/dialog-negative.status"
+  prime_status_seen "$state" "$state/dialog-negative.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_DIALOG_INSPECT_SECS=1 FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 100 || { reap "$pid"; fail "ordinary busy output ended the watcher during dialog inspection: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "ordinary busy output was surfaced as a dialog: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "ordinary busy output queued a dialog wake"
+  [ -s "$state/.busy-dialog-inspected-$key" ] || fail "negative dialog inspection was not bounded by a recorded stamp"
+  reap "$pid"
+  pass "ordinary busy output is inspected once after no progress and remains absorbed"
+}
+
 test_busy_pane_default_turn_age_bound_is_3600s() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-default-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4854,6 +4904,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
+test_busy_dialog_is_surfaced_after_bounded_no_progress
+test_busy_dialog_inspection_ignores_ordinary_busy_output
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale

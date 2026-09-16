@@ -62,7 +62,11 @@
 #                          escalation count, and demand-deep-inspection marker,
 #                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
-#                          tool process.
+#                          tool process. Before that longer bound, one bounded
+#                          rendered-dialog inspection after
+#                          FM_BUSY_DIALOG_INSPECT_SECS without meaningful
+#                          progress surfaces an explicit approval/question
+#                          choice while ordinary busy output remains absorbed.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -266,6 +270,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# After this bounded no-progress delay, inspect the already-captured pane once for
+# an explicit approval/question dialog. A positive dialog wakes firstmate for
+# manual inspection before the longer busy-turn wedge bound; a negative result
+# is remembered in .busy-dialog-inspected-* until meaningful progress changes.
+BUSY_DIALOG_INSPECT_SECS=${FM_BUSY_DIALOG_INSPECT_SECS:-300}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -964,18 +973,69 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+# busy_turn_progress_file: the newest meaningful-progress marker for a task.
+# Before a turn-end or native progress marker exists, the spawn record is the
+# conservative anchor. The caller never treats a busy footer or timer as progress.
+busy_turn_progress_file() {  # <task>
+  local task=$1 f progress
+  f="$STATE/$task.turn-ended"
+  [ -e "$f" ] || f="$STATE/$task.meta"
+  progress="$STATE/$task.progress"
+  if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
+  printf '%s' "$f"
+}
+
+busy_turn_progress_stamp() {  # <task>
+  local f m
+  f=$(busy_turn_progress_file "$1")
+  m=$(stat_mtime "$f") || return 1
+  printf '%s:%s' "$f" "$m"
+}
+
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
 # progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
 # or tool activity, never a timer or a busy footer. It does not emit a wake or
 # change semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
 busy_turn_over_age() {  # <task>
-  local task=$1 f progress
-  f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
-  progress="$STATE/$task.progress"
-  if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  [ "$(age_of "$(busy_turn_progress_file "$1")")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# A bounded, one-shot rendered inspection for a busy pane whose meaningful
+# progress marker has aged past BUSY_DIALOG_INSPECT_SECS. The capture was already
+# taken for the ordinary hash/busy path, so this adds no continuous screen read.
+# A negative result records the progress stamp and is not retried until that stamp
+# changes. Positive results leave recording to the caller, preserving the queue
+# append-before-suppress ordering. Sets BUSY_DIALOG_KIND on a positive result.
+BUSY_DIALOG_KIND=
+BUSY_DIALOG_STAMP=
+busy_dialog_inspection() {  # <task> <key> <captured-tail>
+  local task=$1 key=$2 tail=$3 marker stamp age kind
+  BUSY_DIALOG_KIND=
+  BUSY_DIALOG_STAMP=
+  [[ $BUSY_DIALOG_INSPECT_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  stamp=$(busy_turn_progress_stamp "$task") || return 1
+  age=$(age_of "$(busy_turn_progress_file "$task")")
+  [ "$age" -ge "$BUSY_DIALOG_INSPECT_SECS" ] || return 1
+  marker="$STATE/.busy-dialog-inspected-$key"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$stamp" ] || return 1
+  kind=$(printf '%s' "$tail" | fm_composer_classify_dialog)
+  BUSY_DIALOG_STAMP=$stamp
+  case "$kind" in
+    approval|question)
+      BUSY_DIALOG_KIND=$kind
+      return 0
+      ;;
+    *)
+      printf '%s' "$stamp" > "$marker" || return 1
+      return 1
+      ;;
+  esac
+}
+
+busy_dialog_inspection_record() {  # <key>
+  [ -n "$BUSY_DIALOG_STAMP" ] || return 1
+  printf '%s' "$BUSY_DIALOG_STAMP" > "$STATE/.busy-dialog-inspected-$1"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -2266,6 +2326,21 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Herdr can keep a Pi pane's native state at working while Pi is parked on
+    # an approval/question dialog. Once meaningful progress has been absent for
+    # the bounded inspection delay, classify the already-captured pane once and
+    # wake firstmate for manual inspection when the central dialog classifier
+    # finds a real choice. Normal busy output remains on the existing path.
+    if [ "$busy_now" -eq 0 ] && [ "$kind" != secondmate ] \
+      && busy_dialog_inspection "$task" "$key" "$tail40"; then
+      reason="stale: $w (interactive $BUSY_DIALOG_KIND dialog after no meaningful progress; inspect and answer it)"
+      fm_wake_append stale "$w" "$reason" || exit 1
+      busy_dialog_inspection_record "$key" || exit 1
+      printf '%s' "$h" > "$sf"
+      rm -f "$ssf" "$ewf"
+      clear_write_tracking "$key"
+      wake "$reason"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
