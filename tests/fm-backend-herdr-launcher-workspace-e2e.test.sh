@@ -249,32 +249,29 @@ UNIQB_PANE=$(grep '^herdr_pane_id=' "$UNIQB_META" | cut -d= -f2-)
   || fail "a crewmate launched from the 'firstmate' workspace must stay in it"
 pass "real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace"
 
-# --- 2b. presentation spaces ON: the projected child is created and bound
-#         UNDER the launcher's exact workspace, not collapsed into it ---------
+# --- 2b. presentation preference does not change ordinary stable-home spawn --
+# An ordinary worker is a tab in the owning persistent workspace. Presentation
+# projection journals are legacy-only and must not be required by a new spawn.
 
 spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRES_HOME" presU "$PROJ" --mode no-mistakes --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a presentation-enabled spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
 PRESU_META="$PRES_HOME/state/presU.meta"
 record_worktree "$PRESU_META"
 PRESU_PANE=$(grep '^herdr_pane_id=' "$PRESU_META" | cut -d= -f2-)
+PRESU_TAB=$(grep '^herdr_tab_id=' "$PRESU_META" | cut -d= -f2-)
 PRESU_WS=$(workspace_of_pane "$PRESU_PANE")
 [ -n "$PRESU_WS" ] || fail "could not read presU's workspace"
-[ "$PRESU_WS" != "$WS_PRIMARY" ] \
-  || fail "a projected worker must get its own disposable workspace, not be collapsed into its parent"
-case "$(label_of_workspace "$PRESU_WS")" in
-  "└ "*" · p:"*) : ;;
-  *) fail "presU's workspace is not a presentation projection: '$(label_of_workspace "$PRESU_WS")'" ;;
-esac
+[ "$PRESU_WS" = "$WS_PRIMARY" ] \
+  || fail "an ordinary worker must remain a tab in the launcher's persistent workspace ($WS_PRIMARY), got '$PRESU_WS'"
+[ "$(grep '^herdr_workspace_id=' "$PRESU_META" | cut -d= -f2-)" = "$WS_PRIMARY" ] \
+  || fail "the ordinary worker recorded a workspace other than the launcher's persistent workspace"
+[ "$(herdr tab get "$PRESU_TAB" 2>/dev/null | jq -r '.result.tab.workspace_id // empty')" = "$WS_PRIMARY" ] \
+  || fail "the ordinary worker tab is not inside the launcher's persistent workspace"
 PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
-[ -f "$PRESU_JOURNAL" ] || fail "a projected spawn did not leave its presentation journal"
-[ "$(journal_field "$PRESU_JOURNAL" version)" = 2 ] \
-  || fail "the projection did not publish an exact restart binding"$'\n'"$(cat "$PRESU_JOURNAL")"
-[ "$(journal_field "$PRESU_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY" ] \
-  || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
-[ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
-  || fail "the projection journal does not name its own workspace"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+[ ! -e "$PRESU_JOURNAL" ] && [ ! -L "$PRESU_JOURNAL" ] \
+  || fail "a new ordinary stable-home spawn must not require a legacy presentation journal"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a presentation-enabled spawn stole focus from the captain's workspace"
+pass "real herdr E2E: presentation preference does not create a disposable workspace; the worker remains a tab in the launcher's exact persistent workspace"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -302,67 +299,55 @@ lab pane run "$LAUNCH_DUP_PANE" "$TMP_ROOT/spawn-in-pane.sh" >/dev/null 2>&1 \
 i=0
 while [ ! -f "$TMP_ROOT/dupC.rc" ] && [ "$i" -lt 120 ]; do sleep 2; i=$((i + 1)); done
 [ -f "$TMP_ROOT/dupC.rc" ] || fail "fm-spawn.sh never finished inside the launcher's herdr pane"
-[ "$(cat "$TMP_ROOT/dupC.rc")" = 0 ] \
-  || fail "the in-pane spawn failed"$'\n'"$(cat "$TMP_ROOT/dupC.err" 2>/dev/null)"
-
+[ "$(cat "$TMP_ROOT/dupC.rc")" -ne 0 ] \
+  || fail "a launcher workspace that contradicts the authoritative home binding must refuse"
+assert_contains_local "$(cat "$TMP_ROOT/dupC.err" 2>/dev/null)" "contradicts the authoritative Herdr home binding" \
+  "the stable-home contradiction refusal was not reported"
 DUPC_META="$PRIMARY_HOME/state/dupC.meta"
-record_worktree "$DUPC_META"
-DUPC_PANE=$(grep '^herdr_pane_id=' "$DUPC_META" | cut -d= -f2-)
-DUPC_WS=$(workspace_of_pane "$DUPC_PANE")
-[ "$DUPC_WS" = "$WS_PRIMARY_DUP" ] \
-  || fail "a worker launched from the second 'firstmate' workspace ($WS_PRIMARY_DUP) landed in '$DUPC_WS' instead"
-[ "$DUPC_WS" != "$WS_PRIMARY" ] || fail "the worker was placed in the first label match, the defect under test"
-[ "$DUPC_WS" != "$WS_OTHER" ] || fail "the worker was placed in the globally focused workspace"
-[ "$(grep '^herdr_workspace_id=' "$DUPC_META" | cut -d= -f2-)" = "$WS_PRIMARY_DUP" ] \
-  || fail "the recorded endpoint workspace does not match the launcher's workspace"
-pass "real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace"
-
+[ ! -e "$DUPC_META" ] || fail "a contradictory launcher identity must not publish task metadata"
+DUPC_TABS=$(lab tab list --workspace "$WS_PRIMARY_DUP" 2>/dev/null | jq -r '[.result.tabs[]? | select(.label == "fm-dupC")] | length')
+[ "$DUPC_TABS" = 0 ] || fail "a contradictory launcher identity created a worker tab"
 [ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
   || fail "the other same-labeled workspace's tabs changed; it must never be adopted or mutated"
 [ "$(label_of_workspace "$WS_PRIMARY")" = firstmate ] \
   || fail "the other same-labeled workspace was renamed"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the in-pane spawn stole focus from the captain's workspace"
-pass "real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the refused in-pane spawn stole focus from the captain's workspace"
+pass "real herdr E2E: a launcher workspace that contradicts the stable home binding refuses without creating a worker"
 
-# --- 3b. presentation spaces ON with a duplicated parent label: the projection
-#         still hangs off the launcher's exact workspace ---------------------
+# --- 3b. presentation preference does not bypass a contradictory stable home --
 
 spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRES_HOME" presD "$PROJ" --mode no-mistakes --yolo off
-[ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under a duplicated parent label failed"$'\n'"$(cat "$SPAWN_ERR")"
+[ "$SPAWN_RC" -ne 0 ] || fail "a contradictory presentation-enabled spawn must refuse"
+assert_contains_local "$(cat "$SPAWN_ERR")" "contradicts the authoritative Herdr home binding" \
+  "the presentation path bypassed stable-home contradiction validation"
 PRESD_META="$PRES_HOME/state/presD.meta"
-record_worktree "$PRESD_META"
-PRESD_PANE=$(grep '^herdr_pane_id=' "$PRESD_META" | cut -d= -f2-)
-PRESD_WS=$(workspace_of_pane "$PRESD_PANE")
-[ -n "$PRESD_WS" ] || fail "could not read presD's workspace"
+[ ! -e "$PRESD_META" ] || fail "a contradictory presentation spawn must not publish task metadata"
 PRESD_JOURNAL="$PRES_HOME/state/presD.herdr-presentation"
-[ "$(journal_field "$PRESD_JOURNAL" version)" = 2 ] \
-  || fail "the duplicate-label projection did not publish a version 2 binding"$'\n'"$(cat "$PRESD_JOURNAL" 2>/dev/null)"
-[ "$(journal_field "$PRESD_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY_DUP" ] \
-  || fail "the duplicate-label projection journal did not bind the launcher's exact parent workspace"
-[ "$PRESD_WS" != "$WS_PRIMARY" ] && [ "$PRESD_WS" != "$WS_PRIMARY_DUP" ] \
-  || fail "a projected worker must not be collapsed into either same-labeled parent workspace"
-PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP" --arg child "$PRESD_WS" '
-  [range(0; (.result.workspaces | length)) as $i
-    | {i: $i, id: .result.workspaces[$i].workspace_id}]
-  | ((map(select(.id == $child)) | .[0].i) - (map(select(.id == $dup)) | .[0].i))')
-[ "$PRESD_ORDER" = 1 ] \
-  || fail "the projected child should sit immediately after the launcher's own workspace, offset was '$PRESD_ORDER'"
+[ ! -e "$PRESD_JOURNAL" ] && [ ! -L "$PRESD_JOURNAL" ] \
+  || fail "a refused contradictory presentation spawn created a projection journal"
 [ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
-  || fail "the other same-labeled workspace was mutated by a projected spawn"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched"
+  || fail "the other same-labeled workspace was mutated by a refused presentation spawn"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a refused presentation spawn stole focus from the captain's workspace"
+pass "real herdr E2E: presentation preference cannot bypass stable-home contradiction validation"
 
-# --- 4. duplicate label with NO launcher identity refuses before publishing --
+# --- 4. duplicate label with NO launcher identity uses the stable binding ------
+# Once this home has an authoritative binding, a missing launcher pane does not
+# reopen cosmetic label discovery or guess the sibling workspace.
 
 spawn_from_launcher "" "$PRIMARY_HOME" dupD "$PROJ" --mode no-mistakes --yolo off
-[ "$SPAWN_RC" -ne 0 ] || fail "a duplicate-labeled home workspace with no herdr parent must refuse, not guess"
-assert_contains_local "$(cat "$SPAWN_ERR")" "labeled 'firstmate'" \
-  "the refusal did not name the duplicated home label"
-[ ! -e "$PRIMARY_HOME/state/dupD.meta" ] || fail "a refused spawn must not publish task metadata"
-DUP_TABS=$(lab tab list --workspace "$WS_PRIMARY" 2>/dev/null | jq -r '[.result.tabs[]? | select(.label == "fm-dupD")] | length')
+[ "$SPAWN_RC" -eq 0 ] || fail "a bound home spawn without a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
+DUPD_META="$PRIMARY_HOME/state/dupD.meta"
+record_worktree "$DUPD_META"
+DUPD_PANE=$(grep '^herdr_pane_id=' "$DUPD_META" | cut -d= -f2-)
+DUPD_WS=$(workspace_of_pane "$DUPD_PANE")
+[ "$DUPD_WS" = "$WS_PRIMARY" ] \
+  || fail "a bound home spawn landed in '$DUPD_WS' instead of its authoritative workspace '$WS_PRIMARY'"
+[ "$(grep '^herdr_workspace_id=' "$DUPD_META" | cut -d= -f2-)" = "$WS_PRIMARY" ] \
+  || fail "the bound home spawn recorded the wrong workspace"
 DUP_TABS2=$(lab tab list --workspace "$WS_PRIMARY_DUP" 2>/dev/null | jq -r '[.result.tabs[]? | select(.label == "fm-dupD")] | length')
-[ "$DUP_TABS" = 0 ] && [ "$DUP_TABS2" = 0 ] || fail "a refused spawn created a worker endpoint anyway"
-pass "real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists"
+[ "$DUP_TABS2" = 0 ] || fail "a bound home spawn mutated the duplicate-labeled sibling workspace"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a bound home spawn stole focus from the captain's workspace"
+pass "real herdr E2E: a bound home spawn without a launcher pane uses its exact stable workspace and ignores duplicate labels"
 
 # --- 5. a STALE launcher pane refuses, even though the home label is
 #        unambiguous from the launcher's own (now closed) workspace -----------
@@ -425,19 +410,20 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
-  "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
+  "$ROOT/bin/fm-teardown.sh" dupD >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
-[ "$status" -eq 0 ] || fail "fm-teardown.sh failed for dupC"$'\n'"$(cat "$TMP_ROOT/teardown.out")"
-[ ! -f "$DUPC_META" ] || fail "fm-teardown.sh did not remove dupC's meta"
-if lab pane get "$DUPC_PANE" >/dev/null 2>&1; then
-  fail "fm-teardown.sh did not close dupC's own pane"
+[ "$status" -eq 0 ] || fail "fm-teardown.sh failed for dupD"$'\n'"$(cat "$TMP_ROOT/teardown.out")"
+[ ! -f "$DUPD_META" ] || fail "fm-teardown.sh did not remove dupD's meta"
+if lab pane get "$DUPD_PANE" >/dev/null 2>&1; then
+  fail "fm-teardown.sh did not close dupD's own pane"
 fi
+[ ! -e "$DUPC_META" ] || fail "the refused dupC spawn published metadata"
 lab pane get "$LAUNCH_DUP_PANE" >/dev/null 2>&1 || fail "teardown closed the launcher's own pane"
 lab pane get "$UNIQB_PANE" >/dev/null 2>&1 || fail "teardown closed an unrelated worker's pane in the other same-labeled workspace"
 [ "$(label_of_workspace "$WS_PRIMARY_DUP")" = firstmate ] || fail "teardown removed or renamed the launcher's workspace"
-pass "real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact"
+pass "real herdr E2E: teardown closes only the bound worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact"
 
 if ! cleanup_all; then
   trap - EXIT
