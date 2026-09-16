@@ -2164,7 +2164,10 @@ while :; do
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
-  procevent_reconcile_tick
+  procevent_reconcile_tick || {
+    echo "watcher: FAILED - process-event reconciliation failed" >&2
+    exit 1
+  }
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued

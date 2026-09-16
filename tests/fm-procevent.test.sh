@@ -695,31 +695,32 @@ data["sessions"]["recovery"]["prompts"] = []
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(data, fh)
 PY
+printf 'session:\n  file: %s\n  status: feedback\n' "$RECOVERY_ART"
+printf 'prompts[1]{uid,selector,tag,prompt,text,attachments}:\n'
+printf '  "","","","survive destructive poll","partial'
 exit 1
 SH
 chmod +x "$RECOVERY_BIN/lavish-axi"
-export RECOVERY_COUNT LAVISH_AXI_STATE_DIR="$RECOVERY_STORE"
+export RECOVERY_ART RECOVERY_COUNT LAVISH_AXI_STATE_DIR="$RECOVERY_STORE"
 recovery_id=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$RECOVERY_ART")
 fm_test_track_procevent_home "$HRECOVERY"
 PATH="$RECOVERY_BIN:$PATH" FM_HOME="$HRECOVERY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$RECOVERY_ART" >/dev/null
-first_recovery=$(PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" 2>&1)
-assert_contains "$first_recovery" "no-result: $recovery_id" \
-  "a poll failure after clearing the store is not captured as captain feedback"
+PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] || fail "the destructive poll did not run exactly once"
 [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["sessions"]["recovery"]["prompts"]))' "$RECOVERY_STORE/state.json")" = 0 ] \
   || fail "the destructive poll fixture did not clear its source prompts"
-[ "$(count_results "$HRECOVERY" "$recovery_id")" = 0 ] \
-  || fail "the failed destructive poll created a result before recovery"
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 1 ] \
+  || fail "the failed destructive poll's partial result was not captured"
 assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
-  "pending dock prompts are retained before destructive polling"
+  "a failed poll's partial capture does not acknowledge the complete recovery snapshot"
 PATH="$RECOVERY_BIN:$PATH" FM_PROCEVENT_MAX_OUTPUT_BYTES=256 \
   pe "$HRECOVERY" start "$recovery_id" >/dev/null
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] \
   || fail "recovery polled the already-cleared source again"
-[ "$(count_results "$HRECOVERY" "$recovery_id")" = 1 ] \
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 2 ] \
   || fail "the bounded recovery result was not captured"
-RECOVERY_RESULT=$(first_result "$HRECOVERY" "$recovery_id" || true)
+RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.2.result"
 assert_grep 'status: feedback' "$RECOVERY_RESULT" \
   "the bounded recovery result retains its feedback lifecycle"
 assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
@@ -727,9 +728,9 @@ assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
 PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] \
   || fail "complete recovery polled the already-cleared source again"
-[ "$(count_results "$HRECOVERY" "$recovery_id")" = 2 ] \
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 3 ] \
   || fail "the retained complete dock reply was not captured after truncation"
-RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.2.result"
+RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.3.result"
 assert_grep 'survive destructive poll' "$RECOVERY_RESULT" \
   "the recovered result retains the captain's prompt"
 recovery_read=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" read "$RECOVERY_RESULT")
@@ -737,14 +738,14 @@ assert_contains "$recovery_read" "/tmp/recovered.png" \
   "the recovered presentation retains attachment metadata"
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "durable capture retires the recovery snapshot"
-[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 2" || true)" = 1 ] \
+[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 3" || true)" = 1 ] \
   || fail "the complete recovered reply did not use the process-event wake owner"
 printf 'obsolete snapshot\n' > "$HRECOVERY/state/procevent/$recovery_id.lavish-pending"
 FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECOVERY_ART" >/dev/null
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "public retirement removes the adapter recovery snapshot"
-unset RECOVERY_COUNT LAVISH_AXI_STATE_DIR
-pass "pending dock prompts survive destructive poll failure and bounded capture"
+unset RECOVERY_ART RECOVERY_COUNT LAVISH_AXI_STATE_DIR
+pass "pending dock prompts survive failed partial and bounded captures"
 
 # --- primary watcher automatically registers Lavish sessions ---------------
 HAUTOLAVISH="$TMP_ROOT/hauto-lavish"; new_home "$HAUTOLAVISH"
@@ -845,6 +846,21 @@ PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$FAIL_LAVISH_STORE" \
 assert_absent "$HFAILLAVISH/state/.lavish-discovery-failed" \
   "successful Lavish discovery did not clear the failure episode"
 pass "Lavish discovery failures produce one bounded wake per episode"
+
+HFAILWATCH="$TMP_ROOT/hfail-watch"; new_home "$HFAILWATCH"
+mkdir "$HFAILWATCH/state/.lavish-discovery-failed"
+printf '{broken\n' > "$FAIL_LAVISH_STORE/state.json"
+FAIL_WATCH_OUTPUT=$(PATH="$AUTO_LAVISH_BIN:$PATH" LAVISH_AXI_STATE_DIR="$FAIL_LAVISH_STORE" \
+  FM_ROOT_OVERRIDE="$AUTO_LAVISH_ROOT" FM_HOME="$HFAILWATCH" \
+  FM_STATE_OVERRIDE="$HFAILWATCH/state" FM_POLL=1 \
+  "$ROOT/bin/fm-watch.sh" 2>&1)
+FAIL_WATCH_RC=$?
+[ "$FAIL_WATCH_RC" -eq 1 ] \
+  || fail "the watcher continued after process-event reconciliation failed"
+assert_contains "$FAIL_WATCH_OUTPUT" \
+  "watcher: FAILED - process-event reconciliation failed" \
+  "the watcher surfaces an unwritable Lavish discovery diagnostic"
+pass "watcher fails closed when process-event diagnostics cannot persist"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still

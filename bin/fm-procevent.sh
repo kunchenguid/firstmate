@@ -1009,7 +1009,7 @@ EOF
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
-  if [ "$extension_owner" -eq 0 ] && [ "$truncated" -eq 0 ]; then
+  if [ "$extension_owner" -eq 0 ] && [ "$truncated" -eq 0 ] && [ "$rc" -eq 0 ]; then
     adapter_capture_committed "$adapter" "$id" "$durable" || true
   fi
 

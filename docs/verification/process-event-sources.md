@@ -79,7 +79,7 @@ state.json: status= open pending= 0 prompts= []  chat entries= []
 ```
 
 Nothing remains on the source side to re-read, and the published protocol provides no acknowledgement, cursor, or replay surface to reserve against.
-The Lavish adapter closes that window narrowly for matching pending dock prompts already visible in the local session store: it atomically snapshots them before polling, retains the snapshot until the runner durably captures a result, and emits that snapshot on the next invocation if the destructive poll lost its output.
+The Lavish adapter closes that window narrowly for matching pending dock prompts already visible in the local session store: it atomically snapshots them before polling, retains the snapshot until the runner durably captures a complete result from a successful poll, and emits that snapshot on the next invocation if the destructive poll lost or only partially emitted its output.
 Responses that never appeared in the store remain outside this recovery boundary.
 
 **Consequence for wording:** describe the generic runner's durability and the adapter's narrower store-backed recovery separately; neither is a generic exactly-once or no-loss guarantee.
