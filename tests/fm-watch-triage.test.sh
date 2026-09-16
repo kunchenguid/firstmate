@@ -734,7 +734,7 @@ test_turn_ended_provably_working_absorbed() {
 # pipeline, so the wake must surface instead of being absorbed.
 
 test_turn_ended_not_working_surfaced() {
-  local dir state fakebin out drain_out pid
+  local dir state fakebin out drain_out pid rows marker
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   : > "$state/task.turn-ended"
@@ -744,10 +744,58 @@ test_turn_ended_not_working_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end whose crew is not provably working"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "task.turn-ended" { n++ } END { print n + 0 }' \
+    "$state/.wake-queue")
+  [ "$rows" -eq 1 ] \
+    || fail "one unchanged turn-end signal produced $rows durable rows instead of one"
+  marker="$state/.seen-task_turn-ended"
+  [ -f "$marker" ] || fail "the surfaced turn-end did not commit its seen marker"
+  [ "$(cat "$marker")" = "$(seen_sig "$state/task.turn-ended")" ] \
+    || fail "the unchanged turn-end marker did not commit its observed signature"
   grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
+}
+
+test_turn_ended_grace_coalescing_keeps_later_signature() {
+  local dir state fakebin out pid rows signal marker expected actual real_sleep
+  dir=$(make_case turn-ended-grace-later); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; signal="$state/task.turn-ended"
+  printf 'early\n' > "$signal"
+  real_sleep=$(command -v sleep)
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "${FM_SIGNAL_GRACE:-1}" ] \
+   && [ ! -e "${FM_TEST_SIGNAL_MUTATED:?}" ]; then
+  printf 'later\n' >> "${FM_TEST_SIGNAL_FILE:?}"
+  : > "$FM_TEST_SIGNAL_MUTATED"
+fi
+exec "${FM_TEST_REAL_SLEEP:?}" "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  export FM_TEST_SIGNAL_FILE="$signal"
+  export FM_TEST_SIGNAL_MUTATED="$state/.signal-mutated-during-grace"
+  export FM_TEST_REAL_SLEEP="$real_sleep"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  unset FM_TEST_SIGNAL_FILE FM_TEST_SIGNAL_MUTATED FM_TEST_REAL_SLEEP
+  wait_for_exit "$pid" 100 \
+    || fail "watcher did not surface a turn-end mutated during signal grace"
+  [ -e "$state/.signal-mutated-during-grace" ] \
+    || fail "the signal fixture did not mutate during the grace sleep"
+  rows=$(awk -F '\t' '$3 == "signal" && $4 == "task.turn-ended" { n++ } END { print n + 0 }' \
+    "$state/.wake-queue")
+  [ "$rows" -eq 1 ] \
+    || fail "one turn-end mutated during grace produced $rows durable rows instead of one"
+  marker="$state/.seen-task_turn-ended"
+  [ -f "$marker" ] || fail "the grace-coalesced turn-end did not commit its seen marker"
+  expected=$(seen_sig "$signal")
+  actual=$(cat "$marker")
+  [ "$actual" = "$expected" ] \
+    || fail "signal grace committed the earlier signature ($actual), expected later $expected"
+  pass "signal grace coalescing keeps one row and commits the later file signature"
 }
 
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
@@ -5080,6 +5128,7 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_grace_coalescing_keeps_later_signature
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll

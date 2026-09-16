@@ -1947,24 +1947,44 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
 }
 
 test_teardown_missing_busy_sidecar_completes() {
-  local case_dir gen rc
+  local case_dir gen rc tmux_log
   case_dir=$(make_case missing-busy-sidecar)
   write_meta "$case_dir" local-only ship
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
   printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.turn-ended"
+  printf 'generated extension\n' > "$case_dir/state/task-x1.omp-ext.ts"
+  tmux_log="$case_dir/tmux.log"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
   rm -f "$case_dir/state/task-x1.busy-gen"
 
+  export FM_FAKE_TMUX_LOG="$tmux_log"
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
+  unset FM_FAKE_TMUX_LOG
 
   expect_code 0 "$rc" "missing-busy-sidecar: teardown should treat the incarnation as already retired"
+  grep -Fx 'kill-window -t =firstmate:=fm-task-x1' "$tmux_log" >/dev/null \
+    || fail "missing-busy-sidecar: teardown did not close the recorded endpoint"
+  assert_absent "$case_dir/state/task-x1.busy-gen" \
+    "missing-busy-sidecar: teardown left the busy generation"
   assert_absent "$case_dir/state/task-x1.busy-state" \
     "missing-busy-sidecar: teardown left the orphan busy record"
+  assert_absent "$case_dir/state/task-x1.turn-ended" \
+    "missing-busy-sidecar: teardown left the turn-end notification"
+  assert_absent "$case_dir/state/task-x1.omp-ext.ts" \
+    "missing-busy-sidecar: teardown left the OMP extension wiring"
   assert_absent "$case_dir/state/task-x1.meta" \
     "missing-busy-sidecar: teardown remained incomplete"
-  pass "teardown completes when an exact busy-state sidecar is already absent"
+  pass "full teardown closes the endpoint and removes OMP notification, metadata, and busy artifacts when the sidecar is already absent"
 }
 
 test_herdr_teardown_clears_escalation_marker() {

@@ -514,30 +514,142 @@ EOF
   pass ".omp turn-end guard: digest delivery, seatbelt block, one compelled continuation, flagged stop stands down"
 }
 
+test_watch_extension_coalesces_live_actionable_cohort() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-cohort/repo"; home="$TMP_ROOT/watch-cohort/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+state=${FM_HOME:?}/state
+count=$(cat "$state/.arm-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$count"
+if [ "$count" -le 4 ]; then
+  message="stale: cohort:wR:p$count"
+  printf '%s\n' "$message" >> "$state/.durable-wakes"
+  printf '%s\n' "$message"
+  exit 0
+fi
+if [ "$count" -eq 5 ]; then
+  while [ ! -e "$state/.release-fifth-arm" ]; do sleep 0.05; done
+  message='stale: cohort:wR:p5'
+  printf '%s\n' "$message" >> "$state/.durable-wakes"
+  printf '%s\n' "$message"
+  exit 0
+fi
+exec sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=10000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const waitUntil = async (predicate, label, timeoutMs = 10000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+};
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+if (!tool || tool.name !== "fm_watch_arm_omp") throw new Error("fm_watch_arm_omp was not registered");
+const result = await tool.execute();
+if (!/^watcher: started omp extension arm child 1;/.test(result.content[0].text)) throw new Error(`unexpected arm result: ${result.content[0].text}`);
+await waitUntil(
+  () => existsSync(`${state}/.arm-count`) && Number(readFileSync(`${state}/.arm-count`, "utf8").trim()) >= 5,
+  "four actionable closes and their live successor",
+);
+if (sent.length !== 1) throw new Error(`four live actionables must share one unconsumed follow-up, saw ${sent.length}: ${JSON.stringify(sent)}`);
+if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: stale: cohort:wR:p1")) throw new Error(`unexpected cohort wake text: ${sent[0].m}`);
+if (sent[0].o?.deliverAs !== "followUp") throw new Error("cohort wake must be delivered as a follow-up");
+const durable = readFileSync(`${state}/.durable-wakes`, "utf8").trim().split("\n");
+const expected = [1, 2, 3, 4].map((n) => `stale: cohort:wR:p${n}`);
+if (JSON.stringify(durable) !== JSON.stringify(expected)) throw new Error(`coalescing dropped durable cohort events: ${JSON.stringify(durable)}`);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
+writeFileSync(`${state}/.release-fifth-arm`, "\n");
+await waitUntil(() => sent.length >= 2, "the post-consumption actionable follow-up");
+if (sent.length !== 2) throw new Error(`the fifth actionable must create exactly one later follow-up, saw ${sent.length}`);
+if (!sent[1].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: stale: cohort:wR:p5")) throw new Error(`unexpected later cohort wake text: ${sent[1].m}`);
+await waitUntil(
+  () => Number(readFileSync(`${state}/.arm-count`, "utf8").trim()) >= 6,
+  "successor continuity after the fifth actionable",
+);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[1].m }, {});
+await handlers.get("session_shutdown")({}, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp live actionable cohort contract: $out"
+  [ -z "$out" ] || fail "omp live actionable cohort test printed output: $out"
+  pass ".omp watch extension: a live actionable cohort shares one doorbell, preserves durable events, and restores continuity"
+}
+
 test_watch_extension_arms_and_delivers() {
   local repo home out status
   repo="$TMP_ROOT/watch/repo"; home="$TMP_ROOT/watch/home"
   install_omp_extension_fixture "$repo"
   mkdir -p "$home/state"
-  # The first arm child closes with one actionable reason; every successor
-  # stays up, so exactly one wake exists to consume.
+  # Four replacement-session actionables already exist before the owning
+  # session arms. The first child later emits one genuinely new actionable.
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
-if [ ! -e "${FM_HOME:?}/state/.e2e-fired" ]; then
-  : > "$FM_HOME/state/.e2e-fired"
-  sleep 1
-  printf 'signal: omp-e2e done\n'
+if [ "${1:-}" = --handling-delivered ]; then
   exit 0
 fi
-sleep 30
+state=${FM_HOME:?}/state
+count=$(cat "$state/.arm-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$count"
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$state/.release-first-arm" ]; do sleep 0.05; done
+  printf 'stale: default:wR:p5\n'
+  exit 0
+fi
+exec sleep 30
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=10000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
     EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handoffDir = `${process.env.FM_HOME}/state/extensions/omp-primary-watch`;
+const handoff = `${handoffDir}/session-replacement-actionable.json`;
+mkdirSync(handoffDir, { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [1, 2, 3, 4].map((n) => ({
+    version: 1,
+    token: `900-1000-${n}`,
+    message: `stale: default:wR:p${n}`,
+    predecessorArmPid: String(8000 + n),
+  })),
+})}\n`);
+const waitUntil = async (predicate, label, timeoutMs = 10000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+};
 const handlers = new Map(); let tool = null; let command = null; const sent = [];
 const pi = {
   on(e, h) { handlers.set(e, h); },
@@ -557,21 +669,33 @@ const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-l
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
-await new Promise((r) => setTimeout(r, 2500));
-if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
-if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
+await waitUntil(() => sent.length >= 1, "the replacement-handoff umbrella follow-up");
+if (sent.length !== 1) throw new Error(`four replacement actionables must share one unconsumed follow-up, saw ${sent.length}: ${JSON.stringify(sent)}`);
+if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: stale: default:wR:p1")) throw new Error(`unexpected replacement wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");
-// The wake is consumed when omp starts the next run with that exact prompt.
+await waitUntil(() => {
+  if (!existsSync(handoff)) return false;
+  return JSON.parse(readFileSync(handoff, "utf8")).pending.length === 1;
+}, "covered replacement entries to retire");
+const retained = JSON.parse(readFileSync(handoff, "utf8"));
+if (retained.pending.length !== 1 || retained.pending[0].token !== "900-1000-1") throw new Error(`covered replacement actionables were not retired: ${JSON.stringify(retained)}`);
+// Consumption clears the umbrella. A later arm close must get a fresh wake.
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
+await waitUntil(() => !existsSync(handoff), "the consumed replacement handoff to clear");
+writeFileSync(`${process.env.FM_HOME}/state/.release-first-arm`, "\n");
+await waitUntil(() => sent.length >= 2, "the post-consumption actionable follow-up");
+if (sent.length !== 2) throw new Error(`a later actionable after consumption must get a fresh follow-up, saw ${sent.length}`);
+if (!sent[1].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: stale: default:wR:p5")) throw new Error(`unexpected later wake text: ${sent[1].m}`);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[1].m }, {});
 await handlers.get("session_shutdown")({}, {});
-if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
+if (existsSync(handoff)) throw new Error("a consumed later wake must not ride the replacement handoff");
 process.exit(0);
 EOF
 )
   status=$?
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
-  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+  pass ".omp watch extension: replacement backlog shares one doorbell and a later close wakes again after consumption"
 }
 
 test_detection_anchored_name_and_marker_precedence
@@ -584,4 +708,5 @@ test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
+test_watch_extension_coalesces_live_actionable_cohort
 test_watch_extension_arms_and_delivers

@@ -34,12 +34,13 @@
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
 // The successor pipeline never waits for the model to read it: a follow-up
 // queued while main is streaming joins the running run without ever raising
-// before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up omp had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// before_agent_start. One accepted but unconsumed follow-up is therefore the
+// doorbell for every later durable actionable already queued in that interval;
+// sending one follow-up per token floods main without adding delivery safety.
+// Consumption is tracked so a replacement can replay that one doorbell. An idle
+// main consumes at before_agent_start; a streaming main consumes at the user
+// message_start carrying the exact wake text. Either event finishes its pending
+// record, and a still-unconsumed doorbell rides the replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -493,6 +494,14 @@ export default function (pi: ExtensionAPI) {
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    // Every actionable is already durable before its arm child closes. One
+    // accepted but unconsumed wake therefore covers later pending tokens; mark
+    // them delivered so the normal cleanup removes their replacement records.
+    // A close arriving after consumption sees an empty map and gets a new wake.
+    if (pending && owner.unconsumedWakes.size > 0) {
+      pending.delivered = true;
+      return true;
+    }
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,

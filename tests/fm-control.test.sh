@@ -783,6 +783,46 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
+test_omp_exit_settles_state_and_retires_notifications() {
+  local dir out rc gen current new_gen before after
+  dir=$(new_case omp-settled-exit)
+  add_task "$dir" t1 omp scout
+  alive_as "$dir" omp
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  printf 'done: OMP task complete\n' > "$dir/home/state/t1.status"
+  : > "$dir/home/state/t1.turn-ended"
+  printf 'generated extension\n' > "$dir/home/state/t1.omp-ext.ts"
+
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "OMP exit should settle its semantic state"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.turn-ended" ] \
+    || fail "OMP exit left a stale turn-end notification"
+  [ ! -e "$dir/home/state/t1.omp-ext.ts" ] \
+    || fail "OMP exit left inert per-task extension wiring"
+
+  current=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_DIR="$dir/fake" "$ROOT/bin/fm-crew-state.sh" t1)
+  assert_contains "$current" "state: done" \
+    "a verified OMP exit should preserve terminal status folding"
+  assert_contains "$current" "source: status-log" \
+    "a verified OMP exit should leave a settled semantic state"
+
+  new_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  [ "$new_gen" != "$gen" ] \
+    || fail "OMP relaunch reused the settled exit generation"
+  before=$(cat "$dir/home/state/t1.busy-state")
+  if "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 idle --gen "$gen" \
+    --source fm-control --event late-exit >/dev/null 2>&1; then
+    fail "a late exit event from the settled OMP generation crossed relaunch"
+  fi
+  after=$(cat "$dir/home/state/t1.busy-state")
+  [ "$after" = "$before" ] \
+    || fail "a rejected old-generation exit changed the relaunched OMP state"
+  pass "fm-control exit: OMP settles semantic state and retires notification wiring"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -909,6 +949,7 @@ test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
+test_omp_exit_settles_state_and_retires_notifications
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
