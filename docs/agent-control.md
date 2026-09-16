@@ -39,7 +39,7 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
-Both interrupt planes proof-gate the composer clear the same way: muse restores the cancelled prompt as real text only when the composer was empty at cancel time, so Ctrl+U is sent only after proving the composer content is a suffix of the cancelled run's recorded `started.prompt` (`bin/fm-busy-lib.sh`'s `fm_busy_muse_restored_prompt_verdict`).
+Both interrupt planes proof-gate the composer clear the same way: muse restores the cancelled prompt as real text only when the composer was empty at cancel time, so Ctrl+C is sent only after proving the composer content is a suffix of the cancelled run's recorded `started.prompt` (`bin/fm-busy-lib.sh`'s `fm_busy_muse_restored_prompt_verdict`).
 Fresh input or a provably empty composer skips the clear, so the captain's input is not clobbered; `fm-send.sh --key Escape` warns and skips on an unprovable proof, while this plane refuses loudly because the next lifecycle line would concatenate onto whatever remains.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 

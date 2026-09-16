@@ -270,7 +270,7 @@ fm_send_id_from_meta() { # <meta-file>
 # survives the interrupt untouched (verified live, muse 1.3.0-R3057.1).
 # Classifying a restored prompt as pending input is correct - the text really
 # is unsubmitted - but leaving it there means the NEXT steer types onto the end
-# of it and submits both as one garbled message. Ctrl-U clears the composer
+# of it and submits both as one garbled message. Ctrl-C clears the complete composer
 # (verified), so the interrupt is not complete until the composer is proven
 # free of the restored prompt.
 # The clear is PROOF-GATED: it fires only when the composer's extracted content
@@ -278,7 +278,7 @@ fm_send_id_from_meta() { # <meta-file>
 # started prompt - a suffix because a long prompt can outgrow the bounded
 # capture window). A wake that lands while the captain is typing leaves the
 # composer holding fresh input, not the restored prompt, and an unconditional
-# C-u would clobber it; a mismatch, an unreadable composer, or an unprovable
+# C-c would clobber it; a mismatch, an unreadable composer, or an unprovable
 # restored prompt therefore skips the clear with a warning instead. A failed
 # clear delivery is still loud rather than silent, because the alternative is a
 # corrupted steer.

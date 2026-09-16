@@ -239,7 +239,7 @@ test_key_send_exit_status_follows_delivery() {
 #
 # muse restores the cancelled prompt into its composer after Escape, but only
 # when the composer was empty at cancel time: fresh typed input survives the
-# interrupt, so an unconditional C-u clobbers a message the captain was typing
+# interrupt, so an unconditional C-c clobbers a message the captain was typing
 # when the interrupt landed. The clear is proof-gated on the composer's
 # extracted content being a suffix of the cancelled run's recorded started
 # prompt (bin/fm-busy-lib.sh); anything else skips the clear.
@@ -274,7 +274,7 @@ test_muse_interrupt_clears_the_restored_prompt() {
     FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "a proven restored prompt should still be cleared"
-  assert_contains "$(cat "$log")" "arg=C-u" "the restored prompt should be cleared after the interrupt"
+  assert_contains "$(cat "$log")" "arg=C-c" "the restored prompt should be cleared after the interrupt"
   pass "fm-send --key Escape: muse composer holding the restored prompt is cleared"
 }
 
@@ -293,10 +293,10 @@ test_muse_interrupt_normalizes_multiline_prompt() {
     assert_contains "$(cat "$log")" "arg=Escape" "the interrupt should be delivered"
     expected="$(cat "$log")"
     if [ "$sample" = 'first linesecond line' ]; then
-      assert_not_contains "$expected" "arg=C-u" "fresh joined words must not match a newline boundary"
+      assert_not_contains "$expected" "arg=C-c" "fresh joined words must not match a newline boundary"
       assert_contains "$(cat "$err")" "left untouched" "fresh input should be preserved"
     else
-      assert_contains "$expected" "arg=C-u" "multiline restored prompt or suffix should be cleared"
+      assert_contains "$expected" "arg=C-c" "multiline restored prompt or suffix should be cleared"
     fi
   done
   pass "fm-send --key Escape: multiline prompt boundaries normalize without joining words"
@@ -314,7 +314,7 @@ test_muse_interrupt_preserves_fresh_input() {
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "the interrupt itself was delivered, so the send still succeeds"
   assert_contains "$(cat "$log")" "arg=Escape" "the interrupt key should have been delivered"
-  assert_not_contains "$(cat "$log")" "arg=C-u" "fresh composer input must never be cleared"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "fresh composer input must never be cleared"
   assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say why"
   pass "fm-send --key Escape: muse composer holding fresh input survives the interrupt path"
 }
@@ -333,7 +333,7 @@ test_muse_interrupt_skips_clear_when_unprovable() {
     FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "an unprovable restored prompt skips the clear without failing the delivered interrupt"
-  assert_not_contains "$(cat "$log")" "arg=C-u" "an unprovable composer must never be cleared"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an unprovable composer must never be cleared"
   assert_contains "$(cat "$err")" "cannot be proven" "the skipped clear should say why"
   pass "fm-send --key Escape: muse composer is left untouched when the restored prompt cannot be proven"
 }
@@ -349,7 +349,7 @@ test_muse_interrupt_empty_composer_needs_no_clear() {
     FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "an empty composer needs no clear"
-  assert_not_contains "$(cat "$log")" "arg=C-u" "an empty composer should not be cleared"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an empty composer should not be cleared"
   assert_not_contains "$(cat "$err")" "unreadable" "a provably empty composer skips the clear silently"
   pass "fm-send --key Escape: an empty muse composer is left alone"
 }
@@ -367,7 +367,7 @@ test_muse_interrupt_unreadable_composer_warns() {
     FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
     "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "an unreadable composer skips the clear without failing the delivered interrupt"
-  assert_not_contains "$(cat "$log")" "arg=C-u" "an unreadable composer must never be cleared"
+  assert_not_contains "$(cat "$log")" "arg=C-c" "an unreadable composer must never be cleared"
   assert_contains "$(cat "$err")" "unreadable" "the skipped clear should say the composer was unreadable"
   assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say the composer was left untouched"
   pass "fm-send --key Escape: an unreadable muse composer skips the clear with a warning"

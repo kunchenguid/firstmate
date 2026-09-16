@@ -52,7 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
-    muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    muse) printf '/exit\tEscape\t1\tC-c\n' ;;
     *) return 1 ;;
   esac
 }
@@ -778,7 +778,7 @@ test_muse_interrupt_clears_proven_restored_prompt() {
   printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
   out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "a proven restored prompt should still be cleared"$'\n'"$out"
-  [ "$(keys_sent "$dir")" = "$(printf 'Escape\nC-u')" ] \
+  [ "$(keys_sent "$dir")" = "$(printf 'Escape\nC-c')" ] \
     || fail "the restored prompt should be cleared after the interrupt, got keys: $(keys_sent "$dir")"
   pass "fm-control interrupt: muse composer holding the restored prompt is cleared"
 }
