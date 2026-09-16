@@ -40,7 +40,7 @@ A `FM_DSH_HARNESS` that no producer set was the state of the world before this w
 
 ## Launch: one boundary for values a tool call cannot set
 
-Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, runs the preflight with the profile and any `--patch` overlays it was given, and `exec`s `dsh`.
+Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, runs the preflight with the profile and any `--patch` overlays it was given, and `exec`s `dsh`.
 
 ```
 bin/fm-dsh-launch.sh web --port 3080
@@ -285,7 +285,7 @@ The adapter was again not actually fine.
 The fix is the documented refresh: both scripts now carry a measured hint (`fm-dsh-harness.test.sh` 15067 ms, `fm-dsh-live-e2e.test.sh` 143 ms, the latter because the live guard skips without its opt-in).
 A new test file is therefore not finished when it passes; it also has to be weighed, and the guard that says so lives in a suite the adapter does not otherwise run.
 
-The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), DSH renaming its own tools out from under the delegation guard's stems, and DSH's shipped `standard` preset, which the `firstmate` preset copies.
+The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), DSH renaming its own tools out from under the delegation guard's stems, `dsh-base` composing the hook sandbox from something other than `DSH_PERMISSION_MODE` (the launcher exports it and the preflight evaluates the composed expression), and DSH's shipped `standard` preset, which the `firstmate` preset copies.
 
 ## Not established, blocked, or out of scope
 
@@ -319,8 +319,10 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 41 cases, and the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+As measured on 2026-09-16, the portable suite passes 44 cases.
+Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
+The five-contract run predates the preflight's hook sandbox-mode check, so it is not evidence that the first contract still passes.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

@@ -483,8 +483,7 @@ on 2026-09-16, because a one-shot headless run cannot exercise an idle session:
 
 The full-repository audit (180 bin scripts, 30 docs, 21 skills, 16 AGENTS.md sections, 7 harness
 integrations) invalidated four claims this record previously carried. Each is now fixed and
-regression-tested; `tests/fm-dsh-harness.test.sh` holds 20 cases and 276 tests pass across the
-affected suites.
+regression-tested in `tests/fm-dsh-harness.test.sh`.
 
 | Claim | Reality found | Fix |
 | --- | --- | --- |
@@ -501,20 +500,8 @@ the repair line and the seatbelt in agreement.
 
 ### DSH startup preflight, 2026-09-16
 
-`bin/fm-dsh-preflight.sh`, run by `bin/fm-dsh-launch.sh` before the session starts, asserts the
-three misconfigurations that fail silently. Measured against synthetic homes:
-
-| Condition | Result |
-| --- | --- |
-| Bridge 0.0.1-rc.5 against dsh-base 0.1.5-rc.2 | FAIL, naming both versions and the reinstall command |
-| Bridge absent from the profile | FAIL, naming the install command at the running version |
-| AGENTS.md 81127 bytes against maxBytes 65536 | FAIL, naming the patch file to raise |
-| Conforming home | pass, all required checks |
-| `ps` denied by the sandbox | FAIL, naming the permission preset (`sandbox-policy.mode` alone is refused at load); measured with a fake `ps` only, and superseded: the preflight runs before DSH sandboxes anything, so it now asserts the default permission preset instead ([DSH record](dsh.md#preflight-three-silent-misconfigurations-asserted-rather-than-documented)) |
-
-`lsof` absence is a warning rather than a failure: teardown's stale-lock proof and orphan reap refuse
-rather than proceed without it. An absent `jq` or `node` is a failure, because every guard that needs
-one fails open and becomes a silent no-op.
+`bin/fm-dsh-preflight.sh`, run by `bin/fm-dsh-launch.sh` before the session starts, asserts the three misconfigurations that fail silently.
+The [DSH record](dsh.md#preflight-three-silent-misconfigurations-asserted-rather-than-documented) owns its measured conditions and results.
 
 ### DSH PreToolUse deny, 2026-09-16
 
@@ -550,14 +537,7 @@ a throwaway profile, installs the hooks bridge at the running dsh-base version, 
 headless sessions, failing by name and version rather than degrading quietly. Run it with
 `FM_DSH_LIVE_E2E=1` after a dsh upgrade.
 
-It proves four contracts, each of which was once assumed and later measured:
-
-| Contract | Live result (dsh-base 0.1.5-rc.2) |
-| --- | --- |
-| A matching bridge pin passes `fm-dsh-preflight.sh` | pass |
-| `UserPromptSubmit` additionalContext reaches the FIRST request | pass |
-| A `bash`-matcher `PreToolUse` deny blocks the command | pass (sentinel absent) |
-| A blocking `Stop` forces one bounded continuation | pass (2 firings) |
+The [DSH record](dsh.md#refreshing-this-record) owns its contracts and their latest live results.
 
 Two mistakes this guard made on its first run are worth keeping in view, because both read like real
 failures: it initially isolated `DSH_HOME` to a temp directory, which also isolated the CREDENTIAL
