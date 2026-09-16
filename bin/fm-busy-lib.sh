@@ -6,7 +6,8 @@
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
 # unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
+# process-level override: a busy record on a positively absent local endpoint
+# yields dead, never busy. Child processes, CPU,
 # process sleep state, marker mtimes, and the old global UI-regex OR are not
 # state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
