@@ -5316,11 +5316,13 @@ test_terminal_stale_outcome_covered_absorbed() {
     || { reap "$pid"; fail "covered terminal stale was not absorbed: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "covered terminal stale printed a wake: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "covered terminal stale enqueued a wake"
-  [ -s "$state/.paused-resurfaced-$key" ] \
+  [ -s "$state/.outcome-resurfaced-$key" ] \
     || { reap "$pid"; fail "covered terminal stale did not write the declaration throttle"; }
-  case "$(cat "$state/.paused-resurfaced-$key")" in
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "covered terminal stale claimed the shared pause throttle"; }
+  case "$(cat "$state/.outcome-resurfaced-$key")" in
     outcome-covered:12:*) ;;
-    *) reap "$pid"; fail "covered terminal stale wrote the wrong declaration: $(cat "$state/.paused-resurfaced-$key")" ;;
+    *) reap "$pid"; fail "covered terminal stale wrote the wrong declaration: $(cat "$state/.outcome-resurfaced-$key")" ;;
   esac
   reap "$pid"
   pass "a covered terminal-status pane re-hash is absorbed under the outcome-covered throttle"
@@ -5374,16 +5376,18 @@ test_terminal_stale_outcome_covered_resurfaces_on_cadence() {
   pid=$!
   wait_for_absorbed "$state" "$pid" "absorbed stale (outcome-covered):" \
     || { reap "$pid"; fail "first covered terminal stale was not absorbed: $(cat "$out")"; }
-  decl=$(cat "$state/.paused-resurfaced-$key" 2>/dev/null || true)
+  decl=$(cat "$state/.outcome-resurfaced-$key" 2>/dev/null || true)
   case "$decl" in
     outcome-covered:8:*) ;;
     *) reap "$pid"; fail "first covered sight wrote no outcome-covered declaration: $decl" ;;
   esac
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "first covered sight claimed the shared pause throttle"; }
   reap "$pid"
   # Age the throttle past the cadence, then a new hash must re-surface once.
-  touch -d '2 hours ago' "$state/.paused-resurfaced-$key" 2>/dev/null \
+  touch -d '2 hours ago' "$state/.outcome-resurfaced-$key" 2>/dev/null \
     || touch -t "$(date -u -d '2 hours ago' +%Y%m%d%H%M.%S 2>/dev/null || date -u -v-2H +%Y%m%d%H%M.%S)" \
-         "$state/.paused-resurfaced-$key"
+         "$state/.outcome-resurfaced-$key"
   printf 'finished, awaiting teardown (repaint)' > "$capture_file"
   pane_hash=$(hash_text "finished, awaiting teardown (repaint)")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -5498,16 +5502,18 @@ test_terminal_stale_outcome_covered_post_steer_death_surfaces() {
 }
 
 test_terminal_stale_outcome_covered_static_pane_resurfaces_on_cadence() {
-  local dir state fakebin out capture_file window key throttle
+  local dir state fakebin out capture_file window key throttle shared
   dir=$(make_case terminal-stale-outcome-static); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-static"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  throttle="$state/.paused-resurfaced-$key"
+  throttle="$state/.outcome-resurfaced-$key"
+  shared="$state/.paused-resurfaced-$key"
   setup_covered_terminal_task "$state" static "$window"
   prime_stale_pane "$state" "$key" "$capture_file" 'finished, awaiting teardown'
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "absorbed stale (outcome-covered): $window" \
     || fail "the static pane's first covered sight was not absorbed: $(cat "$out")"
+  [ ! -e "$shared" ] || fail "the static covered absorb claimed the shared pause throttle"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "an unchanged static pane re-alarmed inside the cadence: $(cat "$out")"
   backdate_path "$throttle"
@@ -5519,22 +5525,29 @@ test_terminal_stale_outcome_covered_static_pane_resurfaces_on_cadence() {
     outcome-covered:14:*) ;;
     *) fail "the static re-surface did not refresh the outcome-covered throttle: $(cat "$throttle" 2>/dev/null)" ;;
   esac
+  [ ! -e "$shared" ] || fail "the static re-surface claimed the shared pause throttle"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "the static pane re-alarmed again right after its cadence re-surface"
   pass "an unchanged covered terminal pane re-surfaces once per PAUSE_RESURFACE_SECS"
 }
 
 test_terminal_stale_outcome_covered_busy_then_stop_surfaces() {
-  local dir state fakebin out capture_file window key throttle
+  local dir state fakebin out capture_file window key throttle shared
   dir=$(make_case terminal-stale-outcome-busy); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-rebusy"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  throttle="$state/.paused-resurfaced-$key"
+  throttle="$state/.outcome-resurfaced-$key"
+  shared="$state/.paused-resurfaced-$key"
   setup_covered_terminal_task "$state" rebusy "$window"
   prime_stale_pane "$state" "$key" "$capture_file" 'finished, awaiting teardown'
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "absorbed stale (outcome-covered): $window" \
     || fail "the delivered result's first stale sight was not absorbed: $(cat "$out")"
+  case "$(cat "$throttle" 2>/dev/null)" in
+    outcome-covered:14:*) ;;
+    *) fail "the covered absorb did not arm the dedicated outcome throttle: $(cat "$throttle" 2>/dev/null)" ;;
+  esac
+  [ ! -e "$shared" ] || fail "the covered absorb claimed the shared pause throttle"
   printf 'working on the follow-up\nCtrl+c:cancel' > "$capture_file"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "the watcher exited while the worker was busy: $(cat "$out")"
@@ -5542,10 +5555,8 @@ test_terminal_stale_outcome_covered_busy_then_stop_surfaces() {
     outcome-covered:14:*) ;;
     *) fail "a busy pane did not break the outcome-covered window: $(cat "$state/.outcome-busy-$key" 2>/dev/null)" ;;
   esac
-  case "$(cat "$throttle" 2>/dev/null)" in
-    outcome-covered:14:*) ;;
-    *) fail "the busy observation wrote a foreign declaration into the shared re-surface throttle: $(cat "$throttle" 2>/dev/null)" ;;
-  esac
+  [ ! -e "$shared" ] \
+    || fail "the busy observation claimed the shared re-surface throttle: $(cat "$shared" 2>/dev/null)"
   prime_stale_pane "$state" "$key" "$capture_file" 'Should I also bump the version?'
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
     || fail "the first stop after a busy interval was absorbed as already delivered"
@@ -5554,12 +5565,13 @@ test_terminal_stale_outcome_covered_busy_then_stop_surfaces() {
 }
 
 test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
-  local dir state fakebin out drain_out capture_file window key throttle pid
+  local dir state fakebin out drain_out capture_file window key throttle shared pid
   dir=$(make_case turn-ended-outcome-ack-before-report); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-ackfirst"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  throttle="$state/.paused-resurfaced-$key"
+  throttle="$state/.outcome-resurfaced-$key"
+  shared="$state/.paused-resurfaced-$key"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/ackfirst.meta"
   printf 'done: PR https://example.test/pr/31 checks green\n' > "$state/ackfirst.status"
   printf '%s' "$(seen_sig "$state/ackfirst.status")" > "$state/.seen-ackfirst_status"
@@ -5572,7 +5584,8 @@ test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
   backdate_path "$state/ackfirst.inbox"
   write_covered_outcome_index "$state" ackfirst 21
   # The worker is now working on the steer. No stale sight has armed a throttle.
-  [ ! -e "$throttle" ] || fail "the fixture armed a throttle before the busy interval"
+  [ ! -e "$throttle" ] || fail "the fixture armed a dedicated outcome throttle before the busy interval"
+  [ ! -e "$shared" ] || fail "the fixture armed the shared pause throttle before the busy interval"
   printf 'rebasing the branch\nCtrl+c:cancel' > "$capture_file"
   covered_stale_round "$state" "$fakebin" "$out" "$capture_file" "$window" poll \
     || fail "the watcher exited while the steered worker was busy: $(cat "$out")"
@@ -5580,8 +5593,10 @@ test_turn_ended_outcome_covered_steer_acked_before_report_surfaces() {
     outcome-covered:21:*) ;;
     *) fail "a busy steered worker was not recorded against its covering outcome: $(cat "$state/.outcome-busy-$key" 2>/dev/null)" ;;
   esac
+  [ ! -e "$shared" ] \
+    || fail "the busy observation claimed the shared re-surface throttle: $(cat "$shared" 2>/dev/null)"
   [ ! -e "$throttle" ] \
-    || fail "the busy observation claimed the shared re-surface throttle: $(cat "$throttle" 2>/dev/null)"
+    || fail "the busy observation armed the dedicated outcome throttle: $(cat "$throttle" 2>/dev/null)"
   # It stops with a question in the pane and no new status line.
   printf 'Should I force-push the rebase?' > "$capture_file"
   : > "$state/ackfirst.turn-ended"
@@ -5617,7 +5632,8 @@ test_turn_ended_outcome_covered_branch_order_steer_then_stop_surfaces() {
   record_acked_steer "$state" branchorder
   write_covered_outcome_index "$state" branchorder 33
   [ ! -e "$state/.outcome-busy-$key" ] || fail "the fixture recorded a busy interval it must not need"
-  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "the fixture armed a throttle it must not need"
+  [ ! -e "$state/.outcome-resurfaced-$key" ] || fail "the fixture armed a dedicated outcome throttle it must not need"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "the fixture armed a shared pause throttle it must not need"
   printf 'Should I force-push the rebase?' > "$capture_file"
   : > "$state/branchorder.turn-ended"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \

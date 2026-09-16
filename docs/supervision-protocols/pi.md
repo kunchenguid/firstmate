@@ -26,7 +26,6 @@ A captain-facing outcome instead appears as one exact, sequence-keyed visible tr
 Display-only captain outcomes (`action:none`) stop there: the extension advances the processed marker itself and opens no turn on this conversation.
 Outcomes that still need MAIN (`action:main`, and legacy rows) arrive as one hidden supervision processing request listing each `[seq N] task: summary` it covers.
 That request is the one turn in which MAIN processes the outcome: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed, then call the `fm_branch_processed` tool with the highest sequence the request listed, exactly once.
-When no visible response and no action is due, call `fm_branch_processed` and write nothing else, not even a courtesy acknowledgement.
 Only that call closes an `action:main` outcome; an unrelated, empty, or paraphrased answer leaves it open, and the current unprocessed sequence set is presented again at the next run boundary and at session start until it is acknowledged.
 The persisted entry is already the captain-visible record, so MAIN must not re-emit it verbatim merely because it appeared.
 Before MAIN steers, controls lifecycle, or cleans up a task, claim its lease with `bin/fm-lease.sh claim <task>` and release it afterwards; a refused claim means the branch is acting on that task right now.

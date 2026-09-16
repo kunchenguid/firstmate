@@ -175,7 +175,6 @@ const PROCESSING_INSTRUCTION =
   "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
   "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
-  "When no visible response and no action is due, call fm_branch_processed and write nothing else, not even a courtesy acknowledgement. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };

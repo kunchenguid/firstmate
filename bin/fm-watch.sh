@@ -712,7 +712,7 @@ signal_turnend_panes_churned() {  # <file> ...
 # churn absorb's is: a worker that loops forever without appending status would
 # otherwise hide behind unchanged coverage while churn defeats the stale backbone.
 signal_turnend_outcome_covered() {  # <file> ...
-  local f base task meta kind w key now_s absorb_secs marker since age
+  local f base task meta kind w key now_s absorb_secs marker since age created
   local rec_task task_index i j count declaration
   local max_absorb_secs=9223372036854775807
   local -a signal_tasks=() snapshot_tasks=() snapshot_kinds=() snapshot_windows=() snapshot_keys=()
@@ -794,13 +794,13 @@ signal_turnend_outcome_covered() {  # <file> ...
       return 1
     fi
   done
-  for key in "${missing_keys[@]}"; do
+  for key in ${missing_keys[@]+"${missing_keys[@]}"}; do
     marker="$STATE/.turnend-covered-since-$key"
     if (set -C; printf '%s' "$now_s" > "$marker") 2>/dev/null; then
       created_keys+=("$key")
       continue
     fi
-    for created in "${created_keys[@]}"; do
+    for created in ${created_keys[@]+"${created_keys[@]}"}; do
       rm -f "$STATE/.turnend-covered-since-$created"
     done
     return 1
@@ -1507,19 +1507,21 @@ captain_call_stale_bound() {  # <window-key> <task>
 # hash has nothing new to say until status bytes or a newer outcome change the
 # coverage identity. Declaration embeds the covered sequence and status signature
 # so any new event starts a fresh window whose first sight surfaces immediately.
-# First covered sight absorbs and arms the throttle; later sights inside
-# PAUSE_RESURFACE_SECS absorb; a sight after the cadence, or the first sight
-# after the pane was seen busy under this declaration, returns 1 so the caller
-# alarms once and refreshes the throttle through stale_wait_record.
+# First covered sight absorbs and arms this proof's own .outcome-resurfaced-*
+# throttle; later sights inside PAUSE_RESURFACE_SECS absorb; a sight after the
+# cadence, or the first sight after the pane was seen busy under this declaration,
+# returns 1 so the caller alarms once and refreshes that dedicated marker. The
+# shared .paused-resurfaced-* throttle stays with declared-wait and captain-call
+# cadences alone, so a foreign outcome-covered body cannot skip their gates.
 outcome_covered_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2 throttle
   STALE_WAIT_DECLARATION=$(outcome_covered_declaration "$task") || return 1
   if outcome_covered_window_saw_busy "$key" "$STALE_WAIT_DECLARATION"; then
     return 1
   fi
-  throttle="$STATE/.paused-resurfaced-$key"
+  throttle="$STATE/.outcome-resurfaced-$key"
   if [ "$(cat "$throttle" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]; then
-    stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+    [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
   else
     printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle"
   fi
@@ -1537,12 +1539,21 @@ outcome_covered_declaration() {  # <task>
 }
 
 outcome_covered_throttle_armed() {  # <window-key>
-  local throttle="$STATE/.paused-resurfaced-$1"
+  local throttle="$STATE/.outcome-resurfaced-$1"
   [ -f "$throttle" ] || return 1
   case "$(cat "$throttle" 2>/dev/null || true)" in
     outcome-covered:*) return 0 ;;
   esac
   return 1
+}
+
+outcome_covered_stale_record() {  # <window-key>
+  [ -n "$STALE_WAIT_DECLARATION" ] || return 0
+  case "$STALE_WAIT_DECLARATION" in
+    outcome-covered:*) ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.outcome-resurfaced-$1"
 }
 
 # 0 when this window was seen busy under the CURRENT coverage identity: the
@@ -1569,11 +1580,15 @@ note_outcome_covered_busy() {  # <window-key> <task>
 surface_terminal_stale() {  # <window> <window-key> <hash>
   local w=$1 key=$2 h=$3 stale_status stale_record stale_end stale_rest stale_ident
   fm_wake_append stale "$w" "stale: $w" || exit 1
-  if [ -n "$STALE_WAIT_DECLARATION" ]; then
-    stale_wait_record "$key"
-  elif outcome_covered_throttle_armed "$key"; then
-    rm -f "$STATE/.paused-resurfaced-$key"
-  fi
+  case "$STALE_WAIT_DECLARATION" in
+    outcome-covered:*) outcome_covered_stale_record "$key" ;;
+    ?*) stale_wait_record "$key" ;;
+    *)
+      if outcome_covered_throttle_armed "$key"; then
+        rm -f "$STATE/.outcome-resurfaced-$key"
+      fi
+      ;;
+  esac
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.outcome-busy-$key"
   clear_write_tracking "$key"
