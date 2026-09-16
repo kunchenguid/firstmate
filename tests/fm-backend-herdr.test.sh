@@ -358,6 +358,24 @@ test_workspace_label_config_override_ignores_surrounding_blank_lines() {
   pass "fm_backend_herdr_workspace_label: blank lines around a single-line override are trimmed, not refused"
 }
 
+test_workspace_label_unreadable_config_does_not_abort_a_set_e_caller() {
+  local home label_file
+  home="$TMP_ROOT/primary-home-unreadable-label"; mkdir -p "$home/config"
+  label_file="$home/config/herdr-workspace-label"
+  printf 'Mate Raiz\n' > "$label_file"
+  chmod 000 "$label_file"
+  if [ -r "$label_file" ]; then
+    chmod 644 "$label_file"
+    pass "fm_backend_herdr_workspace_label: skipped (this user reads a mode-000 file, so an unreadable label cannot be staged)"
+    return 0
+  fi
+  out=$( FM_HOME="$home" bash -c 'set -eu; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" ) \
+    || { chmod 644 "$label_file"; fail "an unreadable config/herdr-workspace-label must not abort a 'set -e' caller like fm-spawn.sh"; }
+  chmod 644 "$label_file"
+  [ "$out" = "firstmate" ] || fail "an unreadable config/herdr-workspace-label should fall back to 'firstmate', got '$out'"
+  pass "fm_backend_herdr_workspace_label: an unreadable config/herdr-workspace-label falls back to 'firstmate' instead of killing a 'set -e' caller"
+}
+
 test_workspace_label_secondmate_marker_wins_over_config_override() {
   local home
   home="$TMP_ROOT/secondmate-home-with-label"; mkdir -p "$home/config"
@@ -5261,6 +5279,7 @@ test_workspace_label_config_override_applies_with_internal_space
 test_workspace_label_config_override_absent_falls_back_to_primary
 test_workspace_label_config_override_multiline_falls_back_to_primary
 test_workspace_label_config_override_ignores_surrounding_blank_lines
+test_workspace_label_unreadable_config_does_not_abort_a_set_e_caller
 test_workspace_label_secondmate_marker_wins_over_config_override
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one

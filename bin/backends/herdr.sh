@@ -377,7 +377,7 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   if [ -f "$label_file" ]; then
-    custom=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/./,$!d' "$label_file" 2>/dev/null)
+    custom=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/./,$!d' "$label_file" 2>/dev/null) || custom=""
     if [ -n "$custom" ] \
       && [ "$(printf '%s' "$custom" | wc -l | tr -d '[:space:]')" -eq 0 ]; then
       printf '%s' "$custom"
