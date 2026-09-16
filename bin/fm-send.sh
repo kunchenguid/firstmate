@@ -296,12 +296,13 @@ fm_send_clear_after_interrupt() { # <key>
 
 # fm_send_clear_restored_prompt: send the adapter's composer-clear key only
 # when the composer provably holds the prompt the interrupt restored. The
-# restored text is provable only for muse (the last run's started prompt in
-# the bound session log, via bin/fm-busy-lib.sh); any other family carrying a
-# clear key has no provable restored text here, so the clear is skipped rather
-# than fired blind.
+# proof itself is owned by fm_busy_muse_restored_prompt_verdict
+# (bin/fm-busy-lib.sh), shared with the control plane's interrupt path; this
+# plane's contract is to skip the clear with a warning on anything but a
+# proven restore, because a failed send must never clobber the captain's
+# input.
 fm_send_clear_restored_prompt() { # <family> <clear-key>
-  local family=$1 clear=$2 id log prompt content last='' i wait
+  local family=$1 clear=$2 id verdict
   [ "$family" = muse ] || {
     echo "fm-send: $TARGET_HARNESS needs a post-interrupt composer clear, but this plane cannot prove the restored prompt for that adapter; the composer was left untouched" >&2
     return 0
@@ -311,51 +312,18 @@ fm_send_clear_restored_prompt() { # <family> <clear-key>
     return 0
   }
   id=$(fm_send_id_from_meta "$TARGET_META")
-  log=$(fm_busy_muse_session_log "$STATE" "$id" 2>/dev/null) || {
-    echo "fm-send: no muse session log resolves for $id, so the restored prompt cannot be proven; the composer was left untouched" >&2
-    return 0
-  }
-  prompt=$(fm_busy_muse_last_run_prompt "$log" 2>/dev/null) || {
-    echo "fm-send: no run prompt is recorded in $log, so the restored prompt cannot be proven; the composer was left untouched" >&2
-    return 0
-  }
-  fm_composer_normalize_spaces_var prompt
-  prompt=$(printf '%s\n' "$prompt" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
-  [ -n "$prompt" ] || {
-    echo "fm-send: the recorded run prompt is empty, so the restored prompt cannot be proven; the composer was left untouched" >&2
-    return 0
-  }
-  # The restore lands with the cancel; a short stability poll covers render lag
-  # without ever clearing a composer that is still changing under the captain's
-  # hands.
-  wait=${FM_SEND_RESTORE_WAIT:-2}
-  case "$wait" in '' | *[!0-9]*) wait=2 ;; esac
-  content=
-  readable=0
-  i=$((wait * 5))
-  while [ "$i" -gt 0 ]; do
-    if content=$(fm_backend_composer_content "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null); then
-      readable=1
-    else
-      content=
-    fi
-    [ -n "$content" ] && [ "$content" = "$last" ] && break
-    last=$content
-    i=$((i - 1))
-    [ "$i" -gt 0 ] && sleep 0.2
-  done
-  if [ -z "$content" ]; then
-    if [ "$readable" -eq 0 ]; then
-      echo "fm-send: the composer for $T is unreadable, so the restored prompt cannot be proven; the muse composer was left untouched" >&2
-    fi
-    return 0
-  fi
-  case "$prompt" in
-  *"$content") ;;
-  *)
-    echo "fm-send: the muse composer holds text other than the restored prompt (fresh input survives an interrupt); left untouched - clear or submit it before the next steer" >&2
-    return 0
-    ;;
+  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$id" "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "${FM_SEND_RESTORE_WAIT:-2}")
+  case "$verdict" in
+    restored) ;;
+    empty) return 0 ;;
+    other)
+      echo "fm-send: the muse composer holds text other than the restored prompt (fresh input survives an interrupt); left untouched - clear or submit it before the next steer" >&2
+      return 0
+      ;;
+    unprovable:*)
+      echo "fm-send: ${verdict#unprovable: }, so the restored prompt cannot be proven; the muse composer was left untouched" >&2
+      return 0
+      ;;
   esac
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
     echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
