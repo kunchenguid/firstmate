@@ -956,7 +956,13 @@ clear_write_tracking() {  # <window-key>
 # line that an active run/busy pane outranked).
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# never per poll. The proven-gone endpoint probe sits in that same branch and
+# under the same bound, because this is the single place an escalation is
+# emitted: a busy husk (a closed pane still rendering its harness footer) reaches
+# the ladder through busy_turn_bound_check without ever passing the stale scan's
+# own probe, and every rung of that ladder is a wake nobody can act on. Proof
+# retires the window's records here exactly as the stale scan retires them; every
+# ambiguity escalates as before.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -971,6 +977,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if fm_backend_endpoint_confirmed_gone "$(window_backend "$win")" "$win"; then
+          retire_gone_window_records "$win" "$(window_key "$win")"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1181,15 +1191,16 @@ window_retired() {  # <window> <window-key>
   if [ -n "$meta" ]; then
     marker_at=$(stat_mtime "$marker")
     meta_at=$(stat_mtime "$meta")
-    case "$marker_at$meta_at" in
-      ''|*[!0-9]*) ;;
-      *)
-        if [ "$meta_at" -gt "$marker_at" ]; then
-          rm -f "$marker"
-          return 1
-        fi
-        ;;
+    case "$marker_at" in
+      ''|*[!0-9]*) return 0 ;;
     esac
+    case "$meta_at" in
+      ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$meta_at" -gt "$marker_at" ]; then
+      rm -f "$marker"
+      return 1
+    fi
   fi
   return 0
 }

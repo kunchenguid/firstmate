@@ -3183,6 +3183,59 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
 }
 
+# --- BUSY husk whose ENDPOINT the backend proves is gone: records retired -----
+# The sibling path of the stale-scan retirement above, and the same 2026-09-15
+# case: a pane closed mid-turn keeps its last frame, harness busy footer and all,
+# so window_is_busy still reads busy and the window never reaches the stale
+# scan's own probe. Its completed-turn bound is long past, so busy_turn_bound_check
+# hands it to the wedge timer and every FM_STALE_ESCALATE_SECS produces one more
+# stale wake with a higher escalation count for an endpoint nobody can inspect.
+# Proof of absence retires it instead, with no wake and no escalation, while a
+# window the inventory still names escalates exactly as it always did
+# (test_busy_pane_stable_hash_escalates_past_turn_age_bound covers that half).
+test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-husk-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-husk"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-husk.meta"
+  record_pi_busy "$state" busy-husk
+  printf 'working: setup complete\n' > "$state/busy-husk.status"
+  sig=$(seen_sig "$state/busy-husk.status"); printf '%s' "$sig" > "$state/.seen-busy-husk_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'an-older-hash' > "$state/.stale-$key"
+  printf 'date-of-birth' > "$state/.churn-since-$key"
+  # No completed turn ever recorded for this task: age the spawn record itself,
+  # and put the wedge timer past its threshold so this poll is the one that
+  # would have escalated.
+  touch -t 200001010000 "$state/busy-husk.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+
+  # The session inventory succeeds and names another window, which is what makes
+  # this endpoint's absence PROVEN rather than merely unreadable.
+  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a busy husk whose endpoint is proven gone still woke firstmate: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a confirmed-gone busy husk printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a confirmed-gone busy husk enqueued a wake: $(cat "$state/.wake-queue")"
+  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$window" >/dev/null \
+    || fail "the confirmed-gone busy husk's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  for suffix in hash count stale stale-since churn-since wedge-escalations; do
+    [ ! -e "$state/.$suffix-$key" ] \
+      || fail ".$suffix-$key survived the retirement of a confirmed-gone busy husk"
+  done
+  [ -e "$state/.retired-$key" ] || fail "the busy husk's retirement was not recorded durably"
+  pass "a busy husk whose endpoint the backend proves is gone is retired instead of wedge-escalated"
+}
+
 # Regression fixture for the incident's actual masking condition: Pi's rendered
 # elapsed-time footer changes every poll, so the pane hash never repeats and the
 # watcher always takes the "new hash" branch, never the stable-hash one above.
@@ -4945,6 +4998,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
+test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age

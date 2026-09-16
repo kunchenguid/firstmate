@@ -169,5 +169,23 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- endpoint-gone PROOF vs. a prefix-named neighbor session -----------------
+# The predicate that retires a watcher's durable per-window records, so only a
+# successful inventory of the EXACT recorded session may answer "gone". tmux
+# resolves a bare target name by exact match, then fnmatch, then PREFIX, so a
+# recorded session that is itself dead silently reads a neighbor whose name
+# starts with the same characters - and secondmate homes run the same layout
+# with repeating task ids. The recorded session being absent is an unreachable
+# read, never proof about the window it recorded.
+if ! fm_backend_endpoint_confirmed_gone tmux "$TARGET"; then
+  fail "a window killed out of a live, readable session was not proven gone"
+fi
+tmux new-session -d -s "${SESSION}-ghost-2" -x 200 -y 50 \
+  || fail "real tmux: new-session for the prefix-named neighbor failed"
+if fm_backend_endpoint_confirmed_gone tmux "${SESSION}-ghost:fm-only-recorded-here"; then
+  fail "an absent session whose name prefixes a live neighbor was read as proof this endpoint is gone"
+fi
+pass "real tmux: endpoint-gone proof comes from the exact recorded session, never a prefix-named neighbor"
+
 cleanup_all
 trap - EXIT

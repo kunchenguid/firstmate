@@ -293,8 +293,10 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_endpoint_confirmed_gone: 0 ONLY when a SUCCESSFUL session
-# inventory omits the exact recorded window. The recovery-grade state below is
+# fm_backend_tmux_endpoint_confirmed_gone: 0 ONLY when a SUCCESSFUL inventory of
+# the EXACT recorded session (`=session`, never a name tmux may resolve to a
+# prefix-matching neighbor) omits the exact recorded window, read through the
+# shared owner of that classification. The recovery-grade state below is
 # deliberately wider - it also answers `missing` for a definitive
 # missing-session or missing-server response, which is the tmux server being
 # unreachable rather than proof about this endpoint - and callers of this
@@ -309,7 +311,7 @@ fm_backend_tmux_endpoint_confirmed_gone() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) || return 1
+  windows=$(fm_backend_tmux_window_inventory "=$session") || return 1
   ! printf '%s\n' "$windows" | grep -Fqx "$window"
 }
 
