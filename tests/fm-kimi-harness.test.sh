@@ -224,6 +224,12 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
+  [ "$(path_mode "$task_tmp")" = 700 ] \
+    || fail "kimi spawn left its task temp root readable by others: $(path_mode "$task_tmp")"
+  [ "$(path_mode "$task_tmp/launch.sh")" = 600 ] \
+    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$task_tmp/launch.sh")"
+  grep -qF -- "-l . '$task_tmp/launch.sh'" "$CASE_DIR/tmux-calls.log" \
+    || fail "kimi spawn did not type a short line sourcing its staged launch command"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
@@ -233,6 +239,41 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+path_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
+test_kimi_spawn_refuses_shared_task_temp_root() {
+  local id rec out rc task_tmp
+  id="kimi-sharedtmp-z1-$$"
+  task_tmp="/tmp/fm-$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
+  mkdir "$task_tmp"
+  chmod 777 "$task_tmp"
+  rec=$(make_spawn_case sharedtmp "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "kimi spawn accepted a world-writable task temp root"
+  assert_contains "$out" "is not a private directory owned by this user" \
+    "kimi spawn did not name the unsafe task temp root"
+  assert_absent "$task_tmp/launch.sh" "kimi spawn staged its launch command in a shared directory"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi spawn launched despite an unsafe task temp root"
+  rm -rf "$task_tmp"
+  mkdir "$task_tmp"
+  chmod 755 "$task_tmp"
+  rec=$(make_spawn_case ownedtmp "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "kimi spawn should reuse an existing temp root it owns: $out"
+  [ "$(path_mode "$task_tmp")" = 700 ] \
+    || fail "kimi spawn did not tighten its reused task temp root: $(path_mode "$task_tmp")"
+  rm -rf "$task_tmp"
+  pass "fm-spawn: a task temp root others can write is refused, and an owned one is tightened to 0700"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -689,6 +730,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
