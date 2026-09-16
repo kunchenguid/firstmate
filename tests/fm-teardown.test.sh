@@ -319,9 +319,9 @@ set_submodule_ignores_all() {
   git -C "$case_dir/wt" config submodule.libs/sdk.ignore all
 }
 
-# Override GitHub lookups to report PR 7 as merged with the supplied head.
+# Report a merged PR with independently selectable source and merge-result heads.
 add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 merged=${3:-$2}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -337,6 +337,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,mergeCommit,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$merged' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -697,7 +698,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -735,6 +736,70 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+test_history_location_containment_matrix() {
+  local scenario route case_dir merged local_head expected rc
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/containment-contract.py" \
+    || fail "independent small-history containment oracle failed"
+  for scenario in unlanded-delete landed-delete unlanded-replace same-file-restoration \
+    literal-path ordinary-path successive-upstream one-upstream partial-two-file \
+    whole-file-restoration missing-intermediate-tree complete-enumeration; do
+    for route in pr default; do
+      case_dir=$(make_case "history-$scenario-$route")
+      write_meta "$case_dir" no-mistakes ship
+      add_lsof_no_holder "$case_dir"
+      python3 "$ROOT/tests/containment-fixtures.py" "$case_dir" "$scenario" \
+        || fail "$scenario: could not construct independent history"
+      merged=$(cat "$case_dir/merged-sha")
+      local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      if [ "$route" = pr ]; then
+        add_gh_pr_merged_for_head "$case_dir" "$merged" "$merged"
+        append_pr_meta_url "$case_dir"
+      else
+        add_gh_axi_error "$case_dir"
+      fi
+      case "$scenario" in
+        landed-delete|successive-upstream|one-upstream) expected=0 ;;
+        *) expected=1 ;;
+      esac
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code "$expected" "$rc" "$scenario/$route: wrong final-content verdict"$'\n'"$(cat "$case_dir/stderr")"
+      if [ "$expected" = 1 ]; then
+        assert_refusal_retained_task_state "$case_dir" "$scenario/$route" "$local_head"
+      else
+        [ ! -e "$case_dir/state/task-x1.meta" ] \
+          || fail "$scenario/$route: allowed cleanup did not retire its record"
+      fi
+    done
+  done
+  pass "history/location containment passes the combined 24-case matrix and independent oracles"
+}
+
+test_dirty_initialized_nested_submodule_refuses() {
+  local case_dir head rc
+  case_dir=$(make_case dirty-initialized-nested)
+  setup_submodule_fixture "$case_dir" >/dev/null
+  git init -q "$case_dir/vendor"
+  printf '%s\n' clean > "$case_dir/vendor/README.md"
+  git -C "$case_dir/vendor" add README.md
+  git -C "$case_dir/vendor" -c user.name=t -c user.email=t@t commit -qm "vendor baseline"
+  git -C "$case_dir/wt/libs/sdk" -c protocol.file.allow=always submodule add -q "$case_dir/vendor" vendor
+  git -C "$case_dir/wt/libs/sdk" -c user.name=t -c user.email=t@t commit -qam "nested module"
+  git -C "$case_dir/wt" -c user.name=t -c user.email=t@t commit -qam "nested pointer"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  set_submodule_ignores_all "$case_dir"
+  git -C "$case_dir/wt/libs/sdk" config submodule.vendor.ignore all
+  printf '%s\n' uncommitted > "$case_dir/wt/libs/sdk/vendor/README.md"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "dirty nested module hidden by ignore settings must refuse"
+  assert_refusal_retained_task_state "$case_dir" nested-dirty "$head"
+  pass "dirty initialized nested submodule survives cleanup despite parent ignore settings"
 }
 
 test_local_only_fork_remote_allows() {
@@ -5025,6 +5090,8 @@ test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_s
 test_dirty_submodule_work_refuses_despite_ignore_settings
 test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
+test_history_location_containment_matrix
+test_dirty_initialized_nested_submodule_refuses
 test_content_fallback_contained_merge_history_allows
 test_content_fallback_merge_only_restoration_refuses
 test_content_fallback_refreshes_stale_origin_ref

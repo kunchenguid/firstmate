@@ -1472,12 +1472,10 @@ azure_work_is_landed() {
   local head current
   head=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" landed "$PR_URL") || return 1
   [ -d "$WT" ] || return 0
-  if ! git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null; then
-    git -C "$WT" fetch --quiet origin "$head" >/dev/null 2>&1 || return 1
-  fi
+  ensure_commit_object "$PR_URL" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
-    || content_in_commit "$head" all || content_in_default
+    || content_in_commit "$head" || content_in_default
 }
 
 azure_remote_origin_requires_pr() {
@@ -1536,81 +1534,30 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n name
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$commit" >/dev/null 2>&1 || true
+  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  if n=$(pr_number_from_target "$target"); then
+    git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || true
+    git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  fi
+  name=$(default_branch) || return 1
+  git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
+# One raw-object, history/location-aware proof for PR and default-branch paths.
+# The helper owns its exact evidence, ambiguity and resource-bound contract.
 content_in_commit() {
-  local ref=$1 mode=${2:-unpushed} commits merge_base status path rc=0 paths_file ref_tree_file head_tree_file
-  case "$mode" in
-    all)
-      merge_base=$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null) || return 1
-      commits=$(git -C "$WT" rev-list --reverse "$merge_base..HEAD" 2>/dev/null) || return 1
-      ;;
-    unpushed)
-      commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- 2>/dev/null) || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$commits" ] || return 1
-  paths_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-paths.XXXXXX") || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    git -C "$WT" -c core.quotePath=false -c diff.ignoreSubmodules=none \
-      diff-tree --ignore-submodules=none --no-commit-id --name-status -r -z -m "$commit" -- \
-      >> "$paths_file" || {
-        rm -f -- "$paths_file"
-        return 1
-      }
-  done <<EOF
-$commits
-EOF
-  if [ ! -s "$paths_file" ]; then
-    rm -f -- "$paths_file"
-    return 0
-  fi
-  ref_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-ref.XXXXXX") || {
-    rm -f -- "$paths_file"
-    return 1
-  }
-  head_tree_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-head.XXXXXX") || {
-    rm -f -- "$paths_file" "$ref_tree_file"
-    return 1
-  }
-  exec 3< "$paths_file"
-  while IFS= read -r -d '' status <&3; do
-    case "$status" in
-      R*|C*)
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        ;;
-      *)
-        IFS= read -r -d '' path <&3 || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z "$ref" -- "$path" > "$ref_tree_file" || { rc=1; break; }
-        git -C "$WT" --literal-pathspecs ls-tree -z HEAD -- "$path" > "$head_tree_file" || { rc=1; break; }
-        cmp -s "$ref_tree_file" "$head_tree_file" || { rc=1; break; }
-        ;;
-    esac
-  done
-  exec 3<&-
-  rm -f -- "$paths_file" "$ref_tree_file" "$head_tree_file"
-  [ "$rc" -eq 0 ]
+  python3 "$SCRIPT_DIR/fm-content-containment.py" "$WT" "$1"
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
+# for both the PR state and actual merge result. Returns non-zero when the PR is
+# not merged, the result does not contain current local work, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
@@ -1620,7 +1567,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,mergeCommit,url -q '.state + "\t" + (.mergeCommit.oid // "") + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -1647,13 +1594,9 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Fetch current recorded-base (or default) content, then use exactly the same
+# final-content proof as the PR path. No alternate merge/apply heuristic may
+# override a refusal.
 content_in_default() {
   local name=${BASE_BRANCH:-} ref
   [ -n "$name" ] || name=$(default_branch) || return 1
@@ -1665,7 +1608,7 @@ content_in_default() {
   else
     return 1
   fi
-  content_in_commit "$ref" all
+  content_in_commit "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -1961,7 +1904,7 @@ report_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
+  local dirty_raw dirty submodule_dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
@@ -2004,6 +1947,17 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+  # Each initialized level gets an explicit ignore override. A parent's status
+  # alone can hide a dirty nested module through that module's own configuration.
+  # shellcheck disable=SC2016 # These variables belong to each submodule's shell.
+  if ! submodule_dirty=$(git -C "$WT" submodule foreach --quiet --recursive '
+    changes=$(git -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none) || exit 1
+    [ -z "$changes" ] || printf "%s\n" "submodule has uncommitted changes"
+  ' 2>/dev/null); then
+    echo "REFUSED: cannot inspect initialized submodules for uncommitted changes." >&2
+    return 1
+  fi
+  [ -z "$submodule_dirty" ] || dirty="${dirty:+$dirty$'\n'}$submodule_dirty"
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
