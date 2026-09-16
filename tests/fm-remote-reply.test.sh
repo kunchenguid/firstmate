@@ -405,16 +405,21 @@ assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.stat
 mirrored_cursor_is_current "adjacent structured pointers prevented the cursor from advancing"
 pass "adjacent pointers are fetched while malformed tokens remain unchanged"
 
-# A line may name a path under ANOTHER home's mirror tree; that document is
-# provably not this mate's to serve, and prose naming it is not an offer.
-mirror_lines 'working [key=cross-home]: the sibling relayed data/remote-secondmates/other/data/reply/report.md and its own data/reply/prose-only.md earlier'
-assert_grep 'the sibling relayed data/remote-secondmates/other/data/reply/report.md' "$PARENT/state/ios.status" \
-  "the cross-home mention was not mirrored verbatim"
+mkdir -p "$REMOTE/data/remote-secondmates/other/data/reply"
+printf '# another homes report\n' > "$REMOTE/data/remote-secondmates/other/data/reply/report.md"
+printf '# this mates report\n' > "$REMOTE/data/reply/cross-home-own.md"
+mirror_lines 'done [key=cross-home]: foreign report=data/remote-secondmates/other/data/reply/report.md own report=data/reply/cross-home-own.md'
+assert_grep 'foreign report=data/remote-secondmates/other/data/reply/report.md own report=data/remote-secondmates/ios/data/reply/cross-home-own.md' "$PARENT/state/ios.status" \
+  "the cross-home pointer was changed or the mate-owned pointer was not rewritten"
 assert_absent "$PARENT/data/remote-secondmates/ios/data/remote-secondmates" \
-  "a path under another home's mirror tree was fetched from this mate"
-document_decision_open && fail "a cross-home path mentioned in prose opened a document obligation"
-mirrored_cursor_is_current "a prose-only delta did not advance the cursor"
-pass "a path mentioned in prose, including another home's, is never fetched"
+  "a structured pointer under another home's mirror tree was fetched from this mate"
+cmp -s "$REMOTE/data/reply/cross-home-own.md" "$PARENT/data/remote-secondmates/ios/data/reply/cross-home-own.md" \
+  || fail "the mate-owned structured pointer alongside a cross-home pointer was not fetched"
+document_decision_open && fail "a structured cross-home pointer opened a document obligation"
+assert_no_grep 'doc data/remote-secondmates/' "$PARENT/state/remote-replies/ios.pending-docs" \
+  "a structured cross-home pointer was recorded as a pending obligation"
+mirrored_cursor_is_current "a delta containing a structured cross-home pointer did not advance the cursor"
+pass "structured cross-home pointers stay untouched while mate-owned reports transfer"
 
 # STEP 1 of the reported timeline: the mate offers a report it has not written
 # yet. The escalation must name the document AND the reader's own reason.

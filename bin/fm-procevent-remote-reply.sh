@@ -334,6 +334,12 @@ process_document_pointers() { # <extract|rewrite|canonical> <pointer-map-file> <
           rest = substr(rest, next_index)
           continue
         }
+        if (index(doc, "data/remote-secondmates/") == 1) {
+          if (mode != "extract")
+            rewritten = rewritten substr(rest, 1, next_index - 1)
+          rest = substr(rest, next_index)
+          continue
+        }
         if (mode == "extract") {
           if (!seen[doc]++) print doc
         } else {
