@@ -200,7 +200,11 @@ emit_panes() {
       fi
       if [ "$have_pane" -eq 1 ]; then printf '</section>\n'; fi
       pane_index=$((pane_index + 1))
-      printf '<section class="pane" id="pane-%d">\n' "$pane_index"
+      if [ "$pane_index" -eq 0 ]; then
+        printf '<section class="pane active" id="pane-%d">\n' "$pane_index"
+      else
+        printf '<section class="pane" id="pane-%d">\n' "$pane_index"
+      fi
       have_pane=1
       cur_key=$tab_key
     fi

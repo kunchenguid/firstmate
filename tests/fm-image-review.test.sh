@@ -71,6 +71,7 @@ test_grouping_tabs_and_nested_collapse_sections() {
   assert_grep 'loading="lazy"' "$page" "thumbnails were not lazy-loaded"
   assert_grep 'data-full="alpha/art1/run-a/one.png"' "$page" "thumbnail did not carry its full-size target"
   assert_grep '<details open><summary>art1</summary>' "$page" "nested sections were not collapsible details"
+  assert_grep '<section class="pane active" id="pane-0">' "$page" "the first pane did not start visible beside its active tab"
   pass "fm-image-review.sh: tabs and nested collapsible sections mirror the tree"
 }
 
