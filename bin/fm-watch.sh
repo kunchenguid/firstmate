@@ -2122,6 +2122,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -2198,6 +2199,13 @@ while :; do
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
+        # Contribution signals are already durable. Finish the existing merge
+        # polls before ringing for this aggregate check, so unavailable forge
+        # coverage cannot starve a task's terminal observation every cycle.
+        if [ "$(basename "$c")" = contributions.check.sh ]; then
+          contribution_check_output=$reason
+          continue
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi
@@ -2210,6 +2218,9 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    if [ -n "$contribution_check_output" ]; then
+      wake "$contribution_check_output"
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

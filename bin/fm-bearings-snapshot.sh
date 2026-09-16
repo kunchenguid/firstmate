@@ -21,7 +21,9 @@
 # never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
-# backlog roles, unresolved blockers, and captain actionability. It never infers
+# backlog roles, unresolved blockers, and captain actionability.
+# Contributions project cached coverage and required actors from fm-contributions.sh;
+# only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 # Underway (in_flight) projects every main live worker plus every active child
 # from every readable secondmate ledger, independently of that home's
@@ -594,6 +596,32 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
+      contributions:(
+        ([$snap.contributions + {owner:"(main)"}]
+          + [($snap.secondmate_current.records // [])[] as $m | if $m.contributions == null then null else $m.contributions + {owner:$m.id} end])
+        | map(if . != null and .owner != "(main)" and .known > 0 and (.valid_until // 0) < ($now | fromdateiso8601)
+              then .complete=false | .proven_clear=false | .checked=0 | .captain=[]
+                | .counts={captain:0,fleet:.known,maintainer:0,nobody:0}
+              else . end) as $homes
+        | ([$homes[] | select(. != null)]) as $measured
+        | {scope:"owned contributions per home",known:([$measured[].known] | add // 0),
+           checked:([$measured[].checked] | add // 0),
+           counts:{captain:([$measured[].counts.captain] | add // 0),fleet:([$measured[].counts.fleet] | add // 0),
+                   maintainer:([$measured[].counts.maintainer] | add // 0),nobody:([$measured[].counts.nobody] | add // 0)},
+           complete:(all($homes[]; . != null and .complete) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           proven_clear:(all($homes[]; . != null and .proven_clear) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           unmeasured_homes:([$homes[] | select(. == null)] | length),
+           unreadable_records:([$measured[].unreadable_records] | add // 0),
+           stale_verdicts:([$measured[].stale_verdicts] | add // 0),
+           missing_verdicts:([$measured[].missing_verdicts] | add // 0),
+           captain_omitted:([$measured[].captain_omitted] | add // 0),
+           captain:[$measured[] as $h | $h.captain[]? | . + {owner:$h.owner}]}),
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
@@ -661,8 +689,8 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
+# Nested objects use indented keys; arrays of uniform scalar objects use
+# the tabular array form
 # (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
 # per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
@@ -683,7 +711,9 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
     elif type == "number" then tostring
     else q end;
   def emit($k; $v):
-    if ($v | type) == "array" then
+    if ($v | type) == "object" then
+      "\($k): ", ($v | to_entries[] | emit(.key;.value) | "  " + .)
+    elif ($v | type) == "array" then
       if ($v | length) == 0 then "\($k): []"
       else
         ($v[0] | keys_unsorted) as $ks
