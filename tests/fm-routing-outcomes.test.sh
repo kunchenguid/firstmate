@@ -556,6 +556,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.import_manifest(manifest)
         native = self.latest_record()["native"]
         self.assertEqual(native["tokens"]["input"], 14)
+        self.assertIsNone(native["effective_model"])
         self.assertIsNone(native["effective_effort"])
         self.assertEqual(len(native["models"]), 2)
         self.assertNotIn("PRIVATE RESPONSE", self.store.read_text())
@@ -670,7 +671,7 @@ class RoutingOutcomesTest(unittest.TestCase):
             "agy/google/requested-only:gemini-3.8-flash-medium/requested-only:medium "
             "[auth=oauth, context=all, service=standard]")
 
-    def test_agy_effort_is_bound_to_latest_model_resolution(self):
+    def test_agy_unselected_resolution_does_not_replace_effective_model(self):
         receipt = self.dir / "agy-mixed-resolution.json"
         log = self.dir / "agy-mixed-resolution.log"
         self.write_json(receipt, {"conversation_id": "agy-three", "duration_seconds": 1,
@@ -692,10 +693,14 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["requirements"] = {"effective_model": "gemini-b"}
         manifest["outcome"] = "unresolved"
         self.bind_task("task-one", harness="agy")
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("effective model requirement not proven", json.loads(result.stdout)["error"])
+        manifest["requirements"] = {"effective_model": "gemini-a",
+                                    "effective_effort": "medium"}
         self.import_manifest(manifest)
         native = self.latest_record()["native"]
-        self.assertEqual(native["effective_model"], "gemini-b")
-        self.assertIsNone(native["effective_effort"])
+        self.assertEqual(native["effective_model"], "gemini-a")
+        self.assertEqual(native["effective_effort"], "medium")
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"
@@ -755,10 +760,20 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["route"].update({"harness": "claude", "provider": "anthropic",
                                   "requested_model": "claude-sonnet-5",
                                   "requested_effort": "high"})
+        self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z",
+                         provider="anthropic")
+        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z",
+                         provider="anthropic", generated_at="2030-01-01T00:02:00Z")
+        manifest["quota"]["provider"] = "anthropic"
         manifest["requirements"] = None
         self.bind_task("task-one", harness="claude")
         self.import_manifest(manifest, prices=prices)
-        billing = self.latest_record()["billing"]
+        record = self.latest_record()
+        billing = record["billing"]
+        self.assertIsNone(record["native"]["provider"])
+        self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
+        self.assertIsNone(
+            record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"])
         self.assertIsNone(billing["api_equivalent_usd"])
         self.assertEqual(billing["unpriced_models"], ["claude-haiku-4-5"])
         self.assertEqual([row["model"] for row in billing["price_sources"]],

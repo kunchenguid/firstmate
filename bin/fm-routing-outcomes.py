@@ -278,7 +278,10 @@ def all_or_unknown(values: Iterable[Any]) -> Any:
 
 
 def one_or_unknown(values: Iterable[Any]) -> Any:
-    found = {value for value in values if value is not None}
+    items = list(values)
+    if not items or any(value is None for value in items):
+        return None
+    found = set(items)
     return next(iter(found)) if len(found) == 1 else None
 
 
@@ -438,7 +441,7 @@ def parse_claude_result(source: dict[str, Any]) -> dict[str, Any]:
     usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
     requested_model = source.get("requested_model")
     native_models = {row.get("model") for row in models if row.get("model")}
-    main_model = requested_model if requested_model in native_models else (next(iter(native_models)) if len(native_models) == 1 else None)
+    main_model = next(iter(native_models)) if len(native_models) == 1 else None
     return {
         "kind": "claude-result", "source_sha256": source_digest,
         "session_id": receipt.get("session_id"), "request_count": receipt.get("num_turns"),
@@ -503,19 +506,21 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
     usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
     effective_model = None
     effective_effort = None
+    pending_model = None
     log_digest = None
     if source.get("native_log_path") is not None:
         log, log_digest = read_private(source.get("native_log_path"), "native_receipt.native_log_path")
         for line in log.splitlines():
             requested = AGY_REQUESTED_RE.fullmatch(line)
             if requested:
-                effective_model = requested.group(1)
-                effective_effort = None
+                pending_model = requested.group(1)
                 continue
             label = AGY_MODEL_RE.fullmatch(line)
-            if label and effective_model is not None:
+            if label and pending_model is not None:
+                effective_model = pending_model
                 suffix = re.search(r"\((Low|Medium|High)\)$", label.group(1))
                 effective_effort = suffix.group(1).lower() if suffix else None
+                pending_model = None
     model_row = token_row(effective_model, "google", usage, {
         "input": "input_tokens", "output": "output_tokens", "cache_read": "cache_read_tokens",
         "reasoning": "thinking_tokens", "total": "total_tokens",
