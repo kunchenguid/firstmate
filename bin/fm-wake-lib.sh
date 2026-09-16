@@ -444,10 +444,14 @@ fm_lock_role() {
   cat "$1/role" 2>/dev/null
 }
 
+# An over-long component makes basename fail. Refuse rather than returning the
+# parent directory with an empty basename, which reads as a valid but different
+# path and lets a caller act on the wrong one.
 fm_lock_abs_path() {
   local path=$1 dir base
-  dir=$(dirname "$path")
-  base=$(basename "$path")
+  dir=$(dirname "$path" 2>/dev/null) || return 1
+  base=$(basename "$path" 2>/dev/null) || return 1
+  [ -n "$base" ] || return 1
   dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
   printf '%s/%s\n' "$dir" "$base"
 }
@@ -912,6 +916,60 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# Remove <path> only when its recorded holder is provably gone, reusing the same
+# owner/pid/liveness/freshness recheck the primary lock's recovery uses.
+_fm_lock_reclaim_if_stale() {  # <path>
+  local path=$1 owner='' pid
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  if [ -L "$path" ]; then
+    owner=$(fm_lock_link_owner "$path" 2>/dev/null || true)
+  fi
+  pid=$(cat "$path/pid" 2>/dev/null || true)
+  fm_lock_recheck_stale_owner "$path" "$owner" "$pid" || return 1
+  fm_lock_remove_path "$path"
+}
+
+# Acquire a lock's steal mutex - the mutex serializing recovery of that lock.
+#
+# The steal mutex must never own a recovery mutex of its own. Recovering it with
+# the primary algorithm descends onto "<lock>.steal.steal" and keeps descending
+# for as long as each level looks stale, and every crashed stealer leaves one
+# more permanently stale level behind. That descent is not bounded by the
+# pathname limit either, because fm_lock_abs_path swallows basename's
+# ENAMETOOLONG and hands back a truncated path, so past 255 bytes every level
+# fails identically and recurses again - measured to depth 1046 and a 6299-byte
+# pathname, burning four minutes of fork/exec before bash's stack gave out.
+#
+# So reclaim one stale holder in place instead of descending, in a bounded two
+# attempts. A nested mutex left by an older revision is pruned on the same stale
+# test, because no revision may legitimately hold one and its presence would
+# otherwise block every claim through fm_lock_claim_blocked_by_steal.
+fm_lock_steal_try_acquire() {  # <steal-path>
+  local steal=$1 attempt=0 pid current
+  fm_current_pid current || return 1
+  while [ "$attempt" -lt 2 ]; do
+    attempt=$((attempt + 1))
+    _fm_lock_reclaim_if_stale "$steal.steal" || true
+    if fm_lock_try_create "$steal"; then
+      return 0
+    fi
+    pid=$(cat "$steal/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
+      # This process abandoned the mutex when a trap left the frame holding it,
+      # so the exit path is now waiting on itself. The stale test cannot free
+      # that hold, because our own pid is alive by definition. Reclaim it the
+      # same way the primary lock's self-held branch does; only this process can
+      # have recorded this pid, so nothing else is being taken.
+      fm_lock_remove_path "$steal" || return 1
+      continue
+    fi
+    # A live or mid-acquire holder owns the mutex, so leave it alone and let the
+    # caller retry on its own cadence.
+    _fm_lock_reclaim_if_stale "$steal" || return 1
+  done
+  return 1
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -950,7 +1008,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_steal_try_acquire "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -1748,7 +1806,7 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
-  fm_lock_try_acquire "$steal" || return 1
+  fm_lock_steal_try_acquire "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
