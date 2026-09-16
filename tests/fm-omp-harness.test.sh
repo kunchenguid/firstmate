@@ -13,8 +13,10 @@
 # catches vendor drift against a real omp. Neither replaces the other.
 #
 # The load-bearing contracts:
-#   1. omp publishes no marker; the anchored process name `omp` is the ancestry
-#      evidence, and ompd/comp never identify.
+#   1. omp's identity is the anchored name `omp` in either vendor shape - the
+#      natively-named process (a Bun-compiled binary, 18.1.11) or bun running
+#      the launcher script (comm bun, argv `bun .../bin/omp`, 18.1.22) - plus
+#      the OMPCODE=1 marker omp sets for its children; ompd/comp never identify.
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
@@ -64,27 +66,38 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out fakebin
   bin=$(make_named_shells "$TMP_ROOT/named")
+  # Every env list below also drops OMPCODE: the suite may itself run under
+  # omp, and a leaked marker would decide the verdict instead of the evidence
+  # under test.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(env -u CLAUDECODE -u OMPCODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
+    # Pinned with a foreign marker rather than cleared markers: the suite may
+    # run under omp, whose own args-strength ancestry would otherwise satisfy
+    # a bare `!= omp` above the decoy. A comm-layer false positive would still
+    # beat the marker, so the anchoring stays guarded.
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    out=$(env -u OMPCODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
       "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
-    [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    [ "$out" = claude ] || fail "'$decoy' merely contains omp and must not detect as omp, got '$out'"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(env -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. Ancestry
+  # is blinded so the "no omp ancestor" condition holds even when the suite
+  # itself runs under omp.
+  fakebin=$(fm_fakebin "$TMP_ROOT/blind")
+  fm_fake_blind_ancestry "$fakebin"
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+  out=$(env -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    PATH="$fakebin:$PATH" bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
@@ -94,6 +107,12 @@ test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
+  fm_harness_process_matches bun 'bun /Users/x/.bun/bin/omp' || fail "session-lock identity must accept bun running the omp launcher"
+  fm_harness_process_matches bun 'bun /x/omp --config y --cwd /z' || fail "session-lock identity must accept the launcher with trailing arguments"
+  ! fm_harness_process_matches bun 'bun run build' || fail "session-lock identity must not accept a bare bun"
+  ! fm_harness_process_matches bun 'bun /x/ompd' || fail "session-lock identity must not accept bun running ompd"
+  ! fm_harness_process_matches bun 'bun /x/comp' || fail "session-lock identity must not accept bun running comp"
+  ! fm_harness_process_matches bun 'bun server.js --config /x/omp' || fail "session-lock identity must not accept an omp mention in a later flag value"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -101,7 +120,163 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name /opt/omp/bin/omp)" = agent ] || fail "tmux liveness must classify an omp path as an agent"
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
-  pass "session lock and tmux liveness: omp is anchored, decoys stay out"
+  # shellcheck source=bin/fm-agent-process-lib.sh
+  . "$ROOT/bin/fm-agent-process-lib.sh"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/x/.bun/bin/omp')" = agent ] || fail "liveness must classify bun running the omp launcher as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun run build')" = other ] || fail "liveness must not classify a bare bun as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun /x/ompd')" = other ] || fail "liveness must not classify bun running ompd as an agent"
+  pass "session lock and shared liveness: omp is anchored in both shapes, decoys stay out"
+}
+
+# A bun launcher running a script: a `bun` symlink to the system shell plus a
+# script file, reproducing `bun .../bin/omp` (comm bun, argv carrying the
+# launcher path). The script body ends in a no-op for the same
+# exec-optimization reason make_named_shells documents.
+make_bun_launcher() {  # <dir> <script-name> -> echoes <dir>
+  local dir=$1 script=$2
+  mkdir -p "$dir"
+  ln -sf /bin/bash "$dir/bun"
+  cat > "$dir/$script" <<SH
+"$HARNESS"
+:
+SH
+  printf '%s' "$dir"
+}
+
+test_detection_bun_launcher_shape() {
+  local dir out
+  dir="$TMP_ROOT/bun-omp"
+  make_bun_launcher "$dir" omp >/dev/null
+  out=$(env -u CLAUDECODE -u OMPCODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$dir/bun" "$dir/omp")
+  [ "$out" = omp ] || fail "bun running the omp launcher must detect as omp, got '$out'"
+  # Trailing launcher arguments change nothing.
+  out=$(env -u CLAUDECODE -u OMPCODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$dir/bun" "$dir/omp" --config x --cwd /z)
+  [ "$out" = omp ] || fail "launcher arguments must not change the verdict, got '$out'"
+  pass "fm-harness: bun running the omp launcher detects as omp"
+}
+
+# A fake ps modeling one bun process at pid 100 under init, for the
+# deterministic argv-shape cases a real process cannot pin: a decoy script
+# under a live omp launcher would inherit real omp ancestry above it.
+bun_shape_bin() {  # <dir> <comm> <args> -> echoes the fakebin
+  local dir=$1 comm=$2 args=$3 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+pid=
+prev=
+for a in "\$@"; do
+  [ "\$prev" = -p ] && pid=\$a
+  prev=\$a
+done
+case "\$*" in
+  *'comm='*) if [ "\$pid" = 100 ]; then printf '%s\n' "$comm"; else printf 'init\n'; fi ;;
+  *'args='*) if [ "\$pid" = 100 ]; then printf '%s\n' "$args"; else printf 'init\n'; fi ;;
+  *'ppid='*) printf '1\n' ;;
+  *) printf '\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+bun_shape_verdict() {  # <fakebin> -> the ancestry verdict for pid 100
+  env -u CLAUDECODE -u OMPCODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    PATH="$1:$PATH" "$HARNESS" ancestry 100
+}
+
+test_detection_bun_launcher_ancestry_shapes() {
+  local fakebin out decoy
+  fakebin=$(bun_shape_bin "$TMP_ROOT/ps-bun-omp" bun "bun /Users/x/.bun/bin/omp")
+  out=$(bun_shape_verdict "$fakebin")
+  [ "$out" = "args omp" ] || fail "bun+omp argv must read 'args omp', got '$out'"
+  fakebin=$(bun_shape_bin "$TMP_ROOT/ps-bun-flags" bun "bun /x/omp --config y --cwd /z")
+  out=$(bun_shape_verdict "$fakebin")
+  [ "$out" = "args omp" ] || fail "trailing launcher arguments must keep 'args omp', got '$out'"
+  for decoy in ompd comp; do
+    fakebin=$(bun_shape_bin "$TMP_ROOT/ps-bun-$decoy" bun "bun /x/$decoy")
+    out=$(bun_shape_verdict "$fakebin")
+    [ -z "$out" ] || fail "bun running $decoy must read no verdict, got '$out'"
+  done
+  fakebin=$(bun_shape_bin "$TMP_ROOT/ps-bun-bare" bun "bun run build")
+  out=$(bun_shape_verdict "$fakebin")
+  [ -z "$out" ] || fail "a bare bun must read no verdict, got '$out'"
+  fakebin=$(bun_shape_bin "$TMP_ROOT/ps-bun-flagmention" bun "bun server.js --config /x/omp")
+  out=$(bun_shape_verdict "$fakebin")
+  [ -z "$out" ] || fail "an omp mention in a later flag value must read no verdict, got '$out'"
+  pass "fm-harness ancestry: the bun-launcher argv rule accepts the launcher and rejects decoys, bare runs, and flag mentions"
+}
+
+test_detection_ompcode_marker() {
+  local out
+  # shellcheck disable=SC2016 # the quoted body expands inside the child shell
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS OMPCODE=1 \
+    bash -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = omp ] || fail "OMPCODE=1 must identify omp, got '$out'"
+  # shellcheck disable=SC2016 # the quoted body expands inside the child shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS OMPCODE=1 CLAUDECODE=1 \
+    bash -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = omp ] || fail "OMPCODE=1 must outrank an inherited CLAUDECODE, got '$out'"
+  # shellcheck disable=SC2016 # the quoted body expands inside the child shell
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS OMPCODE=1 GEMINI_CLI=1 \
+    bash -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = gemini ] || fail "a harness's own marker must outrank a leaked OMPCODE, got '$out'"
+  pass "fm-harness: OMPCODE=1 identifies omp, outranks CLAUDECODE, and yields to another harness's own marker"
+}
+
+test_detection_leaked_ompcode_yields_to_structural_ancestry() {
+  local dir out
+  dir="$TMP_ROOT/named-claude"
+  mkdir -p "$dir"
+  ln -sf /bin/bash "$dir/claude"
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS OMPCODE=1 CLAUDECODE=1 \
+    "$dir/claude" -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = claude ] || fail "a leaked OMPCODE must not relabel a claude worker, got '$out'"
+  pass "fm-harness: a structural claude ancestor outranks a leaked OMPCODE"
+}
+
+test_lock_acquires_from_bun_launcher_ancestry() {
+  local home fakebin out
+  home="$TMP_ROOT/lock-bun-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/lock-bun-fake")
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'bun'; exit 0 ;;
+  *"args="*) printf '%s\n' 'bun /Users/x/.bun/bin/omp'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" \
+    || fail "fm-lock did not acquire from bun-launcher ancestry"
+  case "$(cat "$home/state/.lock")" in
+    ''|*[!0-9]*) fail "fm-lock did not record the bun-launcher harness ancestor" ;;
+  esac
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" \
+    "fm-lock did not recognize the bun launcher as a live holder"
+  home="$TMP_ROOT/lock-bun-bare-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/lock-bun-bare-fake")
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'bun'; exit 0 ;;
+  *"args="*) printf '%s\n' 'bun run build'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  if FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
+    fail "fm-lock acquired from a bare bun with no omp launcher above it"
+  fi
+  pass "fm-lock acquires from bun-launcher ancestry, recognizes the live holder, and refuses a bare bun"
 }
 
 # --- 2. Launch ---------------------------------------------------------------
@@ -576,6 +751,11 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
+test_detection_bun_launcher_shape
+test_detection_bun_launcher_ancestry_shapes
+test_detection_ompcode_marker
+test_detection_leaked_ompcode_yields_to_structural_ancestry
+test_lock_acquires_from_bun_launcher_ancestry
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery

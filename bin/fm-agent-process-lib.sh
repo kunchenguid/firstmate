@@ -39,7 +39,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     muse|muse-bin-*) printf 'agent' ;;
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
-    # unrelated commands such as ompd or comp.
+    # unrelated commands such as ompd or comp. Since 18.1.22 omp also ships as
+    # a bun script (comm bun), which no name pattern can own; that shape is
+    # recognized from its argv by fm_omp_args_are_omp in classify below.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
     # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
@@ -79,8 +81,10 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #            on Linux the exec name, on macOS argv[0] truncated to 16 bytes.
 #   <argv0>  argv[0] as the process reports it - a bare name or an install
 #            path, whichever the launcher used (empty when unknown).
-#   <args>   the flattened command line, read only for the node-bundle
-#            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh).
+#   <args>   the flattened command line, read only for the harnesses whose
+#            identity sits in argv[1]: gemini's node bundle
+#            (bin/fm-gemini-lib.sh) and omp's bun launcher
+#            (fm_omp_args_are_omp in bin/fm-session-lock-lib.sh).
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
@@ -100,6 +104,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  if [ -n "$args" ] && fm_omp_args_are_omp "$args"; then
     printf 'agent'
     return 0
   fi
