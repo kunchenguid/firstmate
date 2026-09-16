@@ -1218,7 +1218,7 @@ window_retired() {  # <window> <window-key>
 # subshell - this runs on the ordinary poll hot path, which the stale loop
 # below protects just as explicitly.
 prune_orphan_window_records() {
-  local marker key w recorded= enumerated=0
+  local marker key w recorded='' enumerated=0
   for marker in "$STATE"/.retired-*; do
     [ -e "$marker" ] || continue
     if [ "$enumerated" -eq 0 ]; then
