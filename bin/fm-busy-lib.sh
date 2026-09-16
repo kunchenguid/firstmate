@@ -660,16 +660,22 @@ NODE
 # fm_busy_muse_restored_prompt_verdict: whether the composer of <target> on
 # <backend> provably holds the prompt muse restored after an interrupt. Prints
 # exactly one verdict line:
-#   restored            composer content is a suffix of the last run's
-#                       recorded started prompt (a suffix because a long
-#                       prompt can outgrow the bounded capture window)
+#   restored            a stable composer read whose content, normalized
+#                       exactly like the recorded prompt (whitespace runs
+#                       collapsed and line boundaries joined to spaces, so a
+#                       wrapped multiline restore still proves), is a suffix
+#                       of the last run's recorded started prompt (a suffix
+#                       because a long prompt can outgrow the bounded
+#                       capture window)
 #   other               composer provably holds text that is NOT the restored
 #                       prompt - fresh input survives an interrupt
 #                       (docs/verification/muse.md), so this is the captain's
 #                       typing and must never be cleared
 #   empty               composer provably holds nothing; no clear needed
 #   unprovable: <why>   the restored prompt cannot be proven (no session log,
-#                       no recorded prompt, or an unreadable composer)
+#                       no recorded prompt or an empty one, or a composer
+#                       that is unreadable, never stabilizes, or mixes
+#                       readable and failed samples)
 # Callers decide the consequence: fm-send warns and skips the clear, while
 # fm-control dies rather than leave a possibly-restored prompt where the next
 # lifecycle line would concatenate onto it.

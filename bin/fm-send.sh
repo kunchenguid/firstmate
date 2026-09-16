@@ -281,6 +281,8 @@ fm_send_id_from_meta() { # <meta-file>
 # restored prompt therefore skips the clear with a warning instead. A failed
 # clear delivery is still loud rather than silent, because the alternative is a
 # corrupted steer.
+# The proof polls the composer for up to FM_SEND_RESTORE_WAIT seconds
+# (default 2) for the restored prompt to land and stabilize.
 # WHICH adapters need that clear, and which key clears them, comes from the one
 # control-plane capability table (bin/fm-control-lib.sh) rather than a second
 # copy here - the same table bin/fm-control.sh's interrupt verb reads.
