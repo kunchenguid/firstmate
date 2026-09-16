@@ -657,7 +657,10 @@ cmd_ingest() {
   # Every document this delta OFFERS, deduplicated across the whole delta, is
   # attempted exactly once here. A refusal names the gap once with the reader's
   # own reason instead of once per mentioning line.
-  offered=$(extract_document_pointers "$normalized_payload")
+  if ! offered=$(extract_document_pointers "$normalized_payload"); then
+    fm_lock_release "$lock"
+    die "cannot extract remote document pointers"
+  fi
   while IFS= read -r doc || [ -n "$doc" ]; do
     [ -n "$doc" ] || continue
     fetch_rc=0

@@ -556,6 +556,50 @@ cmp -s "$TMP_ROOT/ios-status-before-mixed-replay" "$PARENT/state/ios.status" \
   || fail "a whole-log recapture mirrored the mixed-pointer line a second time"
 pass "a line mirrors once whichever pointer forms it carried when it was written"
 
+# A failed extraction pass must leave the delta wholly uncommitted. Once the
+# parser works again, the same captured delta applies in full.
+printf '# extraction-failure probe\n' > "$REMOTE/data/reply/extractfail.md"
+GEN=$((GEN + 1))
+printf 'done [key=extraction-failure]: probe report=data/reply/extractfail.md\n' \
+  >> "$REMOTE/state/parent-replies.status"
+extractfail_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-extractfail"
+EXTRACT_FAIL_BIN="$TMP_ROOT/extract-fail-bin"
+mkdir -p "$EXTRACT_FAIL_BIN"
+REAL_AWK=$(command -v awk)
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'for argument in "$@"; do\n'
+  printf '  [ "$argument" != mode=extract ] || exit 97\n'
+  printf 'done\n'
+  printf 'exec %q "$@"\n' "$REAL_AWK"
+} > "$EXTRACT_FAIL_BIN/awk"
+chmod +x "$EXTRACT_FAIL_BIN/awk"
+PATH="$EXTRACT_FAIL_BIN:$PATH" remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" \
+  >/dev/null 2>&1 || true
+RESULT_EXTRACTFAIL="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_EXTRACTFAIL" "the extraction-failure delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "a capture whose pointer extraction failed was acknowledged anyway"
+extractfail_rc=0
+PATH="$EXTRACT_FAIL_BIN:$PATH" remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_EXTRACTFAIL" \
+  > "$TMP_ROOT/extract-fail.out" 2>&1 || extractfail_rc=$?
+[ "$extractfail_rc" -ne 0 ] || fail "the failed extraction pass reported success"
+assert_grep 'cannot extract remote document pointers' "$TMP_ROOT/extract-fail.out" \
+  "the failed extraction pass did not report its failure"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$extractfail_cursor_before" ] \
+  || fail "a failed extraction pass advanced the cursor past dropped status content"
+cmp -s "$TMP_ROOT/ios-status-before-extractfail" "$PARENT/state/ios.status" \
+  || fail "a failed extraction pass appended partial or blank status content"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_EXTRACTFAIL" >/dev/null \
+  || fail "the delta did not apply once pointer extraction worked again"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/extractfail.md' "$PARENT/state/ios.status" \
+  "the recovered delta did not mirror its rewritten pointer"
+cmp -s "$REMOTE/data/reply/extractfail.md" "$PARENT/data/remote-secondmates/ios/data/reply/extractfail.md" \
+  || fail "the recovered delta did not fetch its offered document"
+mirrored_cursor_is_current "the recovered extraction-failure delta did not advance the cursor"
+pass "a failed pointer extraction never commits a partial delta"
+
 # A mirror write that cannot complete must fail loudly rather than leave blank
 # or partial content behind and advance the cursor past status bytes nobody
 # ever received. The delta stays uncommitted and applies in full once the
