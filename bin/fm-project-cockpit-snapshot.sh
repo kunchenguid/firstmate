@@ -204,7 +204,14 @@ jq \
     | (lane_for($state; ($work.state // null); $hold_bucket)) as $lane
     | ($task | open_decision_summaries) as $open_decisions
     | (($work.hold_reason // null) | text(240)) as $hold_question
-    | ($open_decisions | map(select(. != $hold_question))) as $decisions
+    | (if $hold_bucket == null or $hold_question == null then $open_decisions
+       else reduce $open_decisions[] as $summary
+         ({removed:false,items:[]};
+          if (.removed | not) and $summary == $hold_question then .removed = true
+          else .items += [$summary]
+          end)
+         | .items
+       end) as $decisions
     | (($open_decisions | length) > 0) as $has_open_decision
     | (attention_for($state; (($work.captain_actionable // false) or $has_open_decision))) as $attention
     | (($task.started_at // null) | time) as $started_at

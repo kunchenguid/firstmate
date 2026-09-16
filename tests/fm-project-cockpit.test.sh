@@ -70,6 +70,7 @@ test_projection_is_deterministic_and_allowlisted() {
 
 test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
   local model=$TMP_ROOT/main-decision.json held=$TMP_ROOT/main-decision-held.json
+  local held_shared=$TMP_ROOT/main-decision-held-shared.json
   local keyed=$TMP_ROOT/main-decisions-keyed.json exact=$TMP_ROOT/main-decisions-exact.json
   local over=$TMP_ROOT/main-decisions-over.json invalid=$TMP_ROOT/main-decision-invalid.json
   project main-open-decision.json "$model"
@@ -94,6 +95,19 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
       | .attention == true and .hold.question == "Choose API v1 or v2" and .decisions == []
         and .gate == {status:"live",label:"Choose API v1 or v2"}' "$held" >/dev/null \
     || fail "same-task canonical decision and hold were not merged without duplication"
+
+  jq '(.tasks[0].backlog) += {
+        captain_actionable:true,hold_bucket:"live",hold_reason:"Approve",
+        hold_age_days:1,hold_until:null
+      }
+      | .tasks[0].hints.open_decisions = [
+        {key:"first",verb:"needs-decision",summary:"Approve"},
+        {key:"second",verb:"needs-decision",summary:"Approve"}
+      ]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$held_shared"
+  jq -e '.projects[0].tasks[0]
+      | .hold.question == "Approve" and .decisions == ["Approve"]' "$held_shared" >/dev/null \
+    || fail "hold merge removed more than one independently keyed matching decision"
 
   jq '.tasks[0].hints.open_decisions = [
         {key:"first",verb:"needs-decision",summary:"Approve"},
