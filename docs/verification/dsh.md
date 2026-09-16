@@ -40,11 +40,14 @@ A `FM_DSH_HARNESS` that no producer set was the state of the world before this w
 
 ## Launch: one boundary for values a tool call cannot set
 
-Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, applies the tracked `.dsh/profile.patch.yml` with `--patch` (that file is the install step for the bridge mount, the budget and the pinned hook sandbox mode, and without it the documented command boots a profile carrying none of the three), runs the preflight with the profile, the tracked patch and then any operator overlays, so those follow it and can override it, and `exec`s `dsh` with the operator's arguments unchanged plus the tracked patch alone, placed immediately after `web` or first otherwise.
+Environment is the only carrier for DSH identity, so `bin/fm-dsh-launch.sh` is the launch boundary: it exports `FM_DSH_HARNESS=dsh`, an explicit `FM_HOME` and `FM_ROOT` as its own checkout, `DSH_PERMISSION_MODE=danger-full-access` (the hook sandbox, measured below), starts the host from that checkout (DSH takes the invoking directory as its workspace root, and `.dsh/profile.patch.yml` resolves the bridge's `configPath` and `projectDir` from `FM_ROOT`, so a launch from any other directory would mount no hooks), pins `LC_ALL`/`LC_CTYPE` (unset, `bin/fm-line-cap-lib.sh`'s character cap becomes a byte cap and slices UTF-8), clears the foreign harness markers so a session started from another harness's pane cannot inherit its identity, applies the tracked `.dsh/profile.patch.yml` with `--patch` (that file is the install step for the bridge mount, the budget and the pinned hook sandbox mode, and without it the documented command boots a profile carrying none of the three), runs the preflight with the profile, the tracked patch and then any operator overlays, and `exec`s `dsh` with the operator's arguments unchanged plus the tracked patch alone, placed immediately after `web` or first otherwise.
+An operator `--patch` is an overlay, following the tracked patch and able to override it, only when it comes before every app argument: immediately after `web`, or among the root options.
+The launcher collects only those, because DSH applies no other.
 
 Both placements were measured against dsh 0.1.5-rc.1, because the first version of this forwarding broke the launch it was meant to fix while every preflight check passed.
 DSH refuses parent options before a subcommand, so `dsh --patch <tracked> web --help` exits 1 with `web takes none of parent --profile, --from-default-profile, --patch, --dump-config, or --dump-default-config`, while `dsh web --patch <tracked> --help` loads the plugin tree and exits 0; `web`'s own options end at the first token it does not know, so a `--patch` after `--port` reaches the web app as `unknown option '--patch'`.
-An overlay applied twice is equally invisible to the preflight: `dsh web --patch <tracked> --patch <tracked> --dump-config` composes and exits 0, but loading the tree throws `duplicate loader entry id: hooks-claude-code`, so the launcher adds the tracked patch only when no operator `--patch` names the same file.
+An overlay applied twice is equally invisible to the preflight: `dsh web --patch <tracked> --patch <tracked> --dump-config` composes and exits 0, but loading the tree throws `duplicate loader entry id: hooks-claude-code`, so the launcher adds the tracked patch only when no operator overlay names the same file.
+A misplaced operator `--patch` naming it is no overlay, so the tracked patch is still placed after `web` and DSH refuses the misplaced copy.
 
 ```
 bin/fm-dsh-launch.sh web --port 3080
@@ -309,6 +312,7 @@ Ranked by how likely each is to be mistaken for working.
 | Relay (X/Discord) | **out of scope for this deployment.** No pairing token, and it needs `curl`, `jq` and a wake-into-session path |
 | Calm, voice, Lavish board | **out of scope.** Module hooks, a TTY with PortAudio, and a live `lavish-axi` session respectively |
 | In-process extension hosts (Pi, omp, OpenCode) | **out of scope.** DSH's bridge is command-only |
+| A misplaced operator `--patch` refused before the preflight | **not done, an operator decision.** In `bin/fm-dsh-launch.sh web --port 3080 --patch op.yml` the `--patch` follows a web app option, so DSH hands it to the web app, which refuses it. The launcher does not collect it, the preflight composes without it and can report ok, and only then does the launch exit 1 with `unknown option '--patch'`. The failure is loud; refusing it in the launcher, before the preflight, would be new launcher behaviour and was left undecided |
 | Remote secondmates | **out of scope.** No remote-execution primitive, and no Aqua-birth proof on macOS |
 | Secondmates generally, v1 | **refused** by `refuse_dsh_crewmate` |
 | `lsof`-dependent teardown proofs | **not isolated.** They ran during a successful teardown, but no measurement confirms the stale-lock proof and orphan reap hold under DSH's sandbox specifically |
@@ -326,7 +330,7 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-17, the portable suite passes 45 cases.
+As measured on 2026-09-17, the portable suite passes 46 cases.
 Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
 The five-contract run predates the preflight's hook sandbox-mode check, so it is not evidence that the first contract still passes.

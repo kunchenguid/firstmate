@@ -57,27 +57,39 @@ unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null
 # The tracked patch is the install step: it mounts the hooks bridge, raises the
 # instruction budget and pins the hook sandbox mode. Adding it here rather than
 # documenting a copy is what makes the documented launch correct on its own. It
-# comes first, so operator-supplied --patch values follow it and can override
-# it, and it is added even when the preflight is skipped, because skipping the
-# checks must not also drop the configuration they check. An operator --patch
-# naming the same file replaces it rather than repeating it: DSH applies every
-# overlay it is given, and a second insert of the bridge fails the host at boot
-# with "duplicate loader entry id".
+# comes first, and it is added even when the preflight is skipped, because
+# skipping the checks must not also drop the configuration they check.
+#
+# DSH reads its own options only up to the first argument it does not
+# recognise and hands the rest to the booted app, so an operator --patch is an
+# overlay - following the tracked patch and able to override it - only when it
+# comes before any app argument: immediately after `web`, or among the root
+# options. A --patch after that is not collected here, because DSH never applies
+# it; the web app refuses it as an unknown option. An operator overlay naming
+# the tracked file replaces the tracked one rather than repeating it: DSH
+# applies every overlay it is given, and a second insert of the bridge fails the
+# host at boot with "duplicate loader entry id".
 TRACKED_PATCH="$ROOT/.dsh/profile.patch.yml"
 TRACKED=(--patch "$TRACKED_PATCH")
 PROFILE=web
 PATCHES=()
 want=
+SUBCOMMAND=
+if [ "${1:-}" = web ]; then SUBCOMMAND=web; shift; fi
 for arg in "$@"; do
   case "$want" in
     profile) PROFILE=$arg; want=; continue ;;
     patch) PATCHES+=(--patch "$arg"); want=; continue ;;
+    value) want=; continue ;;
   esac
   case "$arg" in
     --profile) want='profile' ;;
     --profile=*) PROFILE=${arg#--profile=} ;;
     --patch) want='patch' ;;
     --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
+    --from-default-profile) want='value' ;;
+    --from-default-profile=*|--dump-config|--dump-default-config) ;;
+    *) break ;;
   esac
 done
 for arg in ${PATCHES[@]+"${PATCHES[@]}"}; do
@@ -93,11 +105,6 @@ if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh"
     ${TRACKED[@]+"${TRACKED[@]}"} ${PATCHES[@]+"${PATCHES[@]}"} || exit 3
 fi
 
-# DSH refuses a parent --patch before the `web` subcommand, and web's own
-# options end at the first token it does not know, so there the tracked patch
-# goes immediately after `web`.
-if [ "${1:-}" = web ]; then
-  shift
-  exec dsh web ${TRACKED[@]+"${TRACKED[@]}"} "$@"
-fi
-exec dsh ${TRACKED[@]+"${TRACKED[@]}"} "$@"
+# DSH refuses a parent --patch before the `web` subcommand, so there the
+# tracked patch goes immediately after `web`.
+exec dsh ${SUBCOMMAND:+"$SUBCOMMAND"} ${TRACKED[@]+"${TRACKED[@]}"} "$@"

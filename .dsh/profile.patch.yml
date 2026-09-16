@@ -26,10 +26,14 @@
 #
 #   dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@<dsh-base version>
 #
-# Launch the primary through bin/fm-dsh-launch.sh so FM_DSH_HARNESS, FM_HOME,
-# DSH_PERMISSION_MODE and the locale are set at process start: a tool call
-# cannot set them, and hook subprocesses inherit whatever the host was given.
-# That wrapper also runs bin/fm-dsh-preflight.sh, which asserts this pin, the
+# Launch the primary through bin/fm-dsh-launch.sh, which applies this patch
+# itself with --patch, so no manual install step is needed. It sets
+# FM_DSH_HARNESS, FM_HOME and the locale at process start: a tool call cannot
+# set them, and hook subprocesses inherit whatever the host was given. Its
+# DSH_PERMISSION_MODE export is only a fallback for a later overlay that hands
+# the sandbox-policy row back to dsh-base's expression; the literal pin below is
+# what decides the hook sandbox. The launcher also runs
+# bin/fm-dsh-preflight.sh, which asserts the bridge pin, the
 # budget of the row a new session renders with, and that new sessions
 # default to the danger-full-access permission preset and hooks run under the
 # danger-full-access sandbox mode, both of which permit ps - each of these

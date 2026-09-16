@@ -347,13 +347,14 @@ install_fm_preset() {  # <dsh-home>
 # beside a stand-in `dsh` that <root>/fakebin links to, and the named profile
 # holds its own node_modules. There is no <root>/profiles/node_modules mirror,
 # which DSH only creates when a host boots, so every fixture is a fresh home.
-# The stand-in keeps DSH's argv grammar: a parent option before the `web` or
-# `plugin` subcommand exits 1, and so does a --patch after web's first unknown
-# token. It answers `--profile p|web --dump-config` with <root>/dump.yml, or with
-# <root>/dump-patched.yml when a --patch overlay is forwarded, recording its argv
-# in <root>/dsh-dump-argv, and fails for any other profile or a missing dump; any
-# other invocation records the environment it booted with in <root>/dsh-env and
-# its argv in <root>/dsh-argv, one argument per line.
+# The stand-in records its argv, one argument per line, in <root>/dsh-dump-argv
+# for a --dump-config invocation and in <root>/dsh-argv for any other, then
+# keeps DSH's argv grammar: a parent option before the `web` or `plugin`
+# subcommand exits 1, and so does a --patch after web's first unknown token. It
+# answers `--profile p|web --dump-config` with <root>/dump.yml, or with
+# <root>/dump-patched.yml when a --patch overlay is forwarded, and fails for any
+# other profile or a missing dump; any other invocation records the environment
+# it booted with in <root>/dsh-env.
 make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
   local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5 fakebin
   mkdir -p "$dir/install/node_modules/@deepseek-ai/dsh-base" "$dir/install/lib" "$dir/profiles/p" "$dir/fmhome"
@@ -369,6 +370,8 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
   fakebin=$(fm_fakebin "$dir")
   cat > "$dir/install/lib/dsh" <<SH
 #!/usr/bin/env bash
+case " \$* " in *" --dump-config "*) argv='$dir/dsh-dump-argv' ;; *) argv='$dir/dsh-argv' ;; esac
+printf '%s\n' "\$@" > "\$argv"
 parent= sub= value= inner=
 for a in "\$@"; do
   if [ -n "\$value" ]; then value=; continue; fi
@@ -387,9 +390,8 @@ for a in "\$@"; do
   esac
 done
 case " \$* " in
-  *" --dump-config "*) printf '%s\n' "\$@" > '$dir/dsh-dump-argv' ;;
-  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'
-     printf '%s\n' "\$@" > '$dir/dsh-argv'; exit 0 ;;
+  *" --dump-config "*) ;;
+  *) printf 'root=%s\npwd=%s\nmode=%s\n' "\$FM_ROOT" "\$PWD" "\$DSH_PERMISSION_MODE" > '$dir/dsh-env'; exit 0 ;;
 esac
 case " \$* " in *" --profile p "*|*" --profile web "*) ;; *) exit 1 ;; esac
 dump='$dir/dump.yml'
@@ -428,8 +430,9 @@ test_dsh_launcher_roots_the_host_in_its_checkout() {
   [ "$rc" -eq 0 ] || fail "the documented web launch must pass the preflight and boot, got rc=$rc"
   assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
   assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
-  # Hooks run with no session, so they get the host's sandbox-policy mode, which
-  # dsh-base reads from DSH_PERMISSION_MODE; any other mode denies ps in every hook.
+  # Hooks run with no session, so they get the host's sandbox-policy mode. The
+  # tracked patch pins it; the export is the fallback for a later overlay that
+  # hands the row back to dsh-base's DSH_PERMISSION_MODE expression.
   assert_equals "mode=danger-full-access" "$(sed -n 3p "$dir/dsh-env")" "the host was not started with hooks able to run ps"
   assert_equals "$(printf '%s\n' web --patch "$ROOT/.dsh/profile.patch.yml" --port 3080)" "$(cat "$dir/dsh-argv")" \
     "the host must get the tracked patch after web and the operator's arguments once"
@@ -468,6 +471,32 @@ test_dsh_launcher_applies_each_patch_once() {
   assert_equals "$respelled" "$(patch_values "$dir/dsh-dump-argv")" "the preflight must compose the tracked patch once"
   assert_equals "$respelled" "$(patch_values "$dir/dsh-argv")" "the host must apply the tracked patch once"
   pass "fm-dsh-launch.sh: the host boots the preflight's overlays, each once"
+}
+
+test_dsh_launcher_leaves_a_misplaced_patch_to_dsh() {
+  local dir out rc tracked="$ROOT/.dsh/profile.patch.yml"
+  # DSH's web subcommand stops reading its own options at the first argument it
+  # does not recognise, so a --patch after --port is handed to the web app,
+  # which refuses it. It is no overlay: the preflight must not compose it, and
+  # when it names the tracked file the tracked patch must still be placed where
+  # web reads it.
+  dir=$(make_dsh_home "$TMP_ROOT/launch-misplaced" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  ln -s p "$dir/profiles/web"
+  : > "$dir/overlay.yml"
+  rc=0
+  out=$(DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 --patch "$dir/overlay.yml" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a --patch after a web app option must be refused by dsh, got rc=$rc: $out"
+  assert_contains "$out" "unknown option '--patch'" "the misplaced --patch was not refused as a web app option"
+  assert_equals "$tracked" "$(patch_values "$dir/dsh-dump-argv")" "the preflight must not compose an overlay dsh never applies"
+  rc=0
+  out=$(DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 --patch "$tracked" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a tracked --patch after a web app option must be refused by dsh, got rc=$rc: $out"
+  assert_equals "$(printf '%s\n' web --patch "$tracked" --port 3080 --patch "$tracked")" "$(cat "$dir/dsh-argv")" \
+    "the tracked patch must still follow web when the operator's copy is misplaced"
+  pass "fm-dsh-launch.sh: a --patch after a web app option is left to dsh, which refuses it"
 }
 
 test_dsh_preflight_rejects_a_mismatched_bridge() {
@@ -1105,6 +1134,7 @@ test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under
 test_dsh_preflight_passes_a_conforming_home
 test_dsh_launcher_roots_the_host_in_its_checkout
 test_dsh_launcher_applies_each_patch_once
+test_dsh_launcher_leaves_a_misplaced_patch_to_dsh
 test_dsh_ancestry_detects_the_launcher_path
 test_dsh_ancestry_detects_the_installed_bin_js
 test_dsh_ancestry_detects_a_global_install

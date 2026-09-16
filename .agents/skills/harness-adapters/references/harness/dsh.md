@@ -75,13 +75,21 @@ and the `firstmate` preset root from `FM_ROOT`), pins `LC_ALL`/`LC_CTYPE` (unset
 harness markers so a session started from another harness's pane cannot inherit its identity.
 It also applies the tracked `.dsh/profile.patch.yml` with `--patch`, because that file is the install
 step for the bridge mount, the instruction budget and the pinned hook sandbox mode: without it the
-documented command boots a profile that carries none of the three. The tracked patch comes first and
-operator `--patch` overlays follow it, so they can override it. The preflight composes with every
-overlay in that order; the host gets the operator's arguments unchanged, with only the tracked patch
-added, immediately after `web` (DSH refuses a parent `--patch` before the `web` subcommand) or first
-otherwise. An operator `--patch` naming the same file replaces it rather than repeating it, because
-DSH applies every overlay it is given and a second insert of the bridge fails the host at boot with
-`duplicate loader entry id`, although `--dump-config` composes the doubled overlay without complaint.
+documented command boots a profile that carries none of the three. The tracked patch comes first, and
+the host gets the operator's arguments unchanged with only the tracked patch added, immediately after
+`web` (DSH refuses a parent `--patch` before the `web` subcommand) or first otherwise.
+
+An operator `--patch` is an overlay only when it comes before every app argument: immediately after
+`web`, or among the root options such as `--profile`. DSH reads its own options only up to the first
+argument it does not recognise and hands the rest to the booted app, so in
+`bin/fm-dsh-launch.sh web --port 3080 --patch op.yml` the `--patch` reaches the web app, which refuses it
+as an unknown option; write `bin/fm-dsh-launch.sh web --patch op.yml --port 3080` instead. An overlay in
+that position follows the tracked patch and can override it, and the preflight composes the tracked
+patch and those overlays in that order. The launcher does not collect a misplaced `--patch` and does
+not refuse it itself: the preflight composes without it and DSH refuses the launch. An overlay naming
+the tracked file replaces it rather than repeating it, because DSH applies every overlay it is given
+and a second insert of the bridge fails the host at boot with `duplicate loader entry id`, although
+`--dump-config` composes the doubled overlay without complaint.
 
 Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
 launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.
