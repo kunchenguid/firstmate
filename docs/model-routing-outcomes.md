@@ -73,6 +73,7 @@ A Claude session with mixed or partially missing assistant-model or session evid
 When a Claude result contains multiple models, the scorecard labels its combined usage as a whole-session multi-model observation rather than assigning every token to the requested main model.
 Multiple turns using the same native model and provider remain one exact attempt route.
 The manifest harness must agree with the task metadata and receipt kind, and its provider must agree with native provider evidence when present.
+When a receipt supplies native timestamps, every retained native timestamp must fall within the manifest's measured attempt interval.
 Only Pi receipts carrying the task identifier and `spawn_gen` may certify an accepted outcome.
 Claude and agy receipts remain useful raw measurements, but their task attribution and outcome stay unresolved operator observations.
 
@@ -85,8 +86,8 @@ A receipt with a missing category yields unknown for that aggregate rather than 
 
 The manifest records task start and finish plus observable queue, model, tool, review, retry, handoff, and human durations.
 Each attempt's end-to-end duration is computed from its timestamp pair rather than from model time alone.
-The scorecard reports each attempt separately.
-Complete accepted-journey time and cost across task incarnations or handoffs are deferred rather than reconstructed from incomplete lineage.
+The scorecard reports each attempt separately as execution-only partial efficiency evidence.
+Complete accepted-journey time and cost across retries, grading, handoffs, or task incarnations are deferred rather than reconstructed from incomplete lineage.
 Native API duration is retained separately where a tool emits it.
 
 An accepted outcome requires an independent deterministic or blind-review grade, a final pass, explicit task acceptance criteria, a separately identified grader or check, and hashed structured check artifacts covering every criterion.
@@ -111,7 +112,8 @@ Provider-reported list-cost fields are retained as native evidence but never pro
 
 Quota inputs are native quota-axi schema-version-5 snapshots taken before and after the attempt.
 The importer retains the selected provider's literal windows and normalized semantics.
-It computes a per-window consumption delta only when reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
+It computes a per-window consumption delta only when the quota provider exactly matches native provider evidence, reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
+When that exact native provider binding is absent, the raw dated provider observations remain visible as unbound and consumption stays unknown.
 It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
 A shadow candidate may attach one raw dated quota-axi provider snapshot.
 The tool displays its literal windows and semantics beside separately labeled heuristic eligibility, runway, and spend judgments without inferring provider-family mappings or verifying the recommendation.
@@ -122,7 +124,7 @@ The scorecard groups attempt-route observations by category, task shape, harness
 When effective model or effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
 Multi-model native results use an explicit whole-session label.
 Task count reports unique task IDs, while task-incarnation count separately reports observed lifecycle incarnations.
-The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual observation for every task incarnation and attempt.
+The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual execution-only partial observation for every task incarnation and attempt.
 Each individual observation includes its raw before/after quota snapshots, native semantics status, attempt bracketing, attribution, concurrency, reset caveats, and supported per-window delta in JSON, plus a concise non-aggregated rendering in Markdown.
 Quota windows are never summed into route or task totals because they may overlap.
 It also prints each heuristic shadow suggestion, raw quota context when present, and the recorded eligibility, capability-class fit, runway, spend priority, explanation, and uncertainty.
@@ -139,5 +141,5 @@ Run the focused behavior suite with:
 tests/fm-routing-outcomes.test.sh
 ```
 
-The suite covers missing provider telemetry, refreshable-auth uncertainty, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, whole-session receipt reuse, exact price matching, multi-model labeling, non-Pi outcome attribution, one-alternative handoff, comparison limits, independent grading, and heuristic shadow context.
+The suite covers missing provider telemetry, native timestamp bounds, refreshable-auth uncertainty, unbound and exact-provider allowance evidence, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, cross-representation whole-session receipt reuse, exact price matching, multi-model labeling, non-Pi outcome attribution, one-alternative handoff, comparison limits, independent grading, and heuristic shadow context.
 `tests/fm-spawn-dispatch-profile.test.sh` verifies that a spawned Pi extension writes only the sanitized request-receipt fields.

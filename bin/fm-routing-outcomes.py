@@ -574,7 +574,7 @@ def sanitize_quota(path_value: Any, provider: str, field: str) -> dict[str, Any]
     return {"source_sha256": source_digest, "generated_at": snapshot.get("generatedAt"), "provider": provider, "windows": windows, "quota_semantics": semantics}
 
 
-def quota_record(value: Any, started_at: str, finished_at: str) -> Any:
+def quota_record(value: Any, started_at: str, finished_at: str, native_provider: Any) -> Any:
     if value is None:
         return None
     quota = need_object(value, "quota")
@@ -592,6 +592,7 @@ def quota_record(value: Any, started_at: str, finished_at: str) -> Any:
     attribution = quota.get("attribution")
     if attribution not in {"exclusive", "shared", "unknown"}:
         fail("quota.attribution must be exclusive, shared, or unknown")
+    route_provider_binding = "exact-native-provider" if provider == native_provider else "unbound"
     before_windows = {row.get("id"): row for row in before["windows"] if row.get("id")}
     after_windows = {row.get("id"): row for row in after["windows"] if row.get("id")}
     deltas = []
@@ -602,14 +603,16 @@ def quota_record(value: Any, started_at: str, finished_at: str) -> Any:
         if not same_reset:
             reset_crossed = True
         left_percent, right_percent = left.get("percentRemaining"), right.get("percentRemaining")
-        attributable = concurrent is False and attribution == "exclusive" and same_reset and attempt_bracketed
+        attributable = (concurrent is False and attribution == "exclusive" and same_reset
+                        and attempt_bracketed and route_provider_binding == "exact-native-provider")
         known_percentages = (isinstance(left_percent, (int, float)) and not isinstance(left_percent, bool)
                              and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
         delta = left_percent - right_percent if attributable and known_percentages and left_percent >= right_percent else None
         deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": not same_reset, "attributed_consumption_percent_points": delta})
     return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent,
             "attribution": attribution, "reset_crossed": reset_crossed,
-            "attempt_bracketed": attempt_bracketed, "window_deltas": deltas,
+            "attempt_bracketed": attempt_bracketed, "route_provider_binding": route_provider_binding,
+            "window_deltas": deltas,
             "note": "Window deltas are never summed; shared and model windows may describe the same allowance use."}
 
 
@@ -635,6 +638,18 @@ def validate_time(manifest: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     cleaned = {key: nullable_number(values.get(key), f"time_ms.{key}") for key in TIME_KEYS}
     cleaned["end_to_end"] = round((finish_time - start_time).total_seconds() * 1000)
     return started, finished, cleaned
+
+
+def validate_native_interval(native: dict[str, Any], started: str, finished: str) -> None:
+    start_time = parse_time(started, "started_at")
+    finish_time = parse_time(finished, "finished_at")
+    for field in ("first_native_at", "last_native_at"):
+        value = native.get(field)
+        if value is None:
+            continue
+        native_time = parse_time(value, f"native.{field}")
+        if native_time < start_time or native_time > finish_time:
+            fail("native receipt timestamps must fall within started_at and finished_at")
 
 
 def validate_grading(value: Any, outcome: str, task_id: str, spawn_gen: str, attempt_id: str) -> dict[str, Any]:
@@ -935,6 +950,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         if requirements.get("effective_effort") is not None and native.get("effective_effort") != requirements.get("effective_effort"):
             fail(f"effective effort requirement not proven: expected {requirements.get('effective_effort')}, got {native.get('effective_effort') or 'unknown'}")
     started, finished, time_values = validate_time(manifest)
+    validate_native_interval(native, started, finished)
     billing = need_object(manifest.get("billing"), "billing")
     billing_record = {
         "actual_incremental_usd": nullable_number(billing.get("actual_incremental_usd"), "billing.actual_incremental_usd"),
@@ -955,7 +971,8 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         "phase": phase, "category": category, "task_shape": task_shape,
         "route": route, "native": native, "requirements": copy.deepcopy(requirements),
         "started_at": started, "finished_at": finished, "time_ms": time_values,
-        "billing": billing_record, "quota": quota_record(manifest.get("quota"), started, finished),
+        "billing": billing_record,
+        "quota": quota_record(manifest.get("quota"), started, finished, native.get("provider")),
         "grading": validate_grading(manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id),
         "comparison": validate_comparison(manifest.get("comparison")),
         "handoff": validate_handoff(manifest.get("handoff"), attempt_id),
@@ -977,9 +994,14 @@ def import_attempt(args: argparse.Namespace) -> dict[str, Any]:
             other = event["record"]["native"]
             native = record["native"]
             same_session = (native.get("session_id") is not None
-                            and native.get("session_id") == other.get("session_id"))
-            same_source = native.get("source_sha256") == other.get("source_sha256")
-            if native.get("kind") == other.get("kind") and (same_session or same_source):
+                            and native.get("session_id") == other.get("session_id")
+                            and native.get("provider") is not None
+                            and native.get("provider") == other.get("provider")
+                            and native.get("api") is not None
+                            and native.get("api") == other.get("api"))
+            same_source = (native.get("kind") == other.get("kind")
+                           and native.get("source_sha256") == other.get("source_sha256"))
+            if same_session or same_source:
                 fail("native session receipt is already attached to another attempt")
         if not record.get("comparison"):
             return
@@ -1103,6 +1125,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             "context_tier": items[0]["route"]["context_tier"],
             "service_tier": items[0]["route"]["service_tier"],
             "measurement_scope": "whole-session" if any(len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
+            "efficiency_scope": "execution-only-partial",
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},
             "tokens": {key: metric(item["native"]["tokens"].get(key) for item in items) for key in TOKEN_KEYS},
@@ -1118,7 +1141,9 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
             "uncertainty": sorted({reason for item in items for reason in (
                 (["effective effort unknown"] if item["native"].get("effective_effort") is None else [])
                 + (["API-equivalent price unknown"] if item["billing"].get("api_equivalent_usd") is None else [])
-                + (["quota attribution unknown"] if not item.get("quota") or item["quota"].get("attribution") != "exclusive" else [])
+                + (["quota attribution unknown"] if not item.get("quota")
+                   or item["quota"].get("attribution") != "exclusive"
+                   or item["quota"].get("route_provider_binding") != "exact-native-provider" else [])
             )}),
         })
     observations = [{"task_id": record["task_id"], "spawn_gen": record["spawn_gen"],
@@ -1128,6 +1153,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                      "outcome_authority": "native-task-incarnation" if record["native"].get("task_id_receipt") and record["native"].get("spawn_gen_receipt") else "operator-observation",
                      "attribution": record["native"]["completeness"].get("attribution"),
                      "measurement_scope": "whole-session" if len(native_model_identities(record)) > 1 else "attempt-route",
+                     "efficiency_scope": "execution-only-partial",
                      "tokens": record["native"]["tokens"],
                      "elapsed_ms": record["time_ms"].get("end_to_end"),
                      "actual_incremental_usd": record["billing"].get("actual_incremental_usd"),
@@ -1142,7 +1168,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     return {"schema": "fm-routing-scorecard.v1", "generated_at": now_iso(), "attempt_count": len(records),
             "task_count": task_count, "task_incarnation_count": task_incarnation_count,
             "routes": route_groups, "observations": observations,
-            "accepted_journey_aggregation": "deferred-across-task-incarnations",
+            "accepted_journey_aggregation": "deferred-retries-grading-handoffs-and-cross-incarnation",
             "shadow_recommendations": [{"task_id": row["task_id"], "decision_id": row["decision_id"], "category": row["category"],
                                          "task_shape": row["task_shape"], "recommended_route": route_name({"route": row["recommended_route"], "native": {"effective_model": None, "effective_effort": None}}),
                                          "shadow_only": True, "recommendation_status": "heuristic",
@@ -1155,7 +1181,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                                                                  "uncertainty": item["uncertainty"], "explanation": item["explanation"]}
                                                                 for item in row["candidates"]]}
                                         for row in sorted(shadows, key=lambda item: (item["task_id"], item["decision_id"]))],
-            "interpretation": "Descriptive attempt evidence and heuristic suggestions only. Cross-incarnation journeys are not aggregated; unknown fields stay outside known totals."}
+            "interpretation": "Descriptive execution-only partial attempt evidence and heuristic suggestions only. Accepted journeys, retries, grading, handoffs, and cross-incarnation totals are not aggregated; unknown fields stay outside known totals."}
 
 
 def format_metric(value: dict[str, Any], suffix: str = "") -> str:
@@ -1183,6 +1209,7 @@ def format_quota_movement(quota: Any) -> str:
     before_semantics = ((quota.get("before") or {}).get("quota_semantics") or {}).get("status")
     after_semantics = ((quota.get("after") or {}).get("quota_semantics") or {}).get("status")
     caveats = (f"attribution={format_optional(quota.get('attribution'))}; "
+               f"route_provider_binding={format_optional(quota.get('route_provider_binding'))}; "
                f"concurrent={format_optional(quota.get('concurrent_activity')).lower()}; "
                f"reset_crossed={format_optional(quota.get('reset_crossed')).lower()}; "
                f"attempt_bracketed={format_optional(quota.get('attempt_bracketed')).lower()}; "
@@ -1201,11 +1228,11 @@ def format_quota_movement(quota: Any) -> str:
 
 def render_markdown(scorecard: dict[str, Any]) -> str:
     lines = ["# Model-routing scorecard", "", f"Attempts: {scorecard['attempt_count']} across {scorecard['task_count']} tasks and {scorecard['task_incarnation_count']} task incarnations.", "",
-             "## Route and whole-session observations", "", "| Category | Task shape | Route / scope | n | Native-bound accepted | Input tokens | Output tokens | Actual incremental | Fixed subscription | Execution API-equivalent | End-to-end | Grader time | Uncertainty |",
+             "## Route and whole-session observations", "", "| Category | Task shape | Route / measurement / efficiency scope | n | Native-bound accepted | Input tokens | Output tokens | Actual incremental | Fixed subscription | Execution API-equivalent | End-to-end | Grader time | Uncertainty |",
              "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for row in scorecard["routes"]:
         lines.append("| " + " | ".join([
-            row["category"], row["task_shape"], f"{row['route']} ({row['measurement_scope']})", str(row["attempts"]), str(row["accepted_attempts"]),
+            row["category"], row["task_shape"], f"{row['route']} ({row['measurement_scope']}; {row['efficiency_scope']})", str(row["attempts"]), str(row["accepted_attempts"]),
             format_metric(row["tokens"]["input"]), format_metric(row["tokens"]["output"]),
             format_metric(row["actual_incremental_usd"], " USD"), format_context(row["fixed_subscription_usd"], " USD"),
             format_metric(row["api_equivalent_usd"], " USD"), format_metric(row["time_ms"]["end_to_end"], " ms"),
@@ -1214,12 +1241,13 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
     if not scorecard["routes"]:
         lines.append("| - | - | - | 0 | 0 | unknown | unknown | unknown | unknown | unknown | unknown | unknown | no samples |")
     lines.extend(["", "## Individual task-linked observations", "",
-                  "| Task | Incarnation | Attempt | Route | Outcome | Outcome authority | Attribution | Scope | Elapsed | Execution API-equivalent | Grader time | Quota movement |",
+                  "| Task | Incarnation | Attempt | Route | Outcome | Outcome authority | Attribution | Measurement / efficiency scope | Elapsed | Execution API-equivalent | Grader time | Quota movement |",
                   "|---|---|---|---|---|---|---|---|---:|---:|---:|---|"])
     for row in scorecard["observations"]:
         lines.append("| " + " | ".join([
             row["task_id"], row["spawn_gen"], row["attempt_id"], row["route"], row["outcome"],
-            row["outcome_authority"], row["attribution"] or "unknown", row["measurement_scope"],
+            row["outcome_authority"], row["attribution"] or "unknown",
+            f"{row['measurement_scope']}; {row['efficiency_scope']}",
             "unknown" if row["elapsed_ms"] is None else f"{row['elapsed_ms']:g} ms",
             "unknown" if row["execution_api_equivalent_usd"] is None else f"{row['execution_api_equivalent_usd']:g} USD",
             "unknown" if row["grader_overhead"].get("duration_ms") is None else f"{row['grader_overhead']['duration_ms']:g} ms",
@@ -1260,7 +1288,7 @@ def inspect_command(args: argparse.Namespace) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Import native usage receipts and report model-routing efficiency without choosing or launching a model.",
+        description="Import native usage receipts and report partial execution observations without choosing or launching a model.",
         epilog="Run '<command> --help' for inputs. Typical flow: import measured attempts, record shadow decisions, then render scorecard.")
     sub = result.add_subparsers(dest="command", required=True)
     imp = sub.add_parser("import", help="idempotently import one task attempt",

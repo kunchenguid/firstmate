@@ -73,7 +73,7 @@ class RoutingOutcomesTest(unittest.TestCase):
     def write_pi(self, path, *, custom=True, effort="max", task="task-one",
                  spawn_gen="spawn-1", duplicate=False, extra_request=None,
                  assistant_model="gpt-5.6-luna", assistant_provider="openai-codex",
-                 session_id="session-1", second_response=False):
+                 request_provider="openai-codex", session_id="session-1", second_response=False):
         rows = [{"type": "session", "id": session_id, "timestamp": "2030-01-01T00:00:00Z"}]
         if custom:
             rows.append({
@@ -81,7 +81,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                 "customType": "fm-routing-request", "timestamp": "2030-01-01T00:00:01Z",
                 "data": {"schema": "fm-routing-request.v1", "taskId": task, "spawnGen": spawn_gen,
                          "requestSequence": 1, "at": "2030-01-01T00:00:01Z",
-                         "provider": "openai-codex", "selectedModel": "gpt-5.6-luna",
+                         "provider": request_provider, "selectedModel": "gpt-5.6-luna",
                          "selectedThinkingLevel": "max", "api": "openai-codex-responses",
                          "payloadModel": "gpt-5.6-luna", "payloadReasoningEffort": effort},
             })
@@ -177,7 +177,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(record["native"]["effective_effort"], "max")
         self.assertEqual(record["native"]["tokens"]["input"], 100)
         self.assertEqual(record["native"]["completeness"]["effort"], "provider-request")
-        self.assertEqual(record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"], 5)
+        self.assertEqual(record["quota"]["route_provider_binding"], "unbound")
+        self.assertIsNone(record["quota"]["window_deltas"][0]["attributed_consumption_percent_points"])
         self.assertNotIn("PRIVATE PROMPT RESPONSE", self.store.read_text())
         again = self.import_manifest(self.manifest())
         self.assertEqual(json.loads(again.stdout)["action"], "noop")
@@ -187,14 +188,24 @@ class RoutingOutcomesTest(unittest.TestCase):
             "--format", "json").stdout)
         quota = score["observations"][0]["quota"]
         self.assertEqual(quota["attribution"], "exclusive")
+        self.assertEqual(quota["route_provider_binding"], "unbound")
         self.assertFalse(quota["concurrent_activity"])
         self.assertTrue(quota["attempt_bracketed"])
-        self.assertEqual(quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
+        self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
         markdown = self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "markdown").stdout
-        self.assertIn("attribution=exclusive; concurrent=false; reset_crossed=false; attempt_bracketed=true; before_semantics=known; after_semantics=known", markdown)
-        self.assertIn("weekly: 100 -> 95; consumption=5 pp; reset_crossed=false", markdown)
+        self.assertIn("attribution=exclusive; route_provider_binding=unbound; concurrent=false", markdown)
+        self.assertIn("weekly: 100 -> 95; consumption=unknown pp; reset_crossed=false", markdown)
+
+    def test_exact_native_quota_provider_allows_attribution(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
+        manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertEqual(quota["route_provider_binding"], "exact-native-provider")
+        self.assertEqual(quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
 
     def test_attempt_phase_and_pi_request_alias_are_rejected(self):
         shadow_attempt = self.manifest()
@@ -278,10 +289,13 @@ class RoutingOutcomesTest(unittest.TestCase):
             "--format", "json").stdout)
         observation = score["observations"][0]
         self.assertEqual(observation["aggregation_status"], "individual-attempt-only")
+        self.assertEqual(observation["efficiency_scope"], "execution-only-partial")
         self.assertEqual(observation["elapsed_ms"], 60000)
         self.assertEqual(observation["actual_incremental_usd"], 0.2)
         self.assertEqual(observation["grader_overhead"]["actual_incremental_usd"], 0.05)
-        self.assertEqual(score["accepted_journey_aggregation"], "deferred-across-task-incarnations")
+        self.assertEqual(score["accepted_journey_aggregation"],
+                         "deferred-retries-grading-handoffs-and-cross-incarnation")
+        self.assertEqual(score["routes"][0]["efficiency_scope"], "execution-only-partial")
         self.assertEqual(score["routes"][0]["fixed_subscription_usd"]["aggregation"], "not-applicable")
 
     def test_scorecard_separates_route_tiers(self):
@@ -323,7 +337,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(score["task_count"], 1)
         self.assertEqual(score["task_incarnation_count"], 2)
         self.assertEqual({row["spawn_gen"] for row in score["observations"]}, {"spawn-1", "spawn-2"})
-        self.assertEqual(score["accepted_journey_aggregation"], "deferred-across-task-incarnations")
+        self.assertEqual(score["accepted_journey_aggregation"],
+                         "deferred-retries-grading-handoffs-and-cross-incarnation")
         markdown = self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "markdown").stdout
@@ -339,6 +354,57 @@ class RoutingOutcomesTest(unittest.TestCase):
             "--format", "json").stdout)
         self.assertEqual(score["attempt_count"], 1)
         self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 100)
+
+    def test_claude_session_cannot_be_reused_across_receipt_kinds(self):
+        result_receipt = self.dir / "claude-cross-kind-result.json"
+        session_receipt = self.dir / "claude-cross-kind-session.jsonl"
+        self.write_json(result_receipt, {
+            "type": "result", "session_id": "claude-shared-session", "num_turns": 1,
+            "modelUsage": {"claude-sonnet-5": {"canonicalModel": "claude-sonnet-5",
+                                                  "provider": "firstParty",
+                                                  "inputTokens": 5, "outputTokens": 2,
+                                                  "cacheReadInputTokens": 0,
+                                                  "cacheCreationInputTokens": 0}},
+        })
+        session_receipt.write_text(json.dumps({
+            "type": "assistant", "sessionId": "claude-shared-session", "uuid": "one",
+            "timestamp": "2030-01-01T00:00:03Z",
+            "message": {"id": "one", "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 5, "output_tokens": 2,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0}},
+        }) + "\n", encoding="utf-8")
+        first = self.manifest(
+            receipt={"kind": "claude-result", "path": str(result_receipt),
+                     "requested_model": "claude-sonnet-5", "requested_effort": "high"},
+            outcome="unresolved")
+        first["route"].update({"harness": "claude", "provider": "anthropic",
+                               "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        first["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        self.import_manifest(first)
+        second = self.manifest(
+            attempt="attempt-two",
+            receipt={"kind": "claude-session", "path": str(session_receipt),
+                     "requested_model": "claude-sonnet-5", "requested_effort": "high"},
+            outcome="unresolved")
+        second["route"].update({"harness": "claude", "provider": "anthropic",
+                                "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        second["requirements"] = None
+        self.bind_task("task-one", harness="claude")
+        result = self.import_manifest(second, ok=False)
+        self.assertIn("already attached to another attempt", json.loads(result.stdout)["error"])
+
+    def test_native_timestamps_must_fit_attempt_interval(self):
+        starts_too_late = self.manifest()
+        starts_too_late["started_at"] = "2030-01-01T00:00:02Z"
+        result = self.import_manifest(starts_too_late, ok=False)
+        self.assertIn("native receipt timestamps must fall within", json.loads(result.stdout)["error"])
+
+        finishes_too_early = self.manifest()
+        finishes_too_early["finished_at"] = "2030-01-01T00:00:02Z"
+        result = self.import_manifest(finishes_too_early, ok=False)
+        self.assertIn("native receipt timestamps must fall within", json.loads(result.stdout)["error"])
 
     def test_duplicate_native_message_id_is_not_double_counted(self):
         self.write_pi(self.pi, duplicate=True)
