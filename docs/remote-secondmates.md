@@ -191,8 +191,12 @@ An unreachable or unreadable remote read is unknown, not evidence that the endpo
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
-A process-event source performs a non-destructive, cursor-anchored delta read, fetches the documents a line explicitly offers through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
+A process-event source performs a non-destructive, cursor-anchored delta read, fetches the documents a line explicitly offers through the confined reader, mirrors content-bearing lines into the primary status channel, and does not carry blank separators.
 Only a structured `report=data/....md` pointer offers a document; a bare path inside prose is a mention, so writing about a document - including one the mate has not created yet - never asks this channel to fetch it.
+Each normalized source line, before its delivered `report=` pointers are rewritten, is the replay identity.
+Once committed, that identity prevents an ingestion retry or whole-log recapture from appending a second spelling when document availability changes, and its record survives reply-adapter retirement alongside the parent status stream.
+For lines mirrored before this source-line record existed, exact mirrored bytes remain the compatibility fallback.
+The first whole-log recapture after upgrading can therefore append one duplicate in the original source spelling for a legacy line whose bare `data/*.md` mention was previously fetched and rewritten; if that line was a since-resolved decision, the duplicate can read as reopening it, but recording that source line prevents another duplicate on later recaptures.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
 Transport normalization rewrites NUL, every other C0 control except tab and newline, and DEL to `?`, while printable ASCII and all high bytes, including UTF-8, pass through unchanged.

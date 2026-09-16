@@ -30,8 +30,8 @@
 # autohandled capture needs - and gets - no `check` wake of its own. One remote
 # note therefore produces exactly one firstmate wake, through the same signal
 # classification a local secondmate's own status append gets, and a replayed
-# capture whose every line is already mirrored (the at-most-once append) adds
-# no bytes and stays completely quiet. Only a capture autohandle could NOT
+# capture whose source lines are already recorded adds no bytes and stays
+# completely quiet. Only a capture autohandle could NOT
 # fully apply is published as a `check` wake for the manual handler, and
 # running `handle` on that wake is idempotent.
 #
@@ -40,8 +40,9 @@
 # state/<id>.status, and every parent consumer - the open-decision fold, wake
 # classification, crew-state reconciliation, and pending-reply resolution - reads
 # that one stream. A remote secondmate must present the same model, so ingest
-# mirrors every content-bearing line at most once, omits blank separators, and
-# leaves every semantic judgement to those same shared consumers. Correlation is
+# deduplicates content-bearing lines by normalized source identity, omits blank
+# separators, and leaves every semantic judgement to those same shared consumers.
+# Correlation is
 # a per-line property that fm-pending-reply-lib.sh consumes; it is never a gate
 # on the stream. Gating on it here made a remote mate's own progress lines and
 # newly raised decisions - which carry no corr= by contract - unrepresentable,
@@ -53,7 +54,7 @@
 #   - documents a line explicitly OFFERS through a structured `report=data/....md`
 #     pointer, fetched through the path-confined remote file reader and rewritten
 #     to their local copies, because the parent cannot read the remote filesystem
-#   - at-most-once append, because a captured generation can be replayed
+#   - source-line replay deduplication, because a captured generation can be replayed
 #   - control-byte normalization, so content-bearing bytes from another machine
 #     cannot make the parent's status file unsafe to read
 #   - the caught-up watermark this channel publishes for
@@ -405,9 +406,9 @@ normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
 
-# The one place a line enters the parent status stream. A captured generation can
-# be replayed, so every append - a mirrored line, or an escalation or note this
-# adapter raises itself - is at most once on exact bytes.
+# Adapter-authored escalations and notes use exact-byte append suppression.
+# Mirrored payload lines use their pre-rewrite source identity in
+# stage_mirror_lines instead, because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -415,6 +416,11 @@ append_status_once() { # <status-file> <line>
   return 0
 }
 
+# Stage whole-stream additions by exact normalized source line, before pointer
+# rewriting. The caller appends status additions first and source identities
+# second: reversing that order could record a line the parent never received.
+# The record lives outside cursor state and survives adapter retirement because
+# the parent status stream it describes survives that retirement too.
 stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-additions> <source-additions>
   LC_ALL=C awk \
     -v rewritten_file="$2" \
