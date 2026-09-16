@@ -187,7 +187,7 @@ Text for a worker to read and commands that drive a worker's process are separat
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
-Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, omp through its extension's `agent_start` and `agent_end` without `willContinue`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
+Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, omp through its extension's `agent_start` and `agent_end` without `willContinue` plus `fm-control`'s verified intentional-exit edge, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok, Rovo, and AGY each keep one clearly isolated rendered-tail fallback that can only ever classify their own task.
 
@@ -197,6 +197,7 @@ Endpoint death is the only process-level override and yields dead; child process
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
+OMP exit settles rather than retires the current incarnation so terminal status can still fold after agent death; relaunch mints a new token and teardown performs the full retirement.
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
