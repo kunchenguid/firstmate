@@ -35,6 +35,7 @@ cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
 EOF
 printf '# Detailed remote answer\n\nThe build is green.\n' > "$REMOTE/data/reply/report.md"
+printf '# Mentioned but never offered\n' > "$REMOTE/data/reply/prose-only.md"
 : > "$REMOTE/state/parent-replies.status"
 SOURCE_BEFORE="$TMP_ROOT/source-before"
 cp "$REMOTE/state/parent-replies.status" "$SOURCE_BEFORE"
@@ -94,7 +95,7 @@ assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 RUNNER=$!
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
-printf 'done [corr=0123456789abcdef] [at=1700000000]: build verified (data/reply/report.md)\n' \
+printf 'done [corr=0123456789abcdef] [at=1700000000]: build verified report=data/reply/report.md\n' \
   >> "$REMOTE/state/parent-replies.status"
 wait "$RUNNER" || fail "remote reply source failed to capture its first delta"
 RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.1.result" -print -quit 2>/dev/null)
@@ -217,7 +218,7 @@ PENDING_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'audit the 
 fm_pending_reply_mark_delivered "$PARENT/state" "$PENDING_CORR" \
   || fail "could not mark the pending-reply request delivered"
 {
-  printf 'working [key=version-audit]: family --version audit complete (data/reply/report.md)\n'
+  printf 'working [key=version-audit]: family --version audit complete (data/reply/prose-only.md)\n'
   printf 'needs-decision [key=rough-cut-version]: implement --version or retire the tool\n'
   printf 'needs-decision [at=1700000000]: which base branch?\n'
   printf 'needs-decision [at=1700086400]: which base branch?\n'
@@ -238,6 +239,14 @@ done
 mirror_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$mirror_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past an uncorrelated line"
+# The prose line NAMES a path that really does exist on the remote, so only the
+# structured-pointer trigger can explain the parent never fetching it.
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/prose-only.md" \
+  "a bare path mentioned in prose was fetched as though the line offered it"
+assert_grep 'audit complete (data/reply/prose-only.md)' "$PARENT/state/ios.status" \
+  "the prose mention was rewritten as though its document had been fetched"
+assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
+  "a bare path mentioned in prose raised a document transfer obligation"
 pass "the remote status and decision model mirrors and the cursor advances"
 
 # The newly raised decision must be indistinguishable from a local mate's, so the
@@ -318,7 +327,7 @@ assert_grep "offset=$nul_offset" "$PARENT/state/remote-replies/ios.cursor" \
 pass "NUL bytes are normalized in place before shell line processing"
 
 printf '# Retryable remote answer\n' > "$REMOTE/data/reply/retry.md"
-printf 'done [key=retry-document]: retry local storage (data/reply/retry.md)\n' \
+printf 'done [key=retry-document]: retry local storage report=data/reply/retry.md\n' \
   >> "$REMOTE/state/parent-replies.status"
 # Obstruct local document storage BEFORE the capture, so the runner's own
 # automatic application fails for real. That is the documented fallback: a
@@ -365,6 +374,273 @@ assert_grep "offset=$retry_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the recovered document delta did not advance the cursor"
 pass "local document storage failures remain retryable until delivery succeeds"
 
+# ---------------------------------------------------------------------------
+# A document a line OFFERS is fetched; one the reader cannot deliver fails open.
+# The reader cannot tell a report still being written from one that will never
+# exist, so a refusal never becomes a decision on the parent's board: the line
+# keeps its own pointer, the cursor advances, and an unkeyed note says why.
+GEN=8
+mirror_lines() { # <line>...
+  GEN=$((GEN + 1))
+  printf '%s\n' "$@" >> "$REMOTE/state/parent-replies.status"
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
+    || fail "generation $GEN was not captured"
+  assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+    "generation $GEN was captured but never applied"
+}
+mirrored_cursor_is_current() { # <label>
+  local offset
+  offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+  assert_grep "offset=$offset" "$PARENT/state/remote-replies/ios.cursor" "$1"
+}
+assert_no_document_decision() { # <label>
+  if status_open_decisions "$PARENT/state/ios.status" | grep -q '^remote-reply-document-'; then
+    fail "$1"
+  fi
+  assert_no_grep '[key=remote-reply-document-' "$PARENT/state/ios.status" "$1"
+}
+
+printf '# valid report behind a malformed pointer\n' > "$REMOTE/data/reply/result.md"
+mirror_lines 'working [key=malformed-report]: malformed offer report=data/reply/result.md.bak'
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/result.md" \
+  "a valid prefix of a malformed report pointer was fetched"
+assert_grep 'report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
+  "a valid prefix of a malformed report pointer was rewritten"
+assert_no_document_decision "a malformed report pointer raised a document decision"
+mirrored_cursor_is_current "a malformed report pointer prevented the cursor from advancing"
+pass "a structured pointer must end at its token boundary"
+
+printf '# first adjacent report\n' > "$REMOTE/data/reply/adjacent-a.md"
+printf '# second adjacent report\n' > "$REMOTE/data/reply/adjacent-b.md"
+mirror_lines 'done [key=adjacent-reports]: report=data/reply/adjacent-a.md,report=data/reply/adjacent-b.md report=data/reply/result.md alongside report=data/reply/result.md.bak'
+cmp -s "$REMOTE/data/reply/adjacent-a.md" "$PARENT/data/remote-secondmates/ios/data/reply/adjacent-a.md" \
+  || fail "the first comma-separated structured pointer was not fetched"
+cmp -s "$REMOTE/data/reply/adjacent-b.md" "$PARENT/data/remote-secondmates/ios/data/reply/adjacent-b.md" \
+  || fail "the second comma-separated structured pointer was not fetched"
+cmp -s "$REMOTE/data/reply/result.md" "$PARENT/data/remote-secondmates/ios/data/reply/result.md" \
+  || fail "the whitespace-separated structured pointer was not fetched"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/adjacent-a.md,report=data/remote-secondmates/ios/data/reply/adjacent-b.md report=data/remote-secondmates/ios/data/reply/result.md alongside report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
+  "structured pointer rewriting skipped an adjacent pointer or changed a malformed token"
+mirrored_cursor_is_current "adjacent structured pointers prevented the cursor from advancing"
+pass "adjacent pointers are fetched while malformed tokens remain unchanged"
+
+# A rejected candidate must not make the text right after it look like the start
+# of a line: the second `report=` here has no boundary of its own.
+printf '# glued report\n' > "$REMOTE/data/reply/glued.md"
+mirror_lines 'working [key=glued-pointers]: glued report=data/reply/glued-prefix.mdreport=data/reply/glued.md'
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/glued.md" \
+  "a pointer with no preceding boundary was fetched after a rejected candidate"
+assert_grep 'glued report=data/reply/glued-prefix.mdreport=data/reply/glued.md' "$PARENT/state/ios.status" \
+  "a pointer with no preceding boundary was rewritten after a rejected candidate"
+pass "a rejected candidate never gives the following text a false leading boundary"
+
+# A `report=` under a remote-secondmates mirror tree is fetched like any other
+# structured offer. When this mate genuinely holds it, it is a nested remote
+# report worth relaying; when it does not, the fetch fails open and harmlessly.
+mkdir -p "$REMOTE/data/remote-secondmates/nested/data/reply"
+printf '# nested grandchild report\n' > "$REMOTE/data/remote-secondmates/nested/data/reply/report.md"
+mirror_lines 'done [key=nested-remote]: nested report=data/remote-secondmates/nested/data/reply/report.md foreign report=data/remote-secondmates/other/data/reply/report.md'
+cmp -s "$REMOTE/data/remote-secondmates/nested/data/reply/report.md" \
+  "$PARENT/data/remote-secondmates/ios/data/remote-secondmates/nested/data/reply/report.md" \
+  || fail "a nested remote report this mate holds was not relayed"
+assert_grep 'nested report=data/remote-secondmates/ios/data/remote-secondmates/nested/data/reply/report.md foreign report=data/remote-secondmates/other/data/reply/report.md' "$PARENT/state/ios.status" \
+  "the nested pointer was not rewritten or the undeliverable foreign pointer was changed"
+assert_grep 'remote document did not transfer for ios: data/remote-secondmates/other/data/reply/report.md - ' "$PARENT/state/ios.status" \
+  "an undeliverable foreign pointer left no note"
+assert_no_document_decision "an undeliverable foreign pointer raised a document decision"
+mirrored_cursor_is_current "an undeliverable foreign pointer prevented the cursor from advancing"
+pass "nested remote reports relay while an undeliverable foreign pointer fails open"
+
+# The reported incident, end to end. The mate announces a scout and names in
+# prose the path its report WILL be written to, then explains the resulting
+# false alarm in two more lines of the same delta. None of that is an offer, so
+# nothing is fetched, nothing is noted, and no decision ever opens. The report
+# arrives through the ledger publisher's structured offer once it exists.
+INCIDENT_DOC=data/reply/voice-scout-report.md
+rm -f "$REMOTE/$INCIDENT_DOC"
+mirror_lines "reply [corr=3333333333333333]: dispatched the voice scout, report path $INCIDENT_DOC, will relay on completion"
+mirror_lines \
+  "reply [corr=3333333333333333]: No report to transfer YET - $INCIDENT_DOC is NOT yet written; nothing is lost" \
+  "reply [corr=3333333333333333]: same - the report does not exist yet (scout still working, $INCIDENT_DOC not written)"
+assert_no_document_decision "a report path mentioned in prose raised a document decision"
+assert_no_grep "remote document did not transfer for ios: $INCIDENT_DOC" "$PARENT/state/ios.status" \
+  "a report path mentioned in prose was treated as an undeliverable offer"
+assert_grep "report path $INCIDENT_DOC, will relay" "$PARENT/state/ios.status" \
+  "the prose announcement was not mirrored verbatim"
+mirrored_cursor_is_current "the prose announcement delta did not advance the cursor"
+printf '# voice scout report\n\nfindings\n' > "$REMOTE/$INCIDENT_DOC"
+# The exact shape bin/fm-inactive-reconcile.sh publishes for a finished child.
+mirror_lines "done [key=child-outcome-voice-scout-done-ab12cd34]: child voice-scout done: report ready mode=scout report=$INCIDENT_DOC"
+cmp -s "$REMOTE/$INCIDENT_DOC" "$PARENT/data/remote-secondmates/ios/$INCIDENT_DOC" \
+  || fail "the structured ledger offer did not deliver the finished report"
+assert_grep "report ready mode=scout report=data/remote-secondmates/ios/$INCIDENT_DOC" "$PARENT/state/ios.status" \
+  "the structured ledger offer was not rewritten to its local copy"
+assert_no_document_decision "the reported incident left a document decision standing"
+pass "the reported incident raises no standing decision and still delivers the report"
+
+# A structured offer the reader cannot deliver fails open with its own reason.
+# Offered again twice in one delta, the unchanged note is not repeated.
+mirror_lines 'reply [corr=4444444444444444]: dispatched a scout report=data/reply/never-written.md'
+assert_grep 'remote document did not transfer for ios: data/reply/never-written.md - file is not a non-symlink regular file' "$PARENT/state/ios.status" \
+  "an undeliverable structured offer left no note carrying the reader's reason"
+status_line_at_epoch "$(grep -F 'remote document did not transfer for ios: data/reply/never-written.md' "$PARENT/state/ios.status")" >/dev/null \
+  || fail "new remote document note has unknown emission time"
+assert_grep 'dispatched a scout report=data/reply/never-written.md' "$PARENT/state/ios.status" \
+  "an undeliverable offer's line was not mirrored with its own pointer intact"
+assert_no_document_decision "an undeliverable structured offer raised a document decision"
+mirrored_cursor_is_current "an undeliverable structured offer held the cursor back"
+mirror_lines \
+  'reply [corr=4444444444444444]: still writing report=data/reply/never-written.md' \
+  'reply [corr=4444444444444444]: same, report=data/reply/never-written.md'
+[ "$(grep -cF 'remote document did not transfer for ios: data/reply/never-written.md' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "re-offering the same undeliverable document repeated its note"
+assert_no_document_decision "re-offering an undeliverable document raised a document decision"
+pass "an undeliverable structured offer fails open with one note and never a decision"
+
+# The positive remote-refusal case with a genuinely non-transient cause: the
+# reader bounds document size, and that refusal is visible by its own reason.
+head -c 300000 /dev/zero | tr '\0' 'x' > "$REMOTE/data/reply/big.md"
+mirror_lines 'done [key=big-report]: oversize deliverable report=data/reply/big.md'
+assert_grep 'remote document did not transfer for ios: data/reply/big.md - file exceeds max-bytes' "$PARENT/state/ios.status" \
+  "an oversize document's refusal did not surface with its reason"
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/big.md" \
+  "a refused oversize document was stored locally anyway"
+assert_no_document_decision "an oversize document raised a document decision"
+mirrored_cursor_is_current "an oversize document held the cursor back"
+pass "a remote refusal surfaces its own reason without opening a decision"
+
+# A failed extraction pass must leave the delta wholly uncommitted. Once the
+# parser works again, the same captured delta applies in full.
+printf '# extraction-failure probe\n' > "$REMOTE/data/reply/extractfail.md"
+GEN=$((GEN + 1))
+printf 'done [key=extraction-failure]: probe report=data/reply/extractfail.md\n' \
+  >> "$REMOTE/state/parent-replies.status"
+extractfail_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-extractfail"
+EXTRACT_FAIL_BIN="$TMP_ROOT/extract-fail-bin"
+mkdir -p "$EXTRACT_FAIL_BIN"
+REAL_AWK=$(command -v awk)
+# The stand-in awk refuses only the extraction pass, so every other awk the
+# relay depends on keeps working.
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  [ "$argument" != mode=extract ] || exit 97
+done
+SH
+  printf 'exec %q "$@"\n' "$REAL_AWK"
+} > "$EXTRACT_FAIL_BIN/awk"
+chmod +x "$EXTRACT_FAIL_BIN/awk"
+PATH="$EXTRACT_FAIL_BIN:$PATH" remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" \
+  >/dev/null 2>&1 || true
+RESULT_EXTRACTFAIL="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_EXTRACTFAIL" "the extraction-failure delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "a capture whose pointer extraction failed was acknowledged anyway"
+extractfail_rc=0
+PATH="$EXTRACT_FAIL_BIN:$PATH" remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_EXTRACTFAIL" \
+  > "$TMP_ROOT/extract-fail.out" 2>&1 || extractfail_rc=$?
+[ "$extractfail_rc" -ne 0 ] || fail "the failed extraction pass reported success"
+assert_grep 'cannot extract remote document pointers' "$TMP_ROOT/extract-fail.out" \
+  "the failed extraction pass did not report its failure"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$extractfail_cursor_before" ] \
+  || fail "a failed extraction pass advanced the cursor past dropped status content"
+cmp -s "$TMP_ROOT/ios-status-before-extractfail" "$PARENT/state/ios.status" \
+  || fail "a failed extraction pass appended partial or blank status content"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_EXTRACTFAIL" >/dev/null \
+  || fail "the delta did not apply once pointer extraction worked again"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/extractfail.md' "$PARENT/state/ios.status" \
+  "the recovered delta did not mirror its rewritten pointer"
+cmp -s "$REMOTE/data/reply/extractfail.md" "$PARENT/data/remote-secondmates/ios/data/reply/extractfail.md" \
+  || fail "the recovered delta did not fetch its offered document"
+mirrored_cursor_is_current "the recovered extraction-failure delta did not advance the cursor"
+pass "a failed pointer extraction never commits a partial delta"
+
+# A mirror write that cannot complete must fail loudly rather than leave blank
+# or partial content behind and advance the cursor past status bytes nobody
+# ever received. The delta stays uncommitted and applies in full once the
+# stream is writable again.
+printf '# write-failure probe\n' > "$REMOTE/data/reply/writefail.md"
+GEN=$((GEN + 1))
+printf 'done [key=write-failure]: probe report=data/reply/writefail.md\n' \
+  >> "$REMOTE/state/parent-replies.status"
+writefail_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-writefail"
+chmod 444 "$PARENT/state/ios.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
+RESULT_WRITEFAIL="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_WRITEFAIL" "the unwritable-stream delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "a capture whose mirror write failed was acknowledged anyway"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$writefail_cursor_before" ] \
+  || fail "a failed mirror write advanced the cursor past dropped status content"
+chmod 644 "$PARENT/state/ios.status"
+cmp -s "$TMP_ROOT/ios-status-before-writefail" "$PARENT/state/ios.status" \
+  || fail "a failed mirror write left partial or blank content on the parent stream"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_WRITEFAIL" >/dev/null \
+  || fail "the delta did not apply once the parent stream was writable again"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/writefail.md' "$PARENT/state/ios.status" \
+  "the recovered delta did not mirror its rewritten pointer"
+mirrored_cursor_is_current "the recovered delta did not advance the cursor"
+pass "a failed mirror write never drops status content or advances the cursor"
+
+# A source line remains the replay identity even when document availability
+# changes between a successful mirror append and a failed ingestion commit.
+REPLAY_LINE='needs-decision [key=replay-decision]: pick report=data/reply/replay.md'
+rm -f "$REMOTE/data/reply/replay.md"
+GEN=$((GEN + 1))
+printf '%s\n' "$REPLAY_LINE" >> "$REMOTE/state/parent-replies.status"
+replay_commit_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
+RECEIPT_FAIL_BIN="$TMP_ROOT/receipt-fail-bin"
+mkdir -p "$RECEIPT_FAIL_BIN"
+REAL_MKTEMP=$(command -v mktemp)
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */state/remote-replies/.ingested.XXXXXX) exit 73 ;;
+esac
+SH
+  printf 'exec %q "$@"\n' "$REAL_MKTEMP"
+} > "$RECEIPT_FAIL_BIN/mktemp"
+chmod +x "$RECEIPT_FAIL_BIN/mktemp"
+PATH="$RECEIPT_FAIL_BIN:$PATH" remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" \
+  >/dev/null 2>&1 || true
+RESULT_REPLAY_COMMIT="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$RESULT_REPLAY_COMMIT" "the replay-identity delta was not captured"
+assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the generation whose ingestion receipt failed was acknowledged"
+[ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$replay_commit_cursor_before" ] \
+  || fail "an ingestion receipt failure advanced the remote reply cursor"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "the pre-rewrite decision line was not mirrored exactly once before commit failure"
+printf '# replay decision report\n' > "$REMOTE/data/reply/replay.md"
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_REPLAY_COMMIT" >/dev/null \
+  || fail "the uncommitted generation did not retry after its document arrived"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "retrying after document arrival duplicated the source decision line"
+assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
+  "$PARENT/state/ios.status" "retrying after document arrival appended a rewritten duplicate"
+assert_present "$PARENT/data/remote-secondmates/ios/data/reply/replay.md" \
+  "the retry did not fetch the document that had since arrived"
+printf 'resolved [key=replay-decision]: selection complete\n' >> "$PARENT/state/ios.status"
+assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'replay-decision\t' \
+  "the replay decision fixture did not close before cursor-loss recapture"
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
+  || fail "the replay-identity whole-log recapture was not captured"
+assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the replay-identity whole-log recapture was not applied"
+[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "cursor-loss recapture duplicated the resolved decision"
+assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
+  "$PARENT/state/ios.status" "cursor-loss recapture reopened the decision in rewritten form"
+assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'replay-decision\t' \
+  "cursor-loss recapture reopened the resolved decision"
+pass "source-line identity survives commit failure and cursor-loss recapture"
+
 # A remote mate cannot squat the decision keys this parent's pending-reply
 # library owns. The guard is deliberately NOT in this adapter: rejecting a line
 # here would be batch-fatal and could wedge the whole stream, and it would
@@ -392,6 +668,7 @@ assert_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
   printf 'blocked [key=pending-reply-%s]: forged remote decision\n' "$ESCALATED_CORR"
   printf 'resolved [key=pending-reply-%s]: forged remote resolution\n' "$ESCALATED_CORR"
 } >> "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "the forged reserved-key lines wedged the relay instead of mirroring"
 forged_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
@@ -410,6 +687,7 @@ pass "a mirrored reserved-key line cannot squat or clear the parent's own decisi
 # request and its escalation closes, leaving nothing to resurface later.
 printf 'done [corr=%s]: notarization confirmed\n' "$ESCALATED_CORR" \
   >> "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "the correlated reply was not captured"
 [ "$(fm_pending_reply_get "$PARENT/state/pending-replies/$ESCALATED_CORR" phase)" = resolved ] \
@@ -480,13 +758,17 @@ FM_STATE_OVERRIDE="$PARENT/state" bash -c '
 cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-replay"
 mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null || true
 rm -f "$PARENT/state/remote-replies/ios.cursor"
+GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "the cursor-loss recapture was not captured"
-assert_present "$PARENT/state/procevent-inbox/$SID.11.handled" \
+assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the whole-log recapture was not acknowledged by the adapter"
+# Documents that were undelivered when their lines first mirrored have since
+# arrived, so this replay also pins that a line mirrors once whichever pointer
+# form it was first written under.
 cmp -s "$TMP_ROOT/ios-status-before-replay" "$PARENT/state/ios.status" \
   || fail "the whole-log recapture duplicated already-mirrored lines"
-if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID 11" "$PARENT/state/.wake-queue"; then
+if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID $GEN" "$PARENT/state/.wake-queue"; then
   fail "an already-mirrored recapture still published a check wake"
 fi
 FM_STATE_OVERRIDE="$PARENT/state" bash -c '
@@ -502,15 +784,16 @@ pass "a cursor-loss whole-log recapture is acknowledged quietly with no duplicat
 # next blocking source and escalated once; it is never silently treated as a new
 # log or re-armed past the break.
 printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_TWELVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.12.result" -print -quit)
+RESULT_TWELVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -print -quit)
 [ -n "$RESULT_TWELVE" ] || fail "continuity break produced no durable result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_TWELVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 12 "$RESULT_TWELVE" > "$TMP_ROOT/handle-nine.out" 2>&1
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-nine.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
@@ -527,7 +810,7 @@ if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
 fi
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.12.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -535,7 +818,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 12 "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
