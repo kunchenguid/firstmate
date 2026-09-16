@@ -15,6 +15,6 @@ Do not convert the rendered borders to Markdown table source, tabs, or a prose s
 
 When the captain supplies a selector, pass it to `bin/fm-tasks.sh --table` so the central resolver accepts a canonical task id, a `t1`-`t99` reference, or an unambiguous human name.
 
-Names are separately editable with `bin/fm-tasks.sh name <selector> <lowercase-hyphenated-name>` when the captain explicitly asks to rename one.
+Names are concise two-to-four-token lowercase hyphenated shorthands, and are separately editable with `bin/fm-tasks.sh name <selector> <name>` when the captain explicitly asks to rename one.
 
 The command derives status from the canonical backlog and current-state reconciler, and keeps retained Done rows only as long as the backlog does.

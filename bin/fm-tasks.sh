@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compact captain task table and central task-name maintenance surface.
 # Usage: fm-tasks.sh [--json|--table] [<task-selector>]
-#        fm-tasks.sh name <task-selector> <lowercase-hyphenated-name>
+#        fm-tasks.sh name <task-selector> <two-to-four-token-name>
 #        fm-tasks.sh resolve <task-selector>
 # The table consumes the canonical fleet snapshot and never maintains a second
 # current-state list. Reference and name assignments live in private state.
@@ -19,7 +19,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 usage() {
   cat <<'EOF'
 usage: fm-tasks.sh [--json|--table] [<task-selector>]
-       fm-tasks.sh name <task-selector> <lowercase-hyphenated-name>
+       fm-tasks.sh name <task-selector> <two-to-four-token-name>
        fm-tasks.sh resolve <task-selector>
 
 Render the compact current task table. Selectors are canonical ids, t1-t99
@@ -81,9 +81,12 @@ CALLSIGNS=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" bash -c \
 MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg selector "$SELECTOR" '
   def trunc($n): tostring | gsub("\\s+"; " ") | gsub("\\|"; "/") | if length > $n then .[:($n-1)] + "…" else . end;
   def call($id): ([ $callsigns[] | select(.id == $id) ] | first) // {};
-  def task($id): ([.tasks[]? | select(.id == $id)] | first) // {};
+  def event_note($t): ($t.hints.last_event_text // "" | sub("^[^:]+:[[:space:]]*"; ""));
+  def current_detail($t):
+    ([$t.current_state.detail, event_note($t)] | map(select(. != null and . != "")) | .[0]) // "";
   def row_status($r; $t):
     if $r.state == "done" then "done"
+    elif $t.mode == "local-only" and ($t.current_state.state // "unknown") == "done" then "ready"
     elif ($r.unresolved_blocker_ids // [] | length) > 0 then "blocked"
     elif $r.hold_kind == "captain" then "needs-you"
     elif $r.hold_kind != null then "waiting"
@@ -96,14 +99,20 @@ MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg se
     elif ($t.current_state.state // "unknown") == "parked" then "needs-you"
     elif ($t.current_state.state // "unknown") == "done" then "ready"
     elif ($t.current_state.state // "unknown") == "failed" then "failed"
-    else "waiting" end;
+    else "unknown" end;
   def outcome($r; $t; $status):
     if $status == "done" then ($r.pr_url // $r.report_path // $r.local_note // "completed")
     elif $status == "queued" then "queued"
     elif $status == "blocked" then (($r.unresolved_blocker_ids // [] | join(", ")) as $b | if $b == "" then ($r.blocked_reason // "blocked") else "waiting on " + $b end)
-    elif $status == "needs-you" then ($r.hold_reason // ($t.current_state.detail // "needs your input"))
-    elif ($t.current_state.detail // "") != "" then $t.current_state.detail
-    elif ($t.hints.last_event_text // "") != "" then $t.hints.last_event_text
+    elif $status == "needs-you" then ($r.hold_reason // (current_detail($t) | if . == "" then "needs your input" else . end))
+    elif $status == "waiting" then ($r.hold_reason // (current_detail($t) | if . == "" then "external delay" else . end))
+    elif $status == "ready" and $t.mode == "local-only" then
+      ($r.hold_reason // current_detail($t)) as $detail
+      | if $detail == "" then "awaiting landing approval"
+        elif ($detail | test("await|approval|landing"; "i")) then $detail
+        else $detail + "; awaiting landing approval" end
+    elif (current_detail($t)) != "" then current_detail($t)
+    elif $status == "unknown" then "current state unavailable"
     else $status end;
   def make($id; $r; $t):
     (call($id)) as $c
@@ -111,6 +120,8 @@ MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg se
     | (row_status($r; $t)) as $status
     | {id:$id, ref:($c.ref // "-"), name:$name, status:$status,
        outcome:(outcome($r; $t; $status) | trunc(100))};
+  . as $snapshot
+  | def task($id): ([$snapshot.tasks[]? | select(.id == $id)] | first) // {};
   ([.backlog.records[]? | select(.structured == true and (.state == "in_flight" or .state == "queued" or .state == "done"))
     | . as $r | make($r.id; $r; task($r.id))]) as $backlog_rows
   | ($backlog_rows | map(.id)) as $backlog_ids
