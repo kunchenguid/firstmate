@@ -1713,6 +1713,31 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# Terminal Herdr cleanup is triggered by the same status-file change that wakes
+# supervision, including a change that is later absorbed as benign. The helper
+# owns exact endpoint, process, journal, and focus checks, so this caller only
+# selects Herdr ship/scout records and lets every refusal preserve the pane.
+herdr_terminal_cleanup_for_status_files() {  # <status-file> ...
+  local f task meta kind backend last
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    task=${f##*/}
+    task=${task%.status}
+    meta="$STATE/$task.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" = herdr ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    case "${kind:-ship}" in ship|scout) ;; *) continue ;; esac
+    last=$(last_status_line "$f")
+    case "$(status_line_verb "$last")" in done|failed) ;; *) continue ;; esac
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" terminal "$task" \
+      >/dev/null 2>&1 || triage_log "terminal Herdr cleanup failed for $task"
+  done
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -2263,6 +2288,10 @@ EOF
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
+    # The terminal pane is disposable even when its status wake is absorbed as
+    # positive execution evidence; durable task records remain untouched.
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+    herdr_terminal_cleanup_for_status_files $files
     # A decision-owned file's queued row payload is marked "needs-decision:"
     # instead of the ordinary "signal:" below (other files in the same batch
     # keep the ordinary payload). The wake reason line itself, and every
@@ -2402,6 +2431,9 @@ EOF
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
+          # Retry terminal Herdr cleanup on a quiet pane after the worker's
+          # status write wins a race with its process exit.
+          herdr_terminal_cleanup_for_status_files "$STATE/$task.status"
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
           # new entry once firstmate hands it to a no-mistakes validation

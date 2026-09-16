@@ -139,8 +139,62 @@ FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
 [ "$(focus_snapshot)" = "$BEFORE_FOCUS" ] || fail 'idempotent repeat changed focus'
 lab pane get "$(printf '%s' "$ANCHOR" | jq -r '.result.root_pane.pane_id')" >/dev/null \
   || fail 'anchor pane was touched by cleanup'
-STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
 pass 'real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire'
+
+TERM_ID=terminal-worker-e2e
+TERM_TOKEN=QrStUvWxYz0123456789Ab
+TERM_TITLE="└ $TERM_ID · p:$TERM_TOKEN"
+TERM_WORKSPACE=$(lab workspace create --cwd "$ROOT" --label "$TERM_TITLE" --no-focus) \
+  || fail 'could not create the terminal-outcome workspace'
+TERM_WS=$(printf '%s' "$TERM_WORKSPACE" | jq -r '.result.workspace.workspace_id')
+TERM_TAB=$(printf '%s' "$TERM_WORKSPACE" | jq -r '.result.tab.tab_id')
+TERM_PANE=$(printf '%s' "$TERM_WORKSPACE" | jq -r '.result.root_pane.pane_id')
+[ -n "$TERM_WS" ] && [ -n "$TERM_TAB" ] && [ -n "$TERM_PANE" ] \
+  || fail 'terminal-outcome workspace response omitted an exact endpoint id'
+{
+  printf 'version=2\n'
+  printf 'task_id=%s\nprojection_id=%s\n' "$TERM_ID" "$TERM_TOKEN"
+  printf 'home=%s\nsession=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' \
+    "$HOME_DIR" "$HERDR_LAB_SESSION" "$TERM_WS" "$TERM_TAB" "$TERM_PANE"
+  printf 'parent_workspace_id=%s\nparent_label=captain-anchor\n' \
+    "$(printf '%s' "$ANCHOR" | jq -r '.result.workspace.workspace_id')"
+  printf 'workspace_label=%s\ntask_label=fm-%s\n' "$TERM_TITLE" "$TERM_ID"
+} > "$HOME_DIR/state/$TERM_ID.herdr-presentation"
+{
+  printf 'window=%s:%s\nendpoint_task_id=%s\nworktree=%s\nproject=%s\n' \
+    "$HERDR_LAB_SESSION" "$TERM_PANE" "$TERM_ID" "$ROOT" "$ROOT"
+  printf 'backend=herdr\nkind=ship\nherdr_session=%s\nherdr_workspace_id=%s\n' \
+    "$HERDR_LAB_SESSION" "$TERM_WS"
+  printf 'herdr_tab_id=%s\nherdr_pane_id=%s\n' "$TERM_TAB" "$TERM_PANE"
+  printf 'pr=https://example.test/pull/terminal-worker-e2e\n'
+} > "$HOME_DIR/state/$TERM_ID.meta"
+printf 'done: terminal worker finished\n' > "$HOME_DIR/state/$TERM_ID.status"
+PANE=$TERM_PANE
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+  if production_process_proof; then break; fi
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 50 ] || fail 'terminal-outcome pane did not converge to the idle-shell proof'
+BEFORE_TERMINAL_FOCUS=$(focus_snapshot) || fail 'could not capture terminal pre-cleanup focus'
+FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
+  PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" terminal "$TERM_ID" \
+  || fail 'terminal-outcome cleanup command failed'
+[ "$(focus_snapshot)" = "$BEFORE_TERMINAL_FOCUS" ] \
+  || fail 'terminal-outcome cleanup changed the exact active focus'
+if lab pane get "$TERM_PANE" >/dev/null 2>&1; then
+  fail 'terminal-outcome cleanup left the exact worker pane open'
+fi
+[ -f "$HOME_DIR/state/$TERM_ID.meta" ] \
+  || fail 'terminal-outcome cleanup removed the durable task metadata'
+[ -f "$HOME_DIR/state/$TERM_ID.status" ] \
+  || fail 'terminal-outcome cleanup removed the terminal status'
+[ -f "$HOME_DIR/state/$TERM_ID.herdr-presentation" ] && fail \
+  'terminal-outcome cleanup kept its retired presentation journal'
+pass 'real named lab terminal done cleanup closes one exact worker pane and keeps durable records'
+
+STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
 printf 'evidence: herdr=%s protocol=%s default-session-tripwire=armed\n' \
   "$(printf '%s' "$STATUS" | jq -r '.client.version')" \
   "$(printf '%s' "$STATUS" | jq -r '.server.protocol')"
