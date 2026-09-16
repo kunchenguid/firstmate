@@ -67,7 +67,7 @@ A `waiting` session, a `missing` one, an `unknown` or unreadable result, and eve
 The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
 Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore announced.
 
-## The loss limitation this runner cannot close
+## The source boundary and Lavish recovery
 
 The published poll clears feedback destructively before returning it.
 Measured at the protocol layer by consuming and discarding the response:
@@ -78,11 +78,11 @@ listing after: ...,open,"...",0
 state.json: status= open pending= 0 prompts= []  chat entries= []
 ```
 
-Nothing remains on the source side to re-read, and there is no acknowledgement, cursor, or replay surface to reserve against.
-A result lost after that clearing and before the runner reads the child's output is therefore unrecoverable.
+Nothing remains on the source side to re-read, and the published protocol provides no acknowledgement, cursor, or replay surface to reserve against.
+The Lavish adapter closes that window narrowly for matching pending dock prompts already visible in the local session store: it atomically snapshots them before polling, retains the snapshot until the runner durably captures a result, and emits that snapshot on the next invocation if the destructive poll lost its output.
+Responses that never appeared in the store remain outside this recovery boundary.
 
-**Consequence for wording:** the runner may describe only its own durability boundary.
-Never at-least-once, no-loss, or lossless.
+**Consequence for wording:** describe the generic runner's durability and the adapter's narrower store-backed recovery separately; neither is a generic exactly-once or no-loss guarantee.
 
 ## What the runner does prove
 

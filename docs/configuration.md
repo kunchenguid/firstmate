@@ -932,15 +932,15 @@ A value this command cannot use is refused by name before anything is launched, 
 The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, not only the crash window right after capture.
 `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
 Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
-The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
-The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
-Never describe this path as at-least-once, no-loss, or lossless.
+The runner proves nothing generic about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
+The Lavish adapter adds one source-specific boundary: before its destructive poll, it atomically snapshots matching pending dock prompts from the session store and retains them until the runner durably captures a result, so a poll that clears those prompts and then loses its output recovers them on the next invocation.
+Responses that never appeared in that store remain outside this narrow recovery boundary, so neither the generic runner nor this path is a generic no-loss or exactly-once mechanism.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 ## Lavish dock replies (state/lavish-dock.check.sh)
 
 Captain dock Send notes are not a `lavish-axi poll` result.
-They sit in lavish-axi session `pending_prompts` until a poll consumes them, and that poll clears the feedback before returning it, so a home that does not keep a worker blocked on poll never sees them, and a poll whose output is lost cannot get them back.
+They sit in lavish-axi session `pending_prompts` until a poll consumes them, and that poll clears the feedback before returning it, so a home that does not keep a worker blocked on poll needs a standing copy path.
 `bin/fm-lavish-dock-check.sh` is the home-wide copy path that does not poll.
 It reads lavish-axi's session store (`$LAVISH_AXI_STATE_DIR/state.json`, default `~/.lavish-axi/state.json`), queues unseen prompts through `bin/fm-inbox.sh note`, and leaves the session's pending prompts in place.
 Queued notes rewrite inner HTTP `:4387` session Opens to the HTTPS wrap on `:4389` on the same host and never emit a `:4387` Open.
@@ -948,11 +948,10 @@ This check does not author artifacts, open a browser, or change Library `:3000`.
 
 The mutable local bootstrap automatically arms the standing check in the primary human-facing home; secondmate homes stay passive.
 Arming writes `state/lavish-dock.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`).
-The owned process-event Lavish adapter also copies feedback at the poll-consumption boundary, so a blocked poll cannot clear a reply before this home records it.
+The owned process-event Lavish adapter snapshots matching pending prompts before it polls, retains that snapshot until durable capture, and recovers it through the same process-event source and wake owner if the destructive poll loses its output.
 The check prints one line when it queues new notes so the current watcher cycle wakes, and each queued note is itself a `check: captain inbox note` wake.
 A proven no-op prints nothing: no new prompts, or the same failure already reported.
 `state/.lavish-dock-seen` stores per-session prompt-occurrence snapshots, including empty and reused-UID prompts, so an unchanged queue is not copied twice and a later occurrence is not suppressed.
-`bin/fm-lavish-dock-check.sh disarm` removes the shim, its trust binding, the report record, and that cursor.
 The check is not inherited into secondmates.
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)

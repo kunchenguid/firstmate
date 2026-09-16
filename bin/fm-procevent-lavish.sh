@@ -12,6 +12,7 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
+#   fm-procevent-lavish.sh capture-committed <source-id> <result-file>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
@@ -104,18 +105,19 @@
 # Lavish fact, so the generic runner in bin/fm-procevent.sh stays
 # adapter-agnostic and learns nothing about it.
 #
-# LOSS LIMITATION, stated plainly. The published poll destructively clears
-# feedback before returning it. A result lost after that clearing and before the
-# runner reads the process output is unrecoverable, and no Firstmate wrapper can
-# close that source-side handoff window. Never describe this path as
-# at-least-once, no-loss, or lossless. The only durability this proves is the
-# runner's own: output that reached the runner is stored before it is announced.
+# Before the published poll can destructively clear dock feedback, this adapter
+# snapshots the matching pending prompts. The runner removes that snapshot only
+# after it has durably captured a result. If the poll clears the store and then
+# dies before returning output, the next invocation emits the snapshot through
+# the same process-event owner instead of polling again. Results that never
+# appeared in the session store retain the runner's ordinary output boundary.
 # Home-wide dock Send delivery, without poll, is bin/fm-lavish-dock-check.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -208,7 +210,6 @@ poll_response_filter() {  # <response-file>
       exit 2 unless defined $count;
       last if $count == 0;
       if ($streaming) {
-        write_all($staged, $chunk);
         write_all(*STDOUT, $chunk);
         next;
       }
@@ -220,7 +221,6 @@ poll_response_filter() {  # <response-file>
       my $matches_prefix = length($candidate) <= length($expected)
         && substr($expected, 0, length($candidate)) eq $candidate;
       if (!$matches_prefix) {
-        write_all($staged, substr($chunk, $take));
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
@@ -262,12 +262,101 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
+recovery_snapshot_path() {  # <source-id>
+  printf '%s/procevent/%s.lavish-pending\n' "$STATE" "$1"
+}
+
+snapshot_pending_prompts() {  # <artifact> <snapshot-file>
+  local artifact=$1 snapshot=$2 store tmp rc
+  store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
+  [ -e "$store" ] || return 10
+  [ -f "$store" ] && [ ! -L "$store" ] || return 1
+  mkdir -p "$STATE/procevent" || return 1
+  tmp=$(umask 077; mktemp "$STATE/procevent/.lavish-pending.XXXXXX") || return 1
+  python3 - "$store" "$artifact" > "$tmp" <<'PY'
+import json
+import os
+import sys
+
+store, artifact = sys.argv[1:]
+try:
+    with open(store, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    raise SystemExit(2)
+
+sessions = data.get("sessions")
+if not isinstance(sessions, dict):
+    raise SystemExit(2)
+target = os.path.realpath(artifact)
+session = None
+for candidate in sessions.values():
+    if not isinstance(candidate, dict):
+        continue
+    path = candidate.get("file")
+    if isinstance(path, str) and os.path.realpath(path) == target:
+        session = candidate
+        break
+if session is None:
+    raise SystemExit(10)
+prompts = session.get("prompts")
+if not isinstance(prompts, list) or not prompts:
+    raise SystemExit(10)
+if any(not isinstance(prompt, dict) for prompt in prompts):
+    raise SystemExit(2)
+
+def scalar(value):
+    return value if isinstance(value, str) else ""
+
+def clean_line(value):
+    return scalar(value).replace("\r", " ").replace("\n", " ")
+
+def quoted(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+print("session:")
+print("  file: " + clean_line(session.get("file")))
+print("  status: feedback")
+ended = session.get("session_ended")
+if isinstance(ended, bool):
+    print("  session_ended: " + ("true" if ended else "false"))
+fields = ("uid", "selector", "tag", "prompt", "text", "attachments")
+print(f"prompts[{len(prompts)}]{{{','.join(fields)}}}:")
+for prompt in prompts:
+    attachments = prompt.get("attachments", [])
+    if not isinstance(attachments, list):
+        attachments = []
+    values = [scalar(prompt.get(field)) for field in fields[:-1]]
+    values.append(json.dumps(attachments, ensure_ascii=False, separators=(",", ":")))
+    print("  " + ",".join(quoted(value) for value in values))
+PY
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    chmod 0600 "$tmp" && mv -f -- "$tmp" "$snapshot" || rc=1
+  fi
+  rm -f -- "$tmp"
+  return "$rc"
+}
+
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
+  local artifact=${1-} id snapshot snapshot_rc delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  id=$(cmd_source_id "$artifact") || exit 1
+  snapshot=$(recovery_snapshot_path "$id")
+  [ ! -L "$snapshot" ] || die "Lavish recovery snapshot must not be a symlink"
+  if [ -f "$snapshot" ] && [ ! -L "$snapshot" ]; then
+    cat -- "$snapshot"
+    return 0
+  fi
+  snapshot_pending_prompts "$artifact" "$snapshot"
+  snapshot_rc=$?
+  case "$snapshot_rc" in
+    0|10) ;;
+    *) die "cannot snapshot pending Lavish prompts before polling" ;;
+  esac
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
   printf -v cleanup_command 'rm -f -- %q' "$response"
@@ -303,10 +392,6 @@ cmd_poll() {
       *) die "cannot classify the poll response" ;;
     esac
   done
-  if [ "$filter_rc" -eq 0 ] && [ "$rc" -eq 0 ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-lavish-dock-check.sh" ingest-poll "$artifact" "$response" \
-      || printf 'warning: consumed Lavish feedback could not be copied to the captain inbox\n' >&2
-  fi
   return "$rc"
 }
 
@@ -673,6 +758,11 @@ cmd_read() {
           print "prompt:\n";
           emit_body($comment);
         }
+        my $attachments = defined $f->{attachments} ? $f->{attachments} : "";
+        if (length $attachments && $attachments ne "[]") {
+          print "attachments:\n";
+          emit_body($attachments);
+        }
       }
       print "END ANNOTATIONS\n";
     } else {
@@ -682,10 +772,22 @@ cmd_read() {
   ' "$file" "$lifecycle" "$session_ended"
 }
 
+cmd_capture_committed() {
+  local id=${1-} result=${2-} snapshot
+  [ "$#" -eq 2 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ -f "$result" ] && [ ! -L "$result" ] || die "result file does not exist: $result"
+  [ "$(cmd_classify "$result")" = feedback ] || return 0
+  snapshot=$(recovery_snapshot_path "$id")
+  [ ! -L "$snapshot" ] || return 1
+  rm -f -- "$snapshot"
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  capture-committed) shift; cmd_capture_committed "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

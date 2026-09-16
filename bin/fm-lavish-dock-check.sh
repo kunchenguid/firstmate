@@ -5,15 +5,15 @@
 # Usage:
 #   fm-lavish-dock-check.sh [check]
 #   fm-lavish-dock-check.sh arm
-#   fm-lavish-dock-check.sh disarm
-#   fm-lavish-dock-check.sh ingest-poll <artifact> <response-file>
 #   fm-lavish-dock-check.sh --help
 #
 # The failure this exists to close: captain markups sit in lavish-axi session
 # `pending_prompts` until a worker `poll` consumes them. Helm does not poll, and
 # the published poll destructively clears feedback before returning it, so that
-# path both misses notes when nobody is blocked on poll and can lose them when
-# someone is. This check never polls. It reads lavish-axi's session store
+# path misses notes when nobody is blocked on poll and needs its own pre-poll
+# recovery boundary when someone is.
+# This check never polls.
+# It reads lavish-axi's session store
 # (`$LAVISH_AXI_STATE_DIR/state.json`, default `~/.lavish-axi/state.json`), the
 # same store the published session listing is built from, copies unseen prompts
 # into `bin/fm-inbox.sh note`, and leaves the session's pending prompts in
@@ -27,16 +27,13 @@
 #
 # `arm` writes state/lavish-dock.check.sh and binds its bytes with
 # fm-check-register.sh, so the watcher dispatches it on its normal
-# FM_CHECK_INTERVAL cadence. `disarm` removes the shim, its trust binding, the
-# report record, and the forwarded-uid cursor.
+# FM_CHECK_INTERVAL cadence.
 #
 # Session Open URLs in queued notes rewrite inner HTTP `:4387` to the HTTPS
 # wrap on `:4389` on the same host. Never emit a `:4387` Open.
 #
 # Mutable bootstrap automatically arms it in the primary human-facing home.
-# The owned Lavish poll adapter also calls `ingest-poll` at its consumption
-# boundary, before the response can disappear from Firstmate. It does not
-# author artifacts, open a browser, or touch Library `:3000`.
+# It does not author artifacts, open a browser, or touch Library `:3000`.
 set -u
 export LC_ALL=C
 
@@ -66,9 +63,6 @@ usage() {
 Usage:
   fm-lavish-dock-check.sh [check]   copy unseen dock prompts into this home's inbox
   fm-lavish-dock-check.sh arm       write and register state/lavish-dock.check.sh
-  fm-lavish-dock-check.sh disarm    remove the registered check and its local state
-  fm-lavish-dock-check.sh ingest-poll <artifact> <response-file>
-                                      copy one consumed poll response into this home's inbox
   fm-lavish-dock-check.sh --help    print this help
 
 Reads lavish-axi session state non-destructively. Never runs `lavish-axi poll`.
@@ -417,20 +411,6 @@ action_check() {
   return 0
 }
 
-action_ingest_poll() {
-  local artifact=${1-} response=${2-} body
-  [ -n "$artifact" ] && [ -f "$response" ] || die_usage "ingest-poll requires an artifact and response file"
-  awk '
-    $0 == "session:" { in_session=1; next }
-    in_session && $0 !~ /^[[:space:]]/ { exit }
-    in_session && /^[[:space:]]+status:[[:space:]]*feedback[[:space:]]*$/ { found=1; exit }
-    END { exit(found ? 0 : 1) }
-  ' "$response" || return 0
-  mkdir -p "$STATE" || return 1
-  body=$(printf 'Lavish dock reply\nBoard: %s\n\n' "$(basename "$artifact")"; cat "$response") || return 1
-  printf '%s\n' "$body" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$INBOX_BIN" note - >/dev/null || return 1
-}
-
 shim_content() {
   local home=$1
   printf '%s\n' \
@@ -552,18 +532,9 @@ action_arm() {
   return 0
 }
 
-action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD" "$SEEN"
-  rm -rf -- "$LOCK"
-  printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
-  return 0
-}
-
 case "${1:-check}" in
   check) action_check ;;
   arm) action_arm ;;
-  disarm) action_disarm ;;
-  ingest-poll) shift; action_ingest_poll "$@" ;;
   -h|--help) usage ;;
   *) die_usage "unknown action: $1" ;;
 esac

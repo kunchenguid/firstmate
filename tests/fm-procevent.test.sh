@@ -7,10 +7,9 @@
 # public commands against the currently published poll shape; no live Lavish
 # server is started.
 #
-# Delivery is deliberately NOT asserted as at-least-once or lossless: the
-# published Lavish poll clears feedback destructively before returning it, so
-# the only durability under test is the runner's own - output that reached the
-# runner is stored before it is announced.
+# The generic runner guarantees only output it captured. The Lavish adapter has
+# an additional narrow recovery contract for matching pending dock prompts in
+# the session store, exercised below at the destructive poll boundary.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -655,6 +654,83 @@ assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+
+# --- pending dock prompts survive destructive poll failure ------------------
+HRECOVERY="$TMP_ROOT/hrecovery"; new_home "$HRECOVERY"
+RECOVERY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-recovery-stub")
+RECOVERY_STORE="$TMP_ROOT/lavish-recovery-store"
+RECOVERY_COUNT="$TMP_ROOT/lavish-recovery-count"
+RECOVERY_ART="$TMP_ROOT/recovery-board.html"
+mkdir -p "$RECOVERY_STORE"
+printf '<h1>recovery</h1>\n' > "$RECOVERY_ART"
+python3 - "$RECOVERY_STORE/state.json" "$RECOVERY_ART" <<'PY'
+import json
+import sys
+
+store, artifact = sys.argv[1:]
+with open(store, "w", encoding="utf-8") as fh:
+    json.dump({"sessions": {"recovery": {
+        "file": artifact,
+        "status": "feedback",
+        "prompts": [{
+            "uid": "",
+            "prompt": "survive destructive poll",
+            "text": "the captain's dock reply",
+            "attachments": [{"path": "/tmp/recovered.png", "mime": "image/png"}],
+        }],
+    }}}, fh)
+PY
+cat > "$RECOVERY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$RECOVERY_COUNT" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$RECOVERY_COUNT"
+python3 - "$LAVISH_AXI_STATE_DIR/state.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+data["sessions"]["recovery"]["prompts"] = []
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+PY
+exit 1
+SH
+chmod +x "$RECOVERY_BIN/lavish-axi"
+export RECOVERY_COUNT LAVISH_AXI_STATE_DIR="$RECOVERY_STORE"
+recovery_id=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$RECOVERY_ART")
+fm_test_track_procevent_home "$HRECOVERY"
+PATH="$RECOVERY_BIN:$PATH" FM_HOME="$HRECOVERY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RECOVERY_ART" >/dev/null
+first_recovery=$(PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" 2>&1)
+assert_contains "$first_recovery" "no-result: $recovery_id" \
+  "a poll failure after clearing the store is not captured as captain feedback"
+[ "$(cat "$RECOVERY_COUNT")" = 1 ] || fail "the destructive poll did not run exactly once"
+[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["sessions"]["recovery"]["prompts"]))' "$RECOVERY_STORE/state.json")" = 0 ] \
+  || fail "the destructive poll fixture did not clear its source prompts"
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 0 ] \
+  || fail "the failed destructive poll created a result before recovery"
+assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
+  "pending dock prompts are retained before destructive polling"
+PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
+[ "$(cat "$RECOVERY_COUNT")" = 1 ] \
+  || fail "recovery polled the already-cleared source again"
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = 1 ] \
+  || fail "the retained dock reply was not captured exactly once"
+RECOVERY_RESULT=$(first_result "$HRECOVERY" "$recovery_id" || true)
+assert_grep 'survive destructive poll' "$RECOVERY_RESULT" \
+  "the recovered result retains the captain's prompt"
+recovery_read=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" read "$RECOVERY_RESULT")
+assert_contains "$recovery_read" "/tmp/recovered.png" \
+  "the recovered presentation retains attachment metadata"
+assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
+  "durable capture retires the recovery snapshot"
+[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 1" || true)" = 1 ] \
+  || fail "the recovered reply did not use exactly one process-event wake"
+FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECOVERY_ART" >/dev/null
+unset RECOVERY_COUNT LAVISH_AXI_STATE_DIR
+pass "pending dock prompts survive destructive poll failure through one wake owner"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
@@ -2489,14 +2565,12 @@ for adapter in remote-reply when; do
 done
 pass "an adapter with no silence verdict keeps announcing every result"
 
-# --- the loss limitation is stated on the public interface ------------------
+# --- durability boundaries are stated on the public interface ---------------
 # Checked through --help, the operator-facing surface, rather than by reading
 # implementation bytes.
 adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
-assert_contains "$adapter_help" "destructively clears" \
-  "the adapter's help states the destructive-source loss limitation"
-assert_contains "$adapter_help" "Never describe" \
-  "the adapter's help forbids an at-least-once or lossless description"
+assert_contains "$adapter_help" "snapshots the matching pending prompts" \
+  "the adapter's help states its narrow pre-poll recovery boundary"
 assert_contains "$adapter_help" "read <result-file>" \
   "the adapter's help publishes the structured read command"
 
@@ -2505,7 +2579,7 @@ assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
-pass "the published interfaces state the loss limitation and claim no lossless delivery"
+pass "the published interfaces state their durability boundaries without claiming exactly-once delivery"
 
 # --- launch pacing and guard startup ----------------------------------------
 

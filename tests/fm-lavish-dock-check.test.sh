@@ -3,9 +3,9 @@
 # check.
 #
 # Dock Send notes must reach this home as a captain-inbox wake without calling
-# `lavish-axi poll`. These cases drive the public check/arm/disarm commands
-# against a scratch home and a fixture session store, plus the owned poll
-# adapter against a fake executable. They never contact a live Lavish server.
+# `lavish-axi poll`. These cases drive the public check/arm commands against a
+# scratch home and a fixture session store. They never contact a live Lavish
+# server.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -89,7 +89,6 @@ test_help_and_usage() {
   expect_code 0 "$rc" "--help must exit 0"
   assert_contains "$out" "check" "--help lists the check action"
   assert_contains "$out" "arm" "--help lists the arm action"
-  assert_contains "$out" "disarm" "--help lists the disarm action"
   assert_contains "$out" "Never runs" "--help says it never polls"
   rc=0
   out=$("$CHECK" bogus 2>&1) || rc=$?
@@ -98,7 +97,7 @@ test_help_and_usage() {
   pass "fm-lavish-dock-check: help and usage plumbing"
 }
 
-test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
+test_arm_writes_and_binds_the_check() {
   local home out
   home=$(make_home arm)
   out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "arm must succeed: $out"
@@ -110,14 +109,7 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
 
   out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "re-arm must succeed: $out"
   assert_contains "$out" "armed" "re-arm stays armed"
-
-  printf '{"schema":"fm-lavish-dock-seen-v2","sessions":{"face":["one"]}}\n' > "$home/state/.lavish-dock-seen"
-  out=$(FM_HOME="$home" "$CHECK" disarm 2>&1) || fail "disarm must succeed: $out"
-  assert_absent "$home/state/lavish-dock.check.sh" "disarm removes the check shim"
-  assert_absent "$home/state/lavish-dock.check-trust" "disarm removes the trust binding"
-  assert_absent "$home/state/.lavish-dock-check" "disarm removes the report record"
-  assert_absent "$home/state/.lavish-dock-seen" "disarm removes the forwarded-uid cursor"
-  pass "fm-lavish-dock-check: arm writes and binds, re-arm is idempotent, disarm removes"
+  pass "fm-lavish-dock-check: arm writes and binds, and re-arm is idempotent"
 }
 
 test_arm_resolves_a_relative_home_into_the_shim() {
@@ -251,37 +243,6 @@ PY
   pass "fm-lavish-dock-check: occurrence cursor, attachments, and Open URL behavior"
 }
 
-test_owned_poll_publishes_consumed_feedback() {
-  local home artifact out note
-  home=$(make_home poll-boundary)
-  artifact="$TMP_ROOT/poll-boundary.html"
-  printf '<!doctype html><title>test</title>\n' > "$artifact"
-  cat > "$FAKEBIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-cat <<'EOF'
-session:
-  file: /tmp/poll-boundary.html
-  status: feedback
-prompts:
-  - uid: ""
-    prompt: consumed while blocked
-    attachments:
-      - path: /tmp/blocked.png
-        mime: image/png
-EOF
-SH
-  chmod +x "$FAKEBIN/lavish-axi"
-  out="$home/poll.txt"
-  FM_HOME="$home" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" poll "$artifact" > "$out" \
-    || fail "owned Lavish poll must return its feedback"
-  assert_contains "$(cat "$out")" "consumed while blocked" "poll output still reaches its worker"
-  note=$(find "$home/state/inbox" -name '*.note' -type f | head -n 1)
-  [ -n "$note" ] || fail "poll consumption must queue a captain inbox note"
-  assert_contains "$(cat "$note")" "consumed while blocked" "the inbox receives feedback consumed by a blocked poll"
-  assert_contains "$(cat "$note")" "/tmp/blocked.png" "the consumed response keeps its attachment path"
-  pass "fm-lavish-dock-check: owned poll publishes consumed feedback"
-}
-
 test_bootstrap_automatically_arms_primary_home() {
   local home out
   home=$(make_home bootstrap)
@@ -319,13 +280,12 @@ test_malformed_store_is_reported_once() {
 }
 
 test_help_and_usage
-test_arm_writes_and_binds_the_check_and_disarm_removes_it
+test_arm_writes_and_binds_the_check
 test_arm_resolves_a_relative_home_into_the_shim
 test_arm_refuses_a_symlink_at_the_shim_path
 test_arm_refuses_without_inbox
 test_pending_dock_note_becomes_an_inbox_wake_without_polling
 test_occurrences_attachments_and_captain_port_text_are_preserved
-test_owned_poll_publishes_consumed_feedback
 test_bootstrap_automatically_arms_primary_home
 test_missing_store_is_silent
 test_malformed_store_is_reported_once

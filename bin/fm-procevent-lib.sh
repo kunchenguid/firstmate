@@ -19,15 +19,14 @@
 # and a captured result with no durable handled acknowledgement remains eligible
 # for bounded re-announcement - including across a restart between publication
 # and handling - until `fm-procevent.sh handled` records it. It proves nothing
-# about the source side of the handoff. In particular the currently published
-# `lavish-axi poll` destructively clears feedback before returning it, so a
-# result lost between that clearing and this runner reading the process output
-# is unrecoverable. A Firstmate wrapper cannot close that window, and marking a
-# result handled says nothing about whether a paired external effect performed
-# before that call actually completed: a crash between the effect and the
-# acknowledgement can still repeat the effect on replay. Never describe this
-# runner as at-least-once, no-loss, or lossless, and never claim generic
-# exactly-once effects from the handled acknowledgement alone.
+# about the source side of the handoff. A source-specific adapter may narrow its
+# own boundary; the Lavish adapter, for example, retains matching pending dock
+# prompts before destructive polling until this runner durably captures a
+# result. Marking a result handled still says nothing about whether a paired
+# external effect performed before that call actually completed: a crash
+# between the effect and the acknowledgement can repeat the effect on replay.
+# Never describe this runner as at-least-once, no-loss, or lossless, and never
+# claim generic exactly-once effects from the handled acknowledgement alone.
 
 # Machine-wide claim root. Homes can share one underlying source store, so the
 # "one owner per canonical source" rule cannot live inside a single home.

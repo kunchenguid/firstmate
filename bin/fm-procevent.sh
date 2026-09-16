@@ -354,6 +354,13 @@ adapter_result_is_silent() {  # <adapter> <result-file>
   "$script" silent "$2" >/dev/null 2>&1
 }
 
+adapter_capture_committed() {  # <adapter> <source-id> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" capture-committed "$2" "$3" >/dev/null 2>&1
+}
+
 # Ask the adapter whether its autohandled results announce themselves through a
 # durable downstream channel of their own (see the announcement-ownership note
 # in the header). Exit 0 is the only declaration; everything else - including a
@@ -1002,6 +1009,9 @@ EOF
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
+  if [ "$extension_owner" -eq 0 ]; then
+    adapter_capture_committed "$adapter" "$id" "$durable" || true
+  fi
 
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
