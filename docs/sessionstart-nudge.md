@@ -7,9 +7,10 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, DSH |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
+DSH reaches the run tier through `UserPromptSubmit` rather than `SessionStart`: its `SessionStart` hook runs detached and lands after the first model request as a user-shaped message, while `UserPromptSubmit` fires before the call and its `additionalContext` is part of it. It has no session-open `source` field, so the digest runs as a first startup and cannot re-emit after a compaction.
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
 The run tier exists because the nudge can only ask.
 An agent can defer an instruction, including when a first-command skill has its own read-only path.

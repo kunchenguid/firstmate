@@ -36,6 +36,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, and AGY are verified only for crewmate and scout work, never a secondmate or primary.
+DeepSeek Harness is verified in the OPPOSITE direction: it is a primary adapter only, and `../../../bin/fm-spawn.sh` refuses it for crewmate, scout and secondmate launches because it exposes no endpoint, interrupt, exit or per-task busy-state control plane - dispatching it would create work nothing could steer, inspect or stop.
 
 ## Detection
 
@@ -95,7 +96,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "muse": "references/harness/muse.md",
     "rovo": "references/harness/rovo.md",
     "omp": "references/harness/omp.md",
-    "agy": "references/harness/agy.md"
+    "agy": "references/harness/agy.md",
+    "dsh": "references/harness/dsh.md"
   }
 }
 ```

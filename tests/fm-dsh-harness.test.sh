@@ -576,6 +576,25 @@ test_dsh_delegation_guard_classifies_real_tool_names() {
   pass "fm-subagent-pretool-check: DSH tool names classify as intended"
 }
 
+test_dsh_is_refused_as_a_crewmate() {
+  local home out rc
+  # dsh has no endpoint, interrupt, exit or busy-state control plane, so a
+  # dispatched worker could not be steered, inspected or stopped. The refusal
+  # must name that property rather than reporting an unknown harness, which
+  # would read as a gap in the launch table.
+  home="$TMP_ROOT/refuse-crew"; mkdir -p "$home/config"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t1 "$home" --harness dsh --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit dsh crewmate must be refused"
+  assert_contains "$out" "verified PRIMARY adapter only" "the explicit refusal did not name the reason"
+  printf 'dsh\n' > "$home/config/crew-harness"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-spawn.sh" t2 "$home" --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a config-resolved dsh crewmate must be refused"
+  assert_contains "$out" "verified PRIMARY adapter only" "the config-resolved refusal did not name the reason"
+  pass "fm-spawn: dsh is refused as a crewmate on both paths"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -605,3 +624,4 @@ test_dsh_job_verdict_tolerates_the_between_cycles_gap
 test_dsh_job_verdict_still_alarms_a_real_lapse
 test_dsh_protocol_states_the_death_window_contract
 test_dsh_delegation_guard_classifies_real_tool_names
+test_dsh_is_refused_as_a_crewmate
