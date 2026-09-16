@@ -244,6 +244,12 @@ The lesson is the reason this section exists: the rebase was clean and **the ada
 Because `bin/fm-session-lock-lib.sh` gained a source dependency, three upstream test fixtures that copy scripts by explicit list needed the new `bin/fm-dsh-lib.sh`; `fm-turnend-guard.test.sh` failed with `fm-session-lock-lib.sh: line 19: .../bin/fm-dsh-lib.sh: No such file or directory`.
 That failure is invisible to the adapter's own suites and appears only when the upstream suites run, so a clean rebase must always be followed by the gates below — never by the adapter's tests alone.
 
+**Second sync, 2026-09-16.** Upstream advanced one more commit (`af1f2ea3`), touching three files on the conflict surface — `AGENTS.md`, `bin/fm-test-run.sh` and `docs/configuration.md` — and the rebase again replayed every commit with zero conflicts.
+The adapter was again not actually fine.
+`bin/fm-test-run.sh` carries a coverage guard that refuses once more than `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT` of the portable-serial lane has no measured duration hint, and adding two test files moved the share from 25 of 173 to 27 of 175 — over the ceiling, failing `tests/fm-test-run.test.sh` for a reason with nothing to do with DSH.
+The fix is the documented refresh: both scripts now carry a measured hint (`fm-dsh-harness.test.sh` 15067 ms, `fm-dsh-live-e2e.test.sh` 143 ms, the latter because the live guard skips without its opt-in).
+A new test file is therefore not finished when it passes; it also has to be weighed, and the guard that says so lives in a suite the adapter does not otherwise run.
+
 The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), and DSH renaming its own tools out from under the delegation guard's stems.
 
 ## Not established, blocked, or out of scope

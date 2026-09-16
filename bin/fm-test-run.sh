@@ -704,6 +704,8 @@ tests/fm-cursor-primary.test.sh 54947
 tests/fm-dispatch-resolve.test.sh 1800
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
+tests/fm-dsh-harness.test.sh 15067
+tests/fm-dsh-live-e2e.test.sh 143
 tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
