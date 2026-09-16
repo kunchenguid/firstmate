@@ -730,7 +730,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   orca_case cleanup-fail
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-cleanup-fail"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-cleanup-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-cleanup-fail","path":"%s"},"terminal":{"handle":"term-cleanup-fail"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
   out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_RM_FAIL=1 \
@@ -741,11 +741,13 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation and abort cleanup fail"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-cleanup-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should attempt helper cleanup before preserving metadata"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-cleanup-fail'$'\x1f''--json' \
+    "Orca spawn should close the implicit terminal when command creation fails"
   assert_present "$state/$id.meta" "failed Orca abort cleanup should preserve metadata"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
-  assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
+  assert_grep "terminal=term-cleanup-fail" "$state/$id.meta" "preserved metadata missing the implicit terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 

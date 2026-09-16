@@ -1025,6 +1025,7 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_FALLBACK_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1130,6 +1131,10 @@ spawn_abort_cleanup() {
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
+    if [ -n "${ORCA_FALLBACK_TERMINAL:-}" ] &&
+      [ "$ORCA_FALLBACK_TERMINAL" != "${ORCA_TERMINAL:-}" ]; then
+      fm_backend_kill orca "$ORCA_FALLBACK_TERMINAL" 2>/dev/null || true
+    fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
@@ -1156,7 +1161,11 @@ spawn_abort_cleanup() {
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            if [ -n "${ORCA_TERMINAL:-}" ]; then
+              echo "terminal=$ORCA_TERMINAL"
+            elif [ -n "${ORCA_FALLBACK_TERMINAL:-}" ]; then
+              echo "terminal=$ORCA_FALLBACK_TERMINAL"
+            fi
           } >"$SPAWN_META_TMP" 2>/dev/null &&
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
