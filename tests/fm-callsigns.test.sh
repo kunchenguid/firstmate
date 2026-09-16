@@ -74,18 +74,53 @@ cat > "$home3/data/backlog.md" <<'EOF'
 - [ ] waiting-task - Waiting Task (repo: sample) (hold: external wait) (hold-kind: external)
 ## Queued
 - [ ] blocked-task - Blocked Task (repo: sample) blocked-by: active-task
-- [ ] input-task - Needs Input (repo: sample) (hold: captain input) (hold-kind: captain)
+- [ ] input-task - Needs Input (repo: sample) (hold: captain input needs a decision about production behavior and careful rollout sequencing) (hold-kind: captain)
 ## Done
 - [x] done-task - Done Task (repo: sample) (done 2026-01-01)
 EOF
 sync "$home3" 40 || fail "status sync failed"
-out=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" --json) || fail "table command failed"
-printf '%s' "$out" | jq -e '
-  map({(.id): .status}) | add
-  | .["blocked-task"] == "blocked"
-    and .["input-task"] == "needs-you"
-    and .["waiting-task"] == "waiting"
-    and .["done-task"] == "done"
-' >/dev/null || fail "status normalization wrong: $out"
-FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" --table | grep -q '| Ref | Name | Status | Current outcome |' || fail "table header missing"
-pass "status normalization and compact table output"
+json_wide=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=120 "$TASKS" --json) || fail "JSON command failed"
+json_narrow=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=40 "$TASKS" --json) || fail "narrow JSON command failed"
+[ "$json_wide" = "$json_narrow" ] || fail "terminal width changed JSON output"
+expected='[
+  {"id":"active-task","ref":"t1","name":"active-task","status":"waiting","outcome":"waiting"},
+  {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","outcome":"waiting"},
+  {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","outcome":"waiting on active-task"},
+  {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","outcome":"captain input needs a decision about production behavior and careful rollout sequencing"},
+  {"id":"done-task","ref":"t5","name":"done-task","status":"done","outcome":"completed"}
+]'
+[ "$(printf '%s' "$json_wide" | jq -Sc .)" = "$(printf '%s' "$expected" | jq -Sc .)" ] \
+  || fail "status normalization or JSON contract changed: $json_wide"
+pass "status normalization and JSON output remain unchanged"
+
+table=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=80 "$TASKS" --table) || fail "table command failed"
+printf '%s\n' "$table" | grep -q '^┌.*┬.*┐$' || fail "top border missing"
+printf '%s\n' "$table" | grep -q '^├.*┼.*┤$' || fail "header border missing"
+printf '%s\n' "$table" | grep -q '^└.*┴.*┘$' || fail "bottom border missing"
+printf '%s\n' "$table" | grep -q 'captain input needs a decision' || fail "wrapped outcome first line missing"
+printf '%s\n' "$table" | grep -q 'about production behavior and' || fail "wrapped outcome continuation missing"
+printf '%s\n' "$table" | grep -q 'careful rollout sequencing' || fail "wrapped outcome final line missing"
+printf '%s\n' "$table" | grep -q '^| Ref |' && fail "Markdown table source leaked"
+printf '%s\n' "$table" | jq -Rsc '
+  split("\n") | map(select(length > 0))
+  | length > 4 and all(.[]; length == 80)
+' >/dev/null || fail "wide table columns are not aligned to 80 cells"
+pass "bordered table aligns columns and wraps current outcomes"
+
+narrow=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=40 "$TASKS" --table) || fail "narrow table command failed"
+printf '%s\n' "$narrow" | jq -Rsc '
+  split("\n") | map(select(length > 0))
+  | length > 4 and all(.[]; length == 40)
+' >/dev/null || fail "narrow table exceeded or underfilled its 40-cell width"
+printf '%s\n' "$narrow" | grep -q '│ Current ' || fail "narrow header was not wrapped inside its cell"
+pass "narrow tables stay aligned within the available width"
+
+home4=$(make_home empty)
+: > "$home4/data/backlog.md"
+empty=$(FM_HOME="$home4" FM_ROOT_OVERRIDE="$ROOT" COLUMNS=50 "$TASKS" --table) || fail "empty table command failed"
+printf '%s\n' "$empty" | jq -Rsc '
+  split("\n") | map(select(length > 0))
+  | length == 4 and all(.[]; length == 50)
+' >/dev/null || fail "empty table did not keep its bordered header"
+printf '%s\n' "$empty" | grep -q '│ Ref ' || fail "empty table header missing"
+pass "empty output remains a proper bordered table"

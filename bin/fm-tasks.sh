@@ -5,12 +5,13 @@
 #        fm-tasks.sh resolve <task-selector>
 # The table consumes the canonical fleet snapshot and never maintains a second
 # current-state list. Reference and name assignments live in private state.
+# Table width follows a positive COLUMNS value, then `tput cols`, then 120;
+# widths below 33 use the smallest aligned layout and may exceed the terminal.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-callsigns-lib.sh
 . "$SCRIPT_DIR/fm-callsigns-lib.sh"
@@ -124,8 +125,70 @@ MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg se
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
-else
-  printf '| Ref | Name | Status | Current outcome |\n'
-  printf '| --- | --- | --- | --- |\n'
-  printf '%s\n' "$MODEL" | jq -r '.[] | "| \(.ref) | \(.name) | \(.status) | \(.outcome) |"'
+  exit 0
 fi
+
+TABLE_WIDTH=${COLUMNS:-}
+case "$TABLE_WIDTH" in
+  ''|*[!0-9]*|0)
+    TABLE_WIDTH=$(tput cols 2>/dev/null || true)
+    case "$TABLE_WIDTH" in ''|*[!0-9]*|0) TABLE_WIDTH=120 ;; esac
+    ;;
+esac
+[ "$TABLE_WIDTH" -ge 33 ] || TABLE_WIDTH=33
+[ "$TABLE_WIDTH" -le 160 ] || TABLE_WIDTH=160
+
+# Four columns need 13 cells for outer/inter-column borders and padding.
+CONTENT_WIDTH=$((TABLE_WIDTH - 13))
+REF_WIDTH=3
+STATUS_WIDTH=9
+NAME_WIDTH=24
+OUTCOME_WIDTH=$((CONTENT_WIDTH - REF_WIDTH - STATUS_WIDTH - NAME_WIDTH))
+while [ "$OUTCOME_WIDTH" -lt 15 ] && [ "$NAME_WIDTH" -gt 4 ]; do
+  NAME_WIDTH=$((NAME_WIDTH - 1))
+  OUTCOME_WIDTH=$((OUTCOME_WIDTH + 1))
+done
+while [ "$OUTCOME_WIDTH" -lt 7 ] && [ "$STATUS_WIDTH" -gt 6 ]; do
+  STATUS_WIDTH=$((STATUS_WIDTH - 1))
+  OUTCOME_WIDTH=$((OUTCOME_WIDTH + 1))
+done
+
+printf '%s\n' "$MODEL" | jq -r \
+  --argjson rw "$REF_WIDTH" \
+  --argjson nw "$NAME_WIDTH" \
+  --argjson sw "$STATUS_WIDTH" \
+  --argjson ow "$OUTCOME_WIDTH" '
+  def pad($text; $width):
+    ($text // "" | tostring) as $text
+    | $text + (" " * ($width - ($text | length)));
+  def wrap($text; $width):
+    ($text // "" | tostring | gsub("^\\s+|\\s+$"; "")) as $text
+    | if ($text | length) <= $width then [$text]
+      else ($text[0:$width] | rindex(" ") // -1) as $break
+      | if $break > 0
+        then [$text[0:$break]] + wrap($text[($break + 1):]; $width)
+        else [$text[0:$width]] + wrap($text[$width:]; $width)
+        end
+      end;
+  def border($left; $middle; $right):
+    $left + ("─" * ($rw + 2)) + $middle
+    + ("─" * ($nw + 2)) + $middle
+    + ("─" * ($sw + 2)) + $middle
+    + ("─" * ($ow + 2)) + $right;
+  def render_row($row):
+    (wrap($row.ref; $rw)) as $refs
+    | (wrap($row.name; $nw)) as $names
+    | (wrap($row.status; $sw)) as $statuses
+    | (wrap($row.outcome; $ow)) as $outcomes
+    | ([$refs, $names, $statuses, $outcomes] | map(length) | max) as $height
+    | range(0; $height) as $line
+    | "│ " + pad($refs[$line]; $rw)
+      + " │ " + pad($names[$line]; $nw)
+      + " │ " + pad($statuses[$line]; $sw)
+      + " │ " + pad($outcomes[$line]; $ow) + " │";
+  border("┌"; "┬"; "┐"),
+  render_row({ref:"Ref", name:"Name", status:"Status", outcome:"Current outcome"}),
+  border("├"; "┼"; "┤"),
+  (.[] | render_row(.)),
+  border("└"; "┴"; "┘")
+'

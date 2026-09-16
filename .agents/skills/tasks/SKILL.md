@@ -10,9 +10,10 @@ metadata:
 
 # tasks
 
-Run `bin/fm-tasks.sh --table` and relay its compact table without inventing another status list.
+Run `bin/fm-tasks.sh --table` and return its stdout verbatim in a plain-text fenced block.
+Do not convert the rendered borders to Markdown table source, tabs, or a prose status list.
 
-When the captain supplies a selector, pass it to `bin/fm-tasks.sh` so the central resolver accepts a canonical task id, a `t1`-`t99` reference, or an unambiguous human name.
+When the captain supplies a selector, pass it to `bin/fm-tasks.sh --table` so the central resolver accepts a canonical task id, a `t1`-`t99` reference, or an unambiguous human name.
 
 Names are separately editable with `bin/fm-tasks.sh name <selector> <lowercase-hyphenated-name>` when the captain explicitly asks to rename one.
 

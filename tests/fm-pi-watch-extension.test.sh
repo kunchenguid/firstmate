@@ -152,6 +152,56 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
+test_pi_tasks_command_preserves_rendered_table() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-tasks-root"
+  home="$TMP_ROOT/pi-tasks-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-tasks.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = t7 ] || { printf 'wrong selector: %s\n' "${1:-}" >&2; exit 2; }
+[ "${COLUMNS:-}" = 50 ] || { printf 'wrong width: %s\n' "${COLUMNS:-unset}" >&2; exit 2; }
+printf '┌─────┐\n│ t7  │\n└─────┘\n'
+SH
+  chmod +x "$repo/bin/fm-tasks.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+let notification = null;
+const pi = {
+  on() {},
+  registerCommand(name, options) {
+    if (name === "tasks") handler = options.handler;
+  },
+  registerTool() {},
+};
+Object.defineProperty(process.stdout, "columns", { value: 52, configurable: true });
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!handler) throw new Error("Pi tasks command was not registered");
+await handler("t7", {
+  mode: "tui",
+  ui: {
+    notify(message, type) {
+      notification = { message, type };
+    },
+  },
+});
+const expected = "┌─────┐\n│ t7  │\n└─────┘";
+if (notification?.message !== expected || notification?.type !== "info") {
+  throw new Error(`rendered table was not returned verbatim: ${JSON.stringify(notification)}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi /tasks must return the rendered table verbatim at its available content width"
+  [ -z "$out" ] || fail "Pi tasks command test printed output: $out"
+  pass "Pi /tasks returns the rendered table without reformatting"
+}
+
 test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
@@ -3975,6 +4025,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_tasks_command_preserves_rendered_table
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

@@ -1117,10 +1117,22 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const taskScript = `${fmRoot}/bin/fm-tasks.sh`;
       const selector = args.trim();
+      const columns = ctx.mode === "tui" && process.stdout.columns
+        ? Math.max(33, process.stdout.columns - 2)
+        : process.env.COLUMNS;
       const result = await runCommandAsync(
         "bash",
         [taskScript, ...(selector ? selector.split(/\s+/) : [])],
-        { cwd: fmRoot, env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state } },
+        {
+          cwd: fmRoot,
+          env: {
+            ...process.env,
+            ...(columns ? { COLUMNS: String(columns) } : {}),
+            FM_HOME: fmHome,
+            FM_ROOT_OVERRIDE: fmRoot,
+            FM_STATE_OVERRIDE: state,
+          },
+        },
       );
       const output = result.stdout.trim() || result.stderr.trim() || "No tasks found.";
       ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
