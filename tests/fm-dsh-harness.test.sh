@@ -595,6 +595,43 @@ test_dsh_is_refused_as_a_crewmate() {
   pass "fm-spawn: dsh is refused as a crewmate on both paths"
 }
 
+test_dsh_refusal_covers_scout_and_secondmate() {
+  local home kind out rc
+  # The refusal is a property of the harness, not of the kind: a scout and a
+  # secondmate need the same absent control plane as a ship. Both kinds resolve
+  # their harness through the same arms, so a kind that skipped the refusal would
+  # stand up an unsteerable worker. Mode flags are omitted: fm-spawn rejects
+  # --mode before harness resolution for non-ship kinds, which would mask the
+  # refusal this case exists to pin.
+  home="$TMP_ROOT/refuse-kinds"; mkdir -p "$home/config"
+  for kind in --scout --secondmate; do
+    rc=0
+    out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "t-${kind#--}" "$home" "$kind" --harness dsh 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$kind with --harness dsh must be refused"
+    assert_contains "$out" "verified PRIMARY adapter only" "$kind did not name the refusal reason"
+  done
+  pass "fm-spawn: dsh is refused for scout and secondmate too"
+}
+
+test_dsh_refusal_is_an_exact_harness_match() {
+  local home out rc
+  # The refusal must fire on the harness NAME dsh and nothing else. A substring
+  # match would also refuse a raw launch command that merely mentions dsh - or a
+  # future harness whose name contains it - and would report a capability gap
+  # where the real failure is an unusable launch command.
+  home="$TMP_ROOT/refuse-exact"; mkdir -p "$home/config"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t1 "$home" --harness dshx --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unknown harness must still fail"
+  assert_contains "$out" "unknown harness" "a near-miss harness name must fall through to the launch-table error"
+  assert_not_contains "$out" "verified PRIMARY adapter only" "a harness merely containing 'dsh' must not get the primary-adapter refusal"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t2 "$home" --mode direct-PR --yolo off 'cd /tmp && dsh-status-helper' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unusable raw launch command must still fail"
+  assert_not_contains "$out" "verified PRIMARY adapter only" "a raw launch command mentioning dsh must not get the primary-adapter refusal"
+  pass "fm-spawn: the dsh refusal matches the harness name exactly"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -625,3 +662,5 @@ test_dsh_job_verdict_still_alarms_a_real_lapse
 test_dsh_protocol_states_the_death_window_contract
 test_dsh_delegation_guard_classifies_real_tool_names
 test_dsh_is_refused_as_a_crewmate
+test_dsh_refusal_covers_scout_and_secondmate
+test_dsh_refusal_is_an_exact_harness_match
