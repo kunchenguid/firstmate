@@ -357,6 +357,8 @@ Before the worktree is returned, teardown concludes the task's own no-mistakes r
 
 ## Optional Relay
 
+The optional private WhatsApp transport is separate from Relay and voice; [WhatsApp setup](whatsapp.md) routes its typed response, idempotent inbox and SQLite owners, with checkpoint-only main availability and no Herdr lifecycle changes.
+
 Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.
 A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
 That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
