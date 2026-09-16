@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Durable ownership of the authority under which a task's merge was accepted.
 #
-# The away-posture record (state/.afk-contract) is resolved only at the merge
-# gate. After a forge accepts the merge, bin/fm-pr-merge.sh persists that answer
-# as:
+# The task's recorded yolo posture is standing merge authority on its own and
+# resolves first, present or absent away-posture record alike; for a task
+# without it the away-posture record (state/.afk-contract) is resolved only at
+# the merge gate. After a forge accepts the merge, bin/fm-pr-merge.sh persists
+# that answer as:
 #   state/<task-id>.merge-authority
 #   fm-merge-authority-v1
 #   <provider>
@@ -54,6 +56,15 @@ fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   FM_MERGE_AUTHORITY=
   FM_MERGE_AUTHORITY_REASON='invalid'
   [ -n "$home" ] && [ -n "$state" ] && [ -n "$meta" ] && [ -n "$id" ] || return 1
+
+  if [ -f "$meta" ]; then
+    yolo=$(grep '^yolo=' "$meta" | tail -1 | cut -d= -f2- || true)
+  fi
+  if [ "$yolo" = on ]; then
+    FM_MERGE_AUTHORITY='yolo'
+    FM_MERGE_AUTHORITY_REASON='granted'
+    return 0
+  fi
 
   if ! fm_afk_contract_present "$state"; then
     FM_MERGE_AUTHORITY='attended'
