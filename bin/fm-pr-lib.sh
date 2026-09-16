@@ -533,6 +533,8 @@ fm_pr_poll_prepare() {
   fi
 }
 
+# The caller holds the task's poll publication lock while publishing this
+# prepared generation, so no registration can name another generation's files.
 fm_pr_poll_publish_prepared() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
@@ -678,15 +680,11 @@ fm_pr_poll_registration_device_shifted() {  # <state> <id> <template>
 
 # Rewrite a device-shifted registration (fm_pr_poll_registration_device_shifted)
 # so it names the live device, changing no other line. The caller holds the
-# task's control lock, which serializes this with every other holder: the
-# watcher's validated check and retirement, teardown, and bin/fm-pr-merge.sh.
-# A direct bin/fm-pr-check.sh re-arm takes no control lock, so the whole proof is
-# repeated just before the rename, which proceeds only while the registration is
-# still the exact file object and bytes first proven. A re-arm landing after
-# that final comparison can have its registration replaced by one naming the
-# previous generation's sidecar and check. No strict validation accepts that
-# pairing, so the poll is refused and reported rather than authenticated, and
-# re-arming repairs it.
+# task's control lock and poll publication lock, which serialize this with the
+# watcher's validated check and retirement, teardown, bin/fm-pr-merge.sh, and
+# direct bin/fm-pr-check.sh publication. The proof is repeated just before the
+# rename, which proceeds only while the registration is still the exact file
+# object and bytes first proven.
 # Success means the strict fm_pr_poll_artifacts_valid accepts the result.
 fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
   local state=$1 id=$2 template=$3 state_device registration tmp reg_hash reg_identity

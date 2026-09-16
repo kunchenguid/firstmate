@@ -2501,6 +2501,7 @@ test_device_renumbered_poll_stays_armed() {
 case " $* " in
   *"task-a.pr-poll-registration "*)
     [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    [ -d "$FM_TEST_POLL_PUBLISH_LOCK" ] || exit 92
     : > "$FM_TEST_REGISTRATION_RENAMED"
     ;;
 esac
@@ -2508,14 +2509,15 @@ exec "$FM_TEST_REAL_MV" "$@"
 SH
   chmod +x "$dir/fakebin/mv"
   set +e
-  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" \
+    FM_TEST_POLL_PUBLISH_LOCK="$state/.pr-poll-publish-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
     FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "re-record watcher failed: $(cat "$dir/watch.err")"
-  [ -e "$dir/registration-renamed" ] || fail "re-record never replaced the registration under the control lock"
+  [ -e "$dir/registration-renamed" ] || fail "re-record never replaced the registration under its locks"
   cmp -s "$original" "$state/task-a.pr-poll-registration" \
     || fail "re-recorded registration differs from the one published on the live device"
   [ "$(file_mode "$state/task-a.pr-poll-registration")" = 600 ] || fail "re-recorded registration is not private"
@@ -2629,58 +2631,123 @@ SH
   pass "a renumbered registration is never re-recorded around a tampered artifact:$exercised, or a pending retirement"
 }
 
-test_device_rerecord_yields_to_concurrent_rearm() {
-  local dir state rc url_a url_b real_mktemp
+start_poll_publish_holder() {  # <dir> <state> <id>
+  local dir=$1 state=$2 id=$3 i
+  PR_POLL_HOLDER_ACQUIRED="$dir/poll-publish-holder-acquired"
+  PR_POLL_HOLDER_RELEASE="$dir/poll-publish-holder-release"
+  PR_POLL_HOLDER_LOCK="$state/.pr-poll-publish-$id.lock"
+  cat > "$dir/poll-publish-holder.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "$FM_TEST_ROOT/bin/fm-wake-lib.sh"
+trap 'fm_lock_release "$FM_TEST_LOCK" || true' EXIT
+fm_lock_acquire_wait "$FM_TEST_LOCK"
+: > "$FM_TEST_ACQUIRED"
+while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.01; done
+SH
+  chmod +x "$dir/poll-publish-holder.sh"
+  FM_TEST_ROOT="$ROOT" FM_TEST_LOCK="$PR_POLL_HOLDER_LOCK" \
+    FM_TEST_ACQUIRED="$PR_POLL_HOLDER_ACQUIRED" FM_TEST_RELEASE="$PR_POLL_HOLDER_RELEASE" \
+    "$dir/poll-publish-holder.sh" &
+  PR_POLL_HOLDER_PID=$!
+  for i in $(seq 1 100); do
+    [ -e "$PR_POLL_HOLDER_ACQUIRED" ] && return 0
+    sleep 0.02
+  done
+  kill "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  wait "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  fail "poll publication holder did not acquire its lock"
+}
+
+release_poll_publish_holder() {
+  : > "$PR_POLL_HOLDER_RELEASE"
+  wait "$PR_POLL_HOLDER_PID" || fail "poll publication holder did not release its lock"
+}
+
+test_device_rerecord_serializes_direct_rearm() {
+  local dir state url_a url_b i rearm_pid
   url_a=https://github.com/o/r/pull/1
   url_b=https://github.com/o/r/pull/2
-  dir=$(make_case device-rerecord-concurrent-rearm)
+  dir=$(make_case device-rerecord-serialized-direct-rearm)
   state="$dir/home/state"
-  real_mktemp=$(command -v mktemp)
   write_poll_meta "$state" task-a "$url_a"
   seed_canonical_poll "$dir" task-a "$url_a"
+  cp "$state/task-a.pr-poll" "$dir/published.pr-poll"
+  cp "$state/task-a.pr-poll-registration" "$dir/published.registration"
+  cp "$state/task-a.check.sh" "$dir/published.check.sh"
+  start_poll_publish_holder "$dir" "$state" task-a
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err" &
+  rearm_pid=$!
+  for i in $(seq 1 100); do
+    if fm_pr_metadata_identity_parse "$state/task-a.meta" && [ "$FM_PR_META_URL" = "$url_b" ]; then
+      break
+    fi
+    sleep 0.02
+  done
+  [ "$FM_PR_META_URL" = "$url_b" ] || fail "direct re-arm did not rewrite metadata before publication"
+  process_is_live_non_zombie "$rearm_pid" || fail "direct re-arm did not wait for poll publication"
+  cmp -s "$dir/published.pr-poll" "$state/task-a.pr-poll" \
+    || fail "blocked direct re-arm replaced the published sidecar"
+  cmp -s "$dir/published.registration" "$state/task-a.pr-poll-registration" \
+    || fail "blocked direct re-arm replaced the published registration"
+  cmp -s "$dir/published.check.sh" "$state/task-a.check.sh" \
+    || fail "blocked direct re-arm replaced the published check"
+  release_poll_publish_holder
+  wait "$rearm_pid" || fail "direct re-arm failed after poll publication release: $(cat "$dir/rearm.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released direct re-arm did not publish a strict poll"
+  [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
+    || fail "released direct re-arm registration does not name its PR"
+  pass "direct re-arm publication waits without replacing an armed poll"
+}
+
+test_device_rerecord_serializes_rerecord() {
+  local dir state original rc watcher_pid i
+  dir=$(make_case device-rerecord-serialized-rerecord)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  cp "$state/task-a.pr-poll-registration" "$dir/registration.original"
   shift_registration_device "$state" task-a
+  original=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
   add_stop_custom_check "$dir"
-  # A direct bin/fm-pr-check.sh re-arm takes no control lock, so land one after
-  # the locked proof and before the registration would be replaced.
-  cat > "$dir/rearm.sh" <<SH
-#!/usr/bin/env bash
-FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \\
-  PATH="$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err"
-printf '%s\n' \$? > "$dir/rearm.rc"
-SH
-  chmod +x "$dir/rearm.sh"
-  cat > "$dir/fakebin/mktemp" <<'SH'
+  cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *".fm-pr-poll-registration."*)
-    if [ ! -e "$FM_TEST_REARM_RAN" ] && [ -d "$FM_TEST_CONTROL_LOCK" ]; then
-      : > "$FM_TEST_REARM_RAN"
-      "$FM_TEST_REARM_SCRIPT"
-    fi
+  *"task-a.pr-poll-registration "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    [ -d "$FM_TEST_POLL_PUBLISH_LOCK" ] || exit 92
+    : > "$FM_TEST_REGISTRATION_RENAMED"
     ;;
 esac
-exec "$FM_TEST_REAL_MKTEMP" "$@"
+exec "$FM_TEST_REAL_MV" "$@"
 SH
-  chmod +x "$dir/fakebin/mktemp"
-  set +e
-  FM_TEST_REARM_RAN="$dir/rearm-ran" FM_TEST_REARM_SCRIPT="$dir/rearm.sh" \
-    FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MKTEMP="$real_mktemp" \
+  chmod +x "$dir/fakebin/mv"
+  start_poll_publish_holder "$dir" "$state" task-a
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" \
+    FM_TEST_POLL_PUBLISH_LOCK="$state/.pr-poll-publish-task-a.lock" \
+    FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" FM_TEST_REAL_MV="$REAL_MV" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "concurrent re-arm watcher failed: $(cat "$dir/watch.err")"
-  [ -e "$dir/rearm-ran" ] || fail "concurrent re-arm never landed inside the re-record"
-  [ "$(cat "$dir/rearm.rc")" -eq 0 ] || fail "concurrent re-arm failed: $(cat "$dir/rearm.err")"
-  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "re-record clobbered a concurrent re-arm"
-  [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
-    || fail "registration no longer names the concurrent re-arm"
-  grep -F 'PR poll identity for task-a was not re-recorded' "$state/.watch-triage.log" >/dev/null \
-    || fail "re-record did not stand down for the concurrent re-arm"
-  grep -F "pr view $url_b --json state" "$dir/gh.log" >/dev/null \
-    || fail "watcher did not poll the concurrently re-armed PR in the same cycle"
-  ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 || fail "stood-down re-record left a staged registration"
-  pass "a re-record stands down for a direct re-arm that lands between its proof and its rename"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  for i in $(seq 1 100); do
+    [ -d "$state/.control-task-a.lock" ] && break
+    sleep 0.02
+  done
+  [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record"
+  process_is_live_non_zombie "$watcher_pid" || fail "watcher did not wait for poll publication"
+  [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \
+    || fail "blocked watcher rewrote a device-shifted registration"
+  [ ! -e "$dir/registration-renamed" ] || fail "blocked watcher renamed the registration"
+  release_poll_publish_holder
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "released watcher re-record failed: $(cat "$dir/watch.err")"
+  [ -e "$dir/registration-renamed" ] || fail "released watcher did not replace the registration"
+  cmp -s "$dir/registration.original" "$state/task-a.pr-poll-registration" \
+    || fail "released watcher did not restore the live-device registration"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released watcher did not strictly authenticate the poll"
+  pass "device re-record publication waits without rewriting its registration"
 }
 
 test_parser_matrix
@@ -2713,7 +2780,8 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
-test_device_rerecord_yields_to_concurrent_rearm
+test_device_rerecord_serializes_direct_rearm
+test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
