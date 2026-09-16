@@ -119,6 +119,9 @@ git -C "$PARENT/projects/alpha" add README.md
 git -C "$PARENT/projects/alpha" commit -qm init
 git -C "$PARENT/projects/alpha" remote add origin "file://$TMP_ROOT/alpha.git"
 git -C "$PARENT/projects/alpha" push -q -u origin main
+# Point the bare origin's HEAD at the branch that was actually pushed, so a
+# clone of it checks out a real working tree instead of an empty one.
+git --git-dir="$TMP_ROOT/alpha.git" symbolic-ref HEAD refs/heads/main
 cat > "$PARENT/data/projects.md" <<EOF
 - alpha [direct-PR] - alpha project (added 2026-08-02)
 EOF
@@ -208,6 +211,15 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
   exit 0
 fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
+  migration-launch-fail:fm-remote-secondmate-control.sh:*)
+    if [ "$_command_action" = launch ]; then exit 1; fi
+    ;;
+  migration-launch-unknown:fm-remote-secondmate-control.sh:*)
+    if [ "$_command_action" = launch ]; then "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255; fi
+    ;;
+  migration-stage-unknown:fm-remote-home-provision.sh:*)
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255
+    ;;
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
     printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -311,6 +323,296 @@ seed_env() {
   FM_FAKE_DOCTOR_REPAIRED="$TMP_ROOT/doctor.repaired" \
   "$@"
 }
+
+# Migration uses the same real transport/provisioning/spawn owners and the
+# stateful Herdr fixture, never the runner's real sessions or remote accounts.
+if [ "${FM_TEST_MIGRATION_ONLY:-0}" = 1 ]; then
+  # <id> [<project-delivery-mode>]: a source home is a real firstmate checkout
+  # carrying durable records, an excluded credential set, and optionally one
+  # registered project clone whose origin the remote host must clone for itself.
+  migration_source() {
+    local id=$1 mode=${2:-} source="$TMP_ROOT/source-$1"
+    git clone -q "$REMOTE_ROOT" "$source" || fail 'source clone failed'
+    mkdir -p "$source/data/report" "$source/state/inbox" "$source/config" "$source/projects" "$PARENT/data/$id"
+    if [ -n "$mode" ]; then
+      git clone -q "file://$TMP_ROOT/alpha.git" "$source/projects/alpha" || fail 'source project clone failed'
+      printf -- '- alpha [%s] - alpha project (added 2026-08-02)\n' "$mode" > "$source/data/projects.md"
+    fi
+    printf '%s\n' "$id" > "$source/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$PARENT" > "$source/.fm-secondmate-parent"
+    printf 'Persistent charter. Replies: %s/state/%s.status; steer: %s/state/%s.inbox\nFor posterity: this mate was first set up under %s and that is where its early reports were written.\n' \
+      "$PARENT" "$id" "$PARENT" "$id" "$source" > "$source/data/charter.md"
+    cp "$source/data/charter.md" "$PARENT/data/$id/brief.md"
+    printf '## In flight\n\n## Queued\n\n- [ ] preserve - Open decision\n  A durable unlanded record.\n\n## Done\n' > "$source/data/backlog.md"
+    printf 'memory\000binary-safe\n' > "$source/data/learnings.md"
+    printf 'report with trailing blank lines\n\n\n' > "$source/data/report/report.md"
+    printf 'pending note\n' > "$source/state/inbox/note.md"
+    printf 'needs-decision [key=old]: preserved historical event\n' > "$source/state/old.status"
+    printf 'codex\n' > "$source/config/crew-harness"
+    printf 'secret-value-never-transfer\n' > "$source/config/cmux-socket-password"
+    printf 'secret-value-never-transfer\n' > "$source/.env"
+    mkdir "$source/data/credentials"
+    printf 'secret-value-never-transfer\n' > "$source/data/credentials/token"
+    printf -- '- %s - Persistent responsibility (home: %s; scope: exact selected work; projects: ; added 2026-08-02)\n' "$id" "$source" >> "$PARENT/data/secondmates.md"
+    printf 'window=fm-remote:missing\nbackend=herdr\nherdr_session=fm-remote\nherdr_pane_id=missing\nherdr_workspace_id=missing-workspace\nherdr_tab_id=missing-tab\nendpoint_task_id=%s\nharness=codex\nkind=secondmate\nhome=%s\nworktree=%s\nproject=%s\n' "$id" "$source" "$source" "$REMOTE_ROOT" > "$PARENT/state/$id.meta"
+  }
+  migrate() {
+    local id=$1
+    PATH="$REMOTE_ROOT/bin:$PATH" remote_env "$ROOT/bin/fm-remote-home-seed.sh" --migrate "$id" \
+      "$TMP_ROOT/source-$id" remote-mac "$REMOTE_ROOT" "$TMP_ROOT/migrated-$id"
+  }
+  migration_source keep-local
+  cp "$PARENT/state/keep-local.meta" "$TMP_ROOT/sibling.meta"
+  cp "$TMP_ROOT/source-keep-local/data/backlog.md" "$TMP_ROOT/sibling.backlog"
+  migration_source move-work
+  printf 'kind=ship\n' > "$TMP_ROOT/source-move-work/state/child.meta"
+  if migrate move-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted child work'; fi
+  assert_grep 'child work records remain' "$TMP_ROOT/migrate.out" 'missing child refusal'
+  assert_absent "$TMP_ROOT/migrated-move-work" 'child refusal created remote home'
+  assert_absent "$TMP_ROOT/source-move-work/.fm-home-migration" 'child refusal froze source'
+  rm "$TMP_ROOT/source-move-work/state/child.meta"
+  # The remaining stopped-home preconditions refuse on the same terms: a home
+  # that is still supervising, still away, or still a parent cannot be moved.
+  # A session lock names a harness process, so hold one: a lock carrying any
+  # other live pid is correctly read as stale and must not block a migration.
+  # A harness-named argv[0] is what both platforms can see - macOS reports it as
+  # the command name and procps exposes it as argv[0] - and it needs no binary
+  # copy, which macOS refuses to execute once its signature no longer matches.
+  bash -c 'exec -a codex sleep 600' &
+  harness_pid=$!
+  printf '%s\n' "$harness_pid" > "$TMP_ROOT/source-move-work/state/.lock"
+  if migrate move-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted a live session'; fi
+  assert_grep 'source session is not stopped' "$TMP_ROOT/migrate.out" 'missing live-session refusal'
+  kill "$harness_pid" 2>/dev/null || true
+  wait "$harness_pid" 2>/dev/null || true
+  rm "$TMP_ROOT/source-move-work/state/.lock"
+  printf 'away\n' > "$TMP_ROOT/source-move-work/state/.afk"
+  if migrate move-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted an away home'; fi
+  assert_grep 'leave away/quiet mode before migration' "$TMP_ROOT/migrate.out" 'missing away-posture refusal'
+  rm "$TMP_ROOT/source-move-work/state/.afk"
+  printf -- '- child - A nested route (home: /nowhere; scope: none; projects: ; added 2026-08-02)\n' \
+    > "$TMP_ROOT/source-move-work/data/secondmates.md"
+  if migrate move-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted a home with nested routes'; fi
+  assert_grep 'nested secondmate routes remain' "$TMP_ROOT/migrate.out" 'missing nested-route refusal'
+  rm "$TMP_ROOT/source-move-work/data/secondmates.md"
+  assert_absent "$TMP_ROOT/migrated-move-work" 'a refused precondition still provisioned the remote home'
+  assert_absent "$TMP_ROOT/source-move-work/.fm-home-migration" 'a refused precondition still froze the source'
+  mkdir -p "$PARENT/state/move-work.inbox/handled" "$PARENT/state/pending-replies"
+  printf 'schema=fm-task-inbox.v1\n\nrequest corr=0123456789abcdef\n' > "$PARENT/state/move-work.inbox/001.msg"
+  printf 'prior handled request\n' > "$PARENT/state/move-work.inbox/handled/000.msg"
+  printf 'task_id=move-work\nphase=resolved\n' > "$PARENT/state/pending-replies/0123456789abcdef"
+  cp "$PARENT/state/pending-replies/0123456789abcdef" "$TMP_ROOT/correlation.before"
+  if FM_FAKE_SSH_MODE=doctor-human migrate move-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration bypassed doctor'; fi
+  assert_grep 'check gui-session=human:' "$TMP_ROOT/migrate.out" "doctor gap was hidden: $(cat "$TMP_ROOT/migrate.out")"
+  assert_no_grep 'doctor-human --fix' "$DOCTOR_LOG" 'migration repaired the real-host boundary implicitly'
+  assert_absent "$TMP_ROOT/migrated-move-work" 'unready host was provisioned'
+  assert_grep 'home: ' "$PARENT/data/secondmates.md" 'unready migration removed local route'
+  rc=0
+  FM_FAKE_SSH_MODE=migration-stage-unknown migrate move-work > "$TMP_ROOT/migrate.out" 2>&1 || rc=$?
+  [ "$rc" = 255 ] || fail "staging unknown was not SSH255: $(cat "$TMP_ROOT/migrate.out")"
+  assert_present "$TMP_ROOT/migrated-move-work/data/backlog.md" "unknown stage lost remote data: $(cat "$TMP_ROOT/migrate.out")"
+  assert_grep 'move-work - Persistent responsibility (home:' "$PARENT/data/secondmates.md" 'unknown staging switched live route'
+  assert_absent "$TMP_ROOT/migrated-move-work/state/parent-route/move-work.meta" 'unknown staging launched an agent'
+  # The parent keeps steering a stopped mate between attempts. A steer queued
+  # after the first snapshot is real work the rerun has to carry across, and the
+  # watcher bookkeeping its re-ring ladder writes beside it is ordinary inbox
+  # furniture the rerun has to ignore. Neither may wedge the migration.
+  printf 'schema=fm-task-inbox.v1\n\nlater request\n' > "$PARENT/state/move-work.inbox/002.msg"
+  printf '001.msg\t1\t1756000000\n' > "$PARENT/state/move-work.inbox/.ring-state"
+  printf '001.msg\n' > "$PARENT/state/move-work.inbox/.escalated"
+  : > "$PARENT/state/move-work.inbox/.staging.Ab3xZ9"
+  : > "$PARENT/state/move-work.inbox/.dedup.Cd4yW1"
+  out=$(migrate move-work 2>&1) || fail "migration recovery failed: $out"
+  assert_grep 'move-work - Persistent responsibility (host:' "$PARENT/data/secondmates.md" 'successful migration did not switch route'
+  for path in data/backlog.md data/learnings.md data/report/report.md state/inbox/note.md; do
+    cmp -s "$TMP_ROOT/source-move-work/$path" "$TMP_ROOT/migrated-move-work/$path" || fail "durable bytes changed: $path"
+  done
+  cmp -s "$TMP_ROOT/source-move-work/state/old.status" "$TMP_ROOT/migrated-move-work/.fm-migration/state/old.status" || fail 'unlanded state evidence lost'
+  cmp -s "$PARENT/state/move-work.inbox/001.msg" "$TMP_ROOT/migrated-move-work/state/parent-route/move-work.inbox/001.msg" || fail 'pending steer bytes/correlation lost'
+  cmp -s "$PARENT/state/move-work.inbox/002.msg" "$TMP_ROOT/migrated-move-work/state/parent-route/move-work.inbox/002.msg" \
+    || fail 'a steer queued after the first snapshot did not cross on the rerun'
+  for artifact in .ring-state .escalated .staging.Ab3xZ9 .dedup.Cd4yW1; do
+    assert_absent "$TMP_ROOT/migrated-move-work/state/parent-route/move-work.inbox/$artifact" \
+      'watcher inbox bookkeeping was transferred as a durable record'
+  done
+  cmp -s "$TMP_ROOT/correlation.before" "$PARENT/state/pending-replies/0123456789abcdef" || fail 'parent correlation changed'
+  cmp -s "$TMP_ROOT/source-move-work/data/charter.md" "$TMP_ROOT/migrated-move-work/.fm-migration/original-charter.md" || fail 'original charter lost'
+  # The active charter re-points exactly the two live parent addresses and is
+  # byte-identical everywhere else, so prose naming the old home as history
+  # survives the move unrewritten.
+  sed -e "s#$PARENT/state/move-work.status#$TMP_ROOT/migrated-move-work/state/parent-replies.status#g" \
+      -e "s#$PARENT/state/move-work.inbox#$TMP_ROOT/migrated-move-work/state/parent-route/move-work.inbox#g" \
+      "$TMP_ROOT/source-move-work/data/charter.md" > "$TMP_ROOT/charter.expected"
+  cmp -s "$TMP_ROOT/charter.expected" "$TMP_ROOT/migrated-move-work/data/charter.md" \
+    || fail 'the active charter re-points more or less than the two parent addresses'
+  grep -q "$TMP_ROOT/source-move-work" "$TMP_ROOT/migrated-move-work/data/charter.md" \
+    || fail 'charter prose naming the old home as history was rewritten'
+  for path in .env config/cmux-socket-password data/credentials; do
+    assert_absent "$TMP_ROOT/migrated-move-work/$path" 'credential transferred'
+    assert_present "$TMP_ROOT/source-move-work/$path" 'excluded credential removed locally'
+  done
+  if FM_HOME="$TMP_ROOT/source-move-work" "$ROOT/bin/fm-lock.sh" > "$TMP_ROOT/frozen.out" 2>&1; then fail 'archive acquired session'; fi
+  assert_grep 'frozen migration archive' "$TMP_ROOT/frozen.out" 'archive not protected'
+  if FM_HOME="$TMP_ROOT/source-move-work" "$ROOT/bin/fm-spawn.sh" unsafe --secondmate > "$TMP_ROOT/frozen.out" 2>&1; then fail 'archive spawned work'; fi
+  assert_grep 'frozen migration archive' "$TMP_ROOT/frozen.out" 'archive dispatch not protected'
+  assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/move-work.meta" 'migration did not launch on fm-remote'
+  [ -z "$(find "$TMP_ROOT" -maxdepth 1 -name '.fm-migration-move-work.*' -print)" ] \
+    || fail 'a published migration left a duplicate of the durable records staged outside the home'
+  pass 'migration refuses children and doctor gaps, converges a rerun that finds new steering, preserves exact durable bytes and correlations, excludes secrets, and relaunches the same identity'
+
+  migration_source fail-work
+  if FM_FAKE_SSH_MODE=migration-launch-fail migrate fail-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'failed launch reported migrated'; fi
+  assert_grep 'original route restored' "$TMP_ROOT/migrate.out" "known failure did not roll back: $(cat "$TMP_ROOT/migrate.out")"
+  assert_grep 'fail-work - Persistent responsibility (home:' "$PARENT/data/secondmates.md" 'rollback did not restore local route'
+  cmp -s "$PARENT/data/fail-work/migration/meta.before" "$PARENT/state/fail-work.meta" || fail 'rollback did not restore endpoint records'
+  assert_present "$TMP_ROOT/source-fail-work/.fm-home-migration" 'rollback allowed unsafe local restart'
+  assert_present "$TMP_ROOT/migrated-fail-work/data/backlog.md" 'rollback discarded remote durable data'
+  # The published home is the newer copy once a placement exists on the host, so
+  # a rerun after the rollback retries the launch and must not re-land the frozen
+  # source's older records over it, even with steering queued since.
+  printf -- '- [ ] landed on the host after the move\n' >> "$TMP_ROOT/migrated-fail-work/data/backlog.md"
+  printf 'memory written on the host\n' > "$TMP_ROOT/migrated-fail-work/data/learnings.md"
+  printf 'report written on the host\n' > "$TMP_ROOT/migrated-fail-work/data/report/report.md"
+  printf 'note written on the host\n' > "$TMP_ROOT/migrated-fail-work/state/inbox/note.md"
+  mkdir -p "$PARENT/state/fail-work.inbox"
+  printf 'schema=fm-task-inbox.v1\n\nsteer queued after the rollback\n' > "$PARENT/state/fail-work.inbox/001.msg"
+  cp -R "$TMP_ROOT/migrated-fail-work" "$TMP_ROOT/remote-before-rerun"
+  out=$(migrate fail-work 2>&1) || fail "the rerun after a rollback did not converge: $out"
+  for path in data/backlog.md data/learnings.md data/report/report.md state/inbox/note.md; do
+    cmp -s "$TMP_ROOT/remote-before-rerun/$path" "$TMP_ROOT/migrated-fail-work/$path" \
+      || fail "the rerun after a rollback re-landed the frozen source over the published home: $path"
+  done
+  assert_grep 'fail-work - Persistent responsibility (host:' "$PARENT/data/secondmates.md" \
+    'the rerun after a rollback did not re-publish the remote route'
+  pass 'known launch failure restores route while preserving both stopped copies, and its rerun retries the launch without re-landing records'
+
+  migration_source unknown-work
+  rc=0
+  FM_FAKE_SSH_MODE=migration-launch-unknown migrate unknown-work > "$TMP_ROOT/migrate.out" 2>&1 || rc=$?
+  [ "$rc" = 255 ] || fail "unknown launch did not retain SSH255: $(cat "$TMP_ROOT/migrate.out")"
+  assert_grep 'unknown-work - Persistent responsibility (host:' "$PARENT/data/secondmates.md" 'unknown launch rolled back route'
+  # Count the endpoints that EXIST, not the creations: recovering a pane that
+  # died closes the old one before launching, so only a genuine duplicate leaves
+  # the fleet holding one more endpoint than it did before the rerun.
+  endpoints=$(jq '.tabs | length' "$HERDR_STATE")
+  out=$(migrate unknown-work 2>&1) || fail "unknown launch reconciliation failed: $out"
+  [ "$(jq '.tabs | length' "$HERDR_STATE")" = "$endpoints" ] \
+    || fail "unknown recovery left a duplicate endpoint: $endpoints -> $(jq '.tabs | length' "$HERDR_STATE")"
+  cmp -s "$TMP_ROOT/sibling.meta" "$PARENT/state/keep-local.meta" || fail 'migration touched local sibling endpoint'
+  cmp -s "$TMP_ROOT/sibling.backlog" "$TMP_ROOT/source-keep-local/data/backlog.md" || fail 'migration touched local sibling home'
+  assert_grep 'keep-local - Persistent responsibility (home:' "$PARENT/data/secondmates.md" 'migration moved an unselected sibling'
+  pass 'unknown launch preserves remote placement and converges without duplicates or touching the local sibling'
+
+  migration_source local-project local-only
+  if migrate local-project > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration moved a local-only project'; fi
+  assert_grep 'project alpha cannot be remote: local-only' "$TMP_ROOT/migrate.out" \
+    "local-only project was not refused: $(cat "$TMP_ROOT/migrate.out")"
+  assert_absent "$TMP_ROOT/migrated-local-project" 'refused local-only project was provisioned'
+  assert_grep 'local-project - Persistent responsibility (home:' "$PARENT/data/secondmates.md" \
+    'local-only refusal switched the route'
+  assert_absent "$TMP_ROOT/source-local-project/.fm-home-migration" 'local-only refusal left the source frozen'
+  assert_absent "$PARENT/data/local-project/migration" 'local-only refusal retained its journal'
+
+  # A home the command refuses locally must stay usable: the refusal names what
+  # it could not carry, and the archive guard that stops a frozen home starting
+  # a session must not be left behind by a migration that never staged anything.
+  # The ordinary remote job ceiling is 1 MiB, and a mate carrying real reports
+  # and memory packs well past it. Move one whose durable records exceed that
+  # ceiling to prove the raised migration bound holds on both sides of the
+  # transport - the staging side and the worker that runs the staged job.
+  migration_source big-work
+  yes 'a durable line of memory that pushes this record past the ordinary remote job ceiling' \
+    | head -c 1572864 > "$TMP_ROOT/source-big-work/data/learnings.md"
+  [ "$(LC_ALL=C wc -c < "$TMP_ROOT/source-big-work/data/learnings.md" | tr -d ' ')" -gt 1048576 ] \
+    || fail 'the oversized fixture record is not above the ordinary remote job ceiling'
+  out=$(migrate big-work 2>&1) || fail "a migration past the ordinary job ceiling failed: $out"
+  cmp -s "$TMP_ROOT/source-big-work/data/learnings.md" "$TMP_ROOT/migrated-big-work/data/learnings.md" \
+    || fail 'the oversized durable record did not cross byte-exact'
+  cmp -s "$TMP_ROOT/source-big-work/data/backlog.md" "$TMP_ROOT/migrated-big-work/data/backlog.md" \
+    || fail 'the rest of the oversized snapshot did not cross byte-exact'
+  assert_grep 'big-work - Persistent responsibility (host:' "$PARENT/data/secondmates.md" \
+    'the oversized migration did not switch the route'
+  assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/big-work.meta" \
+    'the oversized migration did not launch on fm-remote'
+  pass 'a snapshot past the ordinary remote job ceiling stages, reaches the worker, and completes'
+
+  # Records only ever arrive or change while the source is frozen, so a snapshot
+  # that has stopped carrying one the host already holds is a signal, not a
+  # deletion instruction: it is refused by name and the host keeps its bytes.
+  migration_source drop-work
+  rc=0
+  FM_FAKE_SSH_MODE=migration-stage-unknown migrate drop-work > "$TMP_ROOT/migrate.out" 2>&1 || rc=$?
+  [ "$rc" = 255 ] || fail "staging unknown was not SSH255: $(cat "$TMP_ROOT/migrate.out")"
+  assert_present "$TMP_ROOT/migrated-drop-work/data/report/report.md" \
+    "unknown staging did not publish the remote home: $(cat "$TMP_ROOT/migrate.out")"
+  cp "$TMP_ROOT/source-drop-work/data/report/report.md" "$TMP_ROOT/report.published"
+  rm "$TMP_ROOT/source-drop-work/data/report/report.md"
+  if migrate drop-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'a snapshot that drops a published record was accepted'; fi
+  assert_grep 'data/report/report.md' "$TMP_ROOT/migrate.out" \
+    "the refusal did not name the dropped record: $(cat "$TMP_ROOT/migrate.out")"
+  cmp -s "$TMP_ROOT/report.published" "$TMP_ROOT/migrated-drop-work/data/report/report.md" \
+    || fail 'the refused rerun changed the published home instead of leaving it alone'
+  assert_grep 'drop-work - Persistent responsibility (home:' "$PARENT/data/secondmates.md" \
+    'the refused rerun switched the route'
+  printf 'report rewritten before the next attempt\n' > "$TMP_ROOT/source-drop-work/data/report/report.md"
+  out=$(migrate drop-work 2>&1) || fail "a rerun that only changes record bytes did not converge: $out"
+  cmp -s "$TMP_ROOT/source-drop-work/data/report/report.md" "$TMP_ROOT/migrated-drop-work/data/report/report.md" \
+    || fail 'a rerun that only changes record bytes did not re-land them'
+  assert_grep 'drop-work - Persistent responsibility (host:' "$PARENT/data/secondmates.md" \
+    'the converged rerun did not switch the route'
+  pass 'a rerun that drops a published record is refused by name while one that only changes bytes converges'
+
+  migration_source guard-work
+  lock_session() {
+    FM_HOME="$TMP_ROOT/source-guard-work" FM_STATE_OVERRIDE="$TMP_ROOT/source-guard-work/state" \
+      bash -c 'exec -a codex bash "$0"' "$ROOT/bin/fm-lock.sh"
+  }
+  printf 'x=1\n' > "$TMP_ROOT/source-guard-work/config/x-mode.env"
+  if migrate guard-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted an unclassifiable config file'; fi
+  assert_grep 'unclassified config: config/x-mode.env' "$TMP_ROOT/migrate.out" \
+    "the refusal did not name the config file it could not carry: $(cat "$TMP_ROOT/migrate.out")"
+  assert_absent "$TMP_ROOT/source-guard-work/.fm-home-migration" 'an unclassifiable config file froze the source'
+  assert_absent "$PARENT/data/guard-work/migration" 'an unclassifiable config file left a migration journal'
+  lock_session > "$TMP_ROOT/lock.out" 2>&1 || fail "the refused home can no longer start a session: $(cat "$TMP_ROOT/lock.out")"
+  rm "$TMP_ROOT/source-guard-work/state/.lock" "$TMP_ROOT/source-guard-work/config/x-mode.env"
+  # The same holds for a refusal that lands after the freeze: nothing has been
+  # staged on the host yet, so the freeze and its journal are unwound.
+  mkdir -p "$PARENT/state/guard-work.inbox"
+  printf 'not a durable record\n' > "$PARENT/state/guard-work.inbox/scratch"
+  if migrate guard-work > "$TMP_ROOT/migrate.out" 2>&1; then fail 'migration accepted an unclassified inbox artifact'; fi
+  assert_grep 'unclassified inbox artifact: scratch' "$TMP_ROOT/migrate.out" \
+    "the snapshot refusal did not name the artifact: $(cat "$TMP_ROOT/migrate.out")"
+  assert_absent "$TMP_ROOT/migrated-guard-work" 'a refused migration provisioned the remote home'
+  assert_absent "$TMP_ROOT/source-guard-work/.fm-home-migration" 'a refusal before any remote staging left the source frozen'
+  assert_absent "$PARENT/data/guard-work/migration" 'a refusal before any remote staging retained its journal'
+  assert_grep 'guard-work - Persistent responsibility (home:' "$PARENT/data/secondmates.md" 'a refused migration switched the route'
+  lock_session > "$TMP_ROOT/lock.out" 2>&1 || fail "an unwound refusal left the home unable to start: $(cat "$TMP_ROOT/lock.out")"
+  rm "$TMP_ROOT/source-guard-work/state/.lock" "$PARENT/state/guard-work.inbox/scratch"
+  pass 'a local refusal names its cause and leaves the source unfrozen and startable'
+
+  migration_source project-work direct-PR
+  alpha_head=$(git -C "$TMP_ROOT/source-project-work/projects/alpha" rev-parse HEAD) \
+    || fail 'source project clone has no commit to compare against'
+  assert_present "$TMP_ROOT/source-project-work/projects/alpha/README.md" \
+    'source project clone has no working tree to distinguish from a cloned one'
+  printf 'uncommitted local edit\n' > "$TMP_ROOT/source-project-work/projects/alpha/scratch.txt"
+  out=$(migrate project-work 2>&1) || fail "project migration failed: $out"
+  assert_present "$TMP_ROOT/migrated-project-work/projects/alpha/README.md" \
+    'the remote home did not clone the registered project origin'
+  assert_absent "$TMP_ROOT/migrated-project-work/projects/alpha/scratch.txt" \
+    'the local project working tree was copied instead of cloned from origin'
+  migrated_head=$(git -C "$TMP_ROOT/migrated-project-work/projects/alpha" rev-parse HEAD) \
+    || fail 'the cloned project has no commit'
+  [ "$migrated_head" = "$alpha_head" ] \
+    || fail "the cloned project does not carry the registered origin commit: $migrated_head vs $alpha_head"
+  assert_present "$TMP_ROOT/source-project-work/projects/alpha/scratch.txt" \
+    'migration disturbed the local project working tree'
+  cmp -s "$TMP_ROOT/source-project-work/data/projects.md" "$TMP_ROOT/migrated-project-work/data/projects.md" \
+    || fail 'the project registry did not survive migration byte-exact'
+  pass 'migration clones registered project origins on the host and refuses a local-only project'
+  echo 'ALL TESTS PASSED'
+  exit 0
+fi
 
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH

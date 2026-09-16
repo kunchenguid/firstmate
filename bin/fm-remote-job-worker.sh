@@ -677,7 +677,7 @@ worker_capture_output() { # <fifo> <destination>
 }
 
 worker_run_job() { # <account-home> <job-dir>
-  local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining
+  local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining stdin_limit
   local stdout_pipe stderr_pipe stdout_reader stderr_reader preemptible=0
   local -a argv child_env
   root=$(worker_read_text "$job" root 8192) || { worker_publish_result "$job" 126; return; }
@@ -691,13 +691,14 @@ worker_run_job() { # <account-home> <job-dir>
   [ -f "$root/AGENTS.md" ] && [ ! -L "$root/AGENTS.md" ] &&
     [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || { worker_publish_result "$job" 126; return; }
   fm_remote_job_regular_bounded "$job/argv" "$FM_REMOTE_JOB_MAX_BYTES" || { worker_publish_result "$job" 126; return; }
-  fm_remote_job_regular_bounded "$job/stdin" "$FM_REMOTE_JOB_MAX_BYTES" || { worker_publish_result "$job" 126; return; }
-  deadline=$(fm_remote_job_read_deadline "$job") || { worker_publish_result "$job" 126; return; }
-  remaining=$((deadline - $(date +%s)))
-  [ "$remaining" -gt 0 ] || { worker_publish_result "$job" 124; return; }
   argv=()
   while IFS= read -r -d '' command; do argv+=("$command"); done < "$job/argv"
   [ "${#argv[@]}" -ge 1 ] || { worker_publish_result "$job" 126; return; }
+  stdin_limit=$(fm_remote_job_stdin_limit "${argv[0]}" "${argv[1]:-}")
+  fm_remote_job_regular_bounded "$job/stdin" "$stdin_limit" || { worker_publish_result "$job" 126; return; }
+  deadline=$(fm_remote_job_read_deadline "$job") || { worker_publish_result "$job" 126; return; }
+  remaining=$((deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || { worker_publish_result "$job" 124; return; }
   command=${argv[0]}
   case "$command" in fm-*.sh) ;; *) worker_publish_result "$job" 126; return ;; esac
   case "$command" in */*|*..*) worker_publish_result "$job" 126; return ;; esac

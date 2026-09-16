@@ -408,6 +408,10 @@ resolve_directory_input() {
 }
 
 FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+if [ -e "$FM_HOME/.fm-home-migration" ] || [ -L "$FM_HOME/.fm-home-migration" ]; then
+  echo 'error: frozen migration archives cannot spawn work' >&2
+  exit 1
+fi
 if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
 fi
@@ -2339,6 +2343,10 @@ path_is_ancestor_of() {
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
+  if [ -e "$abs_home/.fm-home-migration" ] || [ -L "$abs_home/.fm-home-migration" ]; then
+    echo 'error: a frozen migration archive cannot be launched locally' >&2
+    return 1
+  fi
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
   if [ "$abs_home" = "/" ]; then

@@ -147,9 +147,54 @@ A known provisioning failure rolls back the new route, while SSH exit 255 preser
 Seeding also writes a durable `.fm-secondmate-parent` record next to the home's `.fm-secondmate-home` identity marker, naming this home's route to its parent as `local` or `remote`.
 The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise; `bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
 
-Local secondmates keep the existing route form and need no migration.
+Local secondmates keep the existing route form, and a route that stays local needs no registry rewrite.
 A fleet may contain local and remote routes together.
 Use `bin/fm-home-seed.sh validate` to validate either form.
+
+## Move an existing local home to a host
+
+Seeding creates an empty home, so it cannot take over a registered local second mate that already holds a charter, a backlog, memory, reports, and routing correlations.
+Moving that home is a separate explicitly selected command:
+
+```sh
+bin/fm-remote-home-seed.sh --migrate <id> <local-home> <ssh-alias> <remote-root> <remote-home>
+```
+
+It names exactly one registered local route, never a wildcard or a batch, and `<local-home>` must be the canonical path that route already records.
+[`bin/fm-remote-home-migrate.sh`](../bin/fm-remote-home-migrate.sh) owns the command; its header owns the exact refusals, journal fields, and recovery mechanics.
+
+The second mate must have persisted its work and exited through the ordinary [control plane](agent-control.md) first.
+The command refuses while the home still holds any child work record, a registered state check, in-flight backlog work, a nested secondmate route, an armed process-event source or condition watch, an away or quiet posture, or a live session.
+Only the tmux and Herdr runtimes can prove a stopped agent, so a home on another runtime is refused rather than assumed idle.
+The host is gated on the same read-only [`bin/fm-remote-doctor.sh`](../bin/fm-remote-doctor.sh) readiness the seed uses, and migration never runs `--fix`: an account-level gap is reported with the doctor's own text and no route is switched.
+A file under `config/` that is not in the classified non-secret set is named and refused during the preconditions, before anything is frozen; widening that set is a separate decision because the cost of guessing wrong is a credential on another machine.
+Any refusal that lands before the host has staged anything - an unready host, an unmigratable project, a record the snapshot cannot carry - unwinds the freeze marker and the journal that run created, so a home the command declined to move stays startable.
+Once staging has begun nothing local is unwound: the journal and the archive are retained for reconciliation.
+
+What crosses is durable records only.
+[`bin/fm-home-migration-lib.sh`](../bin/fm-home-migration-lib.sh) owns that transfer boundary: it carries bounded regular files, verifies every record against its own digest at the receiving host, and refuses traversal, links, special files, oversized payloads, and any `config/` file outside the classified non-secret set.
+`.env`, SSH, cloud, and vendor credential stores, key material, and the socket password are excluded and stay on the original machine; the operator still has to read the home's own durable records before authorizing the move, because a secret pasted into ordinary prose is not detectable.
+Projects are cloned on the host from each project's registered origin, exactly as a seed does, and no project tree, Git object, or working copy is copied.
+`data/` and the classified configuration land live, the captain inbox and pending-reply records keep their operational locations, and the rest of `state/` is retained byte-exact as inert evidence under `.fm-migration/state/` rather than as executable runtime state on a machine it was never written for.
+The original charter and parent binding are retained there too; only the active charter's reply address and steering-inbox path are rewritten for the new placement, so charter prose that names the old path as history stays as written.
+
+The remote home is staged at an absent path, provisioned, verified byte-for-byte, and only then published atomically, and the source snapshot is re-taken and compared before the registry changes at all.
+That snapshot is re-taken on every run before cutover, so a steer the parent queues for the stopped mate between attempts crosses with the next run rather than failing the comparison against the first attempt's snapshot.
+An unchanged source packs to the same bytes, so a rerun that changes nothing re-sends the same payload and the host recognizes what it already staged.
+A rerun whose snapshot adds records or changes the bytes of records already there re-lands them, but one that has stopped carrying a record the host already holds is refused and names it: the receiver adds and replaces, and never deletes a record on the host.
+The route switch itself happens under the ordinary registry lock, after which the normal [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) launch owner starts the same identity on that host in `fm-remote`.
+A launch failure the command can prove - a remote endpoint that reads back dead or missing - restores the original route and endpoint record, and both copies are kept.
+Rerunning after that rollback retries the launch against the home already on the host: once a placement has been published the remote copy is the newer one, so the frozen source's records are never re-sent over it, and steering queued since the rollback reaches the mate through the ordinary steering path after it starts.
+SSH exit 255 or an unreadable probe is unknown rather than failed: the remote placement is preserved, nothing is launched locally, and rerunning the identical command converges through the normal launch owner instead of creating a second endpoint.
+
+A migration that fails on the host after staging began leaves that attempt's staging directory next to the remote home, named `.fm-migration-<id>.XXXXXX`, and a retried attempt creates its own rather than reusing or clearing an earlier one.
+Each holds that attempt's bundle and a decoded copy of the same durable records - the charter, backlog, memory, reports, and configuration - so unlanded work is never removed automatically; only an attempt that completes its publication or verification clears its own staging.
+Removing a retained one is a manual operator step (`rm -rf <remote-home-parent>/.fm-migration-<id>.XXXXXX`), and it is only safe once that attempt's work is confirmed present in the published remote home or in the local archive.
+
+The original home is left behind as a frozen archive, not deleted.
+A `.fm-home-migration` marker in it refuses a session lock, a spawn, a local launch, and a reseed, so the same identity cannot end up running in two places while the archive is still around for rollback.
+The freeze outlives a route rollback on purpose: a restored local route points at a home that still refuses to start, because the remote copy of the same identity also exists at that moment.
+Deciding which copy survives, clearing the marker, and returning the archive's worktree lease are separate later operator steps, and this command deliberately has no unfreeze or cleanup verb.
 
 ## Normal operation
 
@@ -279,8 +324,12 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-home-migration.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
+
+The migration case reuses that same lifecycle fixture and covers the refusal with a live child record, the refusal on an unready host with no `--fix` repair, exact durable-byte and steering-correlation transfer, a rerun that finds a steer queued after the first snapshot and watcher bookkeeping beside it, credential exclusion, the frozen-archive guards, a known launch failure restoring the original route while both copies survive, and an unknown completion converging on rerun without a duplicate endpoint or any effect on an unselected sibling home.
+It also covers a refusal that lands before the host has staged anything unwinding the freeze and its journal so the home still starts a session, a snapshot whose durable records exceed the ordinary remote-job ceiling crossing on both sides of the transport, a rerun whose snapshot drops a record the published home holds being refused by name with that home's bytes unchanged while one that only rewrites a record's bytes converges, and a rerun after a rolled-back launch retrying the launch without re-landing the frozen source's older records.
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
 The audit-session facts the guard relies on are recorded with their commands in [runtime backend verification](verification/runtime-backends.md#fm-remote-server-birth-and-login-keychain-access).

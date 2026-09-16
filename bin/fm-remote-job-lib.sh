@@ -27,7 +27,9 @@
 # deadline, changes state to running, writes bounded stdout/stderr and exit,
 # then publishes state=done last. Callers wait for done, relay stdout and
 # stderr separately, then reap only their completed record. Input, argv,
-# stdout, and stderr are each capped at 1048576 bytes.
+# stdout, and stderr are each capped at 1048576 bytes, except that the typed
+# existing-home migration receiver raises its input cap alone to the payload
+# bound bin/fm-home-migration-lib.sh owns.
 #
 # The worker serves one lane per staged home: jobs for the same home run
 # strictly FIFO in seq order while lanes for different homes run concurrently,
@@ -118,6 +120,20 @@ fm_remote_job_safe_id() {
 
 fm_remote_job_command_preemptible() { # <staged argv command>
   case "${1:-}" in fm-remote-delta-read.sh) return 0 ;; *) return 1 ;; esac
+}
+
+# Single owner of the one carve-out over the ordinary stdin ceiling: the typed
+# existing-home migration receiver accepts a whole durable snapshot. Staging and
+# the worker size the same staged file, so both read the decision from here, and
+# the raised value comes from its own owner rather than being restated.
+fm_remote_job_stdin_limit() { # <staged argv command> [first argument]
+  if [ "${1:-}" = fm-remote-home-provision.sh ] && [ "${2:-}" = --migration ]; then
+    # shellcheck source=bin/fm-home-migration-lib.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/fm-home-migration-lib.sh"
+    printf '%s\n' "$FM_MIGRATION_MAX_BYTES"
+    return 0
+  fi
+  printf '%s\n' "$FM_REMOTE_JOB_MAX_BYTES"
 }
 
 fm_remote_job_validate_settings() {
@@ -611,8 +627,10 @@ fm_remote_job_cancel() { # <account-home> <id>
 }
 
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
-  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start
+  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start stdin_limit
   shift 4
+  # argv, output and every other command keep the ordinary ceiling.
+  stdin_limit=$(fm_remote_job_stdin_limit "$command" "${1:-}")
   fm_remote_job_prepare_state "$account_home" || return 1
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
     FM_REMOTE_JOB_ERROR="remote job root is unavailable or unsafe"
@@ -642,7 +660,7 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     ! printf '%s\n' "$queue_deadline" > "$stage/queue_deadline" ||
     ! printf '%s\n' "$FM_REMOTE_JOB_TIMEOUT" > "$stage/timeout" ||
     ! printf '%s\0' "$command" "$@" > "$stage/argv" ||
-    ! head -c "$((FM_REMOTE_JOB_MAX_BYTES + 1))" > "$stage/stdin"; then
+    ! head -c "$((stdin_limit + 1))" > "$stage/stdin"; then
     rm -rf -- "$stage"
     FM_REMOTE_JOB_ERROR="cannot capture remote job input"
     return 1
@@ -653,9 +671,9 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     FM_REMOTE_JOB_ERROR="remote job argv exceeds the ${FM_REMOTE_JOB_MAX_BYTES}-byte bound"
     return 1
   }
-  fm_remote_job_regular_bounded "$stage/stdin" "$FM_REMOTE_JOB_MAX_BYTES" || {
+  fm_remote_job_regular_bounded "$stage/stdin" "$stdin_limit" || {
     rm -rf -- "$stage"
-    FM_REMOTE_JOB_ERROR="remote job stdin exceeds the ${FM_REMOTE_JOB_MAX_BYTES}-byte bound"
+    FM_REMOTE_JOB_ERROR="remote job stdin exceeds the ${stdin_limit}-byte bound"
     return 1
   }
   : > "$stage/stdout"

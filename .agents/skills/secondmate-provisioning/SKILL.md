@@ -2,8 +2,8 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, migrating, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, existing-home migration, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -158,6 +158,24 @@ If validation, cloning, no-mistakes initialization, or registry update fails, ge
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+
+## Migrating an existing home to a host
+
+A seed creates an empty home, so it can never take over a registered local second mate that already holds durable records.
+Moving one is an explicitly selected command naming exactly that route:
+
+```sh
+bin/fm-remote-home-seed.sh --migrate <id> <local-home> <ssh-alias> <remote-root> <remote-home>
+```
+
+Have the second mate persist its work and exit through `bin/fm-control.sh` first; the command refuses a home with any child work record, registered check, in-flight backlog work, nested route, armed process-event registration, away or quiet posture, or live session, and refuses a runtime that cannot prove a stopped agent at all.
+It gates the host on the read-only doctor and never repairs the account as a side effect, so report a remaining gap as the operator step it is rather than working around it.
+It transfers durable records only, clones projects from their registered origins, and excludes credential stores; a secret sitting in ordinary prose is not detectable, so inspect the home's own durable records before authorizing the move.
+Rerun the identical command to reconcile an interrupted attempt: it converges through the normal launch owner rather than creating a second endpoint.
+A proved launch failure restores the original route, while SSH exit 255 is unknown and keeps the remote placement, and neither outcome ever launches the identity locally.
+The original home stays behind as a frozen archive that refuses sessions, spawns, local launches, and reseeding, and a rolled-back route still points at that frozen home because the remote copy of the same identity exists too.
+Deciding which copy survives, clearing the freeze, and returning the archive's lease are separate later captain decisions, not part of this command.
+[`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md#move-an-existing-local-home-to-a-host) owns the operator contract, and [`bin/fm-remote-home-migrate.sh`](../../../bin/fm-remote-home-migrate.sh) plus [`bin/fm-home-migration-lib.sh`](../../../bin/fm-home-migration-lib.sh) own the mechanics and the transfer boundary.
 
 ## Record intake for an existing or inherited domain
 

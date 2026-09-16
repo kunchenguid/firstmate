@@ -4,6 +4,10 @@
 # Usage:
 #   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 #
+#   fm-remote-home-seed.sh --migrate <id> <local-home> <ssh-alias> <remote-root> <remote-home>
+# Explicit existing-home migration (and identical-command recovery) is owned by
+# fm-remote-home-migrate.sh; ordinary seeding still refuses a populated local route.
+#
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
 # remote host dimension in data/secondmates.md, gates the host on
@@ -25,6 +29,7 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${1:-}" = --migrate ]; then exec "$SCRIPT_DIR/fm-remote-home-migrate.sh" "$@"; fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"

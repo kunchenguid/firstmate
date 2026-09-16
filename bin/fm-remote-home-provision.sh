@@ -3,6 +3,10 @@
 #
 # Usage:
 #   fm-remote-home-provision.sh < manifest
+#   fm-remote-home-provision.sh --migration <id> <sha256> < migration-json
+# Migration stages an absent home, verifies typed durable records, then publishes
+# it atomically; its receiver/data contract is in fm-home-migration-lib.sh.
+# An existing destination must match the exact migration receipt, never a seed.
 #
 # Manifest schema fm-remote-home-provision.v1 carries a base64 charter, the
 # base64 parent SSH alias, and one base64 project record per line. Each project
@@ -28,6 +32,51 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+
+# Single owner of the per-home provisioning serialization key, so a seed and a
+# migration racing for the same remote home always contend on the same lock.
+# It sets PROVISION_LOCK_STATE and PROVISION_LOCK, creating neither, and returns
+# nonzero rather than leaving either unset when no digest tool is available.
+provision_resolve_home_lock() { # <canonical remote home>
+  local home=$1 parent key
+  parent=$(dirname "$home")
+  PROVISION_LOCK_STATE="$parent/.firstmate-provision-locks"
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' "$home" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    key=$(printf '%s' "$home" | sha256sum | awk '{print $1}')
+  else
+    printf 'error: no SHA-256 tool is available for provisioning serialization\n' >&2
+    return 1
+  fi
+  [ -n "$key" ] || { printf 'error: cannot derive the provisioning serialization key\n' >&2; return 1; }
+  PROVISION_LOCK="$PROVISION_LOCK_STATE/.remote-home-provision-$key.lock"
+}
+
+# Single owner of migration file digests here, with the same tool fallback the
+# remote entrypoint uses, because a host may ship only one of the two.
+provision_file_sha256() { # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    printf 'error: no SHA-256 tool is available to verify the migration\n' >&2
+    return 1
+  fi
+}
+
+case "${1:-}" in
+  --migration)
+    [ "$#" -eq 3 ] || die 'migration requires identity and SHA-256 digest'
+    shift
+    # shellcheck source=bin/fm-home-migration-lib.sh
+    . "$SCRIPT_DIR/fm-home-migration-lib.sh"
+    fm_migration_receive "$@"
+    exit 0
+    ;;
+esac
+[ "$#" -eq 0 ] || die 'unsupported provisioning arguments'
 
 base64_decode_to() {
   if printf '%s' "$1" | base64 --decode > "$2" 2>/dev/null; then return 0; fi
@@ -122,7 +171,7 @@ HOME_PARENT=$(dirname "$FM_HOME")
 HOME_PARENT_REAL=$(CDPATH='' cd -- "$HOME_PARENT" 2>/dev/null && pwd -P) \
   || die "remote home parent is unavailable"
 [ "$HOME_PARENT_REAL" = "$HOME_PARENT" ] || die "remote home parent is not canonical"
-PROVISION_LOCK_STATE="$HOME_PARENT/.firstmate-provision-locks"
+provision_resolve_home_lock "$FM_HOME" || exit 1
 if [ -e "$PROVISION_LOCK_STATE" ] || [ -L "$PROVISION_LOCK_STATE" ]; then
   [ -d "$PROVISION_LOCK_STATE" ] && [ ! -L "$PROVISION_LOCK_STATE" ] \
     || die "remote provisioning lock root is unsafe"
@@ -131,17 +180,9 @@ else
   [ -d "$PROVISION_LOCK_STATE" ] && [ ! -L "$PROVISION_LOCK_STATE" ] \
     || die "cannot create remote provisioning lock root"
 fi
-if command -v shasum >/dev/null 2>&1; then
-  HOME_LOCK_KEY=$(printf '%s' "$FM_HOME" | shasum -a 256 | awk '{print $1}')
-elif command -v sha256sum >/dev/null 2>&1; then
-  HOME_LOCK_KEY=$(printf '%s' "$FM_HOME" | sha256sum | awk '{print $1}')
-else
-  die "no SHA-256 tool is available for provisioning serialization"
-fi
 FM_STATE_OVERRIDE="$PROVISION_LOCK_STATE"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-PROVISION_LOCK="$STATE/.remote-home-provision-$HOME_LOCK_KEY.lock"
 fm_lock_acquire_wait "$PROVISION_LOCK"
 PROVISION_LOCK_HELD=1
 

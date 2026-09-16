@@ -15,13 +15,13 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `recover-missing`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
-- **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
+- **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped or its endpoint gone.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
@@ -33,6 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `recover-missing` | Recreate the exact recorded terminal for a task whose tmux endpoint is missing - the window alone, or the whole session it lived in - then hand the launch to the existing owner (`fm-spawn.sh --relaunch`) on the recorded harness, model, and effort. | The backend's recovery-grade classifier proves the agent was missing, unavailable/dirty worktrees refuse rather than repairing, and the new agent is alive on the exact recreated terminal. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -55,7 +56,7 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 
 ## Transactional relaunch
 
-`relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
+`relaunch` and `recover-missing` are the only verbs that change durable records, so each runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
@@ -75,12 +76,28 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+### Recovering a missing terminal
+
+`recover-missing` runs the same transaction for a task whose terminal is gone rather than agent-free, which is the one state `relaunch` cannot act on: it refuses a missing endpoint, and `fm-spawn.sh --relaunch` adopts only a surviving endpoint.
+It differs from the steps above in exactly three places.
+
+- No profile flags. `--harness`, `--model`, and `--effort` are refused; a recovery continues the same run, and choosing a different runtime is what `relaunch` is for.
+  Only `--note`/`--note-file` apply, and a ship or scout still requires one for the same reason a relaunch does.
+  Nothing is re-resolved from configuration either: every identity axis comes from the task's own durable record, so a secondmate whose `config/secondmate-harness` pin has since changed is recovered on the harness, model, and effort it actually recorded.
+  Picking the changed pin up is a `relaunch`, which is the verb that deliberately re-resolves it.
+- Two extra preconditions around the checkpoint: the endpoint must read the positively `missing` state, and the recorded local copy must be present, free of uncommitted changes beyond the spawn's own untracked leftovers, and - for a Treehouse pool slot - still claimed by this task.
+  Each of those refuses rather than cleaning, reallocating, or repairing anything; no worktree and no pool slot is ever created here.
+- No stop step. Nothing is running, so step 4 is replaced by recreating the window under the recorded `fm-<id>` name in the recorded session and worktree, then waiting on a bounded budget for the new terminal to hold an agent-free state before step 5 hands it to the same launch owner.
+  A login shell that is still running its rc files reads `ambiguous` while each of them owns the pane, and the launch owner takes one un-retried state read that must be `dead`, so the state has to hold rather than merely be observed once.
+
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
+- A `recover-missing` failure while the terminal is being recreated restores the prior record and the prior instructions byte-exact, because no agent was ever touched in that phase.
+- A `recover-missing` failure once the terminal is back - the new shell never settling to agent-free, or the launch itself failing - never claims an agent was stopped, and names the state the operator is now in: the recreated terminal holds a bare shell, so the endpoint reads `dead` rather than `missing` and the verb that retries it is `relaunch`.
 
 ## Fail-closed boundaries
 
@@ -90,15 +107,22 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - A remotely placed secondmate is refused by name.
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
-  For `relaunch` that host-side drive is `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch ...`, whose host-local leg runs this same plane against a record that is ordinary and local there, so every checkpoint, journal, rollback, and postcondition below applies unchanged ([`docs/remote-secondmates.md`](remote-secondmates.md)); `interrupt` and `exit` have no such route.
+  For `relaunch` that host-side drive is `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch ...`, whose host-local leg runs this same plane against a record that is ordinary and local there, so every checkpoint, journal, rollback, and postcondition below applies unchanged ([`docs/remote-secondmates.md`](remote-secondmates.md)); `interrupt`, `exit`, and `recover-missing` have no such route.
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
+  `recover-missing` refuses such a record outright rather than pointing at `--harness`, because it takes no profile flags: bringing the terminal back on a different runtime than the record names is not a recovery.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
+  The same table refuses a `recover-missing` before the terminal is recreated, where there is no running agent to stop and nothing has been touched at all.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
-- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
+- `exit`, `relaunch`, and `recover-missing` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" or "the endpoint is missing" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
+- `recover-missing` additionally requires a backend that can recreate a terminal under the recorded endpoint handle, which today is tmux only: its window keeps the recorded `fm-<id>` name, so recovery rewrites no durable record.
+  Herdr mints a fresh pane id for every new tab, so recreating there would have to republish the task's endpoint; that is refused rather than shipped without regression coverage.
+- On tmux, two different losses read as a missing endpoint and both are recovered: the task's window is gone from a session that is still alive, or the whole session - or the whole tmux server - is gone.
+  The second is recreated session first, under the exact recorded session name, and then the window inside it; a session that still exists is left exactly as it is.
+  A session that cannot be recreated refuses before the window, the record, or the instructions are touched.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
@@ -123,5 +147,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and an already-armed merge poll still authenticating after the record rewrite.
+- `tests/fm-control-recover-missing.test.sh` - the missing-terminal recovery: the success path under the recorded handle for both losses (a missing window in a live session, and a whole gone session recreated before it), the live, ambiguous, absent-copy, dirty-copy, and pool-slot-ownership refusals leaving the record and instructions byte-identical, the refusal when the session cannot be recreated, the recorded profile surviving a differing configured secondmate pin, the spawn-leftover dirt exemption against real untracked work, the refused profile flags, the basename-harness and unsupported-backend refusals, a still-starting shell being waited out rather than handed over and the refusal when it never settles, and the message after a failed launch handoff.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

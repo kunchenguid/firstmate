@@ -222,6 +222,10 @@ refuse_active_home_path() {
   abs_home=$(resolved_path "$home")
   abs_active_home=$(resolved_path "$FM_HOME")
   abs_root=$(resolved_path "$FM_ROOT")
+  if [ -e "$abs_home/.fm-home-migration" ] || [ -L "$abs_home/.fm-home-migration" ]; then
+    echo 'error: a frozen migration archive cannot be reseeded' >&2
+    return 1
+  fi
   if [ "$abs_home" = "/" ]; then
     echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1

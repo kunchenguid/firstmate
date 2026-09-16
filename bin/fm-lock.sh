@@ -5,6 +5,9 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh migration-guard-version   print archive guard capability
+# A .fm-home-migration marker refuses acquisition before and under the startup
+# claim lock; fm-remote-home-migrate.sh owns this retained-archive boundary.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +15,14 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+if [ "${1:-}" = migration-guard-version ]; then printf '1\n'; exit 0; fi
+refuse_migration_archive() {
+  if [ -e "$FM_HOME/.fm-home-migration" ] || [ -L "$FM_HOME/.fm-home-migration" ]; then
+    echo 'error: this home is a frozen migration archive; no session may start' >&2
+    exit 1
+  fi
+}
+[ "${1:-}" = status ] || refuse_migration_archive
 mkdir -p "$STATE" 2>/dev/null || {
   echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
   exit 1
@@ -76,6 +87,7 @@ if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
   fm_lock_acquire_wait "$CLAIM_LOCK"
 fi
 CLAIM_LOCK_HELD=1
+refuse_migration_archive
 
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ ! -f "$LOCK" ] || [ -L "$LOCK" ]; then
