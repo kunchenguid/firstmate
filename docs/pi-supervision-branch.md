@@ -117,7 +117,6 @@ Main closes an `action:main` request only by calling `fm_branch_processed` with 
 The display-only path is the sole other advance: it refuses any `action:main` row in the span, so a paraphrase or empty reply still cannot close a real decision.
 A lower listed captain sequence is accepted only as a partial acknowledgement and leaves every newer captain sequence open.
 Nothing else advances that marker: an unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed, and the extension presents the current unprocessed `action:main` sequence set again at the next main run boundary and at every session start.
-A no-action processing request ends by calling `fm_branch_processed` with nothing else written.
 A presentation already pending its run boundary is not resent or widened; once that run settles, the extension presents the then-current sequence set.
 The first two presentations of a given sequence set open a turn of their own; after that the request rides the captain's next prompt so an ignored request cannot become an unbounded loop of empty turns, while changed sequence membership and a session replacement each start that budget over.
 Routine outcomes never enter this path and stay turn-free.

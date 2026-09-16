@@ -1505,26 +1505,18 @@ captain_call_stale_bound() {  # <window-key> <task>
 # Bound a terminal-status stale alarm whose latest status log is already covered
 # by a branch outcome. The finished result was already delivered; a new idle-pane
 # hash has nothing new to say until status bytes or a newer outcome change the
-# coverage identity. Declaration embeds the covered sequence and status signature
-# so any new event starts a fresh window whose first sight surfaces immediately.
-# First covered sight absorbs and arms this proof's own .outcome-resurfaced-*
-# throttle; later sights inside PAUSE_RESURFACE_SECS absorb; a sight after the
-# cadence, or the first sight after the pane was seen busy under this declaration,
-# returns 1 so the caller alarms once and refreshes that dedicated marker. The
-# shared .paused-resurfaced-* throttle stays with declared-wait and captain-call
-# cadences alone, so a foreign outcome-covered body cannot skip their gates.
+# coverage identity, or the pane was seen busy under that identity. Only that
+# NEW-hash repetition is absorbed here - a stable hash stays as inert after a
+# first terminal alarm as it already was before this bound, matching the open
+# captain-call contract above. No cadence re-surface: a forgotten teardown is
+# not a supervision-noise problem this absorb exists to solve, and inventing a
+# recurring wake would reverse the intent.
+# Leaves STALE_WAIT_DECLARATION alone so a surface after busy cannot claim the
+# shared .paused-resurfaced-* throttle with an outcome-covered body.
 outcome_covered_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 throttle
-  STALE_WAIT_DECLARATION=$(outcome_covered_declaration "$task") || return 1
-  if outcome_covered_window_saw_busy "$key" "$STALE_WAIT_DECLARATION"; then
-    return 1
-  fi
-  throttle="$STATE/.outcome-resurfaced-$key"
-  if [ "$(cat "$throttle" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]; then
-    [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
-  else
-    printf '%s' "$STALE_WAIT_DECLARATION" > "$throttle"
-  fi
+  local key=$1 task=$2 declaration
+  declaration=$(outcome_covered_declaration "$task") || return 1
+  ! outcome_covered_window_saw_busy "$key" "$declaration"
 }
 
 # The coverage identity a covered absorb is bound to: the covering outcome's
@@ -1536,24 +1528,6 @@ outcome_covered_declaration() {  # <task>
   [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] || return 1
   sig=$(fm_wake_signal_sig "$STATE/$task.status" || true)
   printf 'outcome-covered:%s:%s' "$BRANCH_OUTCOME_INDEX_SEQ" "$sig"
-}
-
-outcome_covered_throttle_armed() {  # <window-key>
-  local throttle="$STATE/.outcome-resurfaced-$1"
-  [ -f "$throttle" ] || return 1
-  case "$(cat "$throttle" 2>/dev/null || true)" in
-    outcome-covered:*) return 0 ;;
-  esac
-  return 1
-}
-
-outcome_covered_stale_record() {  # <window-key>
-  [ -n "$STALE_WAIT_DECLARATION" ] || return 0
-  case "$STALE_WAIT_DECLARATION" in
-    outcome-covered:*) ;;
-    *) return 0 ;;
-  esac
-  printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.outcome-resurfaced-$1"
 }
 
 # 0 when this window was seen busy under the CURRENT coverage identity: the
@@ -1580,15 +1554,9 @@ note_outcome_covered_busy() {  # <window-key> <task>
 surface_terminal_stale() {  # <window> <window-key> <hash>
   local w=$1 key=$2 h=$3 stale_status stale_record stale_end stale_rest stale_ident
   fm_wake_append stale "$w" "stale: $w" || exit 1
-  case "$STALE_WAIT_DECLARATION" in
-    outcome-covered:*) outcome_covered_stale_record "$key" ;;
-    ?*) stale_wait_record "$key" ;;
-    *)
-      if outcome_covered_throttle_armed "$key"; then
-        rm -f "$STATE/.outcome-resurfaced-$key"
-      fi
-      ;;
-  esac
+  if [ -n "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_record "$key"
+  fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.outcome-busy-$key"
   clear_write_tracking "$key"
@@ -2655,9 +2623,9 @@ EOF
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             elif [ -z "$STALE_WAIT_DECLARATION" ] && outcome_covered_stale_bound "$key" "$task"; then
               # A branch outcome already covered this terminal status. Further
-              # NEW pane hashes of the same finished state are noise until the
-              # long cadence asks for a forgotten-teardown recheck, or a new
-              # status event / newer outcome changes the declaration.
+              # NEW pane hashes of the same finished state are noise until a new
+              # status event / newer outcome changes the coverage, or the pane
+              # was seen busy under that identity. A stable hash stays silent.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
@@ -2671,9 +2639,6 @@ EOF
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
-          elif outcome_covered_throttle_armed "$key" \
-            && ! outcome_covered_stale_bound "$key" "$task"; then
-            surface_terminal_stale "$w" "$key" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
