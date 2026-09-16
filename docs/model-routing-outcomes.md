@@ -18,7 +18,7 @@ Category labels and shadow judgments are descriptive and heuristic, so they neve
 
 Initial paired comparisons are limited mechanically to two distinct low-risk pair identifiers per category in one outcome store.
 A comparison manifest must state that the work is non-time-critical, has no private external action, and performs no external action.
-A handoff manifest admits one alternative and requires explicit quality, privacy, and side-effect reconciliation evidence.
+A handoff manifest admits one distinct alternative attempt and requires explicit quality, privacy, and side-effect reconciliation evidence.
 These records do not make an external-action task safe by assertion; such tasks stay outside the initial comparison set.
 
 ## Durable records
@@ -71,6 +71,7 @@ These limitations remain visible in `native.completeness` and in scorecard uncer
 A Pi session with mixed or partially missing task, incarnation, model, effort, provider, or API evidence is rejected instead of pooling its usage into one exact route.
 A Claude session with mixed or partially missing assistant-model or session evidence is rejected, while a Claude result may retain separately itemized auxiliary-model usage.
 When a Claude result contains multiple models, the scorecard labels its combined usage as a whole-session multi-model observation rather than assigning every token to the requested main model.
+Multiple turns using the same native model and provider remain one exact attempt route.
 The manifest harness must agree with the task metadata and receipt kind, and its provider must agree with native provider evidence when present.
 Only Pi receipts carrying the task identifier and `spawn_gen` may certify an accepted outcome.
 Claude and agy receipts remain useful raw measurements, but their task attribution and outcome stay unresolved operator observations.

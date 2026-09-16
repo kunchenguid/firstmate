@@ -694,11 +694,13 @@ def validate_comparison(value: Any) -> Any:
     return item
 
 
-def validate_handoff(value: Any) -> Any:
+def validate_handoff(value: Any, attempt_id: str) -> Any:
     if value is None:
         return None
     item = copy.deepcopy(need_object(value, "handoff"))
     item["alternative_attempt_id"] = need_id(item.get("alternative_attempt_id"), "handoff.alternative_attempt_id")
+    if item["alternative_attempt_id"] == attempt_id:
+        fail("handoff.alternative_attempt_id must identify a different attempt")
     if isinstance(item.get("alternatives"), list):
         fail("handoff admits one alternative, not an alternatives array")
     if item.get("side_effects") not in {"none", "reconciled"}:
@@ -910,7 +912,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         "billing": billing_record, "quota": quota_record(manifest.get("quota")),
         "grading": validate_grading(manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id),
         "comparison": validate_comparison(manifest.get("comparison")),
-        "handoff": validate_handoff(manifest.get("handoff")),
+        "handoff": validate_handoff(manifest.get("handoff"), attempt_id),
         "outcome": outcome,
     }
     return record
@@ -1020,11 +1022,19 @@ def contextual_values(values: Iterable[Any]) -> dict[str, Any]:
             "unknown_count": sum(value is None for value in items), "aggregation": "not-applicable"}
 
 
+def native_model_identities(record: dict[str, Any]) -> set[tuple[str, str]]:
+    native = record["native"]
+    return {(row.get("provider") or native.get("provider") or "unknown",
+             row.get("model") or "unknown") for row in native.get("models") or []}
+
+
 def route_name(record: dict[str, Any]) -> str:
     route = record["route"]
-    models = record["native"].get("models") or []
-    if len(models) > 1:
-        names = sorted({row.get("model") or "unknown" for row in models})
+    identities = native_model_identities(record)
+    if len(identities) > 1:
+        providers = {provider for provider, _model in identities}
+        names = sorted(model if len(providers) == 1 else f"{provider}:{model}"
+                       for provider, model in identities)
         effective_model = f"whole-session-multi-model:{'+'.join(names)}"
     else:
         effective_model = record["native"].get("effective_model") or f"requested-only:{route['requested_model']}"
@@ -1042,7 +1052,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     for (category, shape, route), items in sorted(groups.items()):
         route_groups.append({
             "category": category, "task_shape": shape, "route": route,
-            "measurement_scope": "whole-session" if any(len(item["native"].get("models") or []) > 1 for item in items) else "attempt-route",
+            "measurement_scope": "whole-session" if any(len(native_model_identities(item)) > 1 for item in items) else "attempt-route",
             "attempts": len(items), "accepted_attempts": sum(item["outcome"] == "accepted" for item in items),
             "outcomes": {name: sum(item["outcome"] == name for item in items) for name in sorted(OUTCOMES)},
             "tokens": {key: metric(item["native"]["tokens"].get(key) for item in items) for key in TOKEN_KEYS},
@@ -1067,7 +1077,7 @@ def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
                      "outcome": record["outcome"],
                      "outcome_authority": "native-task-incarnation" if record["native"].get("task_id_receipt") and record["native"].get("spawn_gen_receipt") else "operator-observation",
                      "attribution": record["native"]["completeness"].get("attribution"),
-                     "measurement_scope": "whole-session" if len(record["native"].get("models") or []) > 1 else "attempt-route",
+                     "measurement_scope": "whole-session" if len(native_model_identities(record)) > 1 else "attempt-route",
                      "tokens": record["native"]["tokens"],
                      "elapsed_ms": record["time_ms"].get("end_to_end"),
                      "actual_incremental_usd": record["billing"].get("actual_incremental_usd"),

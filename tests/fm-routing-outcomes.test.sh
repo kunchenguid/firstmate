@@ -72,7 +72,7 @@ class RoutingOutcomesTest(unittest.TestCase):
     def write_pi(self, path, *, custom=True, effort="max", task="task-one",
                  spawn_gen="spawn-1", duplicate=False, extra_request=None,
                  assistant_model="gpt-5.6-luna", assistant_provider="openai-codex",
-                 session_id="session-1"):
+                 session_id="session-1", second_response=False):
         rows = [{"type": "session", "id": session_id, "timestamp": "2030-01-01T00:00:00Z"}]
         if custom:
             rows.append({
@@ -100,6 +100,11 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "cost": {"total": 0.5}}},
         }
         rows.append(assistant)
+        if second_response:
+            second = copy.deepcopy(assistant)
+            second["id"] = "assistant-2"
+            second["timestamp"] = "2030-01-01T00:00:04Z"
+            rows.append(second)
         if duplicate:
             rows.append(copy.deepcopy(assistant))
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -249,6 +254,16 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.write_pi(self.pi, duplicate=True)
         self.import_manifest(self.manifest())
         self.assertEqual(self.latest_record()["native"]["tokens"]["input"], 100)
+
+    def test_multi_turn_single_model_keeps_exact_route_scope(self):
+        self.write_pi(self.pi, second_response=True)
+        self.import_manifest(self.manifest())
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertEqual(score["routes"][0]["route"], "pi/openai-codex/gpt-5.6-luna/max")
+        self.assertEqual(score["routes"][0]["measurement_scope"], "attempt-route")
+        self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 200)
 
     def test_missing_provider_effort_stays_unknown_and_requirement_blocks(self):
         self.write_pi(self.pi, custom=False)
@@ -509,6 +524,12 @@ class RoutingOutcomesTest(unittest.TestCase):
                                "reconciliation_receipt": "no external action was available"}
         self.import_manifest(manifest)
         self.assertEqual(self.latest_record()["handoff"]["alternative_attempt_id"], "attempt-two")
+        self_ref = self.manifest(attempt="attempt-self")
+        self_ref["handoff"] = {"alternative_attempt_id": "attempt-self", "side_effects": "none",
+                               "quality_preserved": True, "privacy_preserved": True,
+                               "reconciliation_receipt": "no external action was available"}
+        result = self.import_manifest(self_ref, ok=False)
+        self.assertIn("different attempt", json.loads(result.stdout)["error"])
         bad = self.manifest(task="task-two", attempt="attempt-two")
         self.write_pi(self.pi, task="task-two")
         bad["handoff"] = {"alternative_attempt_id": "attempt-three", "alternatives": ["a", "b"],
