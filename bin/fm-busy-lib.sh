@@ -732,6 +732,8 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     printf 'unprovable: the composer for %s never stabilized' "$target"
     return 0
   fi
+  fm_composer_normalize_spaces_var content
+  content=$(printf '%s\n' "$content" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
   case "$prompt" in
     *"$content") printf 'restored' ;;
     *) printf 'other' ;;
