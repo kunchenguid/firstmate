@@ -8,10 +8,7 @@
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import {
-  calmPresentationHides,
-  setCalmCurrentStep,
-} from "./fm-calm-visibility.ts";
+import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -50,9 +47,13 @@ const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
 );
 
 let liveStepCounter = 0;
+let liveStepSourceIds = new WeakMap<object, number>();
+let nextLiveStepSourceId = 0;
 
 export function resetCalmAssistantLiveStepCounter(): void {
   liveStepCounter = 0;
+  liveStepSourceIds = new WeakMap<object, number>();
+  nextLiveStepSourceId = 0;
 }
 
 type LiveStep = {
@@ -62,6 +63,11 @@ type LiveStep = {
 };
 
 function currentLiveStep(message: AssistantMessage): LiveStep | undefined {
+  let sourceId = liveStepSourceIds.get(message);
+  if (sourceId === undefined) {
+    sourceId = nextLiveStepSourceId++;
+    liveStepSourceIds.set(message, sourceId);
+  }
   for (let index = message.content.length - 1; index >= 0; index--) {
     const block = message.content[index];
     if (block.type !== "thinking" && block.type !== "text") continue;
@@ -72,7 +78,7 @@ function currentLiveStep(message: AssistantMessage): LiveStep | undefined {
       .filter(Boolean);
     const text = lines.at(-1);
     if (!text) continue;
-    return { key: `${index}:${lines.length}`, block, text };
+    return { key: `${sourceId}:${index}:${lines.length}`, block, text };
   }
   return undefined;
 }
@@ -108,27 +114,29 @@ export function installCalmAssistantLayout(): void {
     // Pi's invalidate() and presentation setters call updateContent() with the
     // shallow presentation copy held by Pi itself. Do not decorate that copy a
     // second time or a live step would acquire a new prefix on every redraw.
-    if (message === state.lastPresentedMessage && message !== state.lastSourceMessage) {
+    // A message_end can carry that same presentation copy, however, and must switch
+    // back to the source message so the live row is removed rather than retained.
+    const presentationReplay =
+      message === state.lastPresentedMessage && message !== state.lastSourceMessage;
+    const sourceMessage =
+      !isStreaming && presentationReplay && state.lastSourceMessage
+        ? state.lastSourceMessage
+        : message;
+    if (isStreaming && presentationReplay) {
       originalUpdateContent.call(this, message, isStreaming);
       return;
     }
 
-    const midTurn = isMidTurnAssistantMessage(message);
+    const midTurn = isMidTurnAssistantMessage(sourceMessage);
     const hadLiveStep = state.liveStepKey !== undefined;
-    const liveStep = isStreaming && patch.hidesWorkingNote() ? currentLiveStep(message) : undefined;
+    const liveStep = isStreaming && patch.hidesWorkingNote() ? currentLiveStep(sourceMessage) : undefined;
     const hideThinking =
       !isStreaming &&
       state.hiddenThinkingLabel === "" &&
       (state.hideThinkingBlock || hadLiveStep) &&
       patch.hidesThinking();
     const hideWorkingNote = !isStreaming && patch.hidesWorkingNote() && midTurn;
-    if (hideWorkingNote) {
-      const step = message.content
-        .flatMap((block) => (block.type === "text" ? [block.text] : []))
-        .join(" ");
-      if (step.trim()) setCalmCurrentStep(step);
-    }
-    let presentationMessage = message;
+    let presentationMessage = sourceMessage;
     if (liveStep) {
       liveStepCounter = state.liveStepKey === liveStep.key ? liveStepCounter : liveStepCounter + 1;
       state.liveStepKey = liveStep.key;
@@ -137,11 +145,11 @@ export function installCalmAssistantLayout(): void {
         liveStep.block.type === "thinking"
           ? { ...liveStep.block, thinking: text }
           : { ...liveStep.block, text };
-      presentationMessage = { ...message, content: [block] };
+      presentationMessage = { ...sourceMessage, content: [block] };
     } else if (hideThinking || hideWorkingNote) {
       presentationMessage = {
-        ...message,
-        content: message.content.filter(
+        ...sourceMessage,
+        content: sourceMessage.content.filter(
           (block) =>
             !(hideThinking && block.type === "thinking") &&
             !(hideWorkingNote && block.type === "text"),
@@ -150,9 +158,9 @@ export function installCalmAssistantLayout(): void {
     }
 
     originalUpdateContent.call(this, presentationMessage, isStreaming);
-    state.lastMessage = message;
+    state.lastMessage = sourceMessage;
     if (!isStreaming) state.liveStepKey = undefined;
-    state.lastSourceMessage = message;
+    state.lastSourceMessage = sourceMessage;
     state.lastPresentedMessage = presentationMessage;
   };
 

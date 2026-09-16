@@ -40,6 +40,7 @@ cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/l
 printf 'on\n' >"$HOME_DIR/config/calm"
 printf '%s\n' '{"terminal":{"clearOnShrink":false}}' >"$PI_CONFIG/settings.json"
 printf '%s\n' '{"type":"module"}' >"$PROJECT/package.json"
+printf '%s\n' 'calm live fixture' >"$PROJECT/calm-live-probe.txt"
 
 cat >"$PROJECT/calm-live-provider.ts" <<'TS'
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -59,8 +60,11 @@ export default function (pi: ExtensionAPI): void {
       contextWindow: 4096,
       maxTokens: 128,
     }],
-    streamSimple(model, _context, options) {
+    streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
+      const completedSteps = context.messages.filter((message) => message.role === "toolResult").length;
+      const isFinal = completedSteps >= 3;
+      const plan = ["LIVE_PLAN_ONE", "LIVE_PLAN_TWO", "LIVE_PLAN_THREE"][completedSteps];
       const output: AssistantMessage = {
         role: "assistant",
         content: [],
@@ -83,21 +87,43 @@ export default function (pi: ExtensionAPI): void {
         const thinking = { type: "thinking" as const, thinking: "" };
         output.content.push(thinking);
         stream.push({ type: "thinking_start", contentIndex: 0, partial: output });
-        for (const step of ["LIVE_PLAN_ONE", "LIVE_PLAN_TWO", "LIVE_PLAN_THREE"]) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          if (options?.signal?.aborted) return;
-          thinking.thinking += `${thinking.thinking ? "\n" : ""}${step}`;
-          stream.push({ type: "thinking_delta", contentIndex: 0, delta: step, partial: output });
+        if (isFinal) {
+          const text = { type: "text" as const, text: "CALM_LIVE_HERDR_FINAL" };
+          output.content.push(text);
+          stream.push({ type: "text_start", contentIndex: 1, partial: output });
+          stream.push({ type: "text_delta", contentIndex: 1, delta: text.text, partial: output });
+          stream.push({ type: "text_end", contentIndex: 1, content: text.text, partial: output });
+          output.stopReason = "stop";
+          stream.push({ type: "done", reason: "stop", message: output });
+          stream.end();
+          return;
         }
-        stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: output });
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        const text = { type: "text" as const, text: "CALM_LIVE_HERDR_FINAL" };
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (options?.signal?.aborted) return;
+        thinking.thinking = plan;
+        stream.push({ type: "thinking_delta", contentIndex: 0, delta: plan, partial: output });
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        if (options?.signal?.aborted) return;
+        stream.push({ type: "thinking_end", contentIndex: 0, content: plan, partial: output });
+        const text = { type: "text" as const, text: `COMMENTARY_${completedSteps + 1}` };
         output.content.push(text);
         stream.push({ type: "text_start", contentIndex: 1, partial: output });
         stream.push({ type: "text_delta", contentIndex: 1, delta: text.text, partial: output });
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        if (options?.signal?.aborted) return;
         stream.push({ type: "text_end", contentIndex: 1, content: text.text, partial: output });
-        output.stopReason = "stop";
-        stream.push({ type: "done", reason: "stop", message: output });
+        const toolCall = {
+          type: "toolCall" as const,
+          id: `calm-live-read-${completedSteps + 1}`,
+          name: "read",
+          arguments: { path: "calm-live-probe.txt" },
+        };
+        output.content.push(toolCall);
+        stream.push({ type: "toolcall_start", contentIndex: 2, partial: output });
+        stream.push({ type: "toolcall_delta", contentIndex: 2, delta: JSON.stringify(toolCall.arguments), partial: output });
+        stream.push({ type: "toolcall_end", contentIndex: 2, toolCall, partial: output });
+        output.stopReason = "toolUse";
+        stream.push({ type: "done", reason: "toolUse", message: output });
         stream.end();
       })();
       return stream;
@@ -141,43 +167,108 @@ wait_for_text "(calm-live)" || fail "real Pi did not reach its ready composer"
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" '/calm-live-probe' >/dev/null
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
+seen_plan_one=0
+seen_plan_two=0
+seen_plan_three=0
+plan_step_one=
+plan_step_two=
+plan_step_three=
 seen_one=0
 seen_two=0
 seen_three=0
+step_one=
+step_two=
+step_three=
 final_text=
 for i in $(seq 1 160); do
   final_text=$(pane_text)
-  if printf '%s' "$final_text" | grep -Fq 'Step 1: LIVE_PLAN_ONE'; then
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_ONE'; then
+    seen_plan_one=1
+    plan_step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_ONE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "first planning frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[23]|COMMENTARY_'; then
+      printf '%s\n' "$final_text" >&2
+      fail "first planning frame accumulated another planning or commentary row"
+    fi
+  fi
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_TWO'; then
+    seen_plan_two=1
+    plan_step_two=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_TWO' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "second planning frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_ONE|LIVE_PLAN_THREE|COMMENTARY_'; then
+      printf '%s\n' "$final_text" >&2
+      fail "second planning frame retained another planning or commentary row"
+    fi
+  fi
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_THREE'; then
+    seen_plan_three=1
+    plan_step_three=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_THREE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "third planning frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[12]|COMMENTARY_'; then
+      printf '%s\n' "$final_text" >&2
+      fail "third planning frame retained another planning or commentary row"
+    fi
+  fi
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_1'; then
     seen_one=1
-    printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_TWO' \
-      && fail "Step 1 frame already accumulated the next planning row"
+    step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_1' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "first frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_|COMMENTARY_[23]'; then
+      printf '%s\n' "$final_text" >&2
+      fail "first frame accumulated a later planning or commentary row"
+    fi
   fi
-  if printf '%s' "$final_text" | grep -Fq 'Step 2: LIVE_PLAN_TWO'; then
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_2'; then
     seen_two=1
-    printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_ONE' \
-      && fail "Step 2 frame retained the prior planning row"
+    step_two=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_2' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "second frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_ONE|COMMENTARY_[13]'; then
+      printf '%s\n' "$final_text" >&2
+      fail "second frame retained an earlier or later planning or commentary row"
+    fi
   fi
-  if printf '%s' "$final_text" | grep -Fq 'Step 3: LIVE_PLAN_THREE'; then
+  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_3'; then
     seen_three=1
-    printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_TWO' \
-      && fail "Step 3 frame retained the prior planning row"
+    step_three=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_3' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
+    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
+    [ "$step_count" -eq 1 ] || fail "third frame rendered $step_count numbered rows"
+    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[12]|COMMENTARY_[12]'; then
+      printf '%s\n' "$final_text" >&2
+      fail "third frame retained an earlier planning or commentary row"
+    fi
   fi
   printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' && break
   sleep 0.1
 done
-[ "$seen_one" -eq 1 ] || fail "real Pi/Herdr never displayed Step 1"
-[ "$seen_two" -eq 1 ] || fail "real Pi/Herdr never displayed Step 2"
-[ "$seen_three" -eq 1 ] || fail "real Pi/Herdr never displayed Step 3"
+[ "$seen_plan_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first planning step"; }
+[ "$seen_plan_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second planning step"; }
+[ "$seen_plan_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third planning step"; }
+[ "$seen_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first commentary step"; }
+[ "$seen_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second commentary step"; }
+[ "$seen_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third commentary step"; }
+[ "$plan_step_one" -lt "$plan_step_two" ] && [ "$plan_step_two" -lt "$plan_step_three" ] \
+  && [ "$step_one" -lt "$step_two" ] && [ "$step_two" -lt "$step_three" ] \
+  || fail "Calm step numbers did not increase monotonically: plans $plan_step_one, $plan_step_two, $plan_step_three; commentary $step_one, $step_two, $step_three"
 printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' \
   || fail "real Pi/Herdr fixture did not settle its final response"
 printf '%s' "$final_text" | grep -Fq 'Step ' \
   && fail "final Pi response retained an intermediate-step row"
 printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_' \
   && fail "final Pi response retained planning narration"
+printf '%s' "$final_text" | grep -Fq 'COMMENTARY_' \
+  && fail "final Pi response retained intermediate commentary"
 
 session_file=$(find "$SESSIONS" -type f -name '*.jsonl' -exec grep -l 'CALM_LIVE_HERDR_FINAL' {} + 2>/dev/null | head -1)
 [ -n "$session_file" ] || fail "real Pi did not persist its session transcript"
 grep -Fq 'LIVE_PLAN_ONE' "$session_file" || fail "live planning context was not persisted"
 grep -Fq 'LIVE_PLAN_TWO' "$session_file" || fail "second planning context was not persisted"
 grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was not persisted"
-printf 'ok - real Pi %s in Herdr displayed one replacing numbered Calm step at a time, settled to the final response, and preserved planning transcript context\n' "$(pi --version)"
+grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
+grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
+grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
+printf 'ok - real Pi %s in Herdr displayed one replacing numbered Calm step around three tool calls, settled to the final response, and preserved planning context\n' "$(pi --version)"

@@ -94,7 +94,6 @@ import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
-  setCalmCurrentStep,
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
@@ -2225,10 +2224,7 @@ ${context.command}
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
     const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length).trimStart() : note;
-    if (calmHides("routine-supervision-note")) {
-      setCalmCurrentStep(rest);
-      return new Container();
-    }
+    if (calmHides("routine-supervision-note")) return new Container();
     const outputPad = 1;
     return new Text(
       `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", hasGlyph ? ` ${rest}` : rest)}`,

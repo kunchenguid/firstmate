@@ -5,7 +5,7 @@ This document owns the version-scoped feasibility evidence, Pi transcript taxono
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, present the latest intermediate step in one replace-in-place status line without accumulating transcript rows, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, present the latest intermediate step in one replace-in-place assistant row without accumulating transcript rows, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and working activity.
 Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
@@ -283,7 +283,7 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
-It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated progress updates reuse one replace-in-place status line without accumulating transcript rows, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
+It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated progress updates reuse one replace-in-place assistant row without accumulating transcript rows, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
@@ -612,13 +612,13 @@ ok - the rendered-export-DOM guard renders in one pass, retries a bounded number
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
 
-## 2026-09-15 Pi 0.85.1 live intermediate-step verification
+## 2026-09-16 Pi 0.85.1 live intermediate-step verification
 
-The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session with a deterministic provider that streamed three planning lines before a final response.
+The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session with a deterministic provider that streamed three assistant messages, each containing thinking, commentary, and a tool call, before a final response.
 
 ```text
 $ NODE_NO_WARNINGS=1 FM_CALM_PI_HERDR_LIVE_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
-ok - real Pi 0.85.1 in Herdr displayed one replacing numbered Calm step at a time, settled to the final response, and preserved planning transcript context
+ok - real Pi 0.85.1 in Herdr displayed one replacing numbered Calm step around three tool calls, settled to the final response, and preserved planning context
 ```
 
-The test observed Step 1, Step 2, and Step 3 as single replacing rows, verified that settlement removed the planning rows, and verified that all three planning lines remained in the persisted session transcript.
+The test observed one numbered assistant row at a time around all three tool calls, verified that settlement removed the planning and commentary rows, and verified that all planning and commentary text remained in the persisted session transcript.

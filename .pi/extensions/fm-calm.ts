@@ -58,15 +58,12 @@ import {
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
 import {
-  calmCurrentStep,
   calmPresentationHides,
   calmPresentationIsActive,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
-  setCalmCurrentStep,
   setCalmPresentation,
   setCalmStockExportRendering,
-  subscribeCalmCurrentStep,
 } from "./lib/fm-calm-visibility.ts";
 
 type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
@@ -136,16 +133,6 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
-  let currentStepUi: ExtensionUIContext | undefined;
-  const updateCurrentStepPresentation = (): void => {
-    currentStepUi?.setStatus(
-      "firstmate-calm",
-      agentRunActive && calmPresentationIsActive() && calmCurrentStep()
-        ? `Current step: ${calmCurrentStep()}`
-        : undefined,
-    );
-  };
-  subscribeCalmCurrentStep(() => updateCurrentStepPresentation());
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
@@ -425,8 +412,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    currentStepUi = ctx.ui;
-    setCalmCurrentStep(undefined);
     reportBuiltInLosses();
     calmToolRowRepaints.clear();
     exportRendering = false;
@@ -440,7 +425,7 @@ export default function (pi: ExtensionAPI) {
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
-    updateCurrentStepPresentation();
+    ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
@@ -471,35 +456,30 @@ export default function (pi: ExtensionAPI) {
         // rows that consult Calm live in render(), such as operational user rows,
         // need without appending anything to the transcript.
         repaintCalmToolRows();
-        updateCurrentStepPresentation();
+        ctx.ui.setStatus("firstmate-calm", undefined);
       }, 0);
       return undefined;
     });
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    currentStepUi = ctx.ui;
-    setCalmCurrentStep(undefined);
     resetCalmAssistantLiveStepCounter();
     agentRunActive = true;
     applyWorkingPresentation(ctx.ui);
-    updateCurrentStepPresentation();
+    ctx.ui.setStatus("firstmate-calm", undefined);
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    setCalmCurrentStep(undefined);
     applyWorkingPresentation(ctx.ui);
-    updateCurrentStepPresentation();
+    ctx.ui.setStatus("firstmate-calm", undefined);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    setCalmCurrentStep(undefined);
     applyWorkingPresentation(ctx.ui);
-    updateCurrentStepPresentation();
-    currentStepUi = undefined;
+    ctx.ui.setStatus("firstmate-calm", undefined);
   });
 
   pi.registerCommand("calm", {
@@ -509,10 +489,9 @@ export default function (pi: ExtensionAPI) {
       persistCalmPreference(active);
       setCalmPresentation(active);
       if (active) activateBuiltInsIfNeeded(ctx.ui);
-      else setCalmCurrentStep(undefined);
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
-      updateCurrentStepPresentation();
+      ctx.ui.setStatus("firstmate-calm", undefined);
       // Pi re-runs every assistant row's layout from this call even when the label is
       // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);

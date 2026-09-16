@@ -1170,7 +1170,6 @@ let terminalInputHandler;
 let workingVisible;
 let hiddenThinkingLabel = "unset";
 const statuses = new Map();
-const statusCalls = [];
 const sessionEntries = [{ type: "message", message: { role: "toolResult", content: "kept" } }];
 const entriesBefore = JSON.stringify(sessionEntries);
 const commandContext = {
@@ -1191,7 +1190,6 @@ const commandContext = {
       }
     },
     setStatus(key, value) {
-      statusCalls.push([key, value]);
       statuses.set(key, value);
     },
     setToolsExpanded(value) {
@@ -1235,21 +1233,19 @@ if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
   throw new Error("Calm did not persist the active choice in the effective Firstmate home");
 }
 await handlers.get("agent_start")[0]({}, commandContext);
-assistantProgress.updateContent(assistantProgressMessage);
-if (statuses.get("firstmate-calm") !== "Current step: CURRENT_STEP_FROM_ASSISTANT") {
-  throw new Error(`Calm did not replace assistant progress with one current step: ${statuses.get("firstmate-calm")}`);
+assistantProgress.updateContent(assistantProgressMessage, true);
+let progressText = assistantProgress.render(100).join("\n");
+if (!progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT")) {
+  throw new Error(`Calm did not render assistant progress as one current numbered step: ${progressText}`);
 }
-assistantProgress.updateContent(nextAssistantProgressMessage);
-if (statuses.get("firstmate-calm") !== "Current step: NEXT_STEP_FROM_ASSISTANT") {
-  throw new Error(`Calm did not replace the prior progress title in place: ${statuses.get("firstmate-calm")}`);
-}
-const progressCalls = statusCalls.filter(([key, value]) => key === "firstmate-calm" && value);
-if (progressCalls.length !== 2 || progressCalls.some(([key]) => key !== "firstmate-calm")) {
-  throw new Error(`Calm appended progress titles instead of reusing one status key: ${JSON.stringify(progressCalls)}`);
+assistantProgress.updateContent(nextAssistantProgressMessage, true);
+progressText = assistantProgress.render(100).join("\n");
+if (!progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") || progressText.includes("CURRENT_STEP_FROM_ASSISTANT")) {
+  throw new Error(`Calm did not replace the prior assistant progress row: ${progressText}`);
 }
 await handlers.get("agent_settled")[0]({}, commandContext);
 if (statuses.get("firstmate-calm") !== undefined) {
-  throw new Error(`Calm kept the current step after the run settled: ${statuses.get("firstmate-calm")}`);
+  throw new Error("Calm left a separate current-step status after the run settled");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1482,7 +1478,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi calm centralizes transcript visibility, replaces assistant progress with one current-step status, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
+  pass "Pi calm centralizes transcript visibility, replaces assistant progress with one current-step row, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1774,7 +1770,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height, replaces their latest text with one current-step status until settlement, while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi calm on collapses mid-turn assistant working notes to zero height, replaces their latest text with one current-step row until settlement, while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {

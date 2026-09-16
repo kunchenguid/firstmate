@@ -4,7 +4,7 @@ Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
-When assistant progress narration or a routine supervision note arrives, Calm keeps only the latest high-level step in one replace-in-place `Current step:` status line rather than adding transcript rows.
+Each in-progress assistant update is rendered as one replacing numbered `Step N:` row, so the latest planning or commentary update replaces the prior one without adding transcript rows.
 The water fills the usable width with low one-cell Unicode bars, using standard ANSI blue for troughs and cyan for crests.
 The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull, with a smaller standard ANSI yellow quarter sail, a larger standard ANSI red right sail, and a blue zero-height interior that keeps the water visible through the boat.
 The boat is deliberately calm: it moves one column every 880ms, while the long smooth wave advances one quarter-cell every 220ms so the surface stays alive between boat steps.
@@ -22,7 +22,7 @@ A mid-turn working note is assistant text in a message the model did not end its
 When the response settles, intermediate tool-use narration and any live planning thinking are hidden while the genuine final response stays visible.
 Restored tool-use narration remains hidden, while explicit reasoning expansion still restores the original reasoning row.
 The narration and routine supervision notes are hidden only from the live transcript presentation, and remain in their messages, model context, session storage, and `/export` artifacts.
-The current-step line is cleared when the main run settles, so the final answer remains the lasting transcript result.
+The live intermediate row disappears when the main run settles, so the final answer remains the lasting transcript result.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -52,7 +52,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy and current-step value, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns assistant progress extraction, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns assistant progress extraction, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
 
 Regression entry points:
 
