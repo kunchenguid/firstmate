@@ -695,6 +695,61 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# fm_composer_pi_strip_footer: <plain-screen> with pi's footer region removed -
+# every row below the last solid separator row, which is the closing rule of
+# pi's separated composer. pi-signed draws the same screen behind its signed
+# launcher, so the rule is the family's, not one build's.
+#
+# WHY THIS EXISTS (task fm-pi-footer-stale-churn): pi's footer is not pane
+# content. It is the harness's own status surface, and pi hands it to extensions
+# (`ctx.ui.setFooter`), so a status line showing a quota countdown, a clock, or a
+# token counter repaints the same rows once per tick while the transcript above
+# never moves. The watcher's staleness backbone reads a content hash as its "the
+# pane changed" signal, so a ticking footer made that signal fire forever: a
+# finished worker whose last status line is `done:` was reported stale once per
+# tick, burning a supervision turn every minute. Consumers of this owner
+# therefore hash the rows pi renders as content. The boundary is a structural
+# row pi draws itself - the composer's closing separator, matched here by the
+# same owner that recognizes it during composer classification - so nothing in
+# this rule depends on a harness version string or on the footer's own text
+# shape, and a repaint of whatever an extension renders there is invisible by
+# construction.
+#
+# Prints nothing and exits 1 when the screen holds no separator row, or holds
+# nothing above the last one, so a caller falls back to the whole capture rather
+# than hashing a degenerate constant that could never change again.
+# The row scan is cheap on purpose: only rows carrying a separator glyph pay for
+# the shared whitespace normalization, and the caller already paid for the
+# capture this reads.
+#
+# Stock macOS Bash 3.2.57 has no namerefs, and the scan therefore keeps the
+# capture's rows in a variable rather than a temporary file: a `while read` fed
+# by a pipe would run in a subshell, and every row accumulated there would be
+# discarded with it.
+# Both the private matcher and this function are scoped to the pi family because
+# pi is the harness whose footer the composer rule bounds; a second harness earns
+# a rule here only with its own structural boundary, never by guessing at footer
+# text.
+fm_composer_pi_strip_footer() {  # <plain-screen>
+  local line trimmed acc='' content='' seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      *─*)
+        trimmed=$line
+        fm_composer_normalize_trim_var trimmed
+        if _fm_composer_pi_separator_row "$trimmed"; then
+          content=$acc
+          seen=1
+        fi
+        ;;
+    esac
+    acc+="$line"$'\n'
+  done <<< "$1"
+  [ "$seen" -eq 1 ] || return 1
+  [ -n "$content" ] || return 1
+  printf '%s' "$content"
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
