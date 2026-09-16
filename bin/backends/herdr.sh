@@ -356,10 +356,13 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 # is recorded as one `parent_label=` line of the exact-binding projection
 # journal, whose validated version:line-count pairing an embedded newline
 # would break, so a multi-line file is refused and falls through to the
-# default rather than emitting a label no journal can round-trip. Absent
-# both, the PRIMARY home resolves to the
-# constant "firstmate", byte-identical to every pre-existing task's recorded
-# label - no forced migration. Read fresh from FM_HOME on every call rather
+# default rather than emitting a label no journal can round-trip. An
+# unreadable file falls through the same way: the read is guarded because
+# fm-spawn.sh calls this under `set -eu`, where a failing command
+# substitution would abort the whole spawn with no message over a purely
+# cosmetic setting. Absent both, the PRIMARY home resolves to the constant
+# "firstmate", byte-identical to every pre-existing task's recorded label -
+# no forced migration. Read fresh from FM_HOME on every call rather
 # than cached at source time: FM_HOME is the home's own durable identity, not
 # env plumbing threaded through a call chain, so the label is automatically
 # stable across every respawn/recovery for the life of that home. fm-spawn.sh
