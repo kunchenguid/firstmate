@@ -454,7 +454,7 @@ test_projection_does_not_call_network_tools() {
   local runtime=$TMP_ROOT/network-runtime fakebin=$TMP_ROOT/network-bin out=$TMP_ROOT/network.json poison=$TMP_ROOT/network.log name
   mkdir -p "$runtime/bin" "$fakebin"
   cp "$PROJECTOR" "$CONTRACT" "$runtime/bin/"
-  printf '#!/usr/bin/env bash\n[ "$1" = --json-read-only ] || exit 95\nexec jq . "%s"\n' "$FIXTURES/states.json" > "$runtime/bin/fm-fleet-snapshot.sh"
+  printf "#!/usr/bin/env bash\n[ \"\$1\" = --json-read-only ] || exit 95\nexec jq . \"%s\"\n" "$FIXTURES/states.json" > "$runtime/bin/fm-fleet-snapshot.sh"
   chmod +x "$runtime/bin/fm-fleet-snapshot.sh"
   for name in curl wget gh gh-axi ssh; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s" >> "%s"\nexit 96\n' "$name" "$poison" > "$fakebin/$name"
