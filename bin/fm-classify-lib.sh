@@ -399,6 +399,23 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   fi
   printf '%s' "$n"
 }
+
+# 0 when a current-state or status line carries positive daemon socket-failure
+# evidence. Client-side timeouts and generic unreachability are deliberately
+# excluded: only a refused or missing socket proves the shared daemon itself is
+# unavailable.
+status_line_reports_daemon_socket_down() {  # <line>
+  local line
+  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$line" in
+    *daemon*|*no-mistakes*) ;;
+    *) return 1 ;;
+  esac
+  case "$line" in
+    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
+  esac
+  return 1
+}
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local k
   if _fm_key_before_colon "$1"; then

@@ -512,6 +512,10 @@ observe_run() { # <task> <incarnation> <state-line>
   case "$line" in
     *"source: run-step"*) ;;
     *)
+      # A refused or missing daemon socket is a current operational blocker,
+      # not lost run attribution. Keep the prior run observation intact and
+      # leave this status-log evidence to the ordinary blocker signal path.
+      status_line_reports_daemon_socket_down "$line" && return 1
       case "$previous" in
         'state: working '*|'state: parked '*|'state: unknown '*)
           line="state: unknown · source: run-observer · previously observed validation run is no longer readable or attributable; reconcile before recovery"

@@ -32,7 +32,11 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+if [ -n "${FM_FAKE_CREW_STATE_LINE:-}" ]; then
+  printf '%s\n' "$FM_FAKE_CREW_STATE_LINE"
+else
+  printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+fi
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -999,9 +1003,28 @@ SH
   pass "a surviving validation run reports its decision and failure without a worker"
 }
 
+test_daemon_socket_failure_preserves_prior_run_observation() {
+  local observation
+  make_world daemon-observation
+  write_child "$MAIN" child 'blocked: no-mistakes daemon socket refused connections'
+  FM_FAKE_CREW_STATE_LINE='state: working · source: run-step · run: surviving-run' \
+    run_reconcile "$MAIN" --startup >/dev/null
+  observation="$MAIN/state/terminal-outcomes/child.run-observation"
+  grep -Fq 'observation=state: working · source: run-step · run: surviving-run' "$observation" \
+    || fail "active run observation was not persisted"
+  FM_FAKE_CREW_STATE_LINE='state: blocked · source: status-log · no-mistakes daemon socket refused connections' \
+    run_reconcile "$MAIN" --startup >/dev/null
+  grep -Fq 'observation=state: working · source: run-step · run: surviving-run' "$observation" \
+    || fail "positive daemon socket failure was rewritten as lost run attribution"
+  ! grep -Fq 'no longer readable or attributable' "$observation" \
+    || fail "daemon socket failure became a generic lost-attribution observation"
+  pass "run observation preserves explicit daemon socket failure for the blocker path"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_lost_run_attribution_does_not_promote_status_terminal
 test_vanished_worker_run_is_observed
+test_daemon_socket_failure_preserves_prior_run_observation
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure

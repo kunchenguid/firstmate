@@ -2706,6 +2706,51 @@ test_ended_worker_state_read_waits_for_stale_cadence() {
   pass "a stopped worker reads authoritative state only at stale cadence boundaries"
 }
 
+test_ended_worker_unreadable_pane_still_reconciles() {
+  local dir state out capture count key
+  dir=$(make_hold_home ended-unreadable-pane 'resolved [key=prior]: reboot interrupted recovery' nohold) \
+    || fail "could not build unreadable ended-worker fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; count="$dir/capture-count"
+  key=$(hold_key)
+  printf 'preserved shell\n' > "$capture"
+  export FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "confirmed ended worker with unreadable pane was skipped"; }
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    || fail "unreadable ended-worker pane did not reconcile by task identity: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "unreadable ended-worker pane produced a false wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge unreadable ended-worker recovery"
+  : > "$out"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "unreadable ended-worker pane repeated inside its recovery cadence"
+  fi
+  reap "$HOLD_WATCH_PID"
+  [ -e "$state/.paused-resurfaced-$key" ] \
+    || fail "unreadable ended-worker recovery did not persist its long cadence"
+  unset FM_FAKE_TMUX_CAPTURE_COUNT_FILE FM_FAKE_TMUX_CAPTURE_FAIL_AFTER
+  pass "a confirmed ended worker reconciles preserved work without readable pane bytes"
+}
+
+test_ended_worker_preserves_daemon_socket_failure() {
+  local dir state out capture
+  dir=$(make_hold_home ended-daemon-down 'blocked: no-mistakes daemon socket refused connections' nohold) \
+    || fail "could not build ended-worker daemon failure fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf 'preserved shell\n' > "$capture"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "ended worker hid a genuine daemon socket failure"; }
+  grep -F 'validation daemon socket down requires recovery' "$out" >/dev/null \
+    || fail "daemon socket failure collapsed into generic worker-loss recovery: $(cat "$out")"
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    && fail "daemon socket failure was mislabeled as generic preserved-state recovery: $(cat "$out")"
+  pass "an ended worker keeps genuine daemon socket failure distinguishable"
+}
+
 
 
 # The disconfirming case keeps the same unheld terminal and blocker statuses
@@ -5022,6 +5067,8 @@ test_open_captain_call_bounds_stale_churn
 test_ended_worker_inherited_wedge_becomes_wait
 test_unheld_ended_worker_inherited_wedge_becomes_recovery
 test_ended_worker_state_read_waits_for_stale_cadence
+test_ended_worker_unreadable_pane_still_reconciles
+test_ended_worker_preserves_daemon_socket_failure
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window

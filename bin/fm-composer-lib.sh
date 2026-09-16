@@ -1470,6 +1470,36 @@ EOF
   esac
 }
 
+# Recovery-only process evidence for cursorless backends that expose no
+# foreground-process API. A positively selected agent composer proves the agent
+# is still present. A bare shell prompt proves it has exited only when that
+# prompt is the bottom-most nonblank screen row; shell-looking transcript text
+# above newer output remains unverified. This verdict is never used to authorize
+# input injection.
+fm_composer_recovery_agent_state() {  # <screen> -> alive|dead|unverified
+  local screen=$1 plain row=0 last_nonblank=-1 raw trimmed
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" '' 1
+  if _fm_composer_select_cursorless "$plain"; then
+    printf 'alive'
+    return 0
+  fi
+  while IFS= read -r raw; do
+    trimmed=$raw
+    fm_composer_normalize_trim_var trimmed
+    [ -z "$trimmed" ] || last_nonblank=$row
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -ge 0 ] \
+     && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -eq "$last_nonblank" ]; then
+    printf 'dead'
+  else
+    printf 'unverified'
+  fi
+}
+
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
 # for the cursor-less backends (cmux, orca, zellij), parameterised by the
 # adapter's send-key and composer-state functions. The caller has already

@@ -884,6 +884,35 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# Recovery-grade fallback for cursorless backends without a foreground-process
+# API. Structural target existence is checked first but a failed existence read
+# stays unverified: these adapters cannot distinguish absence from a runtime
+# read failure. A readable active composer proves the agent alive; only a
+# bottom-most bare shell prompt proves it dead.
+fm_backend_rendered_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2 screen
+  fm_backend_target_exists "$backend" "$target" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    zellij)
+      screen=$(fm_backend_zellij_composer_capture "$target" 2>/dev/null) \
+        || screen=$(fm_backend_zellij_capture "$target" 80 2>/dev/null) \
+        || { printf 'unreadable'; return 0; }
+      ;;
+    orca)
+      screen=$(fm_backend_orca_composer_capture "$target" 2>/dev/null) \
+        || { printf 'unreadable'; return 0; }
+      ;;
+    cmux)
+      screen=$(fm_backend_cmux_composer_capture "$target" 2>/dev/null) \
+        || { printf 'unreadable'; return 0; }
+      ;;
+    *) printf 'unverified'; return 0 ;;
+  esac
+  [ -n "$screen" ] || { printf 'unreadable'; return 0; }
+  fm_composer_recovery_agent_state "$screen"
+}
+
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
@@ -893,23 +922,23 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. Every `alive` is proven at
-# process level through the shared classifier in bin/fm-agent-process-lib.sh,
-# never from a registration or a rendered title alone. The tmux adapter
-# requires a successful session inventory and returns `missing` only when it
-# omits the exact window; the Herdr adapter reuses its strict husk classifier -
-# which verifies a registered agent against `pane process-info` and the real
-# process table, so a registration Herdr kept over a shell-only pane reads
-# `dead` here (issue #4115) - then maps a positively stopped session server to
-# `missing` only in this recovery-grade view. Zellij remains unverified because
-# its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# Only `dead` and `missing` license recovery. Tmux and Herdr prove liveness at
+# process level through bin/fm-agent-process-lib.sh, never from a registration
+# or rendered title alone. Tmux returns `missing` only when a successful session
+# inventory omits the exact window. Herdr verifies a registered agent against
+# `pane process-info` and the real process table, so a registration retained over
+# a shell-only pane reads `dead` (issue #4115), and maps a positively stopped
+# session server to `missing` only in this recovery view. Zellij, Orca, and cmux
+# expose no foreground-process API; their recovery-only fallback accepts an
+# active composer as alive and only a bottom-most bare shell prompt as dead.
+# Every other rendered or unreadable shape remains conservative.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    zellij|orca|cmux) fm_backend_rendered_agent_state "$backend" "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

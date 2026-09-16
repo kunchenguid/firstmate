@@ -367,21 +367,6 @@ log_reports_ci_ready() {
   esac
 }
 
-# 0 when a status-log line reports positive daemon socket failure rather than a
-# client-side timeout or generic unreachability.
-log_reports_daemon_socket_down() {  # <line>
-  local line
-  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  case "$line" in
-    *daemon*|*no-mistakes*) ;;
-    *) return 1 ;;
-  esac
-  case "$line" in
-    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
-  esac
-  return 1
-}
-
 # 0 when a status-log line blames the pipeline's transport rather than the work.
 # None of these claims alone is evidence the daemon died: a drive call is only
 # waiting for a read while the fix round runs in the background.
@@ -778,7 +763,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
-        && log_reports_daemon_socket_down "$LOG_LINE"; then
+        && status_line_reports_daemon_socket_down "$LOG_LINE"; then
         emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
