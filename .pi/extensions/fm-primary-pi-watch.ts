@@ -1139,6 +1139,48 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand?.("close", {
+    description: "Review or close completed Firstmate tasks into private history.",
+    handler: async (args, ctx) => {
+      const closeScript = `${fmRoot}/bin/fm-close.sh`;
+      const closeArgs = args.trim() ? args.trim().split(/\s+/) : [];
+      const result = await runCommandAsync("bash", [closeScript, ...closeArgs], {
+        cwd: fmRoot,
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || "No closure result.";
+      ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand?.("history", {
+    description: "Show or search Firstmate's private closed-task history.",
+    handler: async (args, ctx) => {
+      const historyScript = `${fmRoot}/bin/fm-history.sh`;
+      const words = args.trim() ? args.trim().split(/\s+/) : [];
+      const searchAt = words.indexOf("--search");
+      const historyArgs = searchAt < 0
+        ? words
+        : [...words.slice(0, searchAt), "--search", words.slice(searchAt + 1).join(" ")];
+      const result = await runCommandAsync("bash", [historyScript, ...historyArgs], {
+        cwd: fmRoot,
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || "No closed tasks.";
+      ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
+    },
+  });
+
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {

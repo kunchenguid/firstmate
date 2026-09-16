@@ -17,4 +17,5 @@ When the captain supplies a selector, pass it to `bin/fm-tasks.sh --table` so th
 
 Names are concise two-to-four-token lowercase hyphenated shorthands, and are separately editable with `bin/fm-tasks.sh name <selector> <name>` when the captain explicitly asks to rename one.
 
-The command derives status from the canonical backlog and current-state reconciler, and keeps retained Done rows only as long as the backlog does.
+The command derives status from the canonical backlog and current-state reconciler.
+Done rows remain current with outcome `Ready to close` until `/close` archives them or the configured recent-Done retention moves older rows out of the live backlog.

@@ -86,7 +86,8 @@ config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCA
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
-  backlog.md         task queue, dependencies, history
+  backlog.md         current task queue, dependencies, and recent Done rows
+  closed-tasks/      private finalized closure records plus retained task instructions, reports, and notes; bin/fm-close.sh owns publication and bin/fm-history.sh owns lookup
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
@@ -96,6 +97,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
+  task-callsigns.tsv private canonical-id, human-name, and cooldown-recycled `t1`-`t99` reference registry; bin/fm-callsigns-lib.sh owns it
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.progress      touched for observed native-harness activity inside one Pi turn; bin/fm-busy-event.sh owns its generation binding and bin/fm-watch.sh reads it beside turn-ended for the busy-age bound only, never as a completed turn
@@ -394,7 +396,11 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+After successful teardown, the task is Done and remains visible in `/tasks` with outcome `Ready to close`; re-evaluate queued work whose blockers and time gates have cleared.
+When the captain asks to close completed work, load `/close`: routine close proceeds automatically when its deterministic checks pass, while `--review` presents the proposed archive, knowledge routing, and next-work recommendations without mutation.
+`bin/fm-close.sh` owns closure verification, composes guarded cleanup rather than deleting resources, preserves useful private task material, removes the Done row only through the configured backlog owner, and retires its short reference with cooldown.
+Never create recommended follow-up work without authorization, and stop for a genuine retention choice, destructive cleanup, unlanded work, unresolved captain call, or undelivered public commitment.
+Closed work leaves `/tasks` and remains available through `/history` by canonical id or human name.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -525,7 +531,8 @@ When the automatic transition gate applies, dispatch and completion move the ite
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
-Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise; keep only the configured recent Done entries.
+Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise.
+The configured recent-Done retention remains a bounded fallback; explicit closure is owned by `bin/fm-close.sh`, and `bin/fm-history.sh` reads only finalized private closure records.
 `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff safety.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.

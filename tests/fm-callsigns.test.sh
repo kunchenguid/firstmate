@@ -67,17 +67,29 @@ cat > "$home/data/backlog.md" <<'EOF'
 ## Done
 EOF
 sync "$home" 20 || fail "reconciliation sync failed"
-[ "$(lookup "$home" t1)" = delta-task ] || fail "oldest retired reference was not recycled first"
-[ "$(lookup "$home" t2)" = beta-task ] || fail "active reference changed during recycling"
-FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t1 fresh-name >/dev/null || fail "explicit name assignment failed"
-grep -q $'^delta-task\tt1\tfresh-name\t20\texplicit\t$' "$file" || fail "explicit name was not persisted"
-if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t1 one >/dev/null 2>&1; then
+if lookup "$home" t1 >/dev/null 2>&1; then fail "retired reference resolved during its cooldown"; fi
+[ "$(lookup "$home" t4)" = delta-task ] || fail "cooling tombstone was not reserved during allocation"
+[ "$(lookup "$home" t2)" = beta-task ] || fail "active reference changed during allocation"
+FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t4 fresh-name >/dev/null || fail "explicit name assignment failed"
+grep -q $'^delta-task\tt4\tfresh-name\t20\texplicit\t$' "$file" || fail "explicit name was not persisted"
+if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t4 one >/dev/null 2>&1; then
   fail "one-token explicit shorthand was accepted"
 fi
-if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t1 one-two-three-four-five >/dev/null 2>&1; then
+if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t4 one-two-three-four-five >/dev/null 2>&1; then
   fail "description-length explicit name was accepted"
 fi
-pass "recycling and independently editable concise names"
+cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] beta-task - Crew Inbox (repo: sample)
+## Queued
+- [ ] gamma-task - Ready Queue (repo: sample)
+- [ ] delta-task - New Task (repo: sample)
+- [ ] epsilon-task - Later Task (repo: sample)
+## Done
+EOF
+sync "$home" 86420 || fail "post-cooldown reconciliation failed"
+[ "$(lookup "$home" t1)" = epsilon-task ] || fail "oldest cooled reference was not recycled first"
+pass "cooldown-safe recycling and independently editable concise names"
 
 home2=$(make_home collisions)
 cat > "$home2/data/backlog.md" <<'EOF'
@@ -139,7 +151,7 @@ expected='[
   {"id":"waiting-task","ref":"t2","name":"waiting-task","status":"waiting","outcome":"external wait"},
   {"id":"blocked-task","ref":"t3","name":"blocked-task","status":"blocked","outcome":"waiting on active-task"},
   {"id":"input-task","ref":"t4","name":"needs-input","status":"needs-you","outcome":"captain input needs a decision about production behavior and careful rollout sequencing"},
-  {"id":"done-task","ref":"t5","name":"done-task","status":"done","outcome":"completed"}
+  {"id":"done-task","ref":"t5","name":"done-task","status":"done","outcome":"Ready to close"}
 ]'
 [ "$(printf '%s' "$json_wide" | jq -Sc .)" = "$(printf '%s' "$expected" | jq -Sc .)" ] \
   || fail "status normalization or JSON contract changed: $json_wide"

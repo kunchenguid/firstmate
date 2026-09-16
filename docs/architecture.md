@@ -94,8 +94,11 @@ Each home atomically publishes that bounded home summary with freshness epoch me
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 `bin/fm-tasks.sh` adds the compact task table and uses `bin/fm-callsigns-lib.sh` for private atomic `t1`-`t99` references and concise editable two-to-four-token names; the table remains a projection of backlog and current-state authority rather than a second status list.
-The resolver is used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr-check.sh`, and `fm-teardown.sh`; merge, review, and promotion consumers remain deliberately deferred until their exact task-id boundaries are independently updated.
-The script header owns the exact JSON schema.
+Done rows remain actionable there as `Ready to close`.
+`bin/fm-close.sh` composes the existing terminal-state, guarded cleanup, captain-hold, public-commitment, and tasks-axi owners, then stores one private closure record plus retained task material under `data/closed-tasks/<id>/` before `bin/fm-history.sh` exposes only finalized records.
+Closure retires the recyclable short reference for a deterministic one-day cooldown, while history uses only canonical ids and unambiguous human names.
+The resolver is used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr-check.sh`, `fm-teardown.sh`, and the close surface; merge, review, and promotion consumers remain deliberately deferred until their exact task-id boundaries are independently updated.
+The script headers own their exact schemas and recovery mechanics.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.

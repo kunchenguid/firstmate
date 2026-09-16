@@ -4,7 +4,8 @@
 # The private state file is a tab-separated registry. Live rows have six fields:
 # task id, short reference, human name, last-seen epoch, name origin
 # (`generated` or `explicit`), and an empty retired epoch. Retired rows remain as tombstones
-# so recycled references use oldest retirement order. Version 1 rows migrate by
+# so recycled references use oldest retirement order after a deterministic cooldown;
+# until then they prevent an old reference from silently naming new work. Version 1 rows migrate by
 # treating only the exact legacy title-derived default as generated; every other
 # name is preserved as explicit. Atomic replacement and locking keep concurrent
 # callers coherent.
@@ -14,6 +15,11 @@ set -u
 FM_CALLSIGNS_STATE=${FM_CALLSIGNS_STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-.}/state}}
 FM_CALLSIGNS_FILE=${FM_CALLSIGNS_FILE:-$FM_CALLSIGNS_STATE/task-callsigns.tsv}
 FM_CALLSIGNS_LOCK=${FM_CALLSIGNS_LOCK:-$FM_CALLSIGNS_STATE/.task-callsigns.lock}
+FM_CALLSIGN_REUSE_COOLDOWN_SECS=${FM_CALLSIGN_REUSE_COOLDOWN_SECS:-86400}
+case "$FM_CALLSIGN_REUSE_COOLDOWN_SECS" in
+  ''|*[!0-9]*) FM_CALLSIGN_REUSE_COOLDOWN_SECS=86400 ;;
+  *) [ "${#FM_CALLSIGN_REUSE_COOLDOWN_SECS}" -le 9 ] || FM_CALLSIGN_REUSE_COOLDOWN_SECS=86400 ;;
+esac
 
 fm_callsign_valid_name() {
   [ -n "${1:-}" ] && printf '%s' "$1" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$'
@@ -146,8 +152,8 @@ fm_callsign_unique_generated() {  # <base> <live-file>
 
 fm_callsigns_sync_locked() {
   local inventory=$1 now=$2 tmp live tomb raw id default legacy ref name seen retired origin line field5 field6
-  local selected candidate n schema=1 generated_name rc=0
-  local selected_epoch selected_num selected_ref
+  local selected candidate n schema=1 generated_name rc=0 eligible_before
+  local selected_epoch selected_ref
   inventory="$inventory.unique"
   awk -F '\t' '!seen[$1]++ && $1 != "" {print}' "$1" > "$inventory"
   live=$(mktemp "${TMPDIR:-/tmp}/fm-callsigns-live.XXXXXX") || return 1
@@ -202,22 +208,32 @@ fm_callsigns_sync_locked() {
     rm -f "$live" "$tomb" "$raw" "$inventory"
     return 1
   fi
-  # Allocate missing IDs. Existing retired references are chosen oldest first;
-  # otherwise the shortest unused t1-t99 reference is selected.
+  # Allocate missing IDs. Existing retired references are chosen oldest first
+  # only after the cooldown; cooling tombstones remain reserved, so an immediate
+  # old reference can never identify unrelated new work.
+  eligible_before=$((now - FM_CALLSIGN_REUSE_COOLDOWN_SECS))
   while IFS=$'\t' read -r id default legacy; do
     [ -n "$id" ] || continue
     if awk -F '\t' -v id="$id" '$1 == id {found=1} END {exit !found}' "$live"; then continue; fi
     selected=
     if [ -s "$tomb" ]; then
-      sort -t$'\t' -k1,1n -k2,2n "$tomb" > "$tomb.sorted"
-      IFS=$'\t' read -r selected_epoch selected_num selected_ref name < "$tomb.sorted"
-      selected=$selected_ref
-      awk -F '\t' -v e="$selected_epoch" -v r="$selected_ref" '!($1 == e && $3 == r)' "$tomb" > "$tomb.next" && mv -f "$tomb.next" "$tomb"
-    else
+      awk -F '\t' -v cutoff="$eligible_before" '$1 <= cutoff' "$tomb" \
+        | sort -t$'\t' -k1,1n -k2,2n > "$tomb.sorted"
+      if [ -s "$tomb.sorted" ]; then
+        IFS=$'\t' read -r selected_epoch _ selected_ref name < "$tomb.sorted"
+        selected=$selected_ref
+        awk -F '\t' -v e="$selected_epoch" -v r="$selected_ref" '!($1 == e && $3 == r)' "$tomb" > "$tomb.next" && mv -f "$tomb.next" "$tomb"
+      fi
+    fi
+    if [ -z "$selected" ]; then
       n=1
       while [ "$n" -le 99 ]; do
         candidate=t$n
-        if ! awk -F '\t' -v r="$candidate" '$2 == r {found=1} END {exit !found}' "$live"; then selected=$candidate; break; fi
+        if ! awk -F '\t' -v r="$candidate" '$2 == r {found=1} END {exit !found}' "$live" \
+           && ! awk -F '\t' -v r="$candidate" '$3 == r {found=1} END {exit !found}' "$tomb"; then
+          selected=$candidate
+          break
+        fi
         n=$((n + 1))
       done
     fi
@@ -242,7 +258,7 @@ fm_callsigns_sync_locked() {
     sort -t$'\t' -k1,1 "$live" | while IFS=$'\t' read -r id ref name seen origin; do
       printf '%s\t%s\t%s\t%s\t%s\t\n' "$id" "$ref" "$name" "$seen" "$origin"
     done
-    sort -t$'\t' -k1,1n -k2,2n "$tomb" | while IFS=$'\t' read -r retired ref_num ref name; do
+    sort -t$'\t' -k1,1n -k2,2n "$tomb" | while IFS=$'\t' read -r retired _ ref name; do
       printf '%s\t%s\t%s\t0\tretired\t%s\n' "__retired__${ref}" "$ref" "$name" "$retired"
     done
   } > "$tmp" || { rm -f "$tmp" "$live" "$tomb" "$raw" "$inventory"; return 1; }
@@ -253,6 +269,8 @@ fm_callsigns_sync_locked() {
 
 fm_callsigns_sync() {
   local now=${1:-$(date +%s)} tmp rc=0
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#now}" -le 18 ] || return 1
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-callsigns.XXXXXX") || return 1
   fm_callsigns_inventory > "$tmp" || rc=1
   if [ "$rc" -eq 0 ] && fm_callsigns_lock; then

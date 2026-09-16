@@ -125,6 +125,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/close/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/history/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/tasks/SKILL.md",
       "audience": "agent-runtime"
     },

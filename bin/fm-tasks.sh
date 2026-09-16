@@ -101,7 +101,7 @@ MODEL=$(printf '%s\n' "$SNAPSHOT" | jq --argjson callsigns "$CALLSIGNS" --arg se
     elif ($t.current_state.state // "unknown") == "failed" then "failed"
     else "unknown" end;
   def outcome($r; $t; $status):
-    if $status == "done" then ($r.pr_url // $r.report_path // $r.local_note // "completed")
+    if $status == "done" then "Ready to close"
     elif $status == "queued" then "queued"
     elif $status == "blocked" then (($r.unresolved_blocker_ids // [] | join(", ")) as $b | if $b == "" then ($r.blocked_reason // "blocked") else "waiting on " + $b end)
     elif $status == "needs-you" then ($r.hold_reason // (current_detail($t) | if . == "" then "needs your input" else . end))

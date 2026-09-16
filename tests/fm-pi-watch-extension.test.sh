@@ -165,41 +165,71 @@ test_pi_tasks_command_preserves_rendered_table() {
 [ "${COLUMNS:-}" = 50 ] || { printf 'wrong width: %s\n' "${COLUMNS:-unset}" >&2; exit 2; }
 printf '┌─────┐\n│ t7  │\n└─────┘\n'
 SH
-  chmod +x "$repo/bin/fm-tasks.sh"
+  cat > "$repo/bin/fm-close.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --review ] && [ "${2:-}" = t7 ] || exit 2
+printf 'Review only: t7\n'
+SH
+  cat > "$repo/bin/fm-history.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = task-name ]; then
+  printf '2026-09-16 task-name [task-id]\n'
+elif [ "${1:-}" = --search ] && [ "${2:-}" = 'two word result' ] && [ "$#" -eq 2 ]; then
+  printf '2026-09-16 two-word-result [task-id]\n'
+else
+  exit 2
+fi
+SH
+  chmod +x "$repo/bin/fm-tasks.sh" "$repo/bin/fm-close.sh" "$repo/bin/fm-history.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
-let handler = null;
+const handlers = new Map();
 let notification = null;
 const pi = {
   on() {},
   registerCommand(name, options) {
-    if (name === "tasks") handler = options.handler;
+    handlers.set(name, options.handler);
   },
   registerTool() {},
 };
 Object.defineProperty(process.stdout, "columns", { value: 52, configurable: true });
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (!handler) throw new Error("Pi tasks command was not registered");
-await handler("t7", {
+for (const name of ["tasks", "close", "history"]) {
+  if (!handlers.has(name)) throw new Error(`Pi ${name} command was not registered`);
+}
+const context = {
   mode: "tui",
   ui: {
     notify(message, type) {
       notification = { message, type };
     },
   },
-});
+};
+await handlers.get("tasks")("t7", context);
 const expected = "┌─────┐\n│ t7  │\n└─────┘";
 if (notification?.message !== expected || notification?.type !== "info") {
   throw new Error(`rendered table was not returned verbatim: ${JSON.stringify(notification)}`);
 }
+await handlers.get("close")("--review t7", context);
+if (notification?.message !== "Review only: t7" || notification?.type !== "info") {
+  throw new Error(`close result was not returned verbatim: ${JSON.stringify(notification)}`);
+}
+await handlers.get("history")("task-name", context);
+if (notification?.message !== "2026-09-16 task-name [task-id]" || notification?.type !== "info") {
+  throw new Error(`history result was not returned verbatim: ${JSON.stringify(notification)}`);
+}
+await handlers.get("history")("--search two word result", context);
+if (notification?.message !== "2026-09-16 two-word-result [task-id]" || notification?.type !== "info") {
+  throw new Error(`history search phrase was not preserved: ${JSON.stringify(notification)}`);
+}
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi /tasks must return the rendered table verbatim at its available content width"
-  [ -z "$out" ] || fail "Pi tasks command test printed output: $out"
-  pass "Pi /tasks returns the rendered table without reformatting"
+  expect_code 0 "$status" "Pi task lifecycle commands must return their script output verbatim"
+  [ -z "$out" ] || fail "Pi task lifecycle command test printed output: $out"
+  pass "Pi /tasks, /close, and /history return their script output without reformatting"
 }
 
 test_pi_tool_returns_agent_tool_result() {

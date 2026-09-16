@@ -94,10 +94,14 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+That recent-Done window remains the bounded fallback, while an explicit close uses `bin/fm-close.sh` to preserve a richer private record under `data/closed-tasks/<id>/` and remove only that Done row through the configured tasks-axi adapter.
+Prepared closure records stay hidden from `bin/fm-history.sh` until the adapter removal and callsign retirement both finish, so retry by canonical id or human name is idempotent.
+A manual-backend home has no configured mutation owner for that removal, so automatic close refuses rather than hand-editing or duplicating its state machine.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 When the automatic transition gate applies, dispatch and completion are not separate operator actions: each moves its work item inside the same run that creates or removes the task's record, so the ordinary successful path cannot leave the backlog and live task set out of sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
-Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
+Completion refuses to report success until the item is marked Done, and session start reconciles this home's own books after an interrupted run.
+Done is the terminal backlog state; `closed` names only the later archival disposition produced by `bin/fm-close.sh`.
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
 A markdown backlog is additionally addressed by an explicit `--file` at `<data>/backlog.md`, so the change lands in the home that owns the task regardless of the caller's working directory.
