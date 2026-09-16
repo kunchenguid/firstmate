@@ -418,11 +418,26 @@ HEAD
 </div>
 <script>
 (function () {
-  var lavish = (typeof window.lavish === 'object' && window.lavish) || null;
-  var queue = lavish && typeof lavish.queuePrompt === 'function' ? lavish.queuePrompt : null;
-  var sendAllFn = lavish && typeof lavish.sendQueuedPrompts === 'function' ? lavish.sendQueuedPrompts : null;
+  /* Lavish injects window.lavish into the artifact frame after load, so
+     availability is re-checked on an interval instead of read once. */
+  var queue = null;
+  var sendAllFn = null;
   var banner = document.getElementById('lavish-required');
-  if (!queue && banner) banner.hidden = false;
+  var sendAll = document.getElementById('send-all');
+  function refreshLavish() {
+    var l = (typeof window.lavish === 'object' && window.lavish) || null;
+    queue = l && typeof l.queuePrompt === 'function' ? l.queuePrompt : null;
+    sendAllFn = l && typeof l.sendQueuedPrompts === 'function' ? l.sendQueuedPrompts : null;
+    if (banner) banner.hidden = !!queue;
+    if (sendAll) sendAll.disabled = !sendAllFn;
+  }
+  refreshLavish();
+  setInterval(refreshLavish, 700);
+  if (sendAll) {
+    sendAll.addEventListener('click', function () {
+      if (sendAllFn) sendAllFn();
+    });
+  }
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
   var panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
@@ -491,14 +506,6 @@ HEAD
       if (badge) badge.hidden = false;
     });
   });
-
-  var sendAll = document.getElementById('send-all');
-  if (sendAll) {
-    if (!sendAllFn) sendAll.disabled = true;
-    sendAll.addEventListener('click', function () {
-      if (sendAllFn) sendAllFn();
-    });
-  }
 })();
 </script>
 </body>

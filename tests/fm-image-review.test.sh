@@ -163,7 +163,7 @@ test_feedback_controls_map_to_image_ids() {
   make_tree "$base"
   bash "$GEN" "$base" >/dev/null
   page="$base/.image-review.html"
-  assert_grep 'lavish.queuePrompt' "$page" "feedback form did not queue through lavish"
+  assert_grep 'queuePrompt' "$page" "feedback form did not queue through lavish"
   assert_grep 'queueKey' "$page" "queued feedback did not use a stable per-image queue key"
   assert_grep 'sendQueuedPrompts' "$page" "page lacked a send-all control"
   assert_grep '<form class="fb" data-image-id="alpha/art1/run-a/one.png">' "$page" \
