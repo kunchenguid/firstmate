@@ -133,6 +133,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/next/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/task/SKILL.md",
       "audience": "agent-runtime"
     },

@@ -1139,6 +1139,25 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand?.("next", {
+    description: "Show the single highest-value captain action.",
+    handler: async (args, ctx) => {
+      const nextScript = `${fmRoot}/bin/fm-next.sh`;
+      const nextArgs = args.trim() ? args.trim().split(/\s+/) : [];
+      const result = await runCommandAsync("bash", [nextScript, ...nextArgs], {
+        cwd: fmRoot,
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || "Fleet needs no captain action.";
+      ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
+    },
+  });
+
   pi.registerCommand?.("task", {
     description: "Show one current or closed Firstmate task in detail.",
     handler: async (args, ctx) => {
