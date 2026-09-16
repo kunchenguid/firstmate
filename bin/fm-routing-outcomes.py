@@ -4,7 +4,8 @@
 Usage:
   fm-routing-outcomes.py import --manifest <json> [--store <jsonl>] [--prices <json>] [--json]
   fm-routing-outcomes.py shadow --manifest <json> [--shadow-store <jsonl>] [--json]
-  fm-routing-outcomes.py scorecard [--store <jsonl>] [--shadow-store <jsonl>] [--legacy-log <tsv>] [--format markdown|json]
+  fm-routing-outcomes.py scorecard [--store <jsonl>] [--shadow-store <jsonl>] [--format markdown|json]
+  fm-routing-outcomes.py legacy --legacy-log <tsv> [--json]
   fm-routing-outcomes.py inspect --task <id> [--store <jsonl>] [--json]
 
 The importer is a measurement adapter, not a dispatcher or task lifecycle.
@@ -15,17 +16,20 @@ store. Re-importing an identical manifest is a no-op. A changed manifest for
 the same attempt appends a new full revision, and readers fold only the latest
 revision, so replay and resume cannot double-count cost or accepted work.
 
-Default stores live below FM_DATA_OVERRIDE/model-routing when that override is
+Every import is bound to the current state/<task-id>.meta task incarnation.
+The stores are telemetry attached to that lifecycle, not task or outcome
+authority. Default stores live below FM_DATA_OVERRIDE/model-routing when that override is
 set, otherwise below $FM_HOME/data/model-routing (or this checkout's data when
 FM_HOME is absent). --store and --shadow-store exist for isolated tests and
-explicit private evidence stores. Scorecard also reads a compatible legacy
-`data/dispatch-log.tsv` when present, reports it as incomplete pre-measurement
-history, and never mixes those rows into receipt-backed totals.
+explicit private evidence stores. Legacy `dispatch-log.tsv` history is
+available only through the explicit `legacy` command and is never an automatic
+scorecard input.
 
 Import manifest, schema fm-routing-attempt.v1:
   {
     "schema": "fm-routing-attempt.v1",
     "task_id": "task-id", "attempt_id": "attempt-1",
+    "task_binding": {"spawn_gen": "s20300101.1.1"},
     "phase": "measurement", "category": "1", "task_shape": "code-change",
     "route": {
       "harness": "pi", "provider": "openai-codex",
@@ -43,9 +47,13 @@ Import manifest, schema fm-routing-attempt.v1:
               "after_path": "/private/after.json", "concurrent_activity": true,
               "attribution": "shared"},
     "grading": {"method": "deterministic", "independent": true,
+                "acceptance_criteria": [{"id": "tests", "text": "focused tests pass"}],
+                "grader": {"kind": "deterministic-check", "id": "focused-tests"},
                 "first_pass": "pass", "final_result": "pass",
                 "defect_count": 0, "fix_count": 0, "retry_count": 0,
-                "receipts": [{"kind": "test", "id": "suite", "passed": true}],
+                "receipts": [{"kind": "test", "id": "suite", "passed": true,
+                              "criteria_ids": ["tests"], "artifact_path": "/private/check.json",
+                              "sha256": "..."}],
                 "overhead": {"duration_ms": 10, "tokens": null,
                              "actual_incremental_usd": null}},
     "outcome": "accepted"
@@ -99,7 +107,7 @@ EVENT_SCHEMA = "fm-routing-outcome-event.v1"
 SHADOW_SCHEMA = "fm-routing-shadow.v1"
 SHADOW_EVENT_SCHEMA = "fm-routing-shadow-event.v1"
 PRICE_SCHEMA = "fm-routing-prices.v1"
-PHASES = {"measurement", "shadow", "bounded"}
+PHASES = {"measurement", "shadow"}
 OUTCOMES = {"accepted", "unresolved", "failed", "abandoned"}
 RESULTS = {"pass", "fail", "unknown"}
 AUTH_CATEGORIES = {"subscription", "oauth", "api-key", "unknown"}
@@ -180,6 +188,13 @@ def default_data_dir() -> Path:
     return home / "data"
 
 
+def default_state_dir() -> Path:
+    if os.environ.get("FM_STATE_OVERRIDE"):
+        return Path(os.environ["FM_STATE_OVERRIDE"])
+    home = Path(os.environ.get("FM_HOME", Path(__file__).resolve().parent.parent))
+    return home / "state"
+
+
 def default_store() -> Path:
     return default_data_dir() / "model-routing" / "outcomes.jsonl"
 
@@ -188,8 +203,25 @@ def default_shadow_store() -> Path:
     return default_data_dir() / "model-routing" / "shadow-decisions.jsonl"
 
 
-def default_legacy_log() -> Path:
-    return default_data_dir() / "dispatch-log.tsv"
+def bind_task(task_id: str, value: Any) -> dict[str, Any]:
+    binding = need_object(value, "task_binding")
+    expected_gen = need_text(binding.get("spawn_gen"), "task_binding.spawn_gen")
+    path = default_state_dir() / f"{task_id}.meta"
+    raw, source_digest = read_private(str(path), str(path))
+    fields: dict[str, str] = {}
+    for line in raw.splitlines():
+        if not line or "=" not in line:
+            continue
+        key, field_value = line.split("=", 1)
+        if key in fields:
+            fail(f"{path} contains duplicate {key} fields")
+        fields[key] = field_value
+    if fields.get("endpoint_task_id") != task_id:
+        fail("task metadata is not bound to manifest task_id")
+    if fields.get("spawn_gen") != expected_gen:
+        fail("task_binding.spawn_gen does not match the current task incarnation")
+    return {"task_id": task_id, "spawn_gen": expected_gen, "task_meta_sha256": source_digest,
+            "harness": fields.get("harness"), "kind": fields.get("kind")}
 
 
 def read_private(path_value: Any, field: str, *, text: bool = True) -> tuple[Any, str]:
@@ -554,6 +586,23 @@ def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
             fail(f"grading.{key} must be pass, fail, or unknown")
     for key in ("defect_count", "fix_count", "retry_count"):
         grade[key] = nullable_number(grade.get(key), f"grading.{key}", integer=True)
+    criteria = grade.get("acceptance_criteria")
+    if not isinstance(criteria, list) or not criteria:
+        fail("grading.acceptance_criteria must be a non-empty array")
+    cleaned_criteria = []
+    criterion_ids = set()
+    for index, criterion in enumerate(criteria):
+        item = need_object(criterion, f"grading.acceptance_criteria[{index}]")
+        criterion_id = need_id(item.get("id"), f"grading.acceptance_criteria[{index}].id")
+        if criterion_id in criterion_ids:
+            fail("grading.acceptance_criteria ids must be unique")
+        criterion_ids.add(criterion_id)
+        cleaned_criteria.append({"id": criterion_id,
+                                 "text": need_text(item.get("text"), f"grading.acceptance_criteria[{index}].text")})
+    grade["acceptance_criteria"] = cleaned_criteria
+    grader = need_object(grade.get("grader"), "grading.grader")
+    grade["grader"] = {"kind": need_text(grader.get("kind"), "grading.grader.kind"),
+                       "id": need_id(grader.get("id"), "grading.grader.id")}
     receipts = grade.get("receipts")
     if not isinstance(receipts, list):
         fail("grading.receipts must be an array")
@@ -565,11 +614,24 @@ def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
                    "passed": item.get("passed")}
         if cleaned["passed"] not in (True, False):
             fail(f"grading.receipts[{index}].passed must be boolean")
-        if item.get("sha256") is not None:
-            sha = need_text(item.get("sha256"), f"grading.receipts[{index}].sha256")
-            if not re.fullmatch(r"[0-9a-f]{64}", sha):
-                fail(f"grading.receipts[{index}].sha256 must be lowercase SHA-256")
-            cleaned["sha256"] = sha
+        linked = item.get("criteria_ids")
+        if not isinstance(linked, list) or not linked or any(value not in criterion_ids for value in linked):
+            fail(f"grading.receipts[{index}].criteria_ids must reference acceptance criteria")
+        cleaned["criteria_ids"] = list(dict.fromkeys(linked))
+        artifact, artifact_sha = load_json_file(item.get("artifact_path"), f"grading.receipts[{index}].artifact_path")
+        sha = need_text(item.get("sha256"), f"grading.receipts[{index}].sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", sha) or sha != artifact_sha:
+            fail(f"grading.receipts[{index}].sha256 must match the check artifact")
+        artifact = need_object(artifact, f"grading.receipts[{index}].artifact_path")
+        if artifact.get("schema") != "fm-routing-check.v1" or artifact.get("check_id") != cleaned["id"]:
+            fail(f"grading.receipts[{index}] check artifact identity does not match")
+        if artifact.get("grader_id") != grade["grader"]["id"] or artifact.get("criteria_ids") != cleaned["criteria_ids"]:
+            fail(f"grading.receipts[{index}] check artifact binding does not match")
+        if artifact.get("passed") is not cleaned["passed"]:
+            fail(f"grading.receipts[{index}] check artifact result does not match")
+        if artifact.get("exit_code") != (0 if cleaned["passed"] else artifact.get("exit_code")):
+            fail(f"grading.receipts[{index}] passing check artifact must have exit_code 0")
+        cleaned["artifact_sha256"] = sha
         cleaned_receipts.append(cleaned)
     grade["receipts"] = cleaned_receipts
     overhead = need_object(grade.get("overhead"), "grading.overhead")
@@ -587,6 +649,9 @@ def validate_grading(value: Any, outcome: str) -> dict[str, Any]:
             fail("accepted outcome requires an independent deterministic or blind review")
         if grade["final_result"] != "pass" or not any(row["passed"] for row in cleaned_receipts):
             fail("accepted outcome requires final_result pass and at least one passing receipt")
+        covered = {criterion_id for row in cleaned_receipts if row["passed"] for criterion_id in row["criteria_ids"]}
+        if covered != criterion_ids:
+            fail("accepted outcome requires passing check artifacts for every acceptance criterion")
     return grade
 
 
@@ -760,7 +825,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
     attempt_id = need_id(manifest.get("attempt_id"), "attempt_id")
     phase = manifest.get("phase")
     if phase not in PHASES:
-        fail("phase must be measurement, shadow, or bounded")
+        fail("phase must be measurement or shadow")
     category = need_text(manifest.get("category"), "category")
     task_shape = need_text(manifest.get("task_shape"), "task_shape")
     route = validate_route(manifest.get("route"))
@@ -790,6 +855,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         fail("outcome must be accepted, unresolved, failed, or abandoned")
     record = {
         "schema": ATTEMPT_SCHEMA, "task_id": task_id, "attempt_id": attempt_id,
+        "task_binding": bind_task(task_id, manifest.get("task_binding")),
         "phase": phase, "category": category, "task_shape": task_shape,
         "route": route, "native": native, "requirements": copy.deepcopy(requirements),
         "started_at": started, "finished_at": finished, "time_ms": time_values,
@@ -846,17 +912,18 @@ def import_shadow(args: argparse.Namespace) -> dict[str, Any]:
         fail("candidates must be a non-empty array")
     record = {
         "schema": SHADOW_SCHEMA, "task_id": task_id, "decision_id": decision_id,
+        "task_binding": bind_task(task_id, manifest.get("task_binding")),
         "at": need_text(manifest.get("at"), "at"),
         "category": need_text(manifest.get("category"), "category"),
         "task_shape": need_text(manifest.get("task_shape"), "task_shape"),
         "candidates": [validate_candidate(item, index) for index, item in enumerate(candidates)],
         "recommended_route": validate_route(manifest.get("recommended_route")),
         "explanation": need_text(manifest.get("explanation"), "explanation"),
-        "evidence_sufficient_for_bounded_routing": manifest.get("evidence_sufficient_for_bounded_routing"),
+        "policy_status": "unverified",
     }
     parse_time(record["at"], "at")
-    if record["evidence_sufficient_for_bounded_routing"] not in (True, False):
-        fail("evidence_sufficient_for_bounded_routing must be boolean")
+    if "evidence_sufficient_for_bounded_routing" in manifest:
+        fail("bounded-routing readiness is outside this shadow-only measurement tool")
     recommended = canonical(record["recommended_route"])
     if recommended not in {canonical(item["route"]) for item in record["candidates"]}:
         fail("recommended_route must exactly match one accounted candidate")
@@ -870,6 +937,13 @@ def metric(values: Iterable[Any]) -> dict[str, Any]:
     known = [float(value) for value in items if isinstance(value, (int, float)) and not isinstance(value, bool)]
     total = round(sum(known), 12) if known else (0 if not items else None)
     return {"known_total": total, "known_count": len(known), "unknown_count": len(items) - len(known)}
+
+
+def contextual_values(values: Iterable[Any]) -> dict[str, Any]:
+    items = list(values)
+    known = sorted({float(value) for value in items if isinstance(value, (int, float)) and not isinstance(value, bool)})
+    return {"distinct_values": known, "known_count": len(items) - sum(value is None for value in items),
+            "unknown_count": sum(value is None for value in items), "aggregation": "not-applicable"}
 
 
 def route_name(record: dict[str, Any]) -> str:
@@ -901,7 +975,7 @@ def legacy_history(path: Path) -> dict[str, Any]:
             "completeness": "historical outcome only; token, cost, quota, native effort, and end-to-end attribution unknown"}
 
 
-def build_scorecard(store: Path, shadow_store: Path, legacy_log: Path) -> dict[str, Any]:
+def build_scorecard(store: Path, shadow_store: Path) -> dict[str, Any]:
     records = [event["record"] for event in fold_events(store, EVENT_SCHEMA, ("task_id", "attempt_id")).values()]
     shadows = [event["record"] for event in fold_events(shadow_store, SHADOW_EVENT_SCHEMA, ("task_id", "decision_id")).values()]
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -916,7 +990,7 @@ def build_scorecard(store: Path, shadow_store: Path, legacy_log: Path) -> dict[s
             "tokens": {key: metric(item["native"]["tokens"].get(key) for item in items) for key in TOKEN_KEYS},
             "time_ms": {key: metric(item["time_ms"].get(key) for item in items) for key in (*TIME_KEYS, "end_to_end")},
             "actual_incremental_usd": metric(item["billing"].get("actual_incremental_usd") for item in items),
-            "fixed_subscription_usd": metric(item["billing"].get("fixed_subscription_usd") for item in items),
+            "fixed_subscription_usd": contextual_values(item["billing"].get("fixed_subscription_usd") for item in items),
             "api_equivalent_usd": metric(item["billing"].get("api_equivalent_usd") for item in items),
             "grader_overhead": {
                 "duration_ms": metric(item["grading"]["overhead"].get("duration_ms") for item in items),
@@ -941,12 +1015,18 @@ def build_scorecard(store: Path, shadow_store: Path, legacy_log: Path) -> dict[s
             task_start = min(parse_time(item["started_at"], "started_at") for item in items)
             accepted_finish = min(parse_time(item["finished_at"], "finished_at") for item in accepted_items)
             accepted_span = max(0, round((accepted_finish - task_start).total_seconds() * 1000))
+            accepted_sequence = [item for item in items if parse_time(item["started_at"], "started_at") <= accepted_finish]
+            completed_sequence = [item for item in accepted_sequence if parse_time(item["finished_at"], "finished_at") <= accepted_finish]
+            overlapping = len(accepted_sequence) - len(completed_sequence)
+        else:
+            completed_sequence = []
+            overlapping = 0
         task_rows.append({"task_id": task_id, "category": one_or_unknown(item["category"] for item in items),
                           "task_shape": one_or_unknown(item["task_shape"] for item in items),
                           "attempts": len(items), "accepted": accepted,
-                          "accepted_task_actual_incremental_usd": metric(item["billing"].get("actual_incremental_usd") for item in items) if accepted else None,
-                          "accepted_task_api_equivalent_usd": metric(item["billing"].get("api_equivalent_usd") for item in items) if accepted else None,
-                          "accepted_task_fixed_subscription_usd": metric(item["billing"].get("fixed_subscription_usd") for item in items) if accepted else None,
+                          "accepted_task_actual_incremental_usd": metric([*(item["billing"].get("actual_incremental_usd") for item in completed_sequence), *([None] * overlapping)]) if accepted else None,
+                          "accepted_task_api_equivalent_usd": metric([*(item["billing"].get("api_equivalent_usd") for item in completed_sequence), *([None] * overlapping)]) if accepted else None,
+                          "accepted_task_fixed_subscription_usd": contextual_values(item["billing"].get("fixed_subscription_usd") for item in accepted_sequence) if accepted else None,
                           "accepted_task_end_to_end_ms": metric([accepted_span]) if accepted else None,
                           "grader_actual_incremental_usd": metric(item["grading"]["overhead"].get("actual_incremental_usd") for item in items),
                           "grader_duration_ms": metric(item["grading"]["overhead"].get("duration_ms") for item in items),
@@ -955,12 +1035,13 @@ def build_scorecard(store: Path, shadow_store: Path, legacy_log: Path) -> dict[s
             "task_count": len(by_task), "routes": route_groups, "tasks": task_rows,
             "shadow_recommendations": [{"task_id": row["task_id"], "decision_id": row["decision_id"], "category": row["category"],
                                          "task_shape": row["task_shape"], "recommended_route": route_name({"route": row["recommended_route"], "native": {"effective_model": None, "effective_effort": None}}),
-                                         "evidence_sufficient_for_bounded_routing": row["evidence_sufficient_for_bounded_routing"], "explanation": row["explanation"],
+                                         "shadow_only": True, "policy_status": row["policy_status"], "explanation": row["explanation"],
                                          "candidate_evidence": [{"route": route_name({"route": item["route"], "native": {"effective_model": None, "effective_effort": None}}),
+                                                                 "eligibility": item["eligibility"], "capability_class_fit": item["capability_class_fit"],
+                                                                 "runway_feasibility": item["runway_feasibility"], "spend_priority": item["spend_priority"],
                                                                  "uncertainty": item["uncertainty"], "explanation": item["explanation"]}
                                                                 for item in row["candidates"]]}
                                         for row in sorted(shadows, key=lambda item: (item["task_id"], item["decision_id"]))],
-            "legacy_history": legacy_history(legacy_log),
             "interpretation": "Descriptive evidence only. Heterogeneous tasks and small samples do not establish a winner; unknown fields stay outside known totals."}
 
 
@@ -968,6 +1049,13 @@ def format_metric(value: dict[str, Any], suffix: str = "") -> str:
     total = value.get("known_total")
     shown = "unknown" if total is None else f"{total:g}{suffix}"
     if value.get("unknown_count"):
+        shown += f" (+{value['unknown_count']} unknown)"
+    return shown
+
+
+def format_context(value: dict[str, Any], suffix: str = "") -> str:
+    shown = ", ".join(f"{item:g}{suffix}" for item in value["distinct_values"]) or "unknown"
+    if value["unknown_count"]:
         shown += f" (+{value['unknown_count']} unknown)"
     return shown
 
@@ -980,7 +1068,7 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
         lines.append("| " + " | ".join([
             row["category"], row["task_shape"], row["route"], str(row["attempts"]), str(row["accepted_attempts"]),
             format_metric(row["tokens"]["input"]), format_metric(row["tokens"]["output"]),
-            format_metric(row["actual_incremental_usd"], " USD"), format_metric(row["fixed_subscription_usd"], " USD"),
+            format_metric(row["actual_incremental_usd"], " USD"), format_context(row["fixed_subscription_usd"], " USD"),
             format_metric(row["api_equivalent_usd"], " USD"), format_metric(row["time_ms"]["end_to_end"], " ms"),
             format_metric(row["grader_overhead"]["duration_ms"], " ms"), "; ".join(row["uncertainty"]) or "none",
         ]) + " |")
@@ -994,7 +1082,7 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
             row["task_id"], row["category"] or "mixed", row["task_shape"] or "mixed", str(row["attempts"]), "yes" if row["accepted"] else "no",
             format_metric(row["accepted_task_actual_incremental_usd"], " USD") if row["accepted_task_actual_incremental_usd"] else "n/a",
             format_metric(row["grader_actual_incremental_usd"], " USD"),
-            format_metric(row["accepted_task_fixed_subscription_usd"], " USD") if row["accepted_task_fixed_subscription_usd"] else "n/a",
+            format_context(row["accepted_task_fixed_subscription_usd"], " USD") if row["accepted_task_fixed_subscription_usd"] else "n/a",
             format_metric(row["accepted_task_api_equivalent_usd"], " USD") if row["accepted_task_api_equivalent_usd"] else "n/a",
             format_metric(row["accepted_task_end_to_end_ms"], " ms") if row["accepted_task_end_to_end_ms"] else "n/a",
             format_metric(row["unresolved_or_failure_actual_usd"], " USD"),
@@ -1004,29 +1092,17 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
     lines.extend(["", "## Shadow recommendations", ""])
     if scorecard["shadow_recommendations"]:
         for row in scorecard["shadow_recommendations"]:
-            readiness = "bounded-ready" if row["evidence_sufficient_for_bounded_routing"] else "shadow-only"
-            lines.append(f"- {row['task_id']} ({row['category']}, {row['task_shape']}): {row['recommended_route']} - {readiness}. {row['explanation']}")
+            lines.append(f"- {row['task_id']} ({row['category']}, {row['task_shape']}): {row['recommended_route']} - shadow-only, policy {row['policy_status']}. {row['explanation']}")
             for candidate in row["candidate_evidence"]:
-                lines.append(f"  - {candidate['route']}: {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
+                lines.append(f"  - {candidate['route']}: eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={candidate['spend_priority']}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
     else:
         lines.append("- No shadow recommendations recorded.")
-    lines.extend(["", "## Legacy dispatch history", ""])
-    legacy = scorecard["legacy_history"]
-    if legacy["rows"]:
-        lines.append(f"{legacy['rows']} pre-measurement outcome rows remain visible but are not mixed into receipt-backed totals.")
-        for row in legacy["groups"][:12]:
-            lines.append(f"- {row['task_shape']} / {row['route']} / {row['outcome']}: n={row['samples']}.")
-        if len(legacy["groups"]) > 12:
-            lines.append(f"- {len(legacy['groups']) - 12} more legacy groups are available in JSON output.")
-        lines.append(f"Completeness: {legacy['completeness']}.")
-    else:
-        lines.append("- No compatible legacy dispatch history found.")
     lines.extend(["", scorecard["interpretation"]])
     return "\n".join(lines) + "\n"
 
 
 def scorecard_command(args: argparse.Namespace) -> Any:
-    scorecard = build_scorecard(Path(args.store).expanduser(), Path(args.shadow_store).expanduser(), Path(args.legacy_log).expanduser())
+    scorecard = build_scorecard(Path(args.store).expanduser(), Path(args.shadow_store).expanduser())
     return scorecard if args.format == "json" else render_markdown(scorecard)
 
 
@@ -1055,12 +1131,14 @@ def parser() -> argparse.ArgumentParser:
     shadow.add_argument("--shadow-store", default=str(default_shadow_store()))
     shadow.add_argument("--json", action="store_true")
     score = sub.add_parser("scorecard", help="render compact descriptive evidence",
-                           description="Fold latest attempt and shadow revisions, keep compatible legacy TSV history separate, and render descriptive evidence.",
+                           description="Fold latest attempt and shadow revisions and render descriptive evidence.",
                            epilog="Example: fm-routing-outcomes.py scorecard --format json")
     score.add_argument("--store", default=str(default_store()))
     score.add_argument("--shadow-store", default=str(default_shadow_store()))
-    score.add_argument("--legacy-log", default=str(default_legacy_log()), help="compatible pre-measurement dispatch-log TSV")
     score.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    legacy = sub.add_parser("legacy", help="inspect explicit pre-measurement dispatch history")
+    legacy.add_argument("--legacy-log", required=True, help="compatible pre-measurement dispatch-log TSV")
+    legacy.add_argument("--json", action="store_true")
     inspect = sub.add_parser("inspect", help="show latest attempts for one task",
                              description="Return the folded latest attempt records for one exact task id.",
                              epilog="Example: fm-routing-outcomes.py inspect --task task-id --json")
@@ -1079,11 +1157,13 @@ def main() -> int:
             result = import_shadow(args)
         elif args.command == "scorecard":
             result = scorecard_command(args)
+        elif args.command == "legacy":
+            result = legacy_history(Path(args.legacy_log).expanduser())
         else:
             result = inspect_command(args)
         if isinstance(result, str):
             sys.stdout.write(result)
-        elif getattr(args, "json", False) or args.command in {"scorecard", "inspect"}:
+        elif getattr(args, "json", False) or args.command in {"scorecard", "inspect", "legacy"}:
             print(json.dumps(result, sort_keys=True, indent=2))
         else:
             identity = result.get("attempt_id") or result.get("decision_id")

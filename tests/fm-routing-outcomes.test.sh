@@ -5,6 +5,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TEST_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}" python3 - <<'PY'
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +23,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.store = self.dir / "outcomes.jsonl"
         self.shadow_store = self.dir / "shadow.jsonl"
+        self.state = self.dir / "state"
+        self.state.mkdir()
         self.pi = self.dir / "pi.jsonl"
         self.quota_before = self.dir / "quota-before.json"
         self.quota_after = self.dir / "quota-after.json"
@@ -33,7 +36,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_cli(self, *args, ok=True):
-        result = subprocess.run([str(CLI), *map(str, args)], text=True, capture_output=True)
+        env = dict(os.environ, FM_STATE_OVERRIDE=str(self.state))
+        result = subprocess.run([str(CLI), *map(str, args)], text=True, capture_output=True, env=env)
         if ok and result.returncode != 0:
             self.fail(f"command failed ({result.returncode}): {result.stderr}\n{result.stdout}")
         if not ok and result.returncode == 0:
@@ -42,6 +46,22 @@ class RoutingOutcomesTest(unittest.TestCase):
 
     def write_json(self, path, value):
         path.write_text(json.dumps(value), encoding="utf-8")
+
+    def bind_task(self, task, spawn_gen="spawn-1"):
+        (self.state / f"{task}.meta").write_text(
+            f"endpoint_task_id={task}\nspawn_gen={spawn_gen}\nharness=pi\nkind=ship\n",
+            encoding="utf-8")
+        return {"spawn_gen": spawn_gen}
+
+    def check_receipt(self, *, passed=True, criterion="focused-tests"):
+        artifact = self.dir / f"check-{criterion}-{'pass' if passed else 'fail'}.json"
+        payload = {"schema": "fm-routing-check.v1", "check_id": "unit",
+                   "grader_id": "focused-tests", "criteria_ids": [criterion],
+                   "passed": passed, "exit_code": 0 if passed else 1}
+        self.write_json(artifact, payload)
+        sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        return {"kind": "test", "id": "unit", "passed": passed,
+                "criteria_ids": [criterion], "artifact_path": str(artifact), "sha256": sha}
 
     def write_pi(self, path, *, custom=True, effort="max", task="task-one", duplicate=False):
         rows = [{"type": "session", "id": "session-1", "timestamp": "2030-01-01T00:00:00Z"}]
@@ -82,8 +102,10 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.write_json(path, {"schemaVersion": 5, "generatedAt": "2030-01-01T00:00:00Z", "providers": [row]})
 
     def manifest(self, *, receipt=None, task="task-one", attempt="attempt-one", outcome="accepted"):
+        task_binding = self.bind_task(task)
         return {
             "schema": "fm-routing-attempt.v1", "task_id": task, "attempt_id": attempt,
+            "task_binding": task_binding,
             "phase": "measurement", "category": "1", "task_shape": "code-change",
             "route": {"harness": "pi", "provider": "openai-codex",
                       "auth_category": "subscription", "requested_model": "gpt-5.6-luna",
@@ -98,9 +120,11 @@ class RoutingOutcomesTest(unittest.TestCase):
                       "after_path": str(self.quota_after), "concurrent_activity": False,
                       "attribution": "exclusive"},
             "grading": {"method": "deterministic", "independent": True,
+                        "acceptance_criteria": [{"id": "focused-tests", "text": "focused tests pass"}],
+                        "grader": {"kind": "deterministic-check", "id": "focused-tests"},
                         "first_pass": "pass", "final_result": "pass", "defect_count": 0,
                         "fix_count": 0, "retry_count": 0,
-                        "receipts": [{"kind": "test", "id": "unit", "passed": True}],
+                        "receipts": [self.check_receipt()],
                         "overhead": {"duration_ms": 3, "tokens": None,
                                      "actual_incremental_usd": None}},
             "outcome": outcome,
@@ -136,7 +160,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         path = self.dir / "concurrent-manifest.json"
         self.write_json(path, manifest)
         command = [str(CLI), "import", "--manifest", str(path), "--store", str(self.store), "--json"]
-        processes = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(8)]
+        env = dict(os.environ, FM_STATE_OVERRIDE=str(self.state))
+        processes = [subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) for _ in range(8)]
         results = [process.communicate() + (process.returncode,) for process in processes]
         self.assertTrue(all(returncode == 0 for _stdout, _stderr, returncode in results), results)
         actions = [json.loads(stdout)["action"] for stdout, _stderr, _returncode in results]
@@ -162,7 +187,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         failed["billing"]["actual_incremental_usd"] = 0.1
         failed["grading"].update({"first_pass": "fail", "final_result": "fail",
                                   "defect_count": 1, "fix_count": 0, "retry_count": 1,
-                                  "receipts": [{"kind": "test", "id": "unit", "passed": False}]})
+                                  "receipts": [self.check_receipt(passed=False)]})
         failed["handoff"] = {"alternative_attempt_id": "attempt-accepted", "side_effects": "none",
                              "quality_preserved": True, "privacy_preserved": True,
                              "reconciliation_receipt": "no external action existed"}
@@ -178,6 +203,31 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(task["accepted_task_end_to_end_ms"]["known_total"], 90000)
         self.assertAlmostEqual(task["accepted_task_actual_incremental_usd"]["known_total"], 0.3)
         self.assertAlmostEqual(task["unresolved_or_failure_actual_usd"]["known_total"], 0.1)
+
+    def test_accepted_cost_stops_at_first_acceptance_and_subscription_is_context_only(self):
+        accepted = self.manifest(attempt="accepted")
+        accepted["billing"]["actual_incremental_usd"] = 0.2
+        self.import_manifest(accepted)
+        later = self.manifest(attempt="later", outcome="failed")
+        later["started_at"] = "2030-01-01T00:02:00Z"
+        later["finished_at"] = "2030-01-01T00:03:00Z"
+        later["billing"]["actual_incremental_usd"] = 0.9
+        later["grading"].update({"first_pass": "fail", "final_result": "fail",
+                                  "receipts": [self.check_receipt(passed=False)]})
+        self.import_manifest(later)
+        result = self.run_cli("scorecard", "--store", self.store,
+                              "--shadow-store", self.shadow_store, "--format", "json")
+        score = json.loads(result.stdout)
+        task = score["tasks"][0]
+        self.assertEqual(task["accepted_task_actual_incremental_usd"]["known_total"], 0.2)
+        self.assertEqual(task["accepted_task_fixed_subscription_usd"]["distinct_values"], [20.0])
+        self.assertEqual(score["routes"][0]["fixed_subscription_usd"]["aggregation"], "not-applicable")
+
+    def test_import_requires_current_task_incarnation(self):
+        manifest = self.manifest()
+        manifest["task_binding"]["spawn_gen"] = "stale"
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("current task incarnation", json.loads(result.stdout)["error"])
 
     def test_duplicate_native_message_id_is_not_double_counted(self):
         self.write_pi(self.pi, duplicate=True)
@@ -335,6 +385,10 @@ class RoutingOutcomesTest(unittest.TestCase):
         manifest["grading"]["receipts"] = []
         result = self.import_manifest(manifest, ok=False)
         self.assertIn("passing receipt", json.loads(result.stdout)["error"])
+        manifest = self.manifest()
+        manifest["grading"]["receipts"][0]["sha256"] = "0" * 64
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("must match the check artifact", json.loads(result.stdout)["error"])
 
     def test_handoff_is_one_alternative_and_requires_side_effect_reconciliation(self):
         manifest = self.manifest()
@@ -371,13 +425,10 @@ class RoutingOutcomesTest(unittest.TestCase):
         legacy = self.dir / "dispatch-log.tsv"
         legacy.write_text("date\ttask\trepo\tdeliverable\tharness\tmodel\teffort\tshape\tr1_findings\tfix_rounds\tfirst_try\toutcome\tnotes\n"
                           "2030-01-01\told-task\trepo\tship\tpi\told-model\thigh\tcode\t1\t1\tno\taccepted\told\n")
-        result = self.run_cli("scorecard", "--store", self.store,
-                              "--shadow-store", self.shadow_store, "--legacy-log", legacy,
-                              "--format", "json")
+        result = self.run_cli("legacy", "--legacy-log", legacy, "--json")
         score = json.loads(result.stdout)
-        self.assertEqual(score["attempt_count"], 0)
-        self.assertEqual(score["legacy_history"]["rows"], 1)
-        self.assertIn("token, cost, quota", score["legacy_history"]["completeness"])
+        self.assertEqual(score["rows"], 1)
+        self.assertIn("token, cost, quota", score["completeness"])
 
     def test_shadow_records_all_candidate_uncertainty_without_ranking(self):
         route_one = self.manifest()["route"]
@@ -386,6 +437,7 @@ class RoutingOutcomesTest(unittest.TestCase):
                           "requested_model": "claude-sonnet-5", "requested_effort": "high"})
         shadow = {
             "schema": "fm-routing-shadow.v1", "task_id": "task-one", "decision_id": "decision-one",
+            "task_binding": {"spawn_gen": "spawn-1"},
             "at": "2030-01-01T00:00:00Z", "category": "1", "task_shape": "code-change",
             "candidates": [
                 {"route": route_one, "eligibility": "pass", "capability_class_fit": "pass",
@@ -397,7 +449,6 @@ class RoutingOutcomesTest(unittest.TestCase):
             ],
             "recommended_route": route_one,
             "explanation": "Both fit; known spend priority supports the shadow recommendation while Claude remains an eligible uncertainty.",
-            "evidence_sufficient_for_bounded_routing": False,
         }
         path = self.dir / "shadow-manifest.json"
         self.write_json(path, shadow)
@@ -408,6 +459,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         score = self.run_cli("scorecard", "--store", self.store,
                              "--shadow-store", self.shadow_store, "--format", "markdown")
         self.assertIn("unknown is not exhaustion", score.stdout)
+        self.assertIn("eligibility=pass; capability=pass; runway=pass; spendPriority=1.2", score.stdout)
+        self.assertIn("shadow-only, policy unverified", score.stdout)
         self.assertIn("small samples do not establish a winner", score.stdout)
 
 

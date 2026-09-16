@@ -112,6 +112,24 @@ $1
 EOF
 }
 
+drive_pi_route_receipt() {
+  EXT_PATH=$1 node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+const entries = [];
+mod.default({
+  on: (name, handler) => { handlers[name] = handler; },
+  appendEntry: (customType, data) => { entries.push({ customType, data }); },
+});
+handlers.before_provider_request(
+  { payload: { model: "payload-model", reasoning: { effort: "max" }, messages: ["secret-prompt"], headers: { authorization: "secret-token" } } },
+  { model: { provider: "openai-codex", id: "selected-model", api: "responses" }, thinkingLevel: "max" },
+);
+process.stdout.write(JSON.stringify(entries));
+EOF
+}
+
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
@@ -704,7 +722,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
     "pi-signed spawn did not seed the busy-state record from the launch brief"
-  local ext gen
+  local ext gen receipt
   ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
   gen=$(cat "$HOME_DIR/state/$id.busy-gen")
   assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
@@ -713,12 +731,19 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
-  assert_contains "$ext" 'pi.on("before_provider_request"' "pi extension lost the native route-receipt hook"
-  assert_contains "$ext" 'pi.appendEntry("fm-routing-request"' "pi extension does not persist native route proof"
-  assert_contains "$ext" "taskId: \"$id\"" "pi extension route proof is not bound to the exact task"
-  assert_contains "$ext" 'payloadReasoningEffort:' "pi extension route proof omits effective provider effort"
-  assert_not_contains "$ext" 'payload.messages' "pi extension route proof attempts to persist prompt messages"
-  assert_not_contains "$ext" 'event.headers' "pi extension route proof attempts to persist provider headers"
+  receipt=$(drive_pi_route_receipt "$HOME_DIR/state/$id.pi-ext.ts") \
+    || fail "generated Pi extension route hook did not execute: $receipt"
+  printf '%s' "$receipt" | jq -e --arg id "$id" '
+    length == 1 and
+    .[0].customType == "fm-routing-request" and
+    .[0].data.taskId == $id and
+    .[0].data.provider == "openai-codex" and
+    .[0].data.selectedModel == "selected-model" and
+    .[0].data.selectedThinkingLevel == "max" and
+    .[0].data.payloadModel == "payload-model" and
+    .[0].data.payloadReasoningEffort == "max" and
+    (.[0].data | keys | sort) == (["api", "at", "payloadModel", "payloadReasoningEffort", "provider", "requestSequence", "schema", "selectedModel", "selectedThinkingLevel", "taskId"] | sort)
+  ' >/dev/null || fail "generated Pi extension emitted an incomplete or unsanitized route receipt: $receipt"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 

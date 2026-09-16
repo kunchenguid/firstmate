@@ -2,18 +2,19 @@
 
 `bin/fm-routing-outcomes.py` adds receipt-backed measurement to existing Firstmate tasks without becoming a dispatcher, scheduler, quota provider, grader, or task lifecycle.
 It records one exact task attempt at a time, records quota-informed shadow recommendations separately, and renders a compact descriptive scorecard.
-The task identifier remains the join to the configured task system, while quota-axi remains the allowance source and `quota-array-dispatch` remains the routing decision owner.
+Each record is bound to the existing task's current `spawn_gen` incarnation and metadata digest, while quota-axi remains the allowance source and `quota-array-dispatch` remains the routing decision owner.
 
 ## Rollout boundary
 
-Use the capability in three independent stages.
+This slice supports two independent stages.
 
 1. In `measurement`, import native receipts and verify attribution, token accounting, timing, grading, pricing, and replay behavior without changing the route selected for work.
 2. In `shadow`, record the route that the existing eligibility, capability-class, runway-feasibility, and spend-priority procedure would recommend, but do not execute the recommendation.
-3. In `bounded`, route only after the same evidence is sufficient, retain one capable alternative on a genuinely different allowance pool, and reconcile side effects before any handoff.
-
 The importer itself never launches or switches a model.
-An operator can therefore stop after either of the first two stages without leaving a partially installed control plane.
+Bounded routing remains deferred until external evidence verifies quota, capability, a genuinely different allowance pool, and safe handoff.
+The committed tool never claims bounded readiness.
+The approved model-category matrix remains private policy and is not committed or activated by this measurement slice.
+Category labels on historical or shadow records are descriptive and policy-unverified, so they never establish routing eligibility.
 
 Initial paired comparisons are limited mechanically to two distinct low-risk pair identifiers per category in one outcome store.
 A comparison manifest must state that the work is non-time-critical, has no private external action, and performs no external action.
@@ -29,9 +30,11 @@ The default append-only stores are private and gitignored:
 
 `FM_DATA_OVERRIDE` relocates both with the rest of the effective home.
 `--store` and `--shadow-store` provide explicit locations for fixtures and intentionally separate evidence sets.
-A compatible existing `data/dispatch-log.tsv` is read as pre-measurement history by default, or from `--legacy-log`; those rows remain visible with explicit telemetry gaps and are never mixed into receipt-backed totals.
+Legacy `dispatch-log.tsv` history is read only by the explicit `legacy --legacy-log <path>` command.
+It is never an automatic scorecard input, so an unrelated or incompatible legacy file cannot block receipt-backed reporting.
 
 An import hashes its normalized record.
+It also requires the named task's current authoritative `state/<task-id>.meta` record and exact `spawn_gen`, preventing telemetry from silently attaching to a reused task identifier.
 Replaying an identical attempt is a no-op, while a changed attempt appends a new revision under the same task and attempt identity.
 Readers fold only the newest revision, so a restart, resume, or corrected grade does not duplicate tokens, costs, or accepted-task counts.
 Writers serialize and fsync each append.
@@ -77,7 +80,7 @@ Each attempt's end-to-end duration is computed from its timestamp pair rather th
 The accepted-task table spans the earliest recorded attempt start through the first accepted finish, so retries and one-alternative handoffs are counted without summing overlapping wall-clock attempts.
 Native API duration is retained separately where a tool emits it.
 
-An accepted outcome requires an independent deterministic or blind-review grade, a final pass, and at least one passing check receipt.
+An accepted outcome requires an independent deterministic or blind-review grade, a final pass, explicit task acceptance criteria, a separately identified grader or check, and hashed structured check artifacts covering every criterion.
 The implementation route cannot self-assert acceptance by setting an outcome string alone.
 First-pass result, final result, defect count, fix count, retry count, grader duration, grader tokens, and grader incremental charge stay explicit.
 The importer does not create a second full review pipeline; callers attach the ordinary task's actual check receipts and use limited blind review only where subjective grading requires it.
@@ -87,7 +90,7 @@ The importer does not create a second full review pipeline; callers attach the o
 Three money concepts remain separate:
 
 - `actual_incremental_usd` is an observed charge supplied by the caller.
-- `fixed_subscription_usd` is a fixed expense supplied by the caller and is never converted into a per-task charge by the tool.
+- `fixed_subscription_usd` is a fixed expense supplied by the caller and is reported only as distinct contextual values, never summed or converted into a per-task charge.
 - `api_equivalent_usd` is computed only from a private `fm-routing-prices.v1` catalog.
 
 A price entry must match provider, exact model, context tier, service tier, and the attempt timestamp.
@@ -105,8 +108,8 @@ It never sums shared and model-window deltas, converts allowance percentages to 
 The scorecard groups exact attempts by category, task shape, harness, provider, effective model, and effective effort.
 When effective effort is unavailable, the route is labeled with requested effort rather than misrepresented as proven.
 It includes sample counts, outcomes, known token/cost/time totals, unknown counts, and unresolved or failed costs at the task level.
-It also prints each shadow recommendation and the evidence and uncertainty recorded for every candidate.
-Legacy dispatch rows are grouped separately by their existing shape, route, and outcome fields, with tokens, cost, quota, native effort, and end-to-end attribution labeled unknown.
+It also prints each shadow recommendation and the eligibility, capability-class fit, runway feasibility, spend priority, explanation, and uncertainty recorded for every candidate.
+Attempts that begin after first acceptance do not increase accepted-task cost, while an attempt overlapping first acceptance contributes an explicit unknown rather than mismatched cost and time.
 
 The scorecard is descriptive.
 It deliberately has no opaque weighted score and does not claim a statistical winner from a few heterogeneous tasks.
@@ -117,7 +120,7 @@ Capability class and task fit remain routing gates rather than benchmark conclus
 Run the focused behavior suite with:
 
 ```sh
-python3 tests/fm-routing-outcomes.test.py
+tests/fm-routing-outcomes.test.sh
 ```
 
 The suite covers missing provider telemetry, refreshable-auth uncertainty, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, exact price matching, native multi-model accounting, one-alternative handoff, comparison limits, independent grading, and quota/outage shadow fallback.
