@@ -251,7 +251,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
-| DSH | 0.1.5-rc.1 (dsh-base 0.1.5-rc.2) | Blocking `Stop` hook with an adapter-owned, session-scoped block budget | Exit 2 plus stderr forced exactly one continuation carrying the reason as steering; four consecutive blind stops over one in-flight task returned `2, 2, 2, 0`, so the budget bounded the loop and the fourth stop emitted one attended fail-open. |
+| DSH | 0.1.5-rc.1 (dsh-base 0.1.5-rc.2) | Blocking `Stop` hook with an adapter-owned, session-scoped block budget | Exit 2 plus stderr forced exactly one continuation carrying the reason as steering; four consecutive blind stops over one in-flight task returned `2, 2, 2, 0` in the unit fixture, and a live SDK-driven turn under the same conditions blocked three times, failed open once, and settled. |
 
 ### Cursor primary park, 2026-08-13
 
@@ -468,6 +468,14 @@ task in flight and no live watcher: stops 1-3 returned 2 and wrote the reason
 banner to stderr, stop 4 returned 0 with the attended fail-open `systemMessage`,
 a new session id reset the counter, and removing the in-flight work cleared the
 budget file and allowed the stop.
+
+Live acceptance was then driven over `dsh --profile sdk` (stdio JSON-RPC)
+on 2026-09-16, because a one-shot headless run cannot exercise an idle session:
+
+| Criterion | Method | Observed |
+| --- | --- | --- |
+| An actionable event wakes an IDLE captain | prompt the session to arm `sleep 12; echo FM-WAKE-PROBE-FIRED` as a background job and end its turn, then hold the notification subscription open | The agent reported idle 5.0s in, stayed idle through 13.0s, and resumed at 19.0s when the job settled - the completion opened a turn on the idle session. |
+| The block budget cannot loop without limit | mount the real hooks over an SDK profile in the firstmate checkout with one task in flight and no live watcher, then run a tool-free turn to completion | The guard ran four times: three blocking continuations and one attended fail-open, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4`, after which the session settled instead of re-blocking. |
 
 Instruction budget: `dsh-agent-instructions` ships `maxBytes: 65536` while
 firstmate's `AGENTS.md` is 81127 bytes, so the shipped default truncates the
