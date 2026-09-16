@@ -52,7 +52,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
-    muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    muse) printf '/exit\tEscape\t1\tC-c\n' ;;
     *) return 1 ;;
   esac
 }
@@ -242,6 +242,19 @@ test_interrupt_sends_each_harness_verified_key() {
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
+    if [ "$harness" = muse ]; then
+      # muse's post-interrupt clear is proof-gated on the bound session log;
+      # without a binding the control plane refuses loudly. Give the matrix
+      # case a real binding so the provably-empty stub pane skips the clear.
+      root="$dir/muse-sessions"
+      log="$root/2026/08/08/session-1/session.jsonl"
+      mkdir -p "$(dirname "$log")"
+      printf '%s\n' \
+        "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
+        '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+      printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+        "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
+    fi
     if [ "$harness" = cursor ]; then
       alive_as "$dir" cursor-agent
     else
@@ -251,7 +264,11 @@ test_interrupt_sends_each_harness_verified_key() {
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
     want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
-    [ -z "$clear" ] || want="$want"$'\n'"$clear"
+    # The post-interrupt composer clear is proof-gated: it fires only when
+    # the composer provably holds the restored prompt. The stub pane is a
+    # provably empty composer, so muse's clear key is not expected here; the
+    # restored/fresh/unprovable cases are covered by the muse tests below.
+    { [ -z "$clear" ] || [ "$harness" = muse ]; } || want="$want"$'\n'"$clear"
     got=$(keys_sent "$dir")
     [ "$got" = "$want" ] \
       || fail "interrupt on $harness should send $repeat x $key${clear:+ then $clear}, got: $got"
@@ -350,7 +367,7 @@ test_unverified_harness_is_refused() {
 test_backend_key_capability_matrix() {
   local backend key
   for backend in tmux herdr zellij cmux; do
-    # C-u is the composer clear muse's interrupt needs; every session provider
+    # C-c is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
     for key in Escape Enter C-c C-u; do
       fm_control_backend_supports_key "$backend" "$key" \
@@ -743,6 +760,69 @@ test_muse_interrupt_confirms_adapter_acknowledgement() {
   pass "fm-control interrupt: muse confirms cancellation from its session log"
 }
 
+test_muse_interrupt_clears_proven_restored_prompt() {
+  local dir root log out rc
+  dir=$(new_case muse-clear)
+  add_task "$dir" t1 muse
+  alive_as "$dir" muse
+  root="$dir/muse-sessions"
+  log="$root/2026/08/08/session-1/session.jsonl"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+    "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
+  # The pane shows the restored prompt in the composer: a transcript row
+  # above a muse glyph row holding exactly the recorded prompt.
+  printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
+  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a proven restored prompt should still be cleared"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "$(printf 'Escape\nC-c')" ] \
+    || fail "the restored prompt should be cleared after the interrupt, got keys: $(keys_sent "$dir")"
+  pass "fm-control interrupt: muse composer holding the restored prompt is cleared"
+}
+
+test_muse_interrupt_preserves_fresh_input() {
+  local dir root log out rc
+  dir=$(new_case muse-clobber)
+  add_task "$dir" t1 muse
+  alive_as "$dir" muse
+  root="$dir/muse-sessions"
+  log="$root/2026/08/08/session-1/session.jsonl"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+    "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
+  # The composer holds fresh typed input, not the restored prompt: the clear
+  # must be skipped so the captain's text survives the interrupt.
+  printf 'transcript row\n\342\235\257 fresh captain typing\n' > "$dir/fake/pane"
+  out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "the interrupt itself was delivered, so the verb still succeeds"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "fresh composer input must never be cleared, got keys: $(keys_sent "$dir")"
+  assert_contains "$out" "left untouched" "the skipped clear should say why"
+  pass "fm-control interrupt: muse composer holding fresh input survives the interrupt path"
+}
+
+test_muse_interrupt_dies_when_composer_unprovable() {
+  local dir out rc
+  dir=$(new_case muse-unprovable)
+  add_task "$dir" t1 muse
+  alive_as "$dir" muse
+  # No muse-session binding: the restored prompt cannot be proven, so the
+  # control plane refuses loudly rather than leave the composer unverified.
+  printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
+  out=$(FM_CONTROL_RESTORE_WAIT=0 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "an unprovable restored prompt must die loudly on the control plane"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "an unprovable composer must never be cleared, got keys: $(keys_sent "$dir")"
+  assert_contains "$out" "cannot be proven" "the refusal should say the restored prompt could not be proven"
+  pass "fm-control interrupt: an unprovable muse composer refuses rather than clearing blind"
+}
+
 test_interrupt_revalidates_agent_after_acknowledgement_wait() {
   local dir root log out rc
   dir=$(new_case ack-race)
@@ -911,6 +991,9 @@ test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
+test_muse_interrupt_clears_proven_restored_prompt
+test_muse_interrupt_preserves_fresh_input
+test_muse_interrupt_dies_when_composer_unprovable
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed

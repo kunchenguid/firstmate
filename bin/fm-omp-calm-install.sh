@@ -39,12 +39,7 @@ if [ -f "$LEGACY" ] || [ -L "$LEGACY" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR" || { echo "error: failed to create $INSTALL_DIR" >&2; exit 1; }
-if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete "$PKG_DIR/" "$INSTALL_DIR/" || { echo "error: rsync to $INSTALL_DIR failed" >&2; exit 1; }
-else
-  rm -rf "$INSTALL_DIR"/*
-  cp -R "$PKG_DIR/." "$INSTALL_DIR/" || { echo "error: copy to $INSTALL_DIR failed" >&2; exit 1; }
-fi
+cp -R "$PKG_DIR/." "$INSTALL_DIR/" || { echo "error: copy to $INSTALL_DIR failed" >&2; exit 1; }
 
 omp plugin link "$INSTALL_DIR" || { echo "error: omp plugin link failed" >&2; exit 1; }
 echo "installed: fm-calm-omp loads in every omp session (standalone copy at $INSTALL_DIR)"
