@@ -937,6 +937,23 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Lavish dock replies (state/lavish-dock.check.sh)
+
+Captain dock Send notes are not a `lavish-axi poll` result.
+They sit in lavish-axi session `pending_prompts` until a poll consumes them, and that poll clears the feedback before returning it, so a home that does not keep a worker blocked on poll never sees them, and a poll whose output is lost cannot get them back.
+`bin/fm-lavish-dock-check.sh` is the home-wide copy path that does not poll.
+It reads lavish-axi's session store (`$LAVISH_AXI_STATE_DIR/state.json`, default `~/.lavish-axi/state.json`), queues unseen prompts through `bin/fm-inbox.sh note`, and leaves the session's pending prompts in place.
+Queued notes rewrite inner HTTP `:4387` session Opens to the HTTPS wrap on `:4389` on the same host and never emit a `:4387` Open.
+This check does not author artifacts, open a browser, or change Library `:3000`.
+
+A home that wants dock Send to wake it unattended arms the standing check: `bin/fm-lavish-dock-check.sh arm`.
+Arming writes `state/lavish-dock.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`).
+The check prints one line when it queues new notes so the current watcher cycle wakes, and each queued note is itself a `check: captain inbox note` wake.
+A proven no-op prints nothing: no new prompts, or the same failure already reported.
+`state/.lavish-dock-seen` is the forwarded-uid cursor, so a later cycle does not re-queue the same prompt.
+`bin/fm-lavish-dock-check.sh disarm` removes the shim, its trust binding, the report record, and that cursor.
+The check is not inherited; arm it in the human-facing home that should receive the notes.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.

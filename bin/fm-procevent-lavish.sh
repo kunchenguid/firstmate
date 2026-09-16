@@ -110,6 +110,7 @@
 # close that source-side handoff window. Never describe this path as
 # at-least-once, no-loss, or lossless. The only durability this proves is the
 # runner's own: output that reached the runner is stored before it is announced.
+# Home-wide dock Send delivery, without poll, is bin/fm-lavish-dock-check.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
