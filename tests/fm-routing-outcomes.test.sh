@@ -565,10 +565,16 @@ class RoutingOutcomesTest(unittest.TestCase):
                 "runway": {"status": "projected_exhaustion", "usableRunwaySeconds": 900,
                             "projectionConfidence": "established"},
             }])
+        self.write_quota(
+            self.quota_after, None, "2030-01-02T00:00:00Z",
+            provider="claude", status="unknown")
         route_one = self.manifest()["route"]
         route_two = copy.deepcopy(route_one)
         route_two.update({"harness": "claude", "provider": "anthropic",
                           "requested_model": "claude-sonnet-5", "requested_effort": "high"})
+        route_three = copy.deepcopy(route_one)
+        route_three.update({"harness": "agy", "provider": "google",
+                            "requested_model": "gemini-flash-3.8", "requested_effort": "high"})
         shadow = {
             "schema": "fm-routing-shadow.v1", "task_id": "task-one", "decision_id": "decision-one",
             "task_binding": {"spawn_gen": "spawn-1"},
@@ -581,7 +587,12 @@ class RoutingOutcomesTest(unittest.TestCase):
                  "uncertainty": "none observed", "explanation": "known headroom after fit gates"},
                 {"route": route_two, "eligibility": "unknown", "capability_class_fit": "pass",
                  "runway_feasibility": "unknown", "spend_priority": None,
+                 "quota_evidence": {"snapshot_path": str(self.quota_after),
+                                    "provider": "claude"},
                  "uncertainty": "refreshable auth was not refreshed", "explanation": "unknown is not exhaustion"},
+                {"route": route_three, "eligibility": "unknown", "capability_class_fit": "unknown",
+                 "runway_feasibility": "unknown", "spend_priority": None,
+                 "uncertainty": "agy quota semantics remain unresolved", "explanation": "no native quota snapshot"},
             ],
             "recommended_route": route_one,
             "explanation": "Both fit; known spend priority supports the shadow recommendation while Claude remains an eligible uncertainty.",
@@ -604,7 +615,10 @@ class RoutingOutcomesTest(unittest.TestCase):
             '"usableRunwaySeconds":900},"scope":"all_models","selection":{"spendPriority":-0.4,'
             '"status":"known"},"status":"known"}],"status":"known"}',
             score.stdout)
+        self.assertIn("spendPriority=unknown; raw quota claude at 2030-01-01T00:00:00Z (weekly=unknown)",
+                      score.stdout)
         self.assertIn("no quota snapshot; native quota semantics=unknown", score.stdout)
+        self.assertNotIn("None", score.stdout)
         data = json.loads(self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
@@ -612,7 +626,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         evidence = recommendation["candidate_evidence"][0]["quota_evidence"]
         self.assertEqual(recommendation["recommendation_status"], "heuristic")
         self.assertEqual(recommendation["candidate_evidence"][1]["judgment_status"], "heuristic")
-        self.assertIsNone(recommendation["candidate_evidence"][1]["quota_evidence"])
+        self.assertIsNone(recommendation["candidate_evidence"][2]["quota_evidence"])
         self.assertEqual(evidence["provider"], "codex")
         self.assertEqual(evidence["windows"][0]["percentRemaining"], 100)
         self.assertRegex(evidence["source_sha256"], r"^[0-9a-f]{64}$")

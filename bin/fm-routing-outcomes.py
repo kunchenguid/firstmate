@@ -1120,6 +1120,10 @@ def format_context(value: dict[str, Any], suffix: str = "") -> str:
     return shown
 
 
+def format_optional(value: Any) -> str:
+    return "unknown" if value is None else str(value)
+
+
 def render_markdown(scorecard: dict[str, Any]) -> str:
     lines = ["# Model-routing scorecard", "", f"Attempts: {scorecard['attempt_count']} across {scorecard['task_count']} tasks.", "",
              "## Route and whole-session observations", "", "| Category | Task shape | Route / scope | n | Native-bound accepted | Input tokens | Output tokens | Actual incremental | Fixed subscription | Execution API-equivalent | End-to-end | Grader time | Uncertainty |",
@@ -1156,11 +1160,11 @@ def render_markdown(scorecard: dict[str, Any]) -> str:
                 quota = candidate["quota_evidence"]
                 quota_text = "no quota snapshot; native quota semantics=unknown"
                 if quota:
-                    windows = ", ".join(f"{item.get('id')}={item.get('percentRemaining')}" for item in quota["windows"]) or "no windows"
+                    windows = ", ".join(f"{item.get('id')}={format_optional(item.get('percentRemaining'))}" for item in quota["windows"]) or "no windows"
                     semantics = quota.get("quota_semantics")
                     semantics_text = canonical(semantics) if isinstance(semantics, dict) and semantics else "unknown"
                     quota_text = f"raw quota {quota['provider']} at {quota['generated_at']} ({windows}); native quota semantics={semantics_text}"
-                lines.append(f"  - {candidate['route']}: heuristic eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={candidate['spend_priority']}; {quota_text}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
+                lines.append(f"  - {candidate['route']}: heuristic eligibility={candidate['eligibility']}; capability={candidate['capability_class_fit']}; runway={candidate['runway_feasibility']}; spendPriority={format_optional(candidate['spend_priority'])}; {quota_text}. {candidate['explanation']} Uncertainty: {candidate['uncertainty']}.")
     else:
         lines.append("- No shadow recommendations recorded.")
     lines.extend(["", scorecard["interpretation"]])
