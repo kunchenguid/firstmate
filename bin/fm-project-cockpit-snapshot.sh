@@ -368,7 +368,7 @@ jq \
           gate:$hold.gate
         }
       end;
-  def secondmate_decision_projection($owner; $record; $summaries; $queued; $active; $now):
+  def secondmate_decision_projection($owner; $record; $summaries; $blocked_summaries; $queued; $active; $now):
     (($summaries | join(" · ")) | text(240)) as $decision_summary
     |
     (($queued // {}) + {
@@ -385,7 +385,9 @@ jq \
       } | secondmate_queued_projection($owner; .) | .lane="waiting" | .state_source="structured-home-decision"
         | .decisions=$summaries[:$max_decisions]
         | ._truncated=((._truncated // false) or (($summaries | length) > $max_decisions))
-        | if .gate.status == "unavailable" and $decision_summary != null
+        | if ($blocked_summaries | length) > 0
+          then .gate={status:"blocked",label:(($blocked_summaries | join(" · ")) | text(240))}
+          elif .gate.status == "unavailable" and $decision_summary != null
           then .gate={status:"decision",label:$decision_summary}
           else . end) as $decision
     | if $active == null then $decision
@@ -454,6 +456,7 @@ jq \
           | group_by(.id)[]) as $decision_group
        | $decision_group[0] as $decision
        | ($decision_group | map((.summary // null) | text(240)) | map(select(. != null))) as $decision_summaries
+       | ($decision_group | map(select(.verb == "blocked") | ((.summary // null) | text(240))) | map(select(. != null))) as $blocked_summaries
        | ([ $mate.queued[]? | select(.id == $decision.id) ][0] // null) as $queued_record
        | (([ $mate.active_children[]?
              | select(.id == $decision.id and ((.spawn_gen // null) | ident) != null) ][0])
@@ -462,7 +465,7 @@ jq \
                          and ((.state as $state | ["parked","paused","blocked"] | index($state)) != null)
                          and ((.spawn_gen // null) | ident) != null) ][0])
           // null) as $current_record
-       | secondmate_decision_projection($mate; $decision; $decision_summaries; $queued_record; $current_record; $now)
+       | secondmate_decision_projection($mate; $decision; $decision_summaries; $blocked_summaries; $queued_record; $current_record; $now)
        | . + {_identity:("secondmate:" + .id),_priority:0} ]) as $secondmate_decisions
   | ([ ($snapshot.secondmate_current.records // [])[] as $mate
        | select($mate.provenance.selected == "structured-home")

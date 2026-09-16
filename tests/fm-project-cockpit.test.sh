@@ -375,10 +375,14 @@ test_secondmate_structured_surfaces_are_projected_once() {
             {id:"status-call",spawn_gen:"gen-status-call",kind:"scout",state:"working",repo:"omega",name:"Runtime investigation",source:"structured-home",doing:"PRIVATE-STATUS-DECISION"},
             {id:"dated-hold",spawn_gen:"gen-dated-hold",kind:"ship",state:"working",repo:"omega",name:"Scheduled deployment",source:"structured-home",started_at:"2026-09-15T11:45:00Z",doing:"PRIVATE-HOLD-DETAIL"}
           ],
+          endpoints:[
+            {id:"blocked-call",spawn_gen:"gen-blocked-call",kind:"ship",state:"parked",repo:"omega",name:"Blocked deployment",source:"structured-home",endpoint:{status:"alive"}}
+          ],
           decisions_open:[
             {id:"release-call",verb:"captain-hold",summary:"Choose release route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"},
             {id:"status-call",key:"runtime",verb:"needs-decision",summary:"Choose runtime evidence",reason:null,source:"status"},
-            {id:"status-call",key:"scope",verb:"needs-decision",summary:"Approve evidence scope",reason:null,source:"status"}
+            {id:"status-call",key:"scope",verb:"needs-decision",summary:"Approve evidence scope",reason:null,source:"status"},
+            {id:"blocked-call",key:"access",verb:"blocked",summary:"Waiting on operator access",reason:null,source:"status"}
           ],
           queued:[
             {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[]},
@@ -392,7 +396,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
       }' "$FIXTURES/states.json" \
     | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$model"
   jq -e '
-    ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 7
+    ([.projects[].tasks[] | select(.id | startswith("mate-one:"))] | length) == 8
     and ([.projects[].tasks[] | select(.id == "mate-one:child-live")][0]
       | .lane == "running" and .project_id == "omega" and .crew.kind == "ship" and .spawn_gen == "gen-child-live"
         and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
@@ -405,6 +409,9 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .crew.kind == "scout" and .runtime_evidence.home == "/fleet/mates/one"
         and .gate.status == "decision" and .gate.label == "Choose runtime evidence · Approve evidence scope"
         and .decisions == ["Choose runtime evidence","Approve evidence scope"])
+    and ([.projects[].tasks[] | select(.id == "mate-one:blocked-call")][0]
+      | .lane == "waiting" and .state == "parked" and .attention == true
+        and .blockers == [] and .gate == {status:"blocked",label:"Waiting on operator access"})
     and ([.projects[].tasks[] | select(.id == "mate-one:queued-child")][0].lane == "queued")
     and ([.projects[].tasks[] | select(.id == "mate-one:dated-hold")][0]
       | .lane == "waiting" and .state == "working" and .state_source == "structured-home"
@@ -419,8 +426,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .runtime_evidence.endpoint_status == "unavailable"
         and .hold.classification == "blocked" and .blockers == ["security-review"]
         and .gate == {status:"blocked",label:"security-review"})
-    and .counts.blocked == 2
-    and ([.projects[] | select(.id == "omega")][0].blocker_count == 1)
+    and .counts.blocked == 3
+    and ([.projects[] | select(.id == "omega")][0].blocker_count == 2)
     and ([.projects[].tasks[] | select(.id == "mate-one:landed-child")][0]
       | .lane == "recently_completed" and .artifacts.pr_url == "https://github.com/example/omega/pull/9")
   ' "$model" >/dev/null || fail "bounded secondmate surfaces were not projected with stable identity and deduplication"
