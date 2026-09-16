@@ -51,6 +51,35 @@ assert_absent "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts" "divergent legacy c
 assert_grep "divergent local edit" "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak" "divergent copy preserved"
 pass "divergent legacy copy preserved as .bak"
 
+# A retirement step that cannot complete aborts the install before linking,
+# instead of reporting success and leaving the legacy copy to double-load with
+# the linked package in home sessions.
+RETIRE_HOME="$TMP_ROOT/retire-home"
+RETIRE_FM_HOME="$TMP_ROOT/retire-fm-home"
+mkdir -p "$RETIRE_HOME" "$RETIRE_FM_HOME/.omp/extensions"
+printf '// divergent local edit\n' >"$RETIRE_FM_HOME/.omp/extensions/fm-calm-omp.ts"
+chmod 555 "$RETIRE_FM_HOME/.omp/extensions"
+HOME="$RETIRE_HOME" FM_HOME="$RETIRE_FM_HOME" \
+  "$ROOT/bin/fm-omp-calm-install.sh" >"$TMP_ROOT/retire.out" 2>"$TMP_ROOT/retire.err" \
+  && fail "install succeeded despite failed legacy retirement"
+assert_present "$RETIRE_FM_HOME/.omp/extensions/fm-calm-omp.ts" "legacy copy left in place by failed move"
+assert_grep "error: failed to move" "$TMP_ROOT/retire.err" "retirement failure reported"
+assert_absent "$RETIRE_HOME/.omp/plugins/node_modules/fm-calm-omp" "no link after failed retirement"
+chmod 755 "$RETIRE_FM_HOME/.omp/extensions"
+pass "failed legacy retirement aborts before linking"
+
+# Same abort for the identical-copy removal branch.
+cp "$ROOT/extensions/fm-calm-omp/fm-calm-omp.ts" "$RETIRE_FM_HOME/.omp/extensions/fm-calm-omp.ts"
+chmod 555 "$RETIRE_FM_HOME/.omp/extensions"
+HOME="$RETIRE_HOME" FM_HOME="$RETIRE_FM_HOME" \
+  "$ROOT/bin/fm-omp-calm-install.sh" >"$TMP_ROOT/rm-fail.out" 2>"$TMP_ROOT/rm-fail.err" \
+  && fail "install succeeded despite failed legacy removal"
+assert_present "$RETIRE_FM_HOME/.omp/extensions/fm-calm-omp.ts" "identical legacy copy left by failed removal"
+assert_grep "error: failed to remove" "$TMP_ROOT/rm-fail.err" "removal failure reported"
+assert_absent "$RETIRE_HOME/.omp/plugins/node_modules/fm-calm-omp" "no link after failed removal"
+chmod 755 "$RETIRE_FM_HOME/.omp/extensions"
+pass "failed legacy removal aborts before linking"
+
 # The linked package's manifest entry resolves to the tracked extension.
 assert_grep "fm-calm-omp.ts" "$LINK/package.json" "manifest declares extension entry"
 assert_present "$LINK/fm-calm-omp.ts" "extension resolves through link"
