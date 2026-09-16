@@ -144,7 +144,7 @@ Also never claim that a source cannot refresh its owning home's lease: that rule
 
 The currently published `lavish-axi poll` destructively clears feedback before returning it.
 A result lost after that clearing and before the runner reads the process output is unrecoverable, and no firstmate wrapper can close that source-side window.
-Captain dock Send on a session this home is not already listening to is `bin/fm-lavish-dock-check.sh`, which copies pending prompts into the captain inbox without polling.
+Captain dock Send is also copied into the primary home's inbox by `bin/fm-lavish-dock-check.sh`: its standing check sees pending prompts without polling, and the Lavish adapter publishes responses at the poll-consumption boundary.
 The remote-reply adapter removes that particular pre-capture window by never consuming its source, but it cannot recover bytes truly lost from the remote log itself.
 Say these boundaries plainly wherever the behavior is described.
 

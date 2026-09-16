@@ -946,13 +946,14 @@ It reads lavish-axi's session store (`$LAVISH_AXI_STATE_DIR/state.json`, default
 Queued notes rewrite inner HTTP `:4387` session Opens to the HTTPS wrap on `:4389` on the same host and never emit a `:4387` Open.
 This check does not author artifacts, open a browser, or change Library `:3000`.
 
-A home that wants dock Send to wake it unattended arms the standing check: `bin/fm-lavish-dock-check.sh arm`.
+The mutable local bootstrap automatically arms the standing check in the primary human-facing home; secondmate homes stay passive.
 Arming writes `state/lavish-dock.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`).
+The owned process-event Lavish adapter also copies feedback at the poll-consumption boundary, so a blocked poll cannot clear a reply before this home records it.
 The check prints one line when it queues new notes so the current watcher cycle wakes, and each queued note is itself a `check: captain inbox note` wake.
 A proven no-op prints nothing: no new prompts, or the same failure already reported.
-`state/.lavish-dock-seen` is the forwarded-uid cursor, so a later cycle does not re-queue the same prompt.
+`state/.lavish-dock-seen` stores per-session prompt-occurrence snapshots, including empty and reused-UID prompts, so an unchanged queue is not copied twice and a later occurrence is not suppressed.
 `bin/fm-lavish-dock-check.sh disarm` removes the shim, its trust binding, the report record, and that cursor.
-The check is not inherited; arm it in the human-facing home that should receive the notes.
+The check is not inherited into secondmates.
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 

@@ -208,6 +208,7 @@ poll_response_filter() {  # <response-file>
       exit 2 unless defined $count;
       last if $count == 0;
       if ($streaming) {
+        write_all($staged, $chunk);
         write_all(*STDOUT, $chunk);
         next;
       }
@@ -219,6 +220,7 @@ poll_response_filter() {  # <response-file>
       my $matches_prefix = length($candidate) <= length($expected)
         && substr($expected, 0, length($candidate)) eq $candidate;
       if (!$matches_prefix) {
+        write_all($staged, substr($chunk, $take));
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
@@ -301,6 +303,10 @@ cmd_poll() {
       *) die "cannot classify the poll response" ;;
     esac
   done
+  if [ "$filter_rc" -eq 0 ] && [ "$rc" -eq 0 ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-lavish-dock-check.sh" ingest-poll "$artifact" "$response" \
+      || printf 'warning: consumed Lavish feedback could not be copied to the captain inbox\n' >&2
+  fi
   return "$rc"
 }
 

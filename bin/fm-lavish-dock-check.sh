@@ -6,6 +6,7 @@
 #   fm-lavish-dock-check.sh [check]
 #   fm-lavish-dock-check.sh arm
 #   fm-lavish-dock-check.sh disarm
+#   fm-lavish-dock-check.sh ingest-poll <artifact> <response-file>
 #   fm-lavish-dock-check.sh --help
 #
 # The failure this exists to close: captain markups sit in lavish-axi session
@@ -32,9 +33,10 @@
 # Session Open URLs in queued notes rewrite inner HTTP `:4387` to the HTTPS
 # wrap on `:4389` on the same host. Never emit a `:4387` Open.
 #
-# This check is not inherited. Arm it in the human-facing home that should
-# receive dock replies. It does not author artifacts, open a browser, or touch
-# Library `:3000`.
+# Mutable bootstrap automatically arms it in the primary human-facing home.
+# The owned Lavish poll adapter also calls `ingest-poll` at its consumption
+# boundary, before the response can disappear from Firstmate. It does not
+# author artifacts, open a browser, or touch Library `:3000`.
 set -u
 export LC_ALL=C
 
@@ -50,7 +52,6 @@ CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 INBOX_BIN="$SCRIPT_DIR/fm-inbox.sh"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 RECORD_SCHEMA=fm-lavish-dock-check-v1
-SEEN_SCHEMA=fm-lavish-dock-seen-v1
 MAX_LINE=240
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -65,7 +66,9 @@ usage() {
 Usage:
   fm-lavish-dock-check.sh [check]   copy unseen dock prompts into this home's inbox
   fm-lavish-dock-check.sh arm       write and register state/lavish-dock.check.sh
-  fm-lavish-dock-check.sh disarm    remove the check shim, trust binding, record, and cursor
+  fm-lavish-dock-check.sh disarm    remove the registered check and its local state
+  fm-lavish-dock-check.sh ingest-poll <artifact> <response-file>
+                                      copy one consumed poll response into this home's inbox
   fm-lavish-dock-check.sh --help    print this help
 
 Reads lavish-axi session state non-destructively. Never runs `lavish-axi poll`.
@@ -131,24 +134,21 @@ lavish_state_json() {
 extract_new_sessions() {
   local state_json=$1 seen_file=$2
   python3 - "$state_json" "$seen_file" <<'PY'
+import hashlib
 import json
 import os
 import sys
 
 state_json, seen_file = sys.argv[1], sys.argv[2]
-seen = set()
+seen = {}
 if os.path.isfile(seen_file):
-    with open(seen_file, encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-    if lines and lines[0] == "fm-lavish-dock-seen-v1":
-        for line in lines[1:]:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(" ", 1)
-            if len(parts) != 2:
-                continue
-            seen.add((parts[0], parts[1]))
+    try:
+        with open(seen_file, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        if saved.get("schema") == "fm-lavish-dock-seen-v2" and isinstance(saved.get("sessions"), dict):
+            seen = saved["sessions"]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
 
 try:
     with open(state_json, encoding="utf-8") as fh:
@@ -170,29 +170,38 @@ for sid, sess in sessions.items():
     if not isinstance(sid, str) or not sid or not isinstance(sess, dict):
         continue
     prompts = sess.get("prompts")
-    if not isinstance(prompts, list) or not prompts:
-        continue
-    items = []
+    if not isinstance(prompts, list):
+        prompts = []
+    entries = []
+    fingerprints = []
     for prompt in prompts:
         if not isinstance(prompt, dict):
             continue
-        uid = prompt.get("uid")
-        if uid is None:
-            continue
-        uid = str(uid)
-        if (sid, uid) in seen:
-            continue
+        canonical = json.dumps(prompt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fingerprints.append(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
         text = prompt.get("prompt")
         if not isinstance(text, str):
             text = ""
         context = prompt.get("text")
         if not isinstance(context, str):
             context = ""
-        if not text.strip() and not context.strip():
+        attachments = prompt.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
+        if not text.strip() and not context.strip() and not attachments:
+            entries.append(None)
             continue
-        items.append({"uid": uid, "prompt": text, "text": context})
-    if not items:
-        continue
+        entries.append({"prompt": text, "text": context, "attachments": attachments})
+    previous = seen.get(sid)
+    if not isinstance(previous, list) or not all(isinstance(value, str) for value in previous):
+        previous = []
+    overlap = min(len(previous), len(fingerprints))
+    while overlap and previous[-overlap:] != fingerprints[:overlap]:
+        overlap -= 1
+    if previous == fingerprints:
+        new_items = []
+    else:
+        new_items = [entry for entry in entries[overlap:] if entry is not None]
     url = sess.get("url")
     if not isinstance(url, str):
         url = ""
@@ -203,7 +212,8 @@ for sid, sess in sessions.items():
         "id": sid,
         "url": url,
         "file": os.path.basename(path.rstrip("/")) if path else "",
-        "prompts": items,
+        "prompts": new_items,
+        "fingerprints": fingerprints,
     })
 json.dump(out, sys.stdout, ensure_ascii=False, separators=(",", ":"))
 print()
@@ -243,6 +253,8 @@ def wrap(url):
 lines = ["Lavish dock reply"]
 open_url = wrap(session.get("url") or "")
 if open_url:
+    if urlparse(open_url).port == 4387:
+        raise SystemExit("refusing an unwrapped Lavish Open URL")
     lines.append("Open: " + open_url)
 name = session.get("file") or ""
 if name:
@@ -257,34 +269,47 @@ for item in session.get("prompts") or []:
             lines.append("  (" + context + ")")
     elif context:
         lines.append("- " + context)
+    for attachment in item.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        path = str(attachment.get("path") or "").strip()
+        name = str(attachment.get("name") or "").strip()
+        mime = str(attachment.get("mime") or "").strip()
+        detail = path or name or str(attachment.get("id") or "").strip()
+        if detail:
+            lines.append("  Attachment: " + detail + ((" (" + mime + ")") if mime else ""))
 print("\n".join(lines))
 ' "$1"
 }
 
-seen_load_ok() {
-  [ -f "$SEEN" ] || return 0
-  local first
-  IFS= read -r first < "$SEEN" || return 0
-  [ "$first" = "$SEEN_SCHEMA" ]
-}
-
-seen_append() {
-  local sid=$1 uids=$2 tmp uid
-  tmp=$(mktemp "$SEEN.XXXXXX" 2>/dev/null) || return 1
-  chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-  if [ -f "$SEEN" ] && seen_load_ok; then
-    cat "$SEEN" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  else
-    printf '%s\n' "$SEEN_SCHEMA" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  fi
-  while IFS= read -r uid; do
-    [ -n "$uid" ] || continue
-    printf '%s %s\n' "$sid" "$uid" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
-  done <<EOF
-$(printf '%s' "$uids" | tr ',' '\n')
-EOF
-  mv -f -- "$tmp" "$SEEN" || { rm -f -- "$tmp"; return 1; }
-  return 0
+seen_replace_session() {
+  local sid=$1 fingerprints=$2
+  python3 - "$SEEN" "$sid" "$fingerprints" <<'PY'
+import json, os, sys, tempfile
+path, sid, encoded = sys.argv[1:]
+data = {"schema": "fm-lavish-dock-seen-v2", "sessions": {}}
+try:
+    with open(path, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    if loaded.get("schema") == data["schema"] and isinstance(loaded.get("sessions"), dict):
+        data = loaded
+except (OSError, json.JSONDecodeError, AttributeError):
+    pass
+data["sessions"][sid] = json.loads(encoded)
+fd, temporary = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=os.path.dirname(path))
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
+        fh.write("\n")
+    os.replace(temporary, path)
+except BaseException:
+    try: os.close(fd)
+    except OSError: pass
+    try: os.unlink(temporary)
+    except OSError: pass
+    raise
+PY
 }
 
 lock_release() {
@@ -307,12 +332,8 @@ lock_acquire() {
   return 0
 }
 
-session_uids() {
-  python3 -c 'import json,sys; s=json.loads(sys.argv[1]); print(",".join(p["uid"] for p in s.get("prompts") or [] if p.get("uid")))' "$1"
-}
-
 action_check() {
-  local state_json extracted rc=0 queued=0 idx count body uids sid session_json extract_err
+  local state_json extracted rc=0 queued=0 idx count body sid session_json extract_err fingerprints prompt_count
   mkdir -p "$STATE" || return 1
   if ! lock_acquire; then
     return 0
@@ -362,22 +383,22 @@ action_check() {
       emit_failure "could not read a pending dock session"
       return 0
     }
-    uids=$(session_uids "$session_json") || uids=
+    fingerprints=$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["fingerprints"], separators=(",", ":")))' "$session_json") || return 0
+    prompt_count=$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["prompts"]))' "$session_json") || return 0
+    if [ "$prompt_count" -eq 0 ]; then
+      seen_replace_session "$sid" "$fingerprints" || { emit_failure "could not update a dock cursor"; return 0; }
+      idx=$((idx + 1))
+      continue
+    fi
     body=$(format_note_body "$session_json") || {
       emit_failure "could not format a dock note"
       return 0
     }
-    case "$body" in
-      *":4387"*)
-        emit_failure "refusing to queue a dock note that still names :4387"
-        return 0
-        ;;
-    esac
     if ! printf '%s\n' "$body" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$INBOX_BIN" note - >/dev/null; then
       emit_failure "could not queue a captain inbox note for session $sid"
       return 0
     fi
-    seen_append "$sid" "$uids" || {
+    seen_replace_session "$sid" "$fingerprints" || {
       emit_failure "queued a dock note but could not record its cursor"
       return 0
     }
@@ -386,12 +407,28 @@ action_check() {
   done
 
   record_write "" || true
-  if [ "$queued" -eq 1 ]; then
+  if [ "$queued" -eq 0 ]; then
+    return 0
+  elif [ "$queued" -eq 1 ]; then
     report_line "queued 1 dock note"
   else
     report_line "queued $queued dock notes"
   fi
   return 0
+}
+
+action_ingest_poll() {
+  local artifact=${1-} response=${2-} body
+  [ -n "$artifact" ] && [ -f "$response" ] || die_usage "ingest-poll requires an artifact and response file"
+  awk '
+    $0 == "session:" { in_session=1; next }
+    in_session && $0 !~ /^[[:space:]]/ { exit }
+    in_session && /^[[:space:]]+status:[[:space:]]*feedback[[:space:]]*$/ { found=1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$response" || return 0
+  mkdir -p "$STATE" || return 1
+  body=$(printf 'Lavish dock reply\nBoard: %s\n\n' "$(basename "$artifact")"; cat "$response") || return 1
+  printf '%s\n' "$body" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$INBOX_BIN" note - >/dev/null || return 1
 }
 
 shim_content() {
@@ -526,6 +563,7 @@ case "${1:-check}" in
   check) action_check ;;
   arm) action_arm ;;
   disarm) action_disarm ;;
+  ingest-poll) shift; action_ingest_poll "$@" ;;
   -h|--help) usage ;;
   *) die_usage "unknown action: $1" ;;
 esac

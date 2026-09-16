@@ -4,8 +4,8 @@
 #
 # Dock Send notes must reach this home as a captain-inbox wake without calling
 # `lavish-axi poll`. These cases drive the public check/arm/disarm commands
-# against a scratch home and a fixture session store. They never contact a live
-# Lavish server and never poll.
+# against a scratch home and a fixture session store, plus the owned poll
+# adapter against a fake executable. They never contact a live Lavish server.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -111,7 +111,7 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
   out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "re-arm must succeed: $out"
   assert_contains "$out" "armed" "re-arm stays armed"
 
-  printf 'fm-lavish-dock-seen-v1\nface 4\n' > "$home/state/.lavish-dock-seen"
+  printf '{"schema":"fm-lavish-dock-seen-v2","sessions":{"face":["one"]}}\n' > "$home/state/.lavish-dock-seen"
   out=$(FM_HOME="$home" "$CHECK" disarm 2>&1) || fail "disarm must succeed: $out"
   assert_absent "$home/state/lavish-dock.check.sh" "disarm removes the check shim"
   assert_absent "$home/state/lavish-dock.check-trust" "disarm removes the trust binding"
@@ -187,8 +187,13 @@ test_pending_dock_note_becomes_an_inbox_wake_without_polling() {
 
   wakeq="$home/state/.wake-queue"
   assert_contains "$(cat "$wakeq" 2>/dev/null)" "captain inbox note" "queueing the note appends a Firstmate wake"
-  assert_contains "$(cat "$home/state/.lavish-dock-seen")" "face620c9be38af3 4" "the cursor records the first forwarded uid"
-  assert_contains "$(cat "$home/state/.lavish-dock-seen")" "face620c9be38af3 7" "the cursor records every forwarded uid"
+  python3 - "$home/state/.lavish-dock-seen" <<'PY' || fail "the cursor must record both prompt occurrences"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+assert data["schema"] == "fm-lavish-dock-seen-v2"
+assert len(data["sessions"]["face620c9be38af3"]) == 2
+PY
 
   out="$home/out2.txt"
   run_check "$home" "$lavish" "$out" FM_LAVISH_POLL_LOG="$poll_log"
@@ -197,6 +202,94 @@ test_pending_dock_note_becomes_an_inbox_wake_without_polling() {
     || fail "a second check must not queue another note"
   [ ! -e "$poll_log" ] || fail "the silent re-check must still never poll"
   pass "fm-lavish-dock-check: a dock note becomes an inbox wake without poll or 4387"
+}
+
+test_occurrences_attachments_and_captain_port_text_are_preserved() {
+  local home lavish out note
+  home=$(make_home occurrences)
+  lavish=$(make_lavish_dir occurrences)
+  python3 - "$lavish/state.json" <<'PY'
+import json, sys
+session = {
+  "file": "/tmp/occurrences.html",
+  "url": "http://studio.example:4387/session/occurrences",
+  "prompts": [
+    {"uid": "reused", "prompt": "the :4387 link is broken"},
+    {"uid": "", "prompt": "", "attachments": [{"path": "/tmp/captain.png", "mime": "image/png"}]},
+  ]
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump({"sessions": {"occurrences": session}}, fh)
+PY
+  out="$home/out.txt"
+  run_check "$home" "$lavish" "$out"
+  note=$(find "$home/state/inbox" -name '*.note' -type f | head -n 1)
+  assert_contains "$(cat "$note")" "the :4387 link is broken" "captain text containing the inner port is preserved"
+  assert_contains "$(cat "$note")" "Attachment: /tmp/captain.png (image/png)" "image attachment metadata reaches the inbox"
+  assert_contains "$(cat "$note")" "Open: https://studio.example:4389/session/occurrences" "only the Open URL is rewritten"
+
+  python3 - "$lavish/state.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+data["sessions"]["occurrences"]["prompts"] = []
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+PY
+  run_check "$home" "$lavish" "$home/empty.txt"
+  python3 - "$lavish/state.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+data["sessions"]["occurrences"]["prompts"] = [{"uid": "reused", "prompt": "a later reply"}]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+PY
+  run_check "$home" "$lavish" "$home/later.txt"
+  [ "$(find "$home/state/inbox" -name '*.note' -type f | wc -l | tr -d '[:space:]')" = 2 ] \
+    || fail "a later occurrence with a reused UID must be queued"
+  pass "fm-lavish-dock-check: occurrence cursor, attachments, and Open URL behavior"
+}
+
+test_owned_poll_publishes_consumed_feedback() {
+  local home artifact out note
+  home=$(make_home poll-boundary)
+  artifact="$TMP_ROOT/poll-boundary.html"
+  printf '<!doctype html><title>test</title>\n' > "$artifact"
+  cat > "$FAKEBIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+cat <<'EOF'
+session:
+  file: /tmp/poll-boundary.html
+  status: feedback
+prompts:
+  - uid: ""
+    prompt: consumed while blocked
+    attachments:
+      - path: /tmp/blocked.png
+        mime: image/png
+EOF
+SH
+  chmod +x "$FAKEBIN/lavish-axi"
+  out="$home/poll.txt"
+  FM_HOME="$home" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" poll "$artifact" > "$out" \
+    || fail "owned Lavish poll must return its feedback"
+  assert_contains "$(cat "$out")" "consumed while blocked" "poll output still reaches its worker"
+  note=$(find "$home/state/inbox" -name '*.note' -type f | head -n 1)
+  [ -n "$note" ] || fail "poll consumption must queue a captain inbox note"
+  assert_contains "$(cat "$note")" "consumed while blocked" "the inbox receives feedback consumed by a blocked poll"
+  assert_contains "$(cat "$note")" "/tmp/blocked.png" "the consumed response keeps its attachment path"
+  pass "fm-lavish-dock-check: owned poll publishes consumed feedback"
+}
+
+test_bootstrap_automatically_arms_primary_home() {
+  local home out
+  home=$(make_home bootstrap)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "mutable local bootstrap must complete: $out"
+  assert_present "$home/state/lavish-dock.check.sh" "primary-home bootstrap automatically writes the Lavish dock check"
+  assert_present "$home/state/lavish-dock.check-trust" "primary-home bootstrap automatically registers the Lavish dock check"
+  pass "fm-lavish-dock-check: bootstrap automatically arms the primary home"
 }
 
 test_missing_store_is_silent() {
@@ -231,5 +324,8 @@ test_arm_resolves_a_relative_home_into_the_shim
 test_arm_refuses_a_symlink_at_the_shim_path
 test_arm_refuses_without_inbox
 test_pending_dock_note_becomes_an_inbox_wake_without_polling
+test_occurrences_attachments_and_captain_port_text_are_preserved
+test_owned_poll_publishes_consumed_feedback
+test_bootstrap_automatically_arms_primary_home
 test_missing_store_is_silent
 test_malformed_store_is_reported_once
