@@ -222,6 +222,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+YOLO_MERGE_TIMEOUT=${FM_YOLO_MERGE_TIMEOUT:-120}  # seconds allowed for the watcher-run yolo merge attempt
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -1582,20 +1583,22 @@ procevent_surface_queued() {
 }
 
 run_check_process() {
+  local bound=$1
+  shift
   local c=$1
   shift
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec timeout "$bound" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec gtimeout "$bound" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$bound" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
 }
 
 run_check() {
-  ( run_check_process "$@" ) 2>/dev/null || true
+  ( run_check_process "$CHECK_TIMEOUT" "$@" ) 2>/dev/null || true
 }
 
 FM_ACTIVE_CHECK_PID=
@@ -1603,6 +1606,7 @@ FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
 FM_CHECK_SIGNAL_PENDING=
+FM_MERGE_ATTEMPT_STATUS=
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
@@ -1643,7 +1647,7 @@ run_check_capture() {
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$CHECK_TIMEOUT" "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -1658,6 +1662,44 @@ run_check_capture() {
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
+  FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
+  fm_check_output_cleanup
+}
+
+# The watcher's own forge-requesting action (the yolo merge attempt in the
+# check loop) runs under the same supervision as a *.check.sh: bounded by
+# YOLO_MERGE_TIMEOUT, killable through the tracked process group while it
+# runs, and signal-deferred exactly like run_check_capture. Unlike a check it
+# keeps the command's exit status in FM_MERGE_ATTEMPT_STATUS and its combined
+# output in FM_CHECK_RESULT, because a refused, failed, or expired merge
+# attempt is triaged from both.
+run_merge_attempt_capture() {
+  local pgid
+  fm_check_output_cleanup
+  FM_CHECK_RESULT=
+  FM_MERGE_ATTEMPT_STATUS=
+  FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
+  chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  set -m
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$YOLO_MERGE_TIMEOUT" "$@" ) \
+    > "$FM_CHECK_OUTPUT" 2>&1 &
+  FM_ACTIVE_CHECK_PID=$!
+  FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  set +m
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  trap 'exit 1' HUP INT TERM
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || true
+    fm_check_output_cleanup
+    return 1
+  fi
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  FM_MERGE_ATTEMPT_STATUS=0
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_MERGE_ATTEMPT_STATUS=$?
+  FM_ACTIVE_CHECK_PID=
+  fm_active_check_stop || { fm_check_output_cleanup; return 1; }
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
 }
@@ -2168,21 +2210,33 @@ while :; do
           if [ -z "$out" ] \
             && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
             pr_poll_control_release || exit 1
-            merge_attempt_rc=0
-            merge_attempt_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+            FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
               FM_ROOT_OVERRIDE="$FM_ROOT" \
-              "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" 2>&1) \
-              || merge_attempt_rc=$?
+              run_merge_attempt_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" || exit 1
+            merge_attempt_rc=$FM_MERGE_ATTEMPT_STATUS
+            merge_attempt_out=$FM_CHECK_RESULT
             if [ "$merge_attempt_rc" -eq 0 ] \
               && fm_pr_poll_merge_already_notified "$STATE" "$id" \
                 "$provider" "$host" "$path" "$number"; then
-              pr_poll_self_merged=1
-              out=merged
-              # The merge re-armed this poll while it ran, so the cycle-start
-              # snapshot is stale; refresh it so the merged handling below
-              # retires the re-armed artifacts instead of deferring a cycle.
-              fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-                || triage_log "yolo merge for $id left a poll snapshot that could not be refreshed; retirement defers to the next cycle"
+              # The merged handling below consumes authority and retires poll
+              # artifacts, so the released lifecycle lock is retaken first and
+              # a fresh snapshot is trusted only while it still names the PR
+              # this run merged: the merge re-armed that PR's poll while it
+              # ran, and a task re-registered for a different PR in the same
+              # window keeps that poll armed for its own merge instead of
+              # being retired for this one.
+              PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+              fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+              if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+                && [ "$FM_PR_POLL_SNAPSHOT_PROVIDER" = "$provider" ] \
+                && [ "$FM_PR_POLL_SNAPSHOT_HOST" = "$host" ] \
+                && [ "$FM_PR_POLL_SNAPSHOT_PATH" = "$path" ] \
+                && [ "$FM_PR_POLL_SNAPSHOT_NUMBER" = "$number" ]; then
+                pr_poll_self_merged=1
+                out=merged
+              else
+                triage_log "yolo merge for $id landed a PR this task no longer polls; the landing stays with its durable merge outcome"
+              fi
             elif [ "$merge_attempt_rc" -ne 0 ]; then
               triage_log "yolo merge attempt for $id refused or failed (rc=$merge_attempt_rc): $merge_attempt_out"
             fi
