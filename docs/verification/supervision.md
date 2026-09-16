@@ -541,6 +541,29 @@ directions, so both were fixed together:
 `subagent`, `subagent_fork`, `workflow` and `send_message` remain denied as intended;
 `job_output`, `job_kill`, `job_list`, `todo_write` and `bash` remain allowed.
 
+### DSH live guard, 2026-09-16
+
+The measurements above were one-off. `tests/fm-dsh-live-e2e.test.sh` makes them repeatable: it builds
+a throwaway profile, installs the hooks bridge at the running dsh-base version, and drives real
+headless sessions, failing by name and version rather than degrading quietly. Run it with
+`FM_DSH_LIVE_E2E=1` after a dsh upgrade.
+
+It proves four contracts, each of which was once assumed and later measured:
+
+| Contract | Live result (dsh-base 0.1.5-rc.2) |
+| --- | --- |
+| A matching bridge pin passes `fm-dsh-preflight.sh` | pass |
+| `UserPromptSubmit` additionalContext reaches the FIRST request | pass |
+| A `bash`-matcher `PreToolUse` deny blocks the command | pass (sentinel absent) |
+| A blocking `Stop` forces one bounded continuation | pass (2 firings) |
+
+Two mistakes this guard made on its first run are worth keeping in view, because both read like real
+failures: it initially isolated `DSH_HOME` to a temp directory, which also isolated the CREDENTIAL
+store, so every session died with `MISSING_CREDENTIAL` and the UserPromptSubmit assertion failed as
+though context delivery had regressed; and its first throwaway profile omitted the `maxBytes` raise,
+so `fm-dsh-preflight.sh` correctly rejected it. The guard now keeps the real harness home and makes
+only the profile disposable.
+
 ### DSH PreToolUse resolution, 2026-09-16
 
 PreToolUse initially appeared broken: registering any PreToolUse hook made every

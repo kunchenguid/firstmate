@@ -54,7 +54,12 @@ clean commit → `fm-merge-local.sh` fast-forwarded the primary's `main` → tea
 worktree and cleared every record. `direct-PR` and `no-mistakes` remain untested because both need a
 GitHub remote, as does the merge-authority and `yolo` path.
 
-**Phases 4–5 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
+**Phase 5 — the repeatable live guard is in place.** `tests/fm-dsh-live-e2e.test.sh` builds a
+throwaway profile and drives real DSH sessions to prove the bridge pin, UserPromptSubmit delivery, a
+`bash`-matcher PreToolUse deny, and a bounded blocking Stop. Run with `FM_DSH_LIVE_E2E=1`; it skips
+otherwise. The remaining Phase 5 work is upstreaming the adapter.
+
+**Phase 4 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
 process-event sources, secondmates), the optional DSH crewmate, and upstreaming remain. They are
 larger than the work completed above, not smaller.
 
