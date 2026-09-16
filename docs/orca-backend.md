@@ -36,7 +36,7 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<repo id>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
@@ -45,7 +45,8 @@ worktree=<absolute Orca worktree path>
 
 ## Current lifecycle and safety
 
-Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
+Spawn registers the repository and creates an independent worktree using Orca's configured base and inherited setup policy.
+It launches the selected harness through `terminal create --command`, waits for the TUI readiness receipt, records that terminal handle, and closes any unused fallback shell returned with the worktree.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
 `fm-peek.sh` reads with `orca terminal read`.

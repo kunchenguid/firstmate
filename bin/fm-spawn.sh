@@ -1161,6 +1161,9 @@ spawn_abort_cleanup() {
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
         fi
+      elif [ -f "$STATE/$ID.meta" ] &&
+        [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" = "${SPAWN_GEN:-}" ]; then
+        rm -f "$STATE/$ID.meta"
       fi
     fi
   fi
@@ -3176,9 +3179,6 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-    fi
     T="$ORCA_TERMINAL"
     ;;
   esac
@@ -3545,7 +3545,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -4205,7 +4205,6 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -4315,19 +4314,21 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+if [ "$BACKEND" != orca ]; then
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+fi
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  [ "$BACKEND" = orca ] || spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
-if [ -n "$SPAWN_TRACEPARENT" ]; then
+if [ -n "$SPAWN_TRACEPARENT" ] && [ "$BACKEND" != orca ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
@@ -4339,6 +4340,16 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       exit 1
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
+  fi
+fi
+if [ "$BACKEND" = orca ]; then
+  LAUNCH="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") FM_TASK_ID=$(shell_quote "$ID") $LAUNCH"
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_record_traceparent; then
+      LAUNCH="TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") $LAUNCH"
+    else
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
+    fi
   fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -4361,14 +4372,35 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+if [ "$BACKEND" = orca ]; then
+  ORCA_FALLBACK_TERMINAL=$ORCA_TERMINAL
+  ORCA_TERMINAL=$(fm_backend_orca_terminal_create_command "$ORCA_WORKTREE_ID" "$W" "$LAUNCH") || exit 1
+  T=$ORCA_TERMINAL
+  if ! fm_backend_orca_terminal_wait_tui "$T" 60000 &&
+    ! fm_backend_orca_terminal_wait_tui "$T" 120000; then
+    echo "error: Orca terminal $T did not reach TUI readiness; refusing to report the worker as started" >&2
+    exit 1
+  fi
+  [ -z "$ORCA_FALLBACK_TERMINAL" ] || fm_backend_orca_kill "$ORCA_FALLBACK_TERMINAL" >/dev/null 2>&1 || true
+  SPAWN_META_TMP="$STATE/.$ID.meta.terminal.${BASHPID:-$$}"
+  if ! awk -F= -v terminal="$ORCA_TERMINAL" '$1 == "terminal" { print "terminal=" terminal; next } { print }' \
+    "$STATE/$ID.meta" >"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+      echo "error: could not record Orca command terminal for $ID" >&2
+      exit 1
+  fi
+  SPAWN_META_TMP=
+  ORCA_ABORT_CLEANUP=0
+else
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+[ "$BACKEND" = orca ] || spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

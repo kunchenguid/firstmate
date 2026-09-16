@@ -131,7 +131,7 @@ fm_backend_orca_repo_ensure() {  # <project-path>
 fm_backend_orca_worktree_create() {  # <project-path> <name>
   local project=$1 name=$2 repo_id out wt_id wt_path terminal
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
+  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --json) || return 1
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
     return 1
@@ -163,6 +163,30 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
     return 1
   }
   printf '%s' "$terminal"
+}
+
+fm_backend_orca_terminal_create_command() {  # <worktree-id> <title> <command>
+  local worktree_id=$1 title=$2 command=$3 out terminal
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --command "$command" --json) || return 1
+  terminal=$(printf '%s' "$out" | fm_backend_orca_json_get terminal-handle) || {
+    echo "error: orca terminal create did not return a terminal handle for $title" >&2
+    return 1
+  }
+  printf '%s' "$terminal"
+}
+
+fm_backend_orca_terminal_wait_tui() {  # <terminal-id> <timeout-ms>
+  local terminal=$1 timeout_ms=$2 out
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal wait --terminal "$terminal" --for tui-idle --timeout-ms "$timeout_ms" --json) || return 1
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+if (data.ok === false) process.exit(2);
+const r = data.result || {};
+process.exit((r.wait || r).satisfied === true ? 0 : 1);
+'
 }
 
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
