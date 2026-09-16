@@ -41,6 +41,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -1109,6 +1110,21 @@ export default function (pi: ExtensionAPI) {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
+  });
+
+  pi.registerCommand?.("tasks", {
+    description: "Show the compact current Firstmate task table.",
+    handler: async (args, ctx) => {
+      const taskScript = `${fmRoot}/bin/fm-tasks.sh`;
+      const selector = args.trim();
+      const result = await runCommandAsync(
+        "bash",
+        [taskScript, ...(selector ? selector.split(/\s+/) : [])],
+        { cwd: fmRoot, env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state } },
+      );
+      const output = result.stdout.trim() || result.stderr.trim() || "No tasks found.";
+      ctx.ui.notify(output, result.status === 0 ? "info" : "warning");
+    },
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

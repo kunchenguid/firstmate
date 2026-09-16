@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Deterministic behavior tests for private task references, names, and the table.
+set -u
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+LIB="$ROOT/bin/fm-callsigns-lib.sh"
+TASKS="$ROOT/bin/fm-tasks.sh"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-callsigns-test.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+make_home() {
+  local home=$TMP_ROOT/$1
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config"
+  printf '%s\n' "$home"
+}
+
+sync() { FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1"; fm_callsigns_sync "$2"' _ "$LIB" "$2"; }
+lookup() { FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1"; fm_callsign_resolve "$2"' _ "$LIB" "$2"; }
+
+home=$(make_home allocation)
+cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] alpha-task - Calm Rows (repo: sample)
+- [ ] beta-task - Crew Inbox (repo: sample)
+## Queued
+- [ ] gamma-task - Ready Queue (repo: sample)
+## Done
+EOF
+sync "$home" 10 || fail "initial sync failed"
+file="$home/state/task-callsigns.tsv"
+grep -q $'^alpha-task\tt1\tcalm-rows\t10\t$' "$file" || fail "title default or t1 allocation wrong"
+grep -q $'^beta-task\tt2\tcrew-inbox\t10\t$' "$file" || fail "t2 allocation wrong"
+grep -q $'^gamma-task\tt3\tready-queue\t10\t$' "$file" || fail "t3 allocation wrong"
+old=$(cat "$file")
+sync "$home" 11 || fail "repeat sync failed"
+[ "$old" = "$(cat "$file")" ] || fail "repeat sync changed persisted assignments"
+[ "$(lookup "$home" t2)" = beta-task ] || fail "reference resolution failed"
+[ "$(lookup "$home" calm-rows)" = alpha-task ] || fail "human name resolution failed"
+pass "allocation, persistence, and reference/name resolution"
+
+cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] beta-task - Crew Inbox (repo: sample)
+## Queued
+- [ ] gamma-task - Ready Queue (repo: sample)
+- [ ] delta-task - New Task (repo: sample)
+## Done
+EOF
+sync "$home" 20 || fail "reconciliation sync failed"
+[ "$(lookup "$home" t1)" = delta-task ] || fail "oldest retired reference was not recycled first"
+[ "$(lookup "$home" t2)" = beta-task ] || fail "active reference changed during recycling"
+FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t1 fresh-name >/dev/null || fail "explicit name assignment failed"
+grep -q $'^delta-task\tt1\tfresh-name\t20\t$' "$file" || fail "explicit name was not persisted"
+pass "recycling and independently editable names"
+
+home2=$(make_home ambiguity)
+cat > "$home2/data/backlog.md" <<'EOF'
+## Queued
+- [ ] one-task - Same Task (repo: sample)
+- [ ] two-task - Same Task (repo: sample)
+## Done
+EOF
+sync "$home2" 30 || fail "ambiguity sync failed"
+if lookup "$home2" same-task >/dev/null 2>&1; then fail "ambiguous human name resolved"; fi
+if FM_HOME="$home2" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" name t1 same-task >/dev/null 2>&1; then fail "duplicate explicit name accepted"; fi
+pass "ambiguity is refused"
+
+home3=$(make_home statuses)
+cat > "$home3/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-task - Active Task (repo: sample)
+- [ ] waiting-task - Waiting Task (repo: sample) (hold: external wait) (hold-kind: external)
+## Queued
+- [ ] blocked-task - Blocked Task (repo: sample) blocked-by: active-task
+- [ ] input-task - Needs Input (repo: sample) (hold: captain input) (hold-kind: captain)
+## Done
+- [x] done-task - Done Task (repo: sample) (done 2026-01-01)
+EOF
+sync "$home3" 40 || fail "status sync failed"
+out=$(FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" --json) || fail "table command failed"
+printf '%s' "$out" | jq -e '
+  map({(.id): .status}) | add
+  | .["blocked-task"] == "blocked"
+    and .["input-task"] == "needs-you"
+    and .["waiting-task"] == "waiting"
+    and .["done-task"] == "done"
+' >/dev/null || fail "status normalization wrong: $out"
+FM_HOME="$home3" FM_ROOT_OVERRIDE="$ROOT" "$TASKS" --table | grep -q '| Ref | Name | Status | Current outcome |' || fail "table header missing"
+pass "status normalization and compact table output"

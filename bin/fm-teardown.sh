@@ -269,6 +269,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-callsigns-lib.sh
+. "$SCRIPT_DIR/fm-callsigns-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -293,11 +295,19 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
+if [ "$#" -lt 1 ]; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
+if [[ "$ID" != *:* ]]; then
+  resolved_id=$(fm_callsign_resolve "$ID" 2>/dev/null || true)
+  [ -z "$resolved_id" ] || ID=$resolved_id
+fi
+if ! fm_task_id_path_safe "$ID"; then
+  echo "error: invalid teardown request" >&2
+  exit 2
+fi
 FORCE=
 LEGACY_RECORD_GIVEN=0
 shift

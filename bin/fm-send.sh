@@ -234,6 +234,8 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-callsigns-lib.sh
+. "$SCRIPT_DIR/fm-callsigns-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
@@ -329,7 +331,14 @@ fm_send_count_colons() { # <string>
 }
 
 fm_send_resolve_target() { # <raw-target>
-  local raw=$1 meta pane_meta target backend assumed colons id session hint
+  local raw=$1 meta pane_meta target backend assumed colons id session hint resolved_id
+
+  # Task references and human names are resolved before the existing endpoint
+  # resolver; explicit backend targets containing ':' remain escape hatches.
+  if [[ "$raw" != *:* ]]; then
+    resolved_id=$(fm_callsign_resolve "$raw" 2>/dev/null || true)
+    [ -z "$resolved_id" ] || raw=$resolved_id
+  fi
 
   RESOLVED_TARGET=""
   TARGET_BACKEND=""

@@ -17,10 +17,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-callsigns-lib.sh
+. "$SCRIPT_DIR/fm-callsigns-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 RAW_TARGET=$1
+if [[ "$RAW_TARGET" != *:* ]]; then
+  resolved_id=$(fm_callsign_resolve "$RAW_TARGET" 2>/dev/null || true)
+  [ -z "$resolved_id" ] || RAW_TARGET=$resolved_id
+fi
 N=${2:-40}
 
 REMOTE_META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)

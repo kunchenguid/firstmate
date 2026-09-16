@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-callsigns-lib.sh
+. "$SCRIPT_DIR/fm-callsigns-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -259,10 +261,14 @@ esac
 case "$RAW_ID" in
   *:*) die "'$RAW_ID' is an explicit backend endpoint; fm-control accepts an exact task id only, so a lifecycle command can never land on an endpoint this home does not own" ;;
 esac
-if ! fm_task_id_creation_valid "$RAW_ID"; then
+ID=$RAW_ID
+if [[ "$RAW_ID" != *:* && "$RAW_ID" != fm-* ]]; then
+  resolved_id=$(fm_callsign_resolve "$RAW_ID" 2>/dev/null || true)
+  [ -z "$resolved_id" ] || ID=$resolved_id
+fi
+if ! fm_task_id_creation_valid "$ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
-ID=$RAW_ID
 # Supervision lease guard: lifecycle control is overlap territory between the
 # two Pi supervision actors; refuse while the OTHER actor holds this task's
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).

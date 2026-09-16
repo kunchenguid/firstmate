@@ -93,6 +93,8 @@ For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+`bin/fm-tasks.sh` adds the compact task table and uses `bin/fm-callsigns-lib.sh` for private atomic `t1`-`t99` references and editable hyphenated names; the table remains a projection of backlog and current-state authority rather than a second status list.
+The resolver is used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr-check.sh`, and `fm-teardown.sh`; merge, review, and promotion consumers remain deliberately deferred until their exact task-id boundaries are independently updated.
 The script header owns the exact JSON schema.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.

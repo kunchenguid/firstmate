@@ -15,6 +15,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-callsigns-lib.sh
+. "$SCRIPT_DIR/fm-callsigns-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
@@ -26,6 +28,10 @@ if [ "$#" -ne 2 ]; then
 fi
 ID=$1
 RAW_URL=$2
+if [[ "$ID" != *:* ]]; then
+  resolved_id=$(fm_callsign_resolve "$ID" 2>/dev/null || true)
+  [ -z "$resolved_id" ] || ID=$resolved_id
+fi
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid PR check request" >&2
   exit 2
