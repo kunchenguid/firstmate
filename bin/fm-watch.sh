@@ -923,8 +923,10 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew state
+# itself (the costly check already ran once, at classification time); the stale
+# path's ended_worker_stale_check is what keeps a confirmed-dead endpoint from
+# reaching this timer with an inherited classification. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
@@ -933,6 +935,9 @@ clear_write_tracking() {  # <window-key>
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  if ended_worker_stale_check "$win" "$task"; then
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1254,11 +1259,9 @@ stale_wait_throttled() {  # <window-key> <declaration>
 # and a failure alarm exactly as they do today.
 # Returns 0 to absorb this sighting; 1 to alarm, after which the caller records
 # the throttle through stale_wait_record once its own wake append has succeeded.
-# Record a fired wake against the bounded cadence, and ONLY after that wake was
-# durably appended. A marker written ahead of the append outlives a failed one:
-# the watcher exits with no wake queued, and the next sighting reads the fresh
-# marker and absorbs the retry, which is the single way this bound could swallow
-# an alarm outright rather than delay it.
+# Record a declaration against the bounded cadence after its disposition is
+# durable. Wake callers record only after the queue append; authoritative run
+# absorption records after the successful state read.
 stale_wait_record() {  # <window-key>
   [ -n "$STALE_WAIT_DECLARATION" ] || return 0
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
@@ -1277,6 +1280,90 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# A stopped worker's unchanged pane can retain a timer, busy signal, or status
+# verb from its last active run.
+# Once the endpoint is confirmed dead, only unread steers, declared waits,
+# positive daemon failure evidence, and the authoritative run may override
+# bounded recovery.
+ended_worker_reconcile_state() {  # <window> <task> -> dead|missing
+  local win=$1 task=$2 state
+  [ -n "$task" ] || return 1
+  state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || return 1
+  case "$state" in dead|missing) ;; *) return 1 ;; esac
+  fm_task_inbox_oldest_unhandled "$STATE" "$task" >/dev/null && return 1
+  printf '%s' "$state"
+}
+
+ended_worker_reconcile_ready() {  # <window> <task>
+  ended_worker_reconcile_state "$1" "$2" >/dev/null
+}
+
+ended_worker_stale_check() {  # <window> <task> [known-endpoint-state] [pane-unreadable]
+  local win=$1 task=$2 endpoint_state=${3:-} pane_unreadable=${4:-0}
+  local key line last reason held=0 declared=0
+  if [ -z "$endpoint_state" ]; then
+    endpoint_state=$(ended_worker_reconcile_state "$win" "$task") || return 1
+  else
+    case "$endpoint_state" in dead|missing) ;; *) return 1 ;; esac
+  fi
+  last=$(last_status_line "$STATE/$task.status")
+  if status_is_paused_or_captain_held "$last"; then
+    [ "$pane_unreadable" = 1 ] || return 1
+    declared=1
+  fi
+  if task_captain_call_open "$task"; then
+    held=1
+  fi
+  key=$(window_key "$win")
+  if [ "$held" -eq 1 ]; then
+    STALE_WAIT_DECLARATION="ended-worker:$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")"
+  else
+    STALE_WAIT_DECLARATION="ended-worker:$(fm_wake_signal_sig "$STATE/$task.meta" || true):$(stale_wait_declaration "$task")"
+  fi
+  # An unreadable ended endpoint under a declared external wait has no pane hash
+  # to route through handle_paused_stale. Preserve that function's first-sight
+  # absorb semantics here, then let the same long cadence recheck it.
+  if [ "$pane_unreadable" = 1 ] && [ "$declared" -eq 1 ] && [ "$held" -eq 0 ] \
+     && [ ! -e "$STATE/.paused-resurfaced-$key" ]; then
+    clear_stale_hash_tracking "$key"
+    stale_wait_record "$key"
+    return 0
+  fi
+  if [ "$held" -eq 1 ] && afk_record_present; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
+  if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+    clear_stale_hash_tracking "$key"
+    return 0
+  fi
+  # Only an attributed run (`source: run-step`) survives the worker: it keeps
+  # running without one and the inactive reconciler reports its outcome, so this
+  # window hands it over silently. Pane and ordinary status-log state predate the
+  # stop and cannot revive an inherited wedge. Positive daemon socket failure is
+  # different current evidence and keeps its own explicit recovery reason.
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) \
+    || line='state: unknown · source: none · current state unavailable'
+  clear_stale_hash_tracking "$key"
+  if status_line_reports_daemon_socket_down "$line"; then
+    reason="stale: $win (worker ended; validation daemon socket down requires recovery)"
+  else
+    case "$line" in
+      *"source: run-step"*) stale_wait_record "$key"; return 0 ;;
+    esac
+    if [ "$held" -eq 1 ]; then
+      reason="stale: $win (worker ended, awaiting the captain - preserved work, rechecked on a long cadence not a wedge)"
+    elif [ "$declared" -eq 1 ]; then
+      reason="stale: $win (worker ended during a declared wait - preserved work, rechecked on a long cadence not a wedge)"
+    else
+      reason="stale: $win (worker ended - preserved state needs recovery, rechecked on a long cadence not a wedge)"
+    fi
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
+  stale_wait_record "$key"
+  wake "$reason"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2251,7 +2338,21 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    ended_worker_ready=1
+    ended_worker_state=
+    if [ "$kind" != secondmate ] \
+      && ended_worker_state=$(ended_worker_reconcile_state "$w" "$task"); then
+      ended_worker_ready=0
+    fi
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      # A confirmed dead/missing endpoint has no readable pane by definition in
+      # the missing case. Reconcile it by recorded task identity instead of
+      # silently skipping the task forever at the capture boundary.
+      if [ "$ended_worker_ready" -eq 0 ]; then
+        ended_worker_stale_check "$w" "$task" "$ended_worker_state" 1
+      fi
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2265,14 +2366,22 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$ended_worker_ready" -eq 0 ]; then
+      busy_now=1
+    elif window_is_busy "$w" "$tail40"; then
+      busy_now=0
+    else
+      busy_now=1
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ "$ended_worker_ready" -eq 0 ] && ended_worker_stale_check "$w" "$task" "$ended_worker_state"; then
+          continue
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;

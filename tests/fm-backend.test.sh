@@ -537,6 +537,28 @@ test_backend_validate_spawn_accepts_orca() {
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
 }
 
+test_cursorless_agent_state_routes_recovery_evidence() {
+  local out backend
+  out=$(bash -c '
+    . "$1/bin/fm-composer-lib.sh"
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_target_exists() { return 0; }
+    fm_backend_zellij_composer_capture() { printf "$ "; }
+    fm_backend_orca_composer_capture() { printf "$ "; }
+    fm_backend_cmux_composer_capture() { printf "$ "; }
+    for backend in zellij orca cmux; do
+      printf "%s=%s\n" "$backend" "$(fm_backend_agent_state "$backend" target)"
+    done
+  ' _ "$ROOT")
+  for backend in zellij orca cmux; do
+    printf '%s\n' "$out" | grep -Fxq "$backend=dead" \
+      || fail "$backend did not route bottom-most shell recovery evidence through fm_backend_agent_state: $out"
+  done
+  pass "fm_backend_agent_state: every cursorless backend recognizes a bottom-most dead shell"
+}
+
+
 test_meta_get_and_backend_of_meta() {
   local meta=$TMP_ROOT/meta-get.meta edge=$TMP_ROOT/meta-get-edge.meta
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
@@ -1149,6 +1171,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
+test_cursorless_agent_state_routes_recovery_evidence
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta

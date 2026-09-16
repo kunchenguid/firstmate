@@ -339,6 +339,18 @@ status_line_verb() {  # <status-line> -> leading verb word
   done
   printf '%s' "$out"
 }
+
+# Exact no-mistakes run identity carried by a terminal producer before the
+# status line's first colon: `done [run=<id>]: ...`.
+status_line_run_id() {  # <status-line> -> run id
+  local prefix run_id
+  prefix=${1%%:*}
+  case "$prefix" in *\[run=*\]*) ;; *) return 1 ;; esac
+  run_id=${prefix#*\[run=}
+  run_id=${run_id%%\]*}
+  _fm_decision_slug_ok "$run_id" || return 1
+  printf '%s' "$run_id"
+}
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
@@ -386,6 +398,23 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     n=${n#"${n%%[![:space:]]*}"}
   fi
   printf '%s' "$n"
+}
+
+# 0 when a current-state or status line carries positive daemon socket-failure
+# evidence. Client-side timeouts and generic unreachability are deliberately
+# excluded: only a refused or missing socket proves the shared daemon itself is
+# unavailable.
+status_line_reports_daemon_socket_down() {  # <line>
+  local line
+  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$line" in
+    *daemon*|*no-mistakes*) ;;
+    *) return 1 ;;
+  esac
+  case "$line" in
+    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
+  esac
+  return 1
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local k

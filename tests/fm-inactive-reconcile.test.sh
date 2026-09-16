@@ -32,7 +32,11 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+if [ -n "${FM_FAKE_CREW_STATE_LINE:-}" ]; then
+  printf '%s\n' "$FM_FAKE_CREW_STATE_LINE"
+else
+  printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+fi
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -162,6 +166,24 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+test_lost_run_attribution_does_not_promote_status_terminal() {
+  local out
+  make_world lost-run-attribution
+  write_child "$MAIN" child 'done: stale pre-validation delivery'
+  out=$(FM_FAKE_CREW_STATE='working · source: run-step · run: observed-run · validating (running)' \
+    run_reconcile "$MAIN" --startup)
+  [ -z "$out" ] || fail "active run observation produced an outcome: $out"
+  out=$(FM_FAKE_CREW_STATE='done · source: status-log · done: stale pre-validation delivery' \
+    run_reconcile "$MAIN" --startup)
+  case "$out" in
+    *"no longer readable or attributable"*) ;;
+    *) fail "lost run attribution promoted a stale status terminal: $out" ;;
+  esac
+  grep -Fq 'state=done' "$MAIN/state/.wake-queue" 2>/dev/null \
+    && fail "lost run attribution queued a false terminal outcome"
+  pass "lost run attribution cannot promote a stale status terminal"
 }
 
 # A secondmate delivers a child's terminal ledger line to the parent on the
@@ -818,7 +840,191 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
+run_real_reconcile() {
+  local home=${1:-$MAIN}
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_RUN_FIXTURE="$WORLD/run" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_RUNS_FIXTURE="$WORLD/runs" \
+    "$RECON" scan --startup
+}
+
+# The run survives the endpoint, but no worker remains to append a status.
+# Drive the real current-state reader over a branch-matched CLI fixture.
+test_vanished_worker_run_is_observed() {
+  local wt head out result before after err seq generation pid ticks backend
+  make_world vanished-run
+  write_child "$MAIN" child 'captain-held [key=old]: preserved work'
+  wt="$MAIN/projects/child"
+  mkdir -p "$wt"
+  fm_git_identity fmtest fmtest@example.invalid
+  git -C "$wt" init -q
+  git -C "$wt" checkout -q -b fm/recovery
+  git -C "$wt" commit -q --allow-empty -m initial
+  head=$(git -C "$wt" rev-parse HEAD)
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'axi status') cat "$FM_RUN_FIXTURE" ;;
+  'runs --limit') cat "$FM_RUNS_FIXTURE" 2>/dev/null ;;
+  'daemon status') [ "${FM_DAEMON_DOWN:-0}" != 1 ] ;;
+esac
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in list-windows) exit 0 ;; *) exit 1 ;; esac
+SH
+  chmod +x "$WORLD/fakebin/no-mistakes" "$WORLD/fakebin/tmux"
+  for result in running awaiting_approval running awaiting_approval failed; do
+    printf 'run:\n  id: surviving-run\n  branch: fm/recovery\n  head: %s\n  status: %s\n' "$head" "$result" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    case "$result" in
+      running) [ -z "$out" ] || fail "active surviving run was reported as finished: $out" ;;
+      awaiting_approval) [ -n "$out" ] || fail "vanished worker validation decision remained silent" ;;
+      failed) [ -n "$out" ] || fail "vanished worker terminal failure remained silent" ;;
+    esac
+    before=$(wake_count "$MAIN" 'inactive-outcome:')
+    run_real_reconcile >/dev/null
+    after=$(wake_count "$MAIN" 'inactive-outcome:')
+    [ "$before" = "$after" ] || fail "unchanged run observation duplicated a notification"
+  done
+  grep -F 'state=failed' "$MAIN/state/.wake-queue" >/dev/null || fail "failure was not durably queued"
+  # A handled gate must not reappear after restart; a new run on the same HEAD
+  # is not the old run and must still report its own failure.
+  err="$WORLD/drain.err"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "could not acknowledge run observations"
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "acknowledged terminal outcome replayed after restart"
+  printf 'run:\n  id: replacement\n  branch: fm/recovery\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  run_real_reconcile >/dev/null
+  out=$(FM_DAEMON_DOWN=1 run_real_reconcile)
+  [ -n "$out" ] || fail "daemon failure behind a persisted running row stayed silent"
+  unset FM_DAEMON_DOWN
+  # A completely lost response after a known active run must not be mistaken
+  # for completion, nor forgotten because no worker can report the CLI error.
+  run_real_reconcile >/dev/null
+  : > "$WORLD/run"
+  out=$(run_real_reconcile)
+  case "$out" in *"no longer readable or attributable"*) ;; *) fail "lost run query did not request reconciliation: $out" ;; esac
+  printf 'run:\n  id: replacement\n  branch: fm/recovery\n  head: %s\n  status: failed\n' "$head" > "$WORLD/run"
+  # Exercise the actual watcher, not only its scan entry point, with capture
+  # failing because the endpoint disappeared in the reboot.
+  prime_seen "$MAIN/state" "$MAIN/state/child.status"
+  age "$MAIN/state/.inactive-outcome-reconcile"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_RUN_FIXTURE="$WORLD/run" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$WORLD/watch.out" 2>&1 &
+  pid=$!; ticks=0
+  while kill -0 "$pid" 2>/dev/null && [ "$ticks" -lt 200 ]; do sleep 0.1; ticks=$((ticks + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then reap "$pid"; fail "watcher did not observe the replacement run failure"; fi
+  wait "$pid" || fail "watcher failed: $(cat "$WORLD/watch.out")"
+  grep -F 'state=failed' "$MAIN/state/.wake-queue" >/dev/null || fail "watcher lost terminal failure"
+  grep -Fx 'captain-held [key=old]: preserved work' "$MAIN/state/child.status" >/dev/null || fail "observer changed the worker's decision"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || fail "observer changed preserved project work"
+  # The run source is independent of all five backend adapters. Unknown
+  # liveness is sufficient to observe, never sufficient to relaunch.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$WORLD/fakebin/herdr"
+  chmod +x "$WORLD/fakebin/herdr"
+  for backend in tmux herdr zellij orca cmux; do
+    printf 'backend=%s\n' "$backend" >> "$MAIN/state/child.meta"
+    age "$MAIN/state/child.meta"
+    printf 'run:\n  id: %s-run\n  branch: fm/recovery\n  head: %s\n  status: awaiting_approval\n' "$backend" "$head" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -n "$out" ] || fail "$backend lost a workerless validation decision"
+  done
+  # A gate can change between polls without an observed running interval.
+  # The same run, step, and finding count must not hide different findings.
+  for result in first-finding replacement-finding; do
+    printf 'run:\n  id: gate-revision\n  branch: fm/recovery\n  head: %s\n  status: awaiting_approval\n  findings[1]{id,severity,file,line,action,description}:\n    %s,error,file.sh,1,ask-user,requires a decision\n' "$head" "$result" > "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -n "$out" ] || fail "changed findings at the same gate stayed silent"
+    printf 'elapsed: different on each poll\n' >> "$WORLD/run"
+    out=$(run_real_reconcile)
+    [ -z "$out" ] || fail "elapsed display noise created a duplicate gate notification"
+  done
+  printf 'run:\n  id: foreign\n  branch: fm/other\n  head: %s\n  status: running\n' "$head" > "$WORLD/run"
+  printf 'running fm/recovery %s 2026-09-15 12:00\n' "${head:0:8}" > "$WORLD/runs"
+  out=$(run_real_reconcile)
+  case "$out" in
+    *"only coarse ledger state"*) ;;
+    *) fail "a coarsely attributed workerless run stayed silent: $out" ;;
+  esac
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "an unchanged coarse run ambiguity repeated: $out"
+  : > "$WORLD/runs"
+
+  bind_secondmate local
+  write_child "$MATE" unknown-gate 'done: older delivery'
+  printf 'backend=zellij\n' >> "$MATE/state/unknown-gate.meta"
+  age "$MATE/state/unknown-gate.meta"
+  mkdir -p "$MATE/projects/unknown-gate"
+  git -C "$MATE/projects/unknown-gate" init -q
+  git -C "$MATE/projects/unknown-gate" checkout -q -b fm/unknown-gate
+  git -C "$MATE/projects/unknown-gate" commit -q --allow-empty -m initial
+  head=$(git -C "$MATE/projects/unknown-gate" rev-parse HEAD)
+  printf 'run:\n  id: unknown-gate-run\n  branch: fm/unknown-gate\n  head: %s\n  status: awaiting_approval\n' "$head" > "$WORLD/run"
+  out=$(run_real_reconcile "$MATE")
+  [ -n "$out" ] || fail "unknown secondmate endpoint blocked authoritative gate reconciliation"
+
+  write_child "$MATE" duplicate 'done [run=delivered-run]: completed delivery'
+  printf 'backend=zellij\n' >> "$MATE/state/duplicate.meta"
+  age "$MATE/state/duplicate.meta"
+  mkdir -p "$MATE/projects/duplicate"
+  git -C "$MATE/projects/duplicate" init -q
+  git -C "$MATE/projects/duplicate" checkout -q -b fm/duplicate
+  git -C "$MATE/projects/duplicate" commit -q --allow-empty -m initial
+  head=$(git -C "$MATE/projects/duplicate" rev-parse HEAD)
+  # Reboot recovery sees the producer-tagged terminal ledger and completed run
+  # together, with no prior periodic observation. The receipt copies the tag
+  # rather than guessing identity from this publication-time state read.
+  printf 'run:\n  id: delivered-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  grep -q '^run_id=delivered-run$' "$MATE/state/terminal-outcomes/"*.reported \
+    || fail "the terminal producer's run identity was not durable in its receipt"
+  [ "$(grep -c 'child duplicate done:' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the ledger and completed run published one delivery twice: $(cat "$MAIN/state/mate.status")"
+  [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status" || true)" = 0 ] \
+    || fail "the run outcome duplicated its exact ledger delivery: $(cat "$MAIN/state/mate.status")"
+  printf 'run:\n  id: newer-run\n  branch: fm/duplicate\n  head: %s\n  status: completed\n  outcome: passed\n' "$head" > "$WORLD/run"
+  run_real_reconcile "$MATE" >/dev/null
+  [ "$(grep -c 'child=duplicate' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "a genuinely newer terminal run was hidden by the producer-owned ledger receipt: $(cat "$MAIN/state/mate.status")"
+  # A reused task id cannot inherit the previous incarnation's active observer,
+  # and another branch's run cannot be reported as this task's decision.
+  printf 'spawn_gen=reused-task\n' >> "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  printf 'run:\n  id: foreign\n  branch: fm/other\n  head: %s\n  status: awaiting_approval\n' "$head" > "$WORLD/run"
+  out=$(run_real_reconcile)
+  [ -z "$out" ] || fail "a reused task inherited an observation or attributed a foreign branch: $out"
+  pass "a surviving validation run reports its decision and failure without a worker"
+}
+
+test_daemon_socket_failure_preserves_prior_run_observation() {
+  local observation
+  make_world daemon-observation
+  write_child "$MAIN" child 'blocked: no-mistakes daemon socket refused connections'
+  FM_FAKE_CREW_STATE_LINE='state: working · source: run-step · run: surviving-run' \
+    run_reconcile "$MAIN" --startup >/dev/null
+  observation="$MAIN/state/terminal-outcomes/child.run-observation"
+  grep -Fq 'observation=state: working · source: run-step · run: surviving-run' "$observation" \
+    || fail "active run observation was not persisted"
+  FM_FAKE_CREW_STATE_LINE='state: blocked · source: status-log · no-mistakes daemon socket refused connections' \
+    run_reconcile "$MAIN" --startup >/dev/null
+  grep -Fq 'observation=state: working · source: run-step · run: surviving-run' "$observation" \
+    || fail "positive daemon socket failure was rewritten as lost run attribution"
+  ! grep -Fq 'no longer readable or attributable' "$observation" \
+    || fail "daemon socket failure became a generic lost-attribution observation"
+  pass "run observation preserves explicit daemon socket failure for the blocker path"
+}
+
 test_main_direct_terminal_presentation_receipt
+test_lost_run_attribution_does_not_promote_status_terminal
+test_vanished_worker_run_is_observed
+test_daemon_socket_failure_preserves_prior_run_observation
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure

@@ -2435,7 +2435,7 @@ run_hold() {  # <dir> <args...>
 }
 
 make_hold_home() {  # <name> <status-line> <hold|nohold>
-  local name=$1 line=$2 hold=$3 dir state
+  local name=$1 line=$2 hold=$3 dir state crew_state
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/data" "$dir/config"
   cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || return 1
@@ -2448,22 +2448,35 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
   printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
     > "$state/held-merge.meta"
   printf '%s\n' "$line" > "$state/held-merge.status"
+  # The crew state bin/fm-crew-state.sh really emits for this fixture. Its agent
+  # has exited, so no run is attributed and the pane carries no busy signature:
+  # the reader falls back to the status log and reports that log's own verb
+  # (fm-crew-state.sh's map_log_state). There is no `stopped` state in that
+  # vocabulary, so pinning one here would exercise a shape no reader produces.
+  crew_state=$(status_line_verb "$line")
+  case "$crew_state" in
+    working|blocked|done|failed) ;;
+    needs-decision)              crew_state=parked ;;
+    *)                           crew_state=unknown ;;
+  esac
+  printf 'state: %s · source: status-log · %s\n' "$crew_state" "$line" > "$dir/crew-state"
   printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
   printf '%s\n' "$dir"
 }
 
 # Launch one watcher against a hold fixture, armed the way parked_watch_round
-# arms one, plus the home the backlog read resolves against. The crew reads
-# stopped: a delivered worker's agent has exited, and that is the population
-# whose alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
+# arms one, plus the home the backlog read resolves against. The crew state is
+# the one make_hold_home derived for this fixture - a worker whose agent exited
+# still reads as its own last status line, and that is the population whose
+# alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
 # stdout: a command substitution would background the watcher inside a subshell,
 # leaving the caller unable to wait on or reap its own watcher.
 HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="${FM_HOLD_CURRENT_COMMAND:-zsh}" \
+    FM_FAKE_CREW_STATE="${FM_HOLD_FAKE_CREW_STATE:-$(cat "$dir/crew-state")}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -2553,19 +2566,204 @@ test_open_captain_call_bounds_stale_churn() {
   pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
 }
 
+# A stopped worker can inherit a wedge timer from its preceding live run.
+# Holding the task does not change the pane bytes, so the same-hash branch must
+# reconcile the new wait rather than keep escalating the old working verdict.
+test_ended_worker_inherited_wedge_becomes_wait() {
+  local dir state out capture key
+  dir=$(make_hold_home ended-inherited-wedge 'working: preserved for the captain' hold) \
+    || fail "could not build stopped worker hold"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  key=$(hold_key)
+  printf 'preserved shell\n' > "$capture"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'preserved shell')" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "stopped held worker did not report its wait"; }
+  grep -F 'possible wedge' "$out" >/dev/null && fail "stopped held worker inherited a false wedge: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null || fail "stopped worker was not classified as waiting: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge held worker wait"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped held worker repeated its alarm"
+  fi
+  reap "$HOLD_WATCH_PID"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.paused-resurfaced-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "unchanged stopped worker missed long decision recheck"; }
+  run_hold "$dir" open held-merge || fail "inspection closed the captain's decision"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the decision recheck"
+  bash -c '. "$1"; fm_task_inbox_write "$2" held-merge "resume after the pending decision"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" >/dev/null || fail "could not enqueue an unread instruction"
+  : > "$out"
+  FM_TASK_INBOX_GRACE_SECS=0 hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 || { reap "$HOLD_WATCH_PID"; fail "ended-worker wait swallowed an unread instruction"; }
+  grep -F 'unread firstmate instruction' "$out" >/dev/null || fail "unread instruction did not override the held-worker cadence"
+  pass "a stopped held worker drops inherited wedges and rechecks unchanged panes on the decision cadence"
+}
+
+test_unheld_ended_worker_inherited_wedge_becomes_recovery() {
+  local dir state out capture key run_state stale_state calls pane='Ctrl+c:cancel preserved shell'
+  dir=$(make_hold_home ended-unheld-wedge 'resolved [key=prior]: reboot interrupted recovery' nohold) \
+    || fail "could not build stopped worker recovery fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; calls="$dir/crew-state-calls"
+  key=$(hold_key)
+  printf '%s\n' "$pane" > "$capture"
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 150 \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped unheld worker did not report recovery"; }
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "stopped unheld worker inherited a false wedge: $(cat "$out")"
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    || fail "stopped unheld worker did not report recovery: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge ended-worker recovery"
+  : > "$out"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped unheld worker repeated its recovery alarm"
+  fi
+  reap "$HOLD_WATCH_PID"
+  # The two evidence shapes a reboot leaves behind a dead worker: the pane's
+  # busy signature from its last active turn, and the status log's last line.
+  # Both read `working` from bin/fm-crew-state.sh, neither describes now, so
+  # neither may revive the inherited wedge.
+  for stale_state in 'state: working · source: pane · harness busy' \
+                     'state: working · source: status-log · working: still tidying the branch'
+  do
+    rm -f "$state/.paused-resurfaced-$key"
+    printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+    printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    : > "$out"
+    export FM_HOLD_FAKE_CREW_STATE="$stale_state"
+    hold_watch_launch "$dir" "$out" "$capture"
+    wait_for_exit "$HOLD_WATCH_PID" 150 \
+      || { reap "$HOLD_WATCH_PID"; fail "[$stale_state] dead worker did not report recovery"; }
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "[$stale_state] stale worker evidence revived a false wedge: $(cat "$out")"
+    grep -F 'preserved state needs recovery' "$out" >/dev/null \
+      || fail "[$stale_state] dead worker did not report recovery: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "[$stale_state] could not acknowledge the recovery"
+  done
+  unset FM_HOLD_FAKE_CREW_STATE
+  export FM_FAKE_CREW_STATE_COUNT_FILE="$calls"
+  for run_state in working parked 'done'; do
+    : > "$calls"
+    rm -f "$state/.paused-resurfaced-$key"
+    printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+    printf '%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.stale-since-$key"
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    export FM_HOLD_FAKE_CREW_STATE="state: $run_state · source: run-step · run: surviving-$run_state"
+    hold_watch_launch "$dir" "$out" "$capture"
+    if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+      reap "$HOLD_WATCH_PID"
+      fail "a surviving $run_state run inherited the dead worker's wedge"
+    fi
+    [ ! -e "$state/.stale-since-$key" ] && [ ! -e "$state/.wedge-escalations-$key" ] \
+      || { reap "$HOLD_WATCH_PID"; fail "a surviving $run_state run retained dead-worker wedge state"; }
+    [ "$(cat "$calls" 2>/dev/null || true)" = 1 ] \
+      || { reap "$HOLD_WATCH_PID"; fail "a surviving $run_state run was re-read inside the long cadence"; }
+    reap "$HOLD_WATCH_PID"
+  done
+  unset FM_HOLD_FAKE_CREW_STATE FM_FAKE_CREW_STATE_COUNT_FILE
+  pass "a dead worker ignores stale busy and resolved evidence without suppressing a surviving run"
+}
+
+test_ended_worker_state_read_waits_for_stale_cadence() {
+  local dir state out capture calls
+  dir=$(make_hold_home ended-state-read-cadence 'resolved [key=prior]: reboot interrupted recovery' nohold) \
+    || fail "could not build stopped worker cadence fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; calls="$dir/crew-state-calls"
+  printf 'preserved shell\n' > "$capture"
+  export FM_FAKE_CREW_STATE_COUNT_FILE="$calls"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_poll_cycle "$state" "$HOLD_WATCH_PID" \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker surfaced before its pane was stale"; }
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 0 ] \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker read authoritative state before its pane was stale"; }
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker did not surface once its pane was stale"; }
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "stopped worker did not perform exactly one due authoritative state read"
+  ack_stopped_cycle "$state" || fail "could not acknowledge stopped worker cadence fixture"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "stopped worker repeated its recovery inside the long cadence"
+  fi
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -eq 1 ] \
+    || { reap "$HOLD_WATCH_PID"; fail "stopped worker repeated authoritative state reads inside the long cadence"; }
+  reap "$HOLD_WATCH_PID"
+  unset FM_FAKE_CREW_STATE_COUNT_FILE
+  pass "a stopped worker reads authoritative state only at stale cadence boundaries"
+}
+
+test_ended_worker_unreadable_pane_still_reconciles() {
+  local dir state out capture count key
+  dir=$(make_hold_home ended-unreadable-pane 'resolved [key=prior]: reboot interrupted recovery' nohold) \
+    || fail "could not build unreadable ended-worker fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; count="$dir/capture-count"
+  key=$(hold_key)
+  printf 'preserved shell\n' > "$capture"
+  export FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "confirmed ended worker with unreadable pane was skipped"; }
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    || fail "unreadable ended-worker pane did not reconcile by task identity: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "unreadable ended-worker pane produced a false wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge unreadable ended-worker recovery"
+  : > "$out"
+  hold_watch_launch "$dir" "$out" "$capture"
+  if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" || ! wait_poll_cycle "$state" "$HOLD_WATCH_PID"; then
+    reap "$HOLD_WATCH_PID"
+    fail "unreadable ended-worker pane repeated inside its recovery cadence"
+  fi
+  reap "$HOLD_WATCH_PID"
+  [ -e "$state/.paused-resurfaced-$key" ] \
+    || fail "unreadable ended-worker recovery did not persist its long cadence"
+  unset FM_FAKE_TMUX_CAPTURE_COUNT_FILE FM_FAKE_TMUX_CAPTURE_FAIL_AFTER
+  pass "a confirmed ended worker reconciles preserved work without readable pane bytes"
+}
+
+test_ended_worker_preserves_daemon_socket_failure() {
+  local dir state out capture
+  dir=$(make_hold_home ended-daemon-down 'blocked: no-mistakes daemon socket refused connections' nohold) \
+    || fail "could not build ended-worker daemon failure fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf 'preserved shell\n' > "$capture"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "ended worker hid a genuine daemon socket failure"; }
+  grep -F 'validation daemon socket down requires recovery' "$out" >/dev/null \
+    || fail "daemon socket failure collapsed into generic worker-loss recovery: $(cat "$out")"
+  grep -F 'preserved state needs recovery' "$out" >/dev/null \
+    && fail "daemon socket failure was mislabeled as generic preserved-state recovery: $(cat "$out")"
+  pass "an ended worker keeps genuine daemon socket failure distinguishable"
+}
 
 
-# The other half of the same bound, and the one that decides whether widening the
-# wait was safe: the identical fixtures with NO hold must keep alarming on every
-# new hash, on both branches.
+
+# The disconfirming case keeps the same unheld terminal and blocker statuses
+# behind a confirmed live worker.
+# Each new pane hash must retain ordinary stale alarms.
 test_stale_churn_without_a_captain_call_still_alarms() {
   local spec name line dir state out capture round wakes
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
+  export FM_HOLD_CURRENT_COMMAND=grok
   for spec in \
     'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'unheld-blocker|blocked: cannot reach the release host' \
-    'unheld-worker-line|working: still tidying the branch'
+    'unheld-blocker|blocked: cannot reach the release host'
   do
     name=${spec%%|*}; line=${spec#*|}
     dir=$(make_hold_home "$name" "$line" nohold) \
@@ -2582,7 +2780,8 @@ test_stale_churn_without_a_captain_call_still_alarms() {
       round=$((round + 1))
     done
   done
-  pass "a stale window with no open captain call keeps alarming on every new hash"
+  unset FM_HOLD_CURRENT_COMMAND
+  pass "a live stale worker with no open captain call keeps alarming on every new hash"
 }
 
 
@@ -4865,6 +5064,11 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_open_captain_call_bounds_stale_churn
+test_ended_worker_inherited_wedge_becomes_wait
+test_unheld_ended_worker_inherited_wedge_becomes_recovery
+test_ended_worker_state_read_waits_for_stale_cadence
+test_ended_worker_unreadable_pane_still_reconciles
+test_ended_worker_preserves_daemon_socket_failure
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window

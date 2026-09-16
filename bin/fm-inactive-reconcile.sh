@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-inactive-reconcile.sh - bounded reconciliation of suspicious inactive terminal outcomes.
+# fm-inactive-reconcile.sh - bounded inactive outcomes and workerless run observation.
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
@@ -15,12 +15,14 @@
 # bin/fm-parent-channel-lib.sh as
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh and without waiting for
-# the inactive cadence. A line still being appended (no trailing newline yet)
-# is left for the next poll. This is what keeps a mate's PR-ready, finding,
-# and failure outcomes from depending on the mate model appending them
-# (docs/secondmate-parent-channel.md). A main home has no parent channel and
-# skips this path: its watcher already signals every child status line.
+# report pointer, without waiting for the inactive cadence.
+# When the terminal producer records its exact run id in a `[run=<id>]` tag,
+# delivery copies that identity into the receipt; a line without the tag remains
+# deliverable without a run id.
+# This keeps a mate's PR-ready, finding, and failure outcomes independent of the
+# mate model appending them (docs/secondmate-parent-channel.md).
+# A main home has no parent channel and skips this path because its watcher
+# already signals every child status line.
 # `report <task-id>` runs that same delivery for one child on behalf of a
 # caller that already holds the child's meta lock, which bin/fm-teardown.sh
 # does before it removes the child's record; it exits 0 when the line is
@@ -41,16 +43,16 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# It considers only a direct ordinary crewmate whose newest meta, status, or
-# turn-ended mtime is older than that interval and whose last status is not
-# captain-held. In a secondmate home a child whose ledger already ends in a
-# terminal done or failed line belongs to the ledger-first path above and is
-# skipped here, so one outcome is never reported twice. It then uses
-# fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
-# captain-held work retain their existing supervision semantics.
+# It considers only this home's inactive direct ordinary crewmates and uses
+# fm-crew-state.sh as the sole current-state source. Ordinary done/failed states
+# retain the terminal delivery below; captain-held work without a surviving run
+# stays excluded. A branch/code-attributed run is observed independently of the
+# endpoint, including while an old captain-held line remains in the status log.
+# Unless the backend confirms a live worker, parked/blocked/unverified run states
+# queue a local supervision obligation, while terminal states use normal delivery.
+# No observation starts a worker, drives validation, resolves a decision, changes
+# a task lease, or executes an unauthenticated check. All check wakes remain
+# main-owned and use the existing generation-bound acknowledgement.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -63,7 +65,7 @@
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
-# notice_emitted, plus optional status_head and ledger_claim fields. The
+# notice_emitted, plus optional status_head, ledger_claim, and run_id fields. The
 # inactive-path fingerprint binds the spawn incarnation, task id, terminal
 # state, PR text, and sanitized last status; the ledger-path fingerprint instead
 # binds the incarnation, task id, terminal state, literal `ledger` origin, and
@@ -71,11 +73,25 @@
 # When a terminal ledger append races just after the inactive path's final read,
 # ledger_claim binds that one ledger fingerprint to the already-delivered
 # inactive receipt so the two publishers cannot report one completion twice.
+# A no-mistakes terminal producer persists its exact run identity in the ledger
+# line's `[run=<id>]` tag. The ledger receipt copies that identity and never
+# infers it from a later current-state read that may already describe another run.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
+# terminal-outcomes/<task>.run-observation stores the incarnation, last observed
+# state line, and a chained transition token, atomically under the metadata lock.
+# Polls and restarts preserve an unchanged observation's receipt identity;
+# returning to a gate after observed progress creates a new obligation. A lost
+# response after a known active run reports unverified attribution instead of
+# silently forgetting the run. Lines the observer synthesizes itself - lost
+# attribution and coarse ledger-only progress - carry `source: run-observer` so a
+# reader can tell them from a fm-crew-state.sh read. Observation files survive
+# like outcome receipts; a reused task id cannot inherit an old incarnation's
+# observation.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
+# The scan reads durable local state, recorded backend liveness, and
+# fm-crew-state.sh; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
@@ -96,6 +112,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -186,8 +204,8 @@ record_field_set() {
   mv -f "$tmp" "$record"
 }
 
-ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head]
-  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} tmp
+ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head] [run-id]
+  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} run_id=${10:-} tmp
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -214,6 +232,7 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
     printf 'created_epoch=%s\n' "$(reconcile_now)"
     printf 'notice_emitted=0\n'
     [ -z "$status_head" ] || printf 'status_head=%s\n' "$status_head"
+    [ -z "$run_id" ] || printf 'run_id=%s\n' "$run_id"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$RECORD_PENDING" || { rm -f "$tmp"; return 1; }
@@ -398,10 +417,11 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line run_id
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
+  run_id=$(status_line_run_id "$last" 2>/dev/null || true)
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
@@ -409,8 +429,11 @@ report_child_ledger_locked() { # <id> <meta>
     | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
   predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
-  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" "" "$run_id" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  if [ -n "$run_id" ] && [ "$(record_value "$RECORD_PENDING" run_id)" != "$run_id" ]; then
+    record_field_set "$RECORD_PENDING" run_id "$run_id" || return 1
+  fi
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
@@ -473,36 +496,153 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
+# Keep the last run observation under the task metadata lock. The chained token
+# identifies transitions, not polls: a resumed run returning to the same gate
+# owes a new notification, while restarts observing an unchanged gate do not.
+# A lost CLI response after an active observation is an unverified run, never
+# proof of completion or permission to launch another executor.
+observe_run() { # <task> <incarnation> <state-line>
+  local id=$1 incarnation=$2 line=$3 file previous='' token='' tmp
+  file="$OUTCOME_DIR/$id.run-observation"
+  if [ -f "$file" ] && [ ! -L "$file" ] \
+    && [ "$(record_value "$file" incarnation)" = "$incarnation" ]; then
+    previous=$(record_value "$file" observation)
+    token=$(record_value "$file" token)
+  fi
+  case "$line" in
+    *"source: run-step"*) ;;
+    *)
+      # A refused or missing daemon socket is a current operational blocker,
+      # not lost run attribution. Keep the prior run observation intact and
+      # leave this status-log evidence to the ordinary blocker signal path.
+      status_line_reports_daemon_socket_down "$line" && return 1
+      case "$previous" in
+        'state: working '*|'state: parked '*|'state: unknown '*)
+          line="state: unknown · source: run-observer · previously observed validation run is no longer readable or attributable; reconcile before recovery"
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  line=$(clean_field "$line")
+  if [ "$previous" != "$line" ] || [ -z "$token" ]; then
+    token=$(sha256_text "$incarnation|$token|$line")
+    tmp=$(mktemp "$OUTCOME_DIR/.observation.XXXXXX") || return 2
+    if ! printf 'incarnation=%s\nobservation=%s\ntoken=%s\n' "$incarnation" "$line" "$token" > "$tmp" \
+      || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file"; then
+      rm -f "$tmp"
+      return 2
+    fi
+  fi
+  OBSERVED_RUN_LINE=$line
+  OBSERVED_RUN_TOKEN=$token
+}
+
+run_id_from_state_line() { # <state-line>
+  local line=$1 run_id
+  case "$line" in *" · source: run-step"*) ;; *) return 1 ;; esac
+  case "$line" in *" · run: "*) ;; *) return 1 ;; esac
+  run_id=${line##*" · run: "}
+  run_id=${run_id%%" · "*}
+  valid_id "$run_id" || return 1
+  printf '%s\n' "$run_id"
+}
+
+observation_run_id() { # <task> <incarnation>
+  local task=$1 incarnation=$2 file line
+  file="$OUTCOME_DIR/$task.run-observation"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(record_value "$file" incarnation)" = "$incarnation" ] || return 1
+  line=$(record_value "$file" observation)
+  run_id_from_state_line "$line"
+}
+
+
+claim_ledger_report_for_run() { # <task> <incarnation> <state> <run-id>
+  local task=$1 incarnation=$2 state=$3 run_id=$4 record key
+  [ -n "$run_id" ] || return 1
+  for record in "$OUTCOME_DIR"/*.reported; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(record_value "$record" task_id)" = "$task" ] || continue
+    [ "$(record_value "$record" incarnation)" = "$incarnation" ] || continue
+    [ "$(record_value "$record" state)" = "$state" ] || continue
+    key=$(record_value "$record" outcome_key)
+    case "$key" in child-outcome-*) ;; *) continue ;; esac
+    [ "$(record_value "$record" run_id)" = "$run_id" ] && return 0
+  done
+  return 1
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 orphan=0 observation_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
-  status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
   # A ledger that states its own outcome is the ledger-first path's to deliver.
   if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
-    return 0
+    [ "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" \
+      "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)" != alive ] || return 0
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
-  [ "$state_rc" -ne 124 ] || return 3
+  incarnation=$(meta_incarnation "$meta")
+  OBSERVED_RUN_LINE='' OBSERVED_RUN_TOKEN=''
+  observe_run "$id" "$incarnation" "$state_line" || observation_rc=$?
+  [ "$observation_rc" -ne 2 ] || return 1
+  if [ "$observation_rc" -eq 0 ] \
+    && [ "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" \
+      "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)" != alive ]; then
+    orphan=1
+    state_line=$OBSERVED_RUN_LINE
+  fi
+  [ "$state_rc" -ne 124 ] || [ "$orphan" -eq 1 ] || return 3
+  if [ "$orphan" -eq 0 ]; then
+    status_is_captain_held "$last" && return 0
+  fi
   last=$(last_status_line "$status")
-  if [ -n "$self" ]; then
+  if [ -n "$self" ] && [ "$orphan" -eq 0 ]; then
     case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    'state: working '*"validating (background run)"*)
+      [ "$orphan" -eq 1 ] || return 0
+      state=unknown
+      state_line="state: unknown · source: run-observer · attributed validation run has only coarse ledger state; reconcile exact progress"
+      ;;
+    'state: working '*) return 0 ;;
+    'state: parked '*) [ "$orphan" -eq 1 ] || return 0; state=parked ;;
+    'state: blocked '*) [ "$orphan" -eq 1 ] || return 0; state=blocked ;;
+    'state: unknown '*) [ "$orphan" -eq 1 ] || return 0; state=unknown ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta")
-  incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
+  if [ "$orphan" -eq 1 ]; then
+    fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$OBSERVED_RUN_TOKEN")
+    case "$state" in
+      parked|blocked|unknown)
+        outcome_key="inactive-run-$id-$state"
+        ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" run-step presentation "$pr" || return 1
+        [ -n "$RECORD_PENDING" ] || return 0
+        queue_presentation "$RECORD_PENDING" "$fingerprint" \
+          "validation run requires supervision without a confirmed live worker: child=$id $state_line" || true
+        return 0
+        ;;
+    esac
+    if [ -n "$self" ]; then
+      if claim_ledger_report_for_run "$id" "$incarnation" "$state" \
+        "$(observation_run_id "$id" "$incarnation" 2>/dev/null || true)"; then
+        return 0
+      fi
+    fi
+  fi
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else

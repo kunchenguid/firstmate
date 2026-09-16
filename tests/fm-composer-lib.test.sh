@@ -773,6 +773,18 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+test_recovery_agent_state_distinguishes_live_composer_and_dead_shell() {
+  local out
+  out=$(fm_composer_recovery_agent_state $'old transcript\n❯ ')
+  [ "$out" = alive ] || fail "a bottom-most agent composer should prove the agent alive, got '$out'"
+  out=$(fm_composer_recovery_agent_state $'❯ stale composer\n$ ')
+  [ "$out" = dead ] || fail "a bottom-most bare shell should prove the cursorless agent exited, got '$out'"
+  out=$(fm_composer_recovery_agent_state $'$ transcript fragment\nnewer non-shell output')
+  [ "$out" = unverified ] || fail "shell-looking transcript above newer output must stay unverified, got '$out'"
+  pass "fm_composer_recovery_agent_state: live composer and bottom-most dead shell remain distinct"
+}
+
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -805,6 +817,7 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_recovery_agent_state_distinguishes_live_composer_and_dead_shell
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

@@ -65,6 +65,12 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#      Active records also require a successful bounded daemon probe; unavailable
+#      execution reports unknown, never a completed task or a license to relaunch.
+#      A persisted parked gate remains authoritative through daemon loss because
+#      its durable findings still require a decision. Full run-step detail includes
+#      the attributed run id and parked findings fingerprint so observers distinguish
+#      runs and changed decisions without treating elapsed time as an event.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -276,6 +282,30 @@ nm_field() {  # <key>
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
 }
+
+# Gate identity excludes elapsed/activity fields but includes the complete
+# findings tables: equal counts can still mean a different decision.
+nm_gate_fingerprint() {
+  local findings
+  findings=$(printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*findings\[[0-9]+\]/ {
+      depth = match($0, /[^[:space:]]/)
+      table = 1
+      print
+      next
+    }
+    table && /[^[:space:]]/ {
+      if (match($0, /[^[:space:]]/) <= depth) table = 0
+      else print
+    }
+  ')
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$findings" | shasum -a 256 | cut -d' ' -f1
+  else
+    printf '%s' "$findings" | sha256sum | cut -d' ' -f1
+  fi
+}
+
 nm_gate_step_row() {
   local row step rest status findings
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
@@ -335,21 +365,6 @@ log_reports_ci_ready() {
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-# 0 when a status-log line reports positive daemon socket failure rather than a
-# client-side timeout or generic unreachability.
-log_reports_daemon_socket_down() {  # <line>
-  local line
-  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  case "$line" in
-    *daemon*|*no-mistakes*) ;;
-    *) return 1 ;;
-  esac
-  case "$line" in
-    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
-  esac
-  return 1
 }
 
 # 0 when a status-log line blames the pipeline's transport rather than the work.
@@ -685,6 +700,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
+      gate_fingerprint=$(nm_gate_fingerprint)
+      [ -z "$gate_fingerprint" ] || RUN_DETAIL="$RUN_DETAIL${SEP}gate: $gate_fingerprint"
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
@@ -746,7 +763,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
-        && log_reports_daemon_socket_down "$LOG_LINE"; then
+        && status_line_reports_daemon_socket_down "$LOG_LINE"; then
         emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
@@ -766,6 +783,18 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A persisted active row is not proof that its executor survived a reboot.
+  # An unavailable daemon makes working evidence unverified, never a task
+  # failure. A persisted parked gate remains authoritative: its durable findings
+  # still require the recorded decision even while execution is unavailable.
+  if [ "$RUN_STATE" = working ] && nm_daemon_probe_down; then
+    RUN_STATE=unknown
+    RUN_DETAIL="no-mistakes daemon unreachable; attributed run requires recovery"
+  fi
+  if [ "$RUN_SOURCE" = full ]; then
+    run_id=$(strip_quotes "$(nm_field id)")
+    [ -z "$run_id" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $run_id"
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
