@@ -18,7 +18,7 @@ This skill writes only through the existing Firstmate ownership and write bounda
 
 At an already-required stow, task handoff, or accepted scope change, inspect only instruction surfaces touched by that work when a concrete duplicate, contradiction, stale instruction, or measured budget excess is visible.
 This subsection alone does not invoke a full stow or its cascade.
-Keep stable rules in their single owner, current task state in the task record, and historical evidence behind references; load task details on demand.
+Use the per-topic placement and load-trigger rules in `firstmate-coding-guidelines` before changing instruction placement; keep current task state in the task record and historical evidence behind references.
 Preserve exact user decisions, active exclusions, unresolved findings, and safety/authority facts.
 
 Propose one bounded consolidation with its owner and approximate before/after bytes or estimated tokens.
