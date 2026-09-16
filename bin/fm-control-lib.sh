@@ -31,8 +31,9 @@
 #   3. Per-backend capability: which named keys a runtime backend can deliver,
 #      and whether the backend has a recovery-grade agent-state classifier
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
-#      stopped. A verb whose postcondition cannot be proven on the recorded
-#      backend is refused rather than performed blind.
+#      stopped or that its endpoint is gone. A verb whose postcondition cannot
+#      be proven on the recorded backend is refused rather than performed
+#      blind.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
@@ -48,12 +49,13 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+recover-missing
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|recover-missing) return 0 ;;
   esac
   return 1
 }
