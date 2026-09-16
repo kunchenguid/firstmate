@@ -166,3 +166,104 @@ Each of these produced a wrong answer once already, or would have.
 **zsh does not word-split unquoted `$var`.** `for s in $shas` iterates once over the whole blob. Put loops in a bash script file.
 
 **Assuming auto-merge and a merge call authorize the same way.** bender holds `pull_requests: write` and no `contents: write`, yet gets credited with merges. GitHub does privileged work on its behalf. That is the whole reason this question is empirical instead of readable from the docs.
+
+---
+
+# Run 1 — 2026-09-16, blocked on a third-party scanner
+
+**Status: rig staged and correct, answer not obtained.** Blocked by four consecutive
+Wiz backend failures, not by anything about the bypass.
+
+## Preconditions achieved
+
+| # | precondition | result |
+|---|---|---|
+| 1 | test PR head current with `main` | ✅ `behind_by: 0` |
+| 2 | `Integration:4797210` in ruleset bypass | ✅ added 15:28:24 UTC at `pull_request` mode |
+| 3 | `BankrateBot` not a code owner | ✅ removed via #68, merged `5c545edc` |
+| 4 | required checks green on head | ❌ `Build and scan image` fails |
+
+## What blocked it
+
+[#69](https://github.com/bankrate/platform-cicd-v2-demo/pull/69) is a one-line
+comment in `.github/dependabot.yaml`, chosen so it classifies `dependabot-config`
+(`semverCap: none`, no dependency versions touched) and therefore grades neither
+version-distance nor dependency-type `medium`.
+
+**17 of 18 eligibility gates pass.** The one failure is `checksGreen` on
+`Build and scan image`, and that check failed four times on a Wiz internal error:
+
+```
+ERROR: failed running command: failed to perform scan: failed to finalize scan:
+  oops! an internal error has occurred
+⚠️ Wiz image scan did not complete. Failing closed — not bypassable by exemption.
+```
+
+Every other Wiz Image Scan on this repo today succeeded, including PR #50's at
+15:28:41 UTC. Only `test/plat-1332-bypass-probe` fails. zapp is correctly failing
+closed on an unknown scan result, so it never reaches `shouldEnable` and bender
+never arms auto-merge. Nothing to measure.
+
+`Build and scan image` is required by zapp's `ciBaseline.whenLanguage.Dockerfile`,
+not by the ruleset, so this is a zapp-gate block rather than a GitHub block. It
+cannot be waived — a ciBaseline waiver excuses an `absent` check only, never a
+failing one.
+
+## Why the obvious test vehicle does not work
+
+[#50](https://github.com/bankrate/platform-cicd-v2-demo/pull/50) is a real
+dependabot PR with **all 18 gates green** after its branch was updated. It still
+cannot be used, because its risk grade is `medium` and `maxRiskGrade` is `low`:
+
+| signal | observed |
+|---|---|
+| ⚠️ Version distance | minor — `@prisma/adapter-pg` ^7.9.1 → ^7.10.0 |
+| ⚠️ Dependency type | 9 production, 1 development |
+
+Both are structural. Any `dep-minor` PR grades `medium` on version distance, and
+any production-dependency bump grades `medium` on dependency type. So the test
+vehicle has to be a `dependabot-config` or patch-only devDependency change — which
+is what #69 is.
+
+`maxRiskGrade` is global with no per-repo override, so it cannot be relaxed for a
+test without changing the whole fleet.
+
+## Staged state left in place
+
+Deliberately not restored, so the test can finish on one green Wiz scan.
+
+| item | state |
+|---|---|
+| ruleset `20475255` bypass_actors | `RepositoryRole:5:pull_request`, `Team:2966890:exempt`, **`Integration:4797210:pull_request`** |
+| `main` CODEOWNERS | `@BankrateBot` removed from the six dependency lines |
+| branch `test/plat-1332-bypass-probe` | open as #69 |
+| `main` sha | `5c545edc00caba0a0ce7b2de5c72a171d9c724d7` |
+| repo properties | untouched (`is_poc: true` pre-existing) |
+| backups | `/tmp/bypass-retest/` — `ruleset-restore.json`, `codeowners-before`, `dependabot-before.yaml`, `properties-before.json` |
+
+**To finish:** re-run `Build and scan image` on #69. When it goes green, zapp
+re-evaluates, approves as BankrateBot (which no longer satisfies code-owner
+review), and arms auto-merge as bender. Read `mergeStateStatus` after that event.
+
+**To abandon:** restore the ruleset from `ruleset-restore.json`, restore CODEOWNERS
+from `codeowners-before` via a PR, close #69, delete its branch.
+
+## New finding for the org-vs-repo ruleset question
+
+Chase's position is that the repo rulesets are near-duplicates of the org one and
+could be deleted. The demo's repo ruleset is not a duplicate. It is **weaker on
+branch protection and harsher on auto-merge**:
+
+| | org `15978123` | repo `20475255` |
+|---|---|---|
+| `strict_required_status_checks_policy` | `false` | **`true`** — parks armed auto-merges, GitHub will not update a behind branch |
+| `dismiss_stale_reviews_on_push` | `false` | **`true`** — destroys the bot's approval on every rebase |
+| `do_not_enforce_on_create` | `true` | `false` |
+| Cycode checks pinned to `integration_id: 39308` | **yes** | **no** — any app can post a check with that name |
+| `deletion` rule | **present** | absent |
+| `non_fast_forward` rule | **present** | absent |
+
+So deleting the repo ruleset would *strengthen* branch protection here, not weaken
+it: it would add deletion and force-push protection, pin the required checks to
+Cycode's own App, and remove the two settings that break auto-merge. That is a
+stronger argument for Chase's position than he made.
