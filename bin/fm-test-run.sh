@@ -1412,6 +1412,21 @@ families_for_changed_path() {
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
+    bin/fm-procevent-telegram.sh|bin/fm-telegram.sh|bin/fm-telegram-lib.sh)
+      printf '%s\n' "__script__:fm-telegram.test.sh"
+      ;;
+    bin/fm-inbox.sh)
+      printf '%s\n' "__script__:fm-telegram.test.sh"
+      printf '%s\n' "__script__:fm-voice-relay.test.sh"
+      ;;
+    bin/fm-env-lib.sh)
+      # Relay's .env reader delegates here, so its suites ride along, including
+      # the fixtures that link bin/fm-x-lib.sh into a fake root.
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-gotmp.test.sh"
+      printf '%s\n' "__script__:fm-public-followup.test.sh"
+      printf '%s\n' "__script__:fm-telegram.test.sh"
+      ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;

@@ -429,6 +429,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/telegram-bridge.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
