@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 # Real-browser responsive, keyboard, selection, and failure-state tests for Project Cockpit.
 set -u
 
@@ -49,6 +50,12 @@ model secondmate-generation-a.json "$secondmate_a" 2026-09-15T12:00:00Z
 model secondmate-generation-b.json "$secondmate_b" 2026-09-15T13:00:00Z
 states_json=$(jq -c . "$states")
 credential_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")).artifacts.pr_url="https://user:token@example.com/pull/1"' "$states")
+deferred_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")) |= (
+  .hold.classification="dated" | .hold.age_days=null | .hold.until="2026-09-20"
+  | .artifacts.report.status="available")' "$states")
+unavailable_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")) |= (
+  .hold.age_days=null | .hold.until=null | .artifacts.report.path=null)' "$states")
+bounded_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).hold.evidence=("e" * 40)' "$states")
 jq '.main_inventory.valid=false | .main_inventory.reason="inventory fixture invalid"' "$FIXTURES/empty.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$invalid"
 jq '.secondmate_current.truncated=true | .secondmate_landed.partial=["mate"]' "$FIXTURES/states.json" \
@@ -75,6 +82,26 @@ assert_eval "() => {window.fmCockpit.replacePayload($credential_json); document.
   '\"credentialLinks\":[]' "renderer exposed a credential-bearing HTTPS link"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); return window.fmCockpit.getState();}" \
   'healthy-work' "credential-link defense did not allow the safe fixture to be restored"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); const context=document.querySelector('[aria-label=\"Captain hold context\"]'); return {age:context?.innerText.includes('3 days'),evidence:context?.innerText.includes('structured backlog hold'),reportMissing:context?.innerText.includes('MISSING'),copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
+  '\"age\":true' "desktop inspector omitted the present hold age"
+assert_eval '() => ({evidence:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("structured backlog hold")})' \
+  '\"evidence\":true' "desktop inspector omitted hold evidence provenance"
+assert_eval '() => ({text:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText,copyReport:[...document.querySelectorAll(".copy-button")].some(x=>x.innerText==="Copy report path")})' \
+  '\"copyReport\":false' "desktop inspector offered a path for a missing report"
+assert_eval '() => ({reportMissing:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("MISSING")})' \
+  '\"reportMissing\":true' "desktop inspector omitted missing-report availability"
+assert_eval "() => {window.fmCockpit.replacePayload($deferred_hold_json); const context=document.querySelector('[aria-label=\"Captain hold context\"]'); return {text:context?.innerText,copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
+  'Deferred until 2026-09-20' "desktop inspector omitted the dated deferral"
+assert_eval '() => ({text:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText,copyReport:[...document.querySelectorAll(".copy-button")].some(x=>x.innerText==="Copy report path")})' \
+  '\"copyReport\":true' "desktop inspector hid an available report path action"
+assert_eval '() => ({reportAvailable:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("AVAILABLE")})' \
+  '\"reportAvailable\":true' "desktop inspector omitted available-report status"
+assert_eval "() => {window.fmCockpit.replacePayload($unavailable_hold_json); const context=document.querySelector('[aria-label=\"Captain hold context\"]'); return {text:context?.innerText,copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
+  'Unavailable' "desktop inspector omitted the unavailable timing fallback"
+assert_eval "() => {window.fmCockpit.replacePayload($bounded_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
+  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "desktop inspector omitted bounded evidence provenance"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')).click(); return {holdContexts:document.querySelectorAll('[aria-label=\"Captain hold context\"]').length};}" \
+  '\"holdContexts\":0' "desktop inspector invented hold context for a task without a hold"
 assert_eval '() => [...document.querySelectorAll(".project-button")].map((button)=>button.dataset.projectId).join(",")' \
   'alpha,beta,delta' "active view retained a history-only project"
 assert_eval "() => {window.fmCockpit.replacePayload($attentive_terminal_json); return [document.querySelectorAll('.project-button').length,document.querySelectorAll('.task-button').length,document.querySelector('.task-button')?.innerText.includes('DONE'),document.getElementById('task-detail').innerText.includes('Retained decision')].join('|');}" \
@@ -109,6 +136,8 @@ secondmate_b_json=$(jq -c . "$secondmate_b")
 refreshed_states_json=$(jq -c '.generated="2026-09-15T12:02:00Z" | .observed_at="2026-09-15T12:03:00Z"' "$states")
 unproven_active_a_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")).spawn_gen=null' "$states")
 unproven_active_b_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")).spawn_gen=null | .generated="2026-09-15T12:02:00Z" | .observed_at="2026-09-15T12:03:00Z"' "$states")
+unproven_same_generated_b_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")) |= (
+  .spawn_gen=null | .state="blocked" | .gate={status:"blocked",label:"Replacement evidence"})' "$states")
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.click(); b=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); b.focus(); window.fmCockpit.replacePayload($states_json); return {state:window.fmCockpit.getState(),focused:document.activeElement.dataset.taskKey};}" \
   '\"focused\":\"healthy-work\\u001fgen-healthy-1\"' "same-generation refresh did not preserve focused task identity"
 assert_eval "() => {window.fmCockpit.replacePayload($replacement_json); return window.fmCockpit.getState();}" \
@@ -121,6 +150,8 @@ assert_eval "() => {window.fmCockpit.replacePayload($states_json); const filter=
   'done-work\\u001fcanonical|done-work\\u001fcanonical|done-work\\u001fcanonical' "completed selection or focus changed when only snapshot timestamps refreshed"
 assert_eval "() => {window.fmCockpit.replacePayload($unproven_active_a_json); document.querySelector('[data-project-id=\"alpha\"]').click(); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')).click(); const before=window.fmCockpit.getState().taskKey; window.fmCockpit.replacePayload($unproven_active_b_json); return {before,after:window.fmCockpit.getState().taskKey};}" \
   '\"after\":\"captain-call\\u001fgen-call-1\"' "unproven active incarnation survived a snapshot-generation change"
+assert_eval "() => {window.fmCockpit.replacePayload($unproven_active_a_json); document.querySelector('[data-project-id=\"alpha\"]').click(); let button=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); button.click(); button=[...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')); button.focus(); const before={selection:window.fmCockpit.getState().taskKey,focus:document.activeElement.dataset.taskKey,generated:$unproven_active_a_json.generated}; window.fmCockpit.replacePayload($unproven_same_generated_b_json); return {before,after:{selection:window.fmCockpit.getState().taskKey,focus:document.activeElement.dataset.taskKey||null,generated:$unproven_same_generated_b_json.generated}};}" \
+  '\"selection\":\"captain-call\\u001fgen-call-1\",\"focus\":null' "same-generated replacement preserved unproven active selection or focus"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); document.querySelector('[data-project-id=\"alpha\"]').click(); window.fmCockpit.replacePayload($promoted_json); return window.fmCockpit.getState().projectId + '|' + document.querySelector('.project-button').dataset.projectId;}" \
   'alpha|beta' "refresh did not adopt authoritative project priority while preserving selection"
 assert_eval "() => {window.fmCockpit.replacePayload($multiple_decisions_json); document.querySelector('[data-project-id=\"alpha\"]').click(); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); return document.getElementById('task-detail').innerText;}" \
@@ -155,6 +186,16 @@ assert_eval '() => ({mobile:[...document.querySelectorAll(".mobile-label")].filt
   '\"mobile\":[\"NOW\",\"DECISIONS\",\"QUEUE\"]' "mobile project drill-down labels are missing"
 assert_eval '() => ({identity:document.getElementById("task-identity").innerText,columns:getComputedStyle(document.querySelector(".project-list")).gridTemplateColumns})' \
   'generation gen-call-1' "task identity is not retained in narrow detail"
+assert_eval '() => ({age:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("3 days")})' \
+  '\"age\":true' "mobile inspector omitted present hold context"
+assert_eval "() => {window.fmCockpit.replacePayload($deferred_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
+  'Deferred until 2026-09-20' "mobile inspector omitted dated hold context"
+assert_eval "() => {window.fmCockpit.replacePayload($unavailable_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
+  'Unavailable' "mobile inspector omitted unavailable hold timing"
+assert_eval "() => {window.fmCockpit.replacePayload($bounded_hold_json); return {text:document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText,overflow:document.querySelector('[aria-label=\"Captain hold context\"]').scrollWidth<=document.querySelector('[aria-label=\"Captain hold context\"]').clientWidth};}" \
+  '\"overflow\":true' "mobile bounded hold context overflowed"
+assert_eval "() => {window.fmCockpit.replacePayload($states_json); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')).click(); const absent=document.querySelectorAll('[aria-label=\"Captain hold context\"]').length; [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); return {absent,restored:document.querySelectorAll('[aria-label=\"Captain hold context\"]').length};}" \
+  '\"absent\":0' "mobile inspector invented hold context for a task without a hold"
 assert_eval '() => {const b=document.querySelector(".project-button[aria-current=\"true\"]"); b.focus(); return {project:b.dataset.projectId,focused:document.activeElement===b};}' \
   '\"focused\":true' "mobile selected project did not receive focus"
 chrome-devtools-axi press Enter >/dev/null || fail "Enter could not drill from the mobile project into its task list"

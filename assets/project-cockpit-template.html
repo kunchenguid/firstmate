@@ -138,6 +138,10 @@
     .attention-call { margin: 13px 0; padding: 10px; border-left: 3px solid var(--amber); background: #252117; }
     .attention-call strong { display: block; color: var(--amber); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
     .attention-call p { margin: 6px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+    .hold-context { display: grid; grid-template-columns: minmax(82px, .7fr) minmax(0, 1.3fr); margin: 9px 0 0; border-top: 1px solid #57492d; }
+    .hold-context dt, .hold-context dd { min-width: 0; margin: 0; padding: 7px 0; border-bottom: 1px solid #403820; }
+    .hold-context dt { color: var(--muted); font-size: 11px; }
+    .hold-context dd { font: 11px var(--mono); overflow-wrap: anywhere; }
     .artifact-link { color: #a8d7ff; overflow-wrap: anywhere; }
     .copy-button {
       min-height: 36px; margin-top: 6px; padding: 6px 9px; color: var(--text);
@@ -220,7 +224,7 @@ __FM_PROJECT_COCKPIT_DATA__
   (() => {
     "use strict";
     const byId = (id) => document.getElementById(id);
-    const state = { payload: null, projectId: null, taskKey: null, filter: "active", query: "" };
+    const state = { payload: null, payloadInstance: 0, projectId: null, taskKey: null, filter: "active", query: "" };
     const lanes = [
       ["running", "Running"],
       ["waiting", "Waiting / Captain hold"],
@@ -228,7 +232,7 @@ __FM_PROJECT_COCKPIT_DATA__
       ["recently_completed", "Recently completed"]
     ];
     const text = (value, fallback = "Unavailable") => value === null || value === undefined || value === "" ? fallback : String(value);
-    const taskKey = (task, payload = state.payload) => `${task.id}\u001f${task.spawn_gen || (task.identity_scope === "canonical" ? "canonical" : `unproven:${payload?.generated || "unavailable"}`)}`;
+    const taskKey = (task) => `${task.id}\u001f${task.spawn_gen || (task.identity_scope === "canonical" ? "canonical" : `unproven:${state.payloadInstance}`)}`;
     const upper = (value) => text(value).replaceAll("_", " ").toUpperCase();
     const duration = (seconds) => {
       if (!Number.isFinite(seconds)) return "Unavailable";
@@ -437,7 +441,19 @@ __FM_PROJECT_COCKPIT_DATA__
       byId("task-identity").textContent = `${task.id} · generation ${task.spawn_gen || "legacy / unavailable"}`;
       if (task.hold) {
         const call = el("div", "attention-call");
+        call.setAttribute("role", "group");
+        call.setAttribute("aria-label", "Captain hold context");
         call.append(el("strong", "", `${task.hold.classification} captain hold`), el("p", "", text(task.hold.question)));
+        const context = el("dl", "hold-context");
+        const timing = task.hold.until
+          ? `Deferred until ${text(task.hold.until)}`
+          : Number.isInteger(task.hold.age_days) && task.hold.age_days >= 0
+            ? `${task.hold.age_days} ${task.hold.age_days === 1 ? "day" : "days"}`
+            : "Unavailable";
+        detailRow(context, "Hold timing", timing, task.hold.until ? "dated" : null);
+        detailRow(context, "Evidence", task.hold.evidence);
+        detailRow(context, "Report", upper(task.artifacts.report.status), task.artifacts.report.status);
+        call.append(context);
         detail.append(call);
       }
       if (Array.isArray(task.decisions) && task.decisions.length) {
@@ -466,7 +482,7 @@ __FM_PROJECT_COCKPIT_DATA__
           detail.append(link);
         }
       }
-      if (task.artifacts.report.path) detail.append(copyButton("Copy report path", task.artifacts.report.path));
+      if (task.artifacts.report.status === "available" && task.artifacts.report.path) detail.append(copyButton("Copy report path", task.artifacts.report.path));
       detail.append(copyButton("Copy task ID", task.id));
       if (task.hold?.question) detail.append(copyButton("Copy decision text", task.hold.question));
       const events = el("details");
@@ -510,7 +526,9 @@ __FM_PROJECT_COCKPIT_DATA__
       const previousKey = state.taskKey;
       const focusedProject = document.activeElement?.dataset?.projectId || null;
       const focusedTask = document.activeElement?.dataset?.taskKey || null;
-      state.payload = validatePayload(next);
+      const payload = validatePayload(next);
+      state.payloadInstance += 1;
+      state.payload = payload;
       state.taskKey = previousKey;
       reconcileVisibleSelection();
       renderAll();
@@ -519,9 +537,10 @@ __FM_PROJECT_COCKPIT_DATA__
         : focusedProject
           ? [...byId("project-list").querySelectorAll("button.project-button")].find((button) => button.dataset.projectId === focusedProject)
           : null;
-      focusTarget?.focus();
+      if (focusTarget) focusTarget.focus();
+      else if (focusedTask) byId("project-list").querySelector('[aria-current="true"]')?.focus();
       const current = currentTask();
-      if (previous && current && taskKey(previous) === taskKey(current) && (previous.state !== current.state || previous.gate.label !== current.gate.label)) byId("task-detail").classList.add("changed");
+      if (previous && current && previousKey === state.taskKey && (previous.state !== current.state || previous.gate.label !== current.gate.label)) byId("task-detail").classList.add("changed");
       announce("Project Cockpit snapshot updated");
     };
     const failClosed = (error) => {

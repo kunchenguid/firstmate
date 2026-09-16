@@ -181,6 +181,7 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
   local done_two=$TMP_ROOT/done-1301.json stopped_one=$TMP_ROOT/stopped-1201.json
   local stopped_two=$TMP_ROOT/stopped-1301.json working=$TMP_ROOT/working-1301.json
   local done_hold=$TMP_ROOT/done-hold.json done_decision=$TMP_ROOT/done-decision.json state
+  local unproven_same_a=$TMP_ROOT/unproven-same-a.json unproven_same_b=$TMP_ROOT/unproven-same-b.json
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-a.json" --observed-at 2026-09-15T12:00:00Z > "$first"
   "$PROJECTOR" --from-snapshot "$FIXTURES/secondmate-generation-b.json" --observed-at 2026-09-15T13:00:00Z > "$second"
   jq -e '.projects[0].tasks[0]
@@ -265,6 +266,18 @@ test_secondmate_generation_and_terminal_elapsed_fail_closed() {
         and .state == "unknown" and .state_source == "generation-unavailable"
         and .observed_at == null and .started_at == null and .elapsed_seconds == null' "$unproven" >/dev/null \
     || fail "unproven secondmate generation retained mutable child evidence"
+  jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven_same_a"
+  jq 'del(.secondmate_current.records[0].endpoints[0].spawn_gen)
+      | .secondmate_current.records[0].endpoints[0].state="failed"' "$FIXTURES/secondmate-generation-b.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$unproven_same_b"
+  jq -n -e --slurpfile first "$unproven_same_a" --slurpfile second "$unproven_same_b" '
+      $first[0].generated == $second[0].generated
+      and ([$first[0],$second[0]] | all(.[];
+        (.projects[0].tasks[0]
+          | .identity_scope == "snapshot" and .spawn_gen == null
+            and .state == "unknown" and .observed_at == null)))' >/dev/null \
+    || fail "same-generated unproven captures invented stable identity or retained mutable evidence"
 
   "$PROJECTOR" --from-snapshot "$FIXTURES/terminal-elapsed.json" --observed-at 2026-09-15T12:01:00Z > "$done_one"
   "$PROJECTOR" --from-snapshot "$FIXTURES/terminal-elapsed.json" --observed-at 2026-09-15T13:01:00Z > "$done_two"
@@ -565,6 +578,11 @@ test_builder_is_fail_closed_and_atomic() {
   FM_HOME="$home" "$BOARD" build "$altered" >/dev/null || fail "safe script-boundary text was refused"
   ! grep -Fq '</script><script>globalThis.injected=true' "$prior" || fail "script-closing text survived unescaped"
   grep -Fq '\u003c/script>' "$prior" || fail "script-closing text was not safely JSON escaped"
+  jq '(.projects[].tasks[] | select(.id == "captain-call")) |= (
+      .hold.evidence=("e" * 40)
+      | .artifacts.report={status:"available",path:("r" * 500)})' "$model" > "$altered"
+  FM_HOME="$home" "$BOARD" build "$altered" >/dev/null \
+    || fail "builder rejected exact bounded hold context"
   before=$(sha256sum "$prior" | awk '{print $1}')
   for unsafe_url in \
     'http://unsafe.example/pull/1' \
@@ -587,6 +605,22 @@ test_builder_is_fail_closed_and_atomic() {
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "builder accepted a project missing $field"
+  done
+  for mutation in \
+    '.projects[0].tasks[0] |= (.identity_scope="generation" | .spawn_gen=null)' \
+    '.projects[0].tasks[0] |= (.identity_scope="canonical" | .spawn_gen="unexpected")' \
+    '.projects[0].tasks[0] |= (.identity_scope="snapshot" | .spawn_gen="unexpected")' \
+    '(.projects[].tasks[] | select(.id == "captain-call")).hold.evidence=("e" * 41)' \
+    '(.projects[].tasks[] | select(.id == "captain-call")).hold.age_days=-1' \
+    '(.projects[].tasks[] | select(.id == "captain-call")).artifacts.report.status="unavailable"'; do
+    jq "$mutation" "$model" > "$altered"
+    set +e
+    out=$(FM_HOME="$home" "$BOARD" build "$altered" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "builder accepted an invalid identity or hold-context contract: $mutation"
+    after=$(sha256sum "$prior" | awk '{print $1}')
+    [ "$before" = "$after" ] || fail "failed identity or hold-context validation replaced the previous artifact"
   done
   jq '
     .projects[0].tasks[0] as $task
