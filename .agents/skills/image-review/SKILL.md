@@ -40,19 +40,26 @@ lightbox, and per-image comment plus select/clear controls wired through `window
 
 ## Verify before handing the page over
 
-Use `chrome-devtools-axi` to prove the page renders before telling the captain it is ready:
+The Lavish session wraps the page in a sandboxed iframe and injects `window.lavish` only after
+load, so prove both halves before telling the captain the page is ready:
 
-- Desktop viewport: tabs switch panes, nested sections collapse and expand, thumbnails render,
-  and clicking one opens the full-size lightbox that closes on Esc and backdrop click.
-- Mobile viewport (resize to a phone-width window): tabs scroll, the grid stacks to one column,
-  and the comment and select controls stay usable.
-- In the Lavish session (not the raw file), the select and Queue feedback controls work and the
-  not-connected banner stays hidden; outside Lavish the banner appears instead.
+- Integration (session URL through `lavish-axi`): with a live `lavish-axi poll` running, the
+  not-connected banner disappears and Send-all enables - the generator re-checks availability on
+  an interval, so give it a beat after the page loads. Queue one test comment and confirm the
+  queued prompt in the Conversation panel carries the image's `data-image-id`.
+- Rendering (artifact URL `http://127.0.0.1:<port>/artifact/<session>/index.html`, no wrapper):
+  a frame-piercing browser tool (Playwright, or `chrome-devtools-axi run` page.eval) can drive
+  the artifact directly. Verify tabs switch panes, nested sections collapse and expand,
+  thumbnails render at ~350px, and clicking one opens the full-size lightbox that closes on Esc
+  and backdrop click. Resize to a phone-width window and repeat: tabs scroll, the grid stacks to
+  one column, and the comment and select controls stay usable. `chrome-devtools-axi`'s
+  accessibility snapshot only reaches the wrapper and the artifact's tabs, not the cards inside
+  the sandboxed frame, so use it for the session surface and a frame-piercing tool for the rest.
 
 ## Read feedback back
 
 Poll in the foreground per current `lavish-axi poll` help until the captain sends feedback.
 Every queued prompt carries the image's `data-image-id` - its path relative to the images root -
-in its text and `data` payload, so map each returned comment back to that exact image path when
-reporting findings, and never paraphrase an id into a bare file name.
+in its text, selector, and `data` payload, so map each returned comment back to that exact image
+path when reporting findings, and never paraphrase an id into a bare file name.
 Selections arrive as `selected: true/false` in the same payload.
