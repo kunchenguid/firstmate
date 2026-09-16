@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Link the tracked Calm OMP extension package into OMP's user plugin scope so
-# /calm-omp and the working boat load in every omp session, not only sessions
-# launched inside this checkout.
+# Install the standalone Calm OMP plugin into OMP's user plugin scope so /calm-omp
+# and the working boat load in every omp session, not only sessions launched inside
+# a firstmate checkout.
 # Usage: fm-omp-calm-install.sh
-# The package lives at extensions/fm-calm-omp/ and loads through
-# `omp plugin link`; edits to the tracked source take effect on the next omp
-# session start because the link resolves to this checkout.
-# A legacy project-local copy at <home>/.omp/extensions/fm-calm-omp.ts would
-# load a second time in home sessions (OMP de-duplicates by absolute path, not
-# realpath), so an identical legacy copy is removed and a divergent one is
-# renamed to .bak with a warning.
-# Unload with `omp plugin disable fm-calm-omp` (or delete the linked symlink).
-# `omp plugin uninstall fm-calm-omp` also unloads the extension but leaves the
-# symlink; delete it or run this installer again to restore the link.
+# Sources are copied from extensions/fm-calm-omp/ into ~/.local/share/fm-calm-omp
+# (override with FM_CALM_OMP_DIR), then linked with `omp plugin link`.
+# Re-run after updating firstmate to refresh the standalone copy.
+# A legacy project-local copy at <home>/.omp/extensions/fm-calm-omp.ts would load a
+# second time in home sessions (OMP de-duplicates by absolute path, not realpath), so
+# an identical legacy copy is removed and a divergent one is renamed to .bak.
+# Unload with `omp plugin disable fm-calm-omp`.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,11 +17,16 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 PKG_DIR="$FM_ROOT/extensions/fm-calm-omp"
+INSTALL_DIR="${FM_CALM_OMP_DIR:-$HOME/.local/share/fm-calm-omp}"
 LEGACY="$FM_HOME/.omp/extensions/fm-calm-omp.ts"
 
 command -v omp >/dev/null 2>&1 || { echo "error: omp is not on PATH" >&2; exit 1; }
 [ -f "$PKG_DIR/package.json" ] || { echo "error: $PKG_DIR/package.json is missing" >&2; exit 1; }
 [ -f "$PKG_DIR/fm-calm-omp.ts" ] || { echo "error: $PKG_DIR/fm-calm-omp.ts is missing" >&2; exit 1; }
+[ -f "$PKG_DIR/lib/fm-calm-working-ship.ts" ] || {
+  echo "error: $PKG_DIR/lib/fm-calm-working-ship.ts is missing" >&2
+  exit 1
+}
 
 if [ -f "$LEGACY" ] || [ -L "$LEGACY" ]; then
   if [ -f "$LEGACY" ] && cmp -s "$LEGACY" "$PKG_DIR/fm-calm-omp.ts"; then
@@ -36,11 +38,13 @@ if [ -f "$LEGACY" ] || [ -L "$LEGACY" ]; then
   fi
 fi
 
-omp plugin link "$PKG_DIR" || { echo "error: omp plugin link failed" >&2; exit 1; }
-echo "installed: fm-calm-omp loads in every omp session (linked to $PKG_DIR)"
-
-# A link into a disposable worktree dangles once the worktree is removed.
-if git -C "$FM_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
-  && [ "$(git -C "$FM_ROOT" rev-parse --git-dir)" != "$(git -C "$FM_ROOT" rev-parse --git-common-dir)" ]; then
-  echo "warning: linked to a git worktree; re-run from the primary checkout after it lands" >&2
+mkdir -p "$INSTALL_DIR" || { echo "error: failed to create $INSTALL_DIR" >&2; exit 1; }
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --delete "$PKG_DIR/" "$INSTALL_DIR/" || { echo "error: rsync to $INSTALL_DIR failed" >&2; exit 1; }
+else
+  rm -rf "$INSTALL_DIR"/*
+  cp -R "$PKG_DIR/." "$INSTALL_DIR/" || { echo "error: copy to $INSTALL_DIR failed" >&2; exit 1; }
 fi
+
+omp plugin link "$INSTALL_DIR" || { echo "error: omp plugin link failed" >&2; exit 1; }
+echo "installed: fm-calm-omp loads in every omp session (standalone copy at $INSTALL_DIR)"

@@ -24,8 +24,11 @@ run_install() {
 run_install >"$TMP_ROOT/install.out" 2>"$TMP_ROOT/install.err" \
   || fail "install failed: $(cat "$TMP_ROOT/install.err")"
 LINK="$FAKE_HOME/.omp/plugins/node_modules/fm-calm-omp"
+STANDALONE="$FAKE_HOME/.local/share/fm-calm-omp"
 [ -L "$LINK" ] || fail "plugin link is not a symlink at $LINK"
-assert_equals "$ROOT/extensions/fm-calm-omp" "$(readlink "$LINK")" "link target"
+assert_equals "$STANDALONE" "$(readlink "$LINK")" "link target"
+[ -f "$STANDALONE/lib/fm-calm-working-ship.ts" ] || fail "standalone lib missing"
+assert_absent "$STANDALONE/../../.pi" "standalone copy is not nested under firstmate .pi"
 assert_grep "fm-calm-omp" "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" "lockfile entry"
 pass "install links package into user plugin scope"
 

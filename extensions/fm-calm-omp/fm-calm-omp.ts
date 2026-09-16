@@ -6,7 +6,7 @@
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipAnimation,
-} from "../../.pi/extensions/lib/fm-calm-working-ship.ts";
+} from "./lib/fm-calm-working-ship.ts";
 
 type Component = { render: (width: number) => string[]; invalidate: () => void; dispose?: () => void };
 type UI = {
