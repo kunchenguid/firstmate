@@ -65,7 +65,7 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, or a local main (legacy master also accepted)" >&2; exit 1; }
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
