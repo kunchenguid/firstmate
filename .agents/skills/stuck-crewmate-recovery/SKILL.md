@@ -40,6 +40,15 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+## A pane frozen at the project directory
+
+A pane that shows a bare prompt at the project directory with `[1]+ Stopped <pi launch>` is the after-effect of a dead `treehouse get` parent: killing that parent orphaned the pane's nested subshell, the pane shell retook the terminal, and the worker's next terminal read was stopped by SIGTTIN.
+`fg` does not revive it, because the stopped job belongs to the orphaned subshell rather than the pane shell; never type `fg` at that prompt and never expect a keystroke to fix it.
+Never clear a stale `treehouse get` with a pattern kill either: `pkill -f` matches every process on the host, so `pkill -f 'treehouse get'` kills the live `treehouse get` parent of every running worker and freezes the rest of the fleet.
+The arm seatbelt refuses such patterns with `broad-treehouse-kill`, and the correct cleanup is to close the exact pane, which takes its `treehouse get` with it.
+Recover the task by binding a fresh terminal to its recorded worktree and running `bin/fm-control.sh <task-id> relaunch --note '<progress inventory>'`; the worktree and every uncommitted change survive untouched.
+A failed flat spawn now closes the pane it created, so a hung `treehouse get` left by the spawn path itself should be rare; when one is recorded anyway, close that exact pane rather than reaching for a process pattern.
+
 ## A live crewmate claiming the pipeline is dead
 
 This is the inverse of the dead-endpoint case above: the worker is alive and the pipeline it declares dead usually is too.

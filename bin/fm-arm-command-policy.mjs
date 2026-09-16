@@ -24,6 +24,7 @@ const REASONS = {
   "watcher-bundled": "a protected watcher command must be the sole final command after approved setup nodes",
   "watcher-nested": "a protected watcher command must not run through a wrapper, substitution, or compound command",
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
+  "broad-treehouse-kill": "a fleet-wide process kill that can match treehouse workers is forbidden; close the exact task pane or use bin/fm-control.sh instead",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
 };
@@ -50,6 +51,28 @@ function rawMentionsProtected(command) {
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
   return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+}
+
+// A pkill/killall pattern is refused when it can match a treehouse process at
+// all, because pkill walks every process on the host: `pkill -f 'treehouse[ ]get'`
+// killed the live `treehouse get` parent of every running worker on 2026-09-16.
+// Bracket-expression delimiters are stripped before the check so the
+// self-protecting form `pkill -f '[t]reehouse get'` cannot slip through, which
+// is why the transport prefilter strips the same bytes before deciding whether
+// to delegate here. Task-scoped kills that name anything else stay allowed.
+function stripKillPatternBrackets(value) {
+  return value.replace(/[[\]]/g, "");
+}
+
+function patternCanMatchTreehouse(word, context) {
+  if (!word) return false;
+  if (stripKillPatternBrackets(word.value).includes("treehouse")) return true;
+  return wordReferencesAny(word, context.treehousePatterns);
+}
+
+function rawMentionsTreehouseKill(command) {
+  const normalized = normalizeLineContinuations(command);
+  return stripKillPatternBrackets(normalized).includes("treehouse") && /\b(?:pkill|killall)\b/.test(normalized);
 }
 
 function normalizeLineContinuations(source) {
@@ -699,6 +722,7 @@ function contextWithAssignments(context, words) {
   const protectedVariables = new Set(context.protectedVariables || []);
   const watcherPatterns = new Set(context.watcherPatterns || []);
   const watcherPids = new Set(context.watcherPids || []);
+  const treehousePatterns = new Set(context.treehousePatterns || []);
   for (const word of words) {
     const name = assignmentName(word);
     if (!name) continue;
@@ -709,8 +733,10 @@ function contextWithAssignments(context, words) {
     else watcherPatterns.delete(name);
     if (wordReferencesAny(word, watcherPids)) watcherPids.add(name);
     else watcherPids.delete(name);
+    if (stripKillPatternBrackets(value).includes("treehouse") || wordReferencesAny(word, treehousePatterns)) treehousePatterns.add(name);
+    else treehousePatterns.delete(name);
   }
-  return { ...context, protectedVariables, watcherPatterns, watcherPids };
+  return { ...context, protectedVariables, watcherPatterns, watcherPids, treehousePatterns };
 }
 
 function nodeHasRedirection(tokens) {
@@ -728,16 +754,17 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadTreehouseKill: rawMentionsTreehouseKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadTreehouseKill: rawMentionsTreehouseKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
+  let broadTreehouseKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -745,6 +772,7 @@ function analyzeProgram(command, context, depth = 0) {
     protectedVariables: new Set(context.protectedVariables || []),
     watcherPatterns: new Set(context.watcherPatterns || []),
     watcherPids: new Set(context.watcherPids || []),
+    treehousePatterns: new Set(context.treehousePatterns || []),
   };
   let unclassifiableProtected = false;
 
@@ -763,6 +791,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      broadTreehouseKill ||= nested.broadTreehouseKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +800,7 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        broadTreehouseKill ||= nested.broadTreehouseKill;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +810,7 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+          broadTreehouseKill ||= nested.broadTreehouseKill;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -804,6 +835,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      broadTreehouseKill ||= nested.broadTreehouseKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +844,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      broadTreehouseKill ||= nested.broadTreehouseKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -822,6 +855,7 @@ function analyzeProgram(command, context, depth = 0) {
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
+    if ((commandName === "pkill" || commandName === "killall") && args.some((word) => patternCanMatchTreehouse(word, nodeContext))) broadTreehouseKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
@@ -848,10 +882,11 @@ function analyzeProgram(command, context, depth = 0) {
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
-  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  const broadTreehouseKillFound = broadTreehouseKill || (unsupported && rawMentionsTreehouseKill(command));
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || broadTreehouseKillFound)) {
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, broadTreehouseKill: broadTreehouseKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, broadTreehouseKill: broadTreehouseKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -900,9 +935,10 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set(), treehousePatterns: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
+  if (analysis.broadTreehouseKill) return deny("broad-treehouse-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");

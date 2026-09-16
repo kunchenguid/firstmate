@@ -74,3 +74,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
+
+When a diagnostic leaves a stale endpoint or a hung `treehouse get`, close exactly that pane.
+A `pkill`/`killall` pattern that can match treehouse is fleet-wide and refused by the arm seatbelt, and a pane showing a bare prompt at the project directory with `[1]+ Stopped <pi launch>` cannot be revived with `fg`.
+`stuck-crewmate-recovery` owns the worker-side reconciliation and relaunch.

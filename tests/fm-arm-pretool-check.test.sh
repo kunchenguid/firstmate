@@ -123,6 +123,17 @@ matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
 
+# Treehouse fleet-kill rows: the 2026-09-16 incident command and its bracket
+# form must deny; a task-scoped kill and read-only mentions must stay allowed.
+matrix_case T01 deny "pkill -f 'treehouse[ ]get'"
+matrix_case T02 deny "pkill -f '[t]reehouse get'"
+matrix_case T03 deny 'killall treehouse'
+matrix_case T04 deny 'while true; do pkill -f treehouse; done'
+matrix_case T05 deny "pattern='treehouse'; pkill -f \"\$pattern\""
+matrix_case T06 allow "pkill -f 'villa-public-forms'"
+matrix_case T07 allow "echo 'pkill -f treehouse'"
+matrix_case T08 allow "grep -rn 'treehouse get' docs"
+
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
 matrix_case E03 allow 'bin/fm-watch-arm.sh # output > file &'
@@ -183,7 +194,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|broad-treehouse-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
@@ -237,6 +248,13 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  assert_policy direct-incident-treehouse-pkill $'deny\tbroad-treehouse-kill' "pkill -f 'treehouse[ ]get'"
+  assert_policy direct-bracket-treehouse-pkill $'deny\tbroad-treehouse-kill' "pkill -f '[t]reehouse get'"
+  assert_policy direct-killall-treehouse $'deny\tbroad-treehouse-kill' 'killall treehouse'
+  assert_policy direct-treehouse-pattern-var $'deny\tbroad-treehouse-kill' 'pattern=treehouse; pkill -f "$pattern"'
+  assert_policy direct-treehouse-loop $'deny\tbroad-treehouse-kill' 'while true; do pkill -f treehouse; done'
+  assert_policy direct-task-scoped-pkill allow "pkill -f 'villa-public-forms'"
+  assert_policy direct-treehouse-data allow "echo 'pkill -f treehouse'"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -348,7 +366,26 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
+  # A task-scoped kill that names no treehouse pattern still reaches the
+  # classifier (it carries no delegate byte) and is allowed there.
+  "$CHECK" --command "pkill -f 'villa-public-forms'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a task-scoped pkill pattern must be classified and allowed, got exit $rc"
+  # Treehouse kill patterns carry the treehouse bytes and must delegate; the
+  # bracket form survives the byte strip only because the prefilter strips the
+  # brackets the classifier's kill-pattern normalization strips too.
+  "$CHECK" --command "pkill -f 'treehouse[ ]get'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "the recorded treehouse pkill incident command must deny, got exit $rc"
+  "$CHECK" --command "pkill -f '[t]reehouse get'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "a bracket-obfuscated treehouse pkill pattern must delegate and deny, got exit $rc"
+  # A benign command that only mentions treehouse as data still reaches the
+  # classifier and is allowed there, proving the prefilter owns no verdict.
+  "$CHECK" --command "echo 'pkill -f treehouse'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a benign treehouse-substring command must be classified and allowed, got exit $rc"
+  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch, treehouse, and quoting-decoder-marker command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------
