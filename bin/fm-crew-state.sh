@@ -37,8 +37,10 @@
 #      branch (branch_sync.state=pipeline_owned), its own custody attribution
 #      binds an ACTIVE run without head equality (fm_nm_run_is_pipeline_owned_active
 #      in bin/fm-nm-run-lib.sh).
-#      A run head whose commit object the task copy never fetched (the pipeline
-#      committed its fix round in its own checkout) cannot be verified locally;
+#      A run head the task copy cannot bind - never fetched (the pipeline
+#      committed its fix round in its own checkout), or resolvable but off this
+#      worktree's line of history (the pipeline replayed the branch onto an
+#      advanced upstream) - cannot be verified locally;
 #      that row is recognized only as a provable pipeline-owned continuation -
 #      the branch's ACTIVE newest ledger row, anchored by the row immediately
 #      before it having ended at exactly this worktree's head - so an active fix
