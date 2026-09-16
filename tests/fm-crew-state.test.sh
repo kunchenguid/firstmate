@@ -23,8 +23,10 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (e2) several runs bound to one worktree: the live one outranks the corpse
 #        (an unclassifiable status word keeps the ledger's newest-first order)
-#   (e3) the live sibling's head was never fetched into the task copy: it still
-#        outranks a terminal row sitting at the worktree's exact commit
+#   (e3) the live sibling's head cannot be bound - never fetched into the task
+#        copy, or replayed onto an advanced upstream by the pipeline: it still
+#        outranks a terminal row sitting at the worktree's exact commit, and
+#        without that exact anchor it binds nothing at all
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -83,10 +85,24 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        if [ "${1:-}" = --run ]; then
+          # FM_FAKE_AXI_RUN_ID pins WHICH run id the fixture answers for, the
+          # way the real CLI answers only the id that exists: any other id gets
+          # the error response, so a test can prove the helper asked for the
+          # live run and not some other row.
+          if [ -n "${FM_FAKE_AXI_RUN_ID:-}" ] && [ "${2:-}" != "${FM_FAKE_AXI_RUN_ID}" ]; then
+            printf 'error: run %s not found\n' "${2:-}"
+          else
+            printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+          fi
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+      '')
+        # `no-mistakes axi` with no subcommand: the home view, whose recent-runs
+        # table is the only public surface that carries run IDS (the top-level
+        # `runs` ledger has none).
+        printf '%s\n' "${FM_FAKE_AXI_HOME:-}" ;;
     esac
     ;;
   runs)
@@ -220,6 +236,8 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_RUN_ID=""
+  FM_FAKE_AXI_HOME=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -234,7 +252,7 @@ reset_fakes() {
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_RUN_ID FM_FAKE_AXI_HOME FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
 }
@@ -363,6 +381,71 @@ steps[3]{step,status,findings,duration_ms}:
   review,fix_review,1,0
   test,pending,0,0
 EOF
+}
+
+# The live sibling run's own detail, in the shape `no-mistakes axi status --run
+# <id>` really returns (captured from run 01M2H391VCGZ6TX3ZKQKBHDBZ4 on the
+# installed CLI v1.72.0): the run status word stays `running` - the ledger's own
+# vocabulary has no gate words in it - the park shows up as `awaiting_agent`,
+# the steps table is nested under `run:`, and the per-run query adds the
+# top-level `gate:` block with the gate's findings table that the crew's own
+# bare `axi status` omits. Carries the 2026-09-15 incident's numbers: parked
+# 23m57s at review, two findings, one of them ask-user.
+run_parked_live_sibling() {  # <branch> <head> <id>
+  cat <<EOF
+run:
+  id: "$3"
+  branch: $1
+  status: running
+  awaiting_agent: parked 23m57s
+  head: $2
+  pr: ""
+  findings: "2 awaiting, 1 auto-fix, 1 info"
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,10
+    review,fix_review,2,1437000
+    test,pending,0,0
+gate:
+  step: review
+  status: fix_review
+  summary: "two findings await a decision"
+  findings[2]{id,severity,file,action,description}:
+    f1,warning,a.go,auto-fix,"ignored error"
+    f2,error,b.go,ask-user,"changes product behavior"
+EOF
+}
+
+# The same parked run as the crew's OWN bare `no-mistakes axi status` renders it
+# (captured alongside the shape above): identical `run:` block, but no
+# `gate:` block and no findings table at all - the gate is visible only as the
+# `fix_review` row inside the nested steps table, and the finding count only as
+# that row's own column.
+run_parked_awaiting_only() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 1d2h
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/247"
+  findings: "3 awaiting, 1 auto-fix, 2 info"
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,10
+    review,completed,2,2422414
+    pr,completed,0,40497
+    ci,fix_review,3,349921
+EOF
+}
+
+# The home view `no-mistakes axi` prints with no subcommand: its recent-runs
+# table is the only public surface that carries run IDS, which the top-level
+# `no-mistakes runs` ledger omits entirely.
+axi_home_view() {  # <table-row>...
+  local row
+  printf 'current_branch: fm/whatever\ndaemon: running\ncount: %d of %d total\n' "$#" "$#"
+  printf 'runs[%d]{id,branch,status,head,pr}:\n' "$#"
+  for row in "$@"; do printf '  %s\n' "$row"; done
 }
 
 run_passed() {  # <branch>
@@ -723,6 +806,23 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+# The production shape of a run parked at a gate, read from the crew's own bare
+# `axi status`: no gate block and no findings table, so both the gate name and
+# the finding count can only come from the steps table's fix_review row.
+test_awaiting_agent_without_gate_block_names_the_step_row_gate() {
+  reset_fakes
+  local d; d=$(new_case parked-awaiting-only)
+  make_repo_on_branch "$d/wt" fm/feat-await
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-await.meta" "window=fm:fm-feat-await" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_parked_awaiting_only fm/feat-await)"
+  local out; out=$(run_crew_state "$d" feat-await)
+  assert_equals "state: parked · source: run-step · parked at ci: 3 finding(s)" "$out" \
+    "a park visible only as a steps-table row must still name that gate"
+  assert_not_contains "$out" "state: working" "a run waiting on a human is not active work"
+  pass "an awaiting_agent run with no gate block reports its step row's gate"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1241,6 +1341,461 @@ EOF
   assert_contains "$out" "state: working" "an unfetched live row anchored by the exact-head terminal row outranks it"
   assert_not_contains "$out" "state: failed" "the corpse at the worktree commit must not report a healthy task as failed"
   pass "an unfetched live sibling outranks a terminal row at the worktree's exact commit"
+}
+
+# The nutrifam-cerrar-allow-authenticated incident (2026-09-07): the live run
+# REBASED the branch onto an advanced upstream, so its head is a new commit on
+# a line of history the worktree HEAD is not an ancestor of, and the head rule
+# rejects it in both directions. `axi status` answered with the previous run,
+# which had died at this worktree's exact commit, so the terminal answer stood
+# and a healthy task parked at its gate was reported failed - and the watcher
+# turned that into a terminal-outcome wake for an outcome that never happened.
+# A live row for this worktree's own branch is the present whether or not its
+# rebased head still binds, once an older row on that branch binds the worktree.
+test_rebased_live_run_outranks_terminal_row_at_worktree_head() {
+  reset_fakes
+  local d base_head rebased_head short_base short_rebased out
+  d=$(new_case rebased-live-run)
+  make_repo_on_branch "$d/wt" fm/feat-rebased
+  git -C "$d/wt" commit -q --allow-empty -m 'the work this crew submitted'
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  # The live run's head: the branch replayed onto an advanced upstream, so it
+  # resolves in the task copy (the pipeline pushed it) but shares no ancestry
+  # with the worktree HEAD in either direction.
+  git -C "$d/wt" checkout -q --detach "$(git -C "$d/wt" rev-list --max-parents=0 HEAD)"
+  git -C "$d/wt" commit -q --allow-empty -m 'upstream advanced'
+  git -C "$d/wt" commit -q --allow-empty -m 'the pipeline replayed the branch onto it'
+  rebased_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-rebased
+  git -C "$d/wt" merge-base --is-ancestor "$base_head" "$rebased_head" \
+    && fail "the rebased head must not descend from the worktree HEAD"
+  git -C "$d/wt" merge-base --is-ancestor "$rebased_head" "$base_head" \
+    && fail "the worktree HEAD must not descend from the rebased head"
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  short_rebased=$(git -C "$d/wt" rev-parse --short=7 "$rebased_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/rebased.meta" "window=fm:fm-rebased" "worktree=$d/wt" "kind=ship"
+  # The dead run sits at this worktree's exact commit, so it binds and answers.
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-rebased)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  running    fm/feat-rebased ${short_rebased}  2026-09-07 14:14
+  failed     fm/feat-rebased ${short_base}  2026-09-07 09:48
+LEDGER
+)"
+  out=$(run_crew_state "$d" rebased)
+  # Pinned whole: the incident's own reported line was
+  # "state: failed · source: run-step · run failed", so a regression that
+  # brings any part of that terminal verdict back breaks this literal.
+  assert_equals "state: working · source: run-step · validating (background run)" "$out" \
+    "the live rebased run is this worktree's present, reported in full"
+  assert_not_contains "$out" "state: failed" "a terminal outcome that never happened must not be reported"
+  pass "a live run whose head was rebased outranks a terminal row at the worktree's commit"
+}
+
+# The residual the incident above left behind (2026-09-15): once the live
+# sibling is recognized, the ledger can only say the WORD `running`, so a run
+# sitting at an unanswered gate was reported as work in progress -
+# `state: working - source: run-step - validating (background run)` while its
+# real state was `fix_review`, parked 23m57s, 2 findings, one of them ask-user.
+# bin/fm-fleet-snapshot.sh classifies `working` as active work and only
+# `parked`/`paused`/`blocked` as a wait, so nobody was ever told a decision was
+# owed. The ledger carries no run id, so the gate is recoverable only by taking
+# the id from the home view's recent-runs table and inspecting THAT run.
+test_parked_live_sibling_reports_its_gate_not_working() {
+  reset_fakes
+  local d base_head short_base unfetched out
+  d=$(new_case parked-live-sibling)
+  make_repo_on_branch "$d/wt" fm/feat-parkedlive
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  # The live run's fix-round head lives only in the gate repo, the routine
+  # production shape: it is not a git object here and can never bind by head.
+  unfetched=0123abc
+  git -C "$d/wt" rev-parse --verify --quiet "${unfetched}^{commit}" >/dev/null 2>&1 \
+    && fail "the live run's head must not resolve in the task copy"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/parkedlive.meta" "window=fm:fm-parkedlive" \
+    "worktree=$d/wt" "kind=ship"
+  # Bare `axi status` binds the previous FAILED run by exact head equality.
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-parkedlive)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  failed     fm/feat-parkedlive ${short_base}  2026-09-15 11:20
+  running    fm/feat-parkedlive ${unfetched}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01OTHER\",fm/other-crew,running,aaaaaaa,\"\"" \
+    "\"01LIVE\",fm/feat-parkedlive,running,${unfetched},\"\"" \
+    "\"01DEAD\",fm/feat-parkedlive,failed,${short_base},\"\"")"
+  FM_FAKE_AXI_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/feat-parkedlive "$unfetched" 01LIVE)"
+  out=$(run_crew_state "$d" parkedlive)
+  # Pinned whole: the incident's own reported line was
+  # "state: working - source: run-step - validating (background run)", so a
+  # regression that brings back any part of that working verdict, or that loses
+  # the gate detail the second inspection recovered, breaks this literal.
+  assert_equals "state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)" "$out" \
+    "a live run parked at its gate must report the gate, not work in progress"
+  assert_not_contains "$out" "state: working" "a run waiting on a human is not active work"
+  pass "a live sibling parked at its gate reports the gate, not working"
+}
+
+# Negative control for the case above: the recent-runs table is consulted ONLY
+# to name the run the ledger already attributed to this worktree. Same fixture,
+# but the table's live row for this branch carries a different head, so it is
+# not the attributed row and nothing may be inspected through it. The answer
+# falls back to exactly the coarse word the ledger proved, never to the other
+# run's detail.
+test_home_view_row_with_another_head_is_never_inspected() {
+  reset_fakes
+  local d base_head short_base unfetched other out
+  d=$(new_case parked-live-wrong-head)
+  make_repo_on_branch "$d/wt" fm/feat-wronghead
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  unfetched=0123abc
+  other=9999abc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/wronghead.meta" "window=fm:fm-wronghead" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-wronghead)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  failed     fm/feat-wronghead ${short_base}  2026-09-15 11:20
+  running    fm/feat-wronghead ${unfetched}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01ELSE\",fm/feat-wronghead,running,${other},\"\"")"
+  FM_FAKE_AXI_RUN_ID=01ELSE
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/feat-wronghead "$other" 01ELSE)"
+  out=$(run_crew_state "$d" wronghead)
+  assert_equals "state: working · source: run-step · validating (background run)" "$out" \
+    "a table row that is not the attributed run must not be inspected"
+  pass "the home view is read only for the attributed run's id"
+}
+
+# The degenerate form of the same boundary: a table row for this branch whose
+# head column is EMPTY. It records no head at all, so it can never be the row
+# the ledger attributed, and an empty string must not read as a head that
+# matches everything.
+test_home_view_row_without_a_head_is_never_inspected() {
+  reset_fakes
+  local d base_head short_base unfetched out
+  d=$(new_case parked-live-empty-head)
+  make_repo_on_branch "$d/wt" fm/feat-emptyhead
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  unfetched=0123abc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/emptyhead.meta" "window=fm:fm-emptyhead" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-emptyhead)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  failed     fm/feat-emptyhead ${short_base}  2026-09-15 11:20
+  running    fm/feat-emptyhead ${unfetched}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01NOHEAD\",fm/feat-emptyhead,running,\"\",\"\"")"
+  FM_FAKE_AXI_RUN_ID=01NOHEAD
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/feat-emptyhead "$unfetched" 01NOHEAD)"
+  out=$(run_crew_state "$d" emptyhead)
+  assert_equals "state: working · source: run-step · validating (background run)" "$out" \
+    "a table row carrying no head must not be inspected"
+  pass "a headless table row is never taken as the attributed run"
+}
+
+# The same boundary on the inspection's ANSWER. The id binds, but the run
+# detail that comes back names another branch (a reused or recycled id), so it
+# is not this worktree's run and must not be adopted - the coarse word stands.
+test_inspected_run_for_another_branch_is_rejected() {
+  reset_fakes
+  local d base_head short_base unfetched out
+  d=$(new_case parked-live-foreign-detail)
+  make_repo_on_branch "$d/wt" fm/feat-foreigndetail
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  unfetched=0123abc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/foreigndetail.meta" "window=fm:fm-foreigndetail" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-foreigndetail)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  failed     fm/feat-foreigndetail ${short_base}  2026-09-15 11:20
+  running    fm/feat-foreigndetail ${unfetched}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01LIVE\",fm/feat-foreigndetail,running,${unfetched},\"\"")"
+  FM_FAKE_AXI_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/some-other-crew "$unfetched" 01LIVE)"
+  out=$(run_crew_state "$d" foreigndetail)
+  assert_equals "state: working · source: run-step · validating (background run)" "$out" \
+    "another branch's run detail must never answer for this worktree"
+  pass "an inspected run naming another branch is rejected"
+}
+
+# The inspection may only ever REPLACE the coarse live word with that same live
+# run's own gate detail. If the inspected run reads terminal - it finished
+# between the ledger read and the inspection, or the id was recycled - the
+# coarse live word stands, because turning a second query into a terminal
+# verdict is exactly the false-failure class the live-over-terminal rule exists
+# to prevent.
+test_inspected_terminal_run_never_overrides_the_live_word() {
+  reset_fakes
+  local d base_head short_base unfetched out
+  d=$(new_case parked-live-terminal-detail)
+  make_repo_on_branch "$d/wt" fm/feat-terminaldetail
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  unfetched=0123abc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/terminaldetail.meta" "window=fm:fm-terminaldetail" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-terminaldetail)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  failed     fm/feat-terminaldetail ${short_base}  2026-09-15 11:20
+  running    fm/feat-terminaldetail ${unfetched}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01LIVE\",fm/feat-terminaldetail,running,${unfetched},\"\"")"
+  FM_FAKE_AXI_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_RUN="$(cat <<DETAIL
+current_branch: fm/feat-terminaldetail
+run:
+  id: "01LIVE"
+  branch: fm/feat-terminaldetail
+  status: completed
+  head: "${unfetched}"
+  pr: ""
+  findings: none
+outcome: failed
+DETAIL
+)"
+  out=$(run_crew_state "$d" terminaldetail)
+  assert_equals "state: working · source: run-step · validating (background run)" "$out" \
+    "a terminal inspection answer must not displace the proven live word"
+  assert_not_contains "$out" "state: failed" "a second query must never manufacture a failure verdict"
+  pass "a terminal inspected run never overrides the proven live word"
+}
+
+# The other coarse entry point, and the routine one once several crews validate
+# the same repo: bare `axi status` answers with another crew's run, so this
+# branch's own live run is proved only by the ledger. It must reach its gate the
+# same way - the false `working` reading is the ledger word, not the entry point.
+test_other_branch_answer_still_reports_the_live_gate() {
+  reset_fakes
+  local d base_head short_base out
+  d=$(new_case parked-live-otherbranch)
+  make_repo_on_branch "$d/wt" fm/feat-otherbranch
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/otherbranch.meta" "window=fm:fm-otherbranch" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  running    fm/other-crew aaaaaaa  2026-09-15 11:30
+  running    fm/feat-otherbranch ${short_base}  2026-09-15 10:05
+LEDGER
+)"
+  FM_FAKE_AXI_HOME="$(axi_home_view \
+    "\"01OTHER\",fm/other-crew,running,aaaaaaa,\"\"" \
+    "\"01LIVE\",fm/feat-otherbranch,running,${short_base},\"\"")"
+  FM_FAKE_AXI_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/feat-otherbranch "$short_base" 01LIVE)"
+  out=$(run_crew_state "$d" otherbranch)
+  assert_equals "state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)" "$out" \
+    "a live run proved only by the ledger must still report its own gate"
+  pass "another crew's answer does not hide this crew's gate"
+}
+
+# The zero-extra-call shape of the same case, and what the installed CLI
+# actually returns when this branch has no run object: the status answer itself
+# carries the recent-runs table, ids included. The home view is then never
+# consulted - pinned by leaving it empty, so a regression that reaches for it
+# anyway cannot find an id and fails this case.
+test_status_answer_carrying_the_runs_table_needs_no_home_view() {
+  reset_fakes
+  local d base_head short_base out
+  d=$(new_case parked-live-statustable)
+  make_repo_on_branch "$d/wt" fm/feat-statustable
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/statustable.meta" "window=fm:fm-statustable" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(cat <<STATUS
+current_branch: fm/feat-statustable
+runs_on_current_branch: 0
+count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  "01LIVE",fm/feat-statustable,running,${short_base},""
+help[1]: "No run exists for this branch"
+STATUS
+)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-statustable ${short_base}  2026-09-15 10:05"
+  FM_FAKE_AXI_HOME=""
+  FM_FAKE_AXI_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_live_sibling fm/feat-statustable "$short_base" 01LIVE)"
+  out=$(run_crew_state "$d" statustable)
+  assert_equals "state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)" "$out" \
+    "the ids already in the status answer must be enough to reach the gate"
+  pass "a status answer carrying the runs table needs no home-view call"
+}
+
+# Negative control for the rule above: recognizing a live row the head rule
+# cannot bind widened only WHICH rows reach the anchor, never the anchor
+# itself. Same rebased live row, but the immediately-older row sits at a
+# DESCENDANT of this worktree's commit rather than at the commit itself - the
+# ordinary head rule would accept that row, exact equality does not, so this
+# case fails the moment the anchor is relaxed to the head rule. Nothing binds
+# and the pane answers.
+test_rebased_live_run_without_exact_anchor_binds_nothing() {
+  reset_fakes
+  local d base_head descendant_head rebased_head short_descendant short_rebased out gen
+  d=$(new_case rebased-no-anchor)
+  make_repo_on_branch "$d/wt" fm/feat-rebasednoanchor
+  git -C "$d/wt" commit -q --allow-empty -m 'the work this crew submitted'
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'an older run advanced the tip past it'
+  descendant_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  git -C "$d/wt" checkout -q --detach "$(git -C "$d/wt" rev-list --max-parents=0 HEAD)"
+  git -C "$d/wt" commit -q --allow-empty -m 'upstream advanced'
+  git -C "$d/wt" commit -q --allow-empty -m 'the pipeline replayed the branch onto it'
+  rebased_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-rebasednoanchor
+  # The divergence this case rests on: the anchor row is not the worktree
+  # commit, yet the ordinary head rule would bind it.
+  [ "$descendant_head" != "$base_head" ] || fail "the anchor row must not sit at the worktree commit"
+  git -C "$d/wt" merge-base --is-ancestor "$base_head" "$descendant_head" \
+    || fail "the anchor row must still satisfy the ordinary head rule"
+  short_descendant=$(git -C "$d/wt" rev-parse --short=7 "$descendant_head")
+  short_rebased=$(git -C "$d/wt" rev-parse --short=7 "$rebased_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/rebasednoanchor.meta" "window=fm:fm-rebasednoanchor" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  running    fm/other-crew aaaaaaa  2026-09-07 15:00
+  running    fm/feat-rebasednoanchor ${short_rebased}  2026-09-07 14:14
+  failed     fm/feat-rebasednoanchor ${short_descendant}  2026-09-07 09:48
+LEDGER
+)"
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" rebasednoanchor)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" rebasednoanchor busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" rebasednoanchor)
+  assert_not_contains "$out" "source: run-step" "an unanchored rebased live row must not bind a run"
+  assert_not_contains "$out" "state: failed" "and must not fall through to the older failed row"
+  assert_contains "$out" "source: pane" "without the exact anchor the pane answers, not the runs rows"
+  pass "a rebased live row without the exact anchor still binds nothing"
+}
+
+# The other way the head rule refuses to bind a row, which the anchor must NOT
+# rescue: the live newest row's head resolves here as a STRICT ANCESTOR of the
+# worktree HEAD. That run is not unprovable, it is superseded - local work
+# advanced past it outside the run - and even a perfect exact-head anchor
+# immediately behind it cannot make stale history the present. Only an absent
+# head or one on an unshared line of history reaches the anchor.
+test_ancestor_live_newest_row_is_never_anchored() {
+  reset_fakes
+  local d older_head base_head short_older short_base out gen
+  d=$(new_case ancestor-live-row)
+  make_repo_on_branch "$d/wt" fm/feat-ancestorlive
+  git -C "$d/wt" commit -q --allow-empty -m 'the commit the abandoned run was launched at'
+  older_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work advanced past it outside the run'
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  # The ancestry this case rests on: the live row's head resolves here and the
+  # worktree HEAD strictly descends from it, so it is superseded, not unknown.
+  [ "$older_head" != "$base_head" ] || fail "the live row must not sit at the worktree commit"
+  git -C "$d/wt" merge-base --is-ancestor "$older_head" "$base_head" \
+    || fail "the live row's head must be an ancestor of the worktree HEAD"
+  git -C "$d/wt" merge-base --is-ancestor "$base_head" "$older_head" \
+    && fail "the worktree HEAD must not be an ancestor of the live row's head"
+  short_older=$(git -C "$d/wt" rev-parse --short=7 "$older_head")
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ancestorlive.meta" "window=fm:fm-ancestorlive" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  running    fm/other-crew aaaaaaa  2026-09-07 15:00
+  running    fm/feat-ancestorlive ${short_older}  2026-09-07 14:14
+  failed     fm/feat-ancestorlive ${short_base}  2026-09-07 09:48
+LEDGER
+)"
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" ancestorlive)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" ancestorlive busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" ancestorlive)
+  assert_equals "state: working · source: pane · harness busy (claude-hook)" "$out" \
+    "a superseded live row binds nothing, however perfect the anchor behind it"
+  pass "a strict-ancestor live newest row is never anchored"
+}
+
+# The class guard the anchor rests on: only a LIVE row the head rule cannot
+# bind is recognizable as a pipeline continuation. A TERMINAL row the head rule
+# cannot bind is a foreign or superseded run, and this change made the diverged
+# (not merely unfetched) shape reach that guard for the first time. Same rebased
+# head as the case above, but the newest row is FAILED, and the row immediately
+# older sits at EXACTLY the worktree HEAD - a perfect anchor. Relax the guard
+# and that anchor resurrects the incident's own false verdict from a second
+# ledger shape, so the terminal row must end the scan before ever reaching it.
+test_diverged_terminal_newest_row_is_never_anchored() {
+  reset_fakes
+  local d base_head rebased_head short_base short_rebased out gen
+  d=$(new_case diverged-terminal-anchor)
+  make_repo_on_branch "$d/wt" fm/feat-divergedterminal
+  git -C "$d/wt" commit -q --allow-empty -m 'the work this crew submitted'
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --detach "$(git -C "$d/wt" rev-list --max-parents=0 HEAD)"
+  git -C "$d/wt" commit -q --allow-empty -m 'upstream advanced'
+  git -C "$d/wt" commit -q --allow-empty -m 'another task replayed its branch onto it'
+  rebased_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-divergedterminal
+  # The two facts this case rests on: the newest row resolves here yet binds in
+  # neither direction, and the row behind it is a perfect exact-head anchor.
+  [ -n "$(git -C "$d/wt" rev-parse --verify --quiet "${rebased_head}^{commit}")" ] \
+    || fail "the diverged head must resolve in the task copy"
+  git -C "$d/wt" merge-base --is-ancestor "$base_head" "$rebased_head" \
+    && fail "the diverged head must not descend from the worktree HEAD"
+  git -C "$d/wt" merge-base --is-ancestor "$rebased_head" "$base_head" \
+    && fail "the worktree HEAD must not descend from the diverged head"
+  [ "$(git -C "$d/wt" rev-parse HEAD)" = "$base_head" ] \
+    || fail "the anchor row must sit at exactly the worktree HEAD"
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  short_rebased=$(git -C "$d/wt" rev-parse --short=7 "$rebased_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/divergedterminal.meta" "window=fm:fm-divergedterminal" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<LEDGER
+  running    fm/other-crew aaaaaaa  2026-09-07 15:00
+  failed     fm/feat-divergedterminal ${short_rebased}  2026-09-07 14:14
+  completed  fm/feat-divergedterminal ${short_base}  2026-09-07 09:48
+LEDGER
+)"
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" divergedterminal)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" divergedterminal busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" divergedterminal)
+  assert_not_contains "$out" "source: run-step" "a diverged terminal newest row must not bind a run"
+  assert_not_contains "$out" "state: failed" "and must never be anchored into a terminal verdict"
+  assert_contains "$out" "source: pane" "the scan ends at the terminal row and the pane answers"
+  pass "a diverged terminal newest row is never anchored by the row behind it"
 }
 
 # The preference must not widen: candidates of the SAME liveness class keep the
@@ -2494,6 +3049,7 @@ test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_awaiting_agent_without_gate_block_names_the_step_row_gate
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
@@ -2519,6 +3075,17 @@ test_cross_branch_attribution_picks_most_recent_row
 test_terminal_corpse_loses_to_live_run_on_same_branch
 test_runs_list_live_row_outranks_newer_terminal_row
 test_unfetched_live_sibling_outranks_terminal_row_at_exact_head
+test_rebased_live_run_outranks_terminal_row_at_worktree_head
+test_parked_live_sibling_reports_its_gate_not_working
+test_home_view_row_with_another_head_is_never_inspected
+test_home_view_row_without_a_head_is_never_inspected
+test_inspected_run_for_another_branch_is_rejected
+test_inspected_terminal_run_never_overrides_the_live_word
+test_other_branch_answer_still_reports_the_live_gate
+test_status_answer_carrying_the_runs_table_needs_no_home_view
+test_rebased_live_run_without_exact_anchor_binds_nothing
+test_diverged_terminal_newest_row_is_never_anchored
+test_ancestor_live_newest_row_is_never_anchored
 test_only_terminal_rows_keep_newest_first_precedence
 test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged

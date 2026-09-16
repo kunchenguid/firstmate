@@ -56,6 +56,61 @@ SH
   printf '%s\n' "$fb"
 }
 
+# A `no-mistakes` fake for the incident's exact shape: this branch has no run
+# object bare `axi status` can bind, its recent-runs table carries the live
+# run's id, the ledger lists that run, and inspecting it by id shows a run
+# parked at its gate with an ask-user finding.
+write_parked_run_fake() {  # <fakebin> <branch> <head>
+  cat > "$1/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  axi)
+    shift
+    case "\${1:-}" in
+      status)
+        shift
+        if [ "\${1:-}" = --run ]; then
+          [ "\${2:-}" = 01LIVE ] || { printf 'error: run %s not found\n' "\${2:-}"; exit 0; }
+          cat <<'DETAIL'
+run:
+  id: "01LIVE"
+  branch: $2
+  status: running
+  awaiting_agent: parked 23m57s
+  head: $3
+  pr: ""
+  findings: "2 awaiting, 1 auto-fix, 1 info"
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,10
+    review,fix_review,2,1437000
+    test,pending,0,0
+gate:
+  step: review
+  status: fix_review
+  summary: "two findings await a decision"
+  findings[2]{id,severity,file,action,description}:
+    f1,warning,a.go,auto-fix,"ignored error"
+    f2,error,b.go,ask-user,"changes product behavior"
+DETAIL
+        else
+          cat <<'STATUS'
+current_branch: $2
+runs_on_current_branch: 0
+count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  "01LIVE",$2,running,$3,""
+STATUS
+        fi ;;
+    esac ;;
+  runs)
+    printf '  running    $2 $3  2026-09-15 10:05\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/no-mistakes"
+}
+
 make_home() {  # <name>
   local home=$TMP_ROOT/$1
   mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config"
@@ -474,6 +529,51 @@ test_event_hints_follow_reconciled_current_state() {
       and task("stale-blocked").hints.blocked_event == false
   ' >/dev/null || fail "event hints must follow reconciled current state"
   pass "snapshot event hints follow reconciled current state"
+}
+
+# The 2026-09-15 false-active report, end to end through the classifier the
+# captain's fleet view is built from: a crew whose live run is PARKED at an
+# unanswered gate, and whose run bare `axi status` cannot bind to the worktree,
+# must land in the waiting list, never in active work. Only `parked`, `paused`
+# and `blocked` reach $holds_all; `working` counts as work in progress, which is
+# how a crew sitting on an ask-user gate could stay invisible indefinitely.
+test_parked_live_run_is_a_hold_not_active_work() {
+  local home fakebin out repo base short
+  home=$(make_home parked-live-run)
+  repo="$home/projects/parkedlive"
+  mkdir -p "$repo"
+  fm_git_identity fmtest fmtest@example.invalid
+  git -C "$repo" init -q
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" checkout -q -b fm/feat-parkedlive
+  base=$(git -C "$repo" rev-parse HEAD)
+  short=$(git -C "$repo" rev-parse --short=7 "$base")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] parkedlive - Crew parked at an unanswered gate (repo: alpha) (kind: ship) (since 2026-09-15)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/parkedlive.meta" \
+    "window=firstmate:fm-parkedlive" \
+    "worktree=$repo" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fakebin=$(make_fakebin "$home")
+  write_parked_run_fake "$fakebin" fm/feat-parkedlive "$short"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | any(.id == "parkedlive"))
+      and (.holds[] | select(.id == "parkedlive") | .reason | contains("parked at review"))
+      and (.holds[] | select(.id == "parkedlive") | .source == "child-state")
+      and .active_children == []
+      and .counts.active_children == 0
+  ' >/dev/null || fail "a crew parked at an unanswered gate was not classified as a wait: $out"
+  pass "a live run parked at its gate is a hold, not active work"
 }
 
 test_scout_reports_include_teardown_reports() {
@@ -1059,6 +1159,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_parked_live_run_is_a_hold_not_active_work
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

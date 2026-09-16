@@ -5,7 +5,7 @@
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
 # by strict branch-and-head identity first, and both then recognize a provable
-# pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
+# pipeline-owned continuation through fm_nm_runs_decision_for_worktree below:
 # crew-state for an ACTIVE run, so a fix round never reads as an older failed
 # run, and teardown for a run PARKED at a gate, so cleanup concludes it
 # instead of orphaning it. Getting this wrong in either
@@ -75,7 +75,7 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
 # A run head whose object this copy does not have cannot be proven here and is
-# rejected; fm_nm_runs_status_for_worktree below owns the one ledger-anchored
+# rejected; fm_nm_runs_decision_for_worktree below owns the one ledger-anchored
 # recognition for that case, and fm_nm_run_is_pipeline_owned_active below
 # carries the custody exemption: a live run whose pipeline currently owns the
 # branch binds without head equality.
@@ -90,7 +90,7 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 # match rule each one used, because a terminal run can be the corpse of a
 # crashed attempt while the live one is what is actually validating this code.
 # Within one liveness class the selecting caller's existing precedence is
-# unchanged - for the runs ledger, fm_nm_runs_status_for_worktree's
+# unchanged - for the runs ledger, fm_nm_runs_decision_for_worktree's
 # newest-row-decides rule below.
 # fm_nm_run_status_class next classifies a recorded status word for that
 # comparison, and a word it cannot classify keeps the caller's own precedence
@@ -159,26 +159,34 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]"; the `axi` surface has no
-# runs-listing subcommand - verified against the installed CLI). Prints the
-# status word of the branch's CURRENT run row, or nothing when the ledger
-# cannot prove attribution. When optional expected head $4 is supplied, its
+# runs-listing subcommand, only the home view `no-mistakes axi` prints with no
+# subcommand at all, which fm_nm_home_view_run_id below reads for the run ids
+# this ledger omits - both verified against the installed CLI, v1.72.0). Prints
+# "<status> <row-head>" for the branch's CURRENT run row, or nothing when the
+# ledger cannot prove attribution. When optional expected head $4 is supplied, its
 # abbreviated commit identity must match the newest row. The branch's NEWEST
 # row alone decides; older rows are history and never answer for the present:
 #   - newest row's head resolves and matches the worktree (fm_nm_head_matches_worktree):
 #     its status word
-#   - newest row's head resolves but does not match: nothing (a newer run that
-#     is not this worktree's makes every older row stale history)
-#   - newest row's head does not resolve in this copy (the pipeline committed
-#     its fix round in its own checkout and the task copy never fetched it):
-#     recognized ONLY as a provable pipeline-owned continuation of the
-#     submitted head, which requires ALL of: the row is ACTIVE (status
-#     running), and the immediately older row for the SAME branch resolves to
-#     EXACTLY the worktree HEAD. The pipeline's own ledger then proves an
-#     unbroken run sequence from a run that ended at the submitted head to an
-#     active run on the same branch - the anchored active row's status word is
-#     printed. Anything else (no anchor row, an anchor that is merely an
-#     ancestor, a terminal unresolvable row) prints nothing, so branch-name
-#     coincidence, arbitrary remote state, and other tasks' runs never match.
+#   - newest row's head does not bind - either it does not resolve in this copy
+#     (the pipeline committed its fix round in its own checkout and the task
+#     copy never fetched it) or it resolves on a line of history the worktree
+#     HEAD does not share (the pipeline replayed the branch onto an advanced
+#     upstream, so neither commit descends from the other):
+#     a TERMINAL or unclassifiable row prints nothing, because a newer run that
+#     is not this worktree's makes every older row stale history. An ACTIVE row
+#     is recognized as a provable pipeline-owned continuation of the submitted
+#     head, which additionally requires the immediately older row for the SAME
+#     branch to resolve to EXACTLY the worktree HEAD. The pipeline's own ledger
+#     then proves an unbroken run sequence from a run that ended at the
+#     submitted head to an active run on the same branch - the anchored active
+#     row's status word is printed. Anything else (no anchor row, an anchor
+#     that is merely an ancestor or merely a descendant) prints nothing, so
+#     branch-name coincidence, arbitrary remote state, and other tasks' runs
+#     never match. Both unbindable shapes reach the SAME anchor because a
+#     rebased head is exactly as unprovable as an unfetched one, and treating
+#     only the unfetched one that way is what let a dead run report a live
+#     task as failed (nutrifam-cerrar-allow-authenticated, 2026-09-07).
 # The one exception to newest-row-decides is the live-over-terminal rule stated
 # with fm_nm_head_matches_worktree above, and it only ever replaces a TERMINAL
 # answer with a LIVE one: when the newest row binds but is terminal, the older
@@ -191,20 +199,21 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # requires, so branch-name coincidence and other tasks' runs still never
 # match. A terminal newest row is the corpse of a crashed attempt whenever a
 # live run for the same worktree is still on the ledger, so it is not the
-# present. Nothing else widens: a newest row that does not bind still ends the
-# scan, a newest row whose class is live or unclassifiable is still answered
-# as-is, the anchored pipeline-continuation path is untouched, and with no live
-# sibling the newest terminal word is still what is printed.
+# present. Nothing else widens: the sibling scan is unchanged, a newest row
+# that does not bind still ends the scan unless it is LIVE and its head is
+# unprovable rather than superseded, a newest row that binds is still answered
+# as-is, the anchor is still exact head equality and nothing else, and with no
+# live sibling the newest terminal word is still what is printed.
 # Read-only: git reads resolve objects in place; custody never changes.
-fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
+fm_nm_runs_decision_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}
-  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
+  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st='' pending_sha=''
   # Set only by the newest binding row when its status classifies terminal, and
   # printed when the scan ends without finding a live row for this worktree. It
   # is the sole reason the scan continues past the newest row, and every exit
   # below leaves the loop rather than returning, so a malformed older row can
   # never swallow an answer the newest row had already decided.
-  local decided='' decided_exact=''
+  local decided='' decided_exact='' decided_sha=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
@@ -249,6 +258,7 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
         [ -n "$decided_exact" ] || continue
       fi
       decided=$st
+      decided_sha=$sha
       break
     fi
     if [ -n "$pending_st" ]; then
@@ -257,6 +267,7 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
       # worktree still sits at the submitted head.
       if [ "$(fm_nm_resolve_commit "$wt" "$sha")" = "$local_full" ]; then
         decided=$pending_st
+        decided_sha=$pending_sha
       fi
       break
     fi
@@ -269,21 +280,94 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
       esac
     fi
     row_full=$(fm_nm_resolve_commit "$wt" "$sha")
-    if [ -n "$row_full" ]; then
-      if fm_nm_head_matches_worktree "$wt" "$sha"; then
-        decided=$st
-        # A live or unclassifiable word is this worktree's current answer and
-        # ends the scan; only a terminal one keeps looking for a live sibling.
-        if [ "$(fm_nm_run_status_class "$st")" = terminal ]; then
-          [ "$row_full" != "$local_full" ] || decided_exact=1
-          continue
-        fi
+    if [ -n "$row_full" ] && fm_nm_head_matches_worktree "$wt" "$sha"; then
+      decided=$st
+      decided_sha=$sha
+      # A live or unclassifiable word is this worktree's current answer and
+      # ends the scan; only a terminal one keeps looking for a live sibling.
+      if [ "$(fm_nm_run_status_class "$st")" = terminal ]; then
+        [ "$row_full" != "$local_full" ] || decided_exact=1
+        continue
       fi
       break
     fi
-    [ "$st" = running ] || break
+    # The head rule could not bind this row. A head that resolves as a strict
+    # ANCESTOR of the worktree HEAD is not unprovable, it is superseded: local
+    # work advanced past it outside the run (the case fm_nm_head_matches_worktree
+    # rejects on purpose), and no anchor can turn stale history into the present.
+    if [ -n "$row_full" ] \
+      && git -C "$wt" merge-base --is-ancestor "$row_full" "$local_full" 2>/dev/null; then
+      break
+    fi
+    # What remains is genuinely unprovable: a head absent from this copy, or one
+    # on a line of history the worktree HEAD does not share. Only a LIVE row is
+    # still recognizable, through the anchor below.
+    [ "$(fm_nm_run_status_class "$st")" = live ] || break
     pending_st=$st
+    pending_sha=$sha
   done <<< "$list"
-  printf '%s' "$decided"
+  if [ -n "$decided" ]; then
+    printf '%s %s' "$decided" "$decided_sha"
+  fi
   return 0
+}
+
+# The run id of the live run the ledger already attributed to this worktree,
+# read from a recent-runs TOON table in captured output $1 (the home view
+# `no-mistakes axi` prints with no subcommand, and the same table a status
+# response carries). The ledger the decision above scans has no id column, so
+# this is the only public way to name that run for `axi status --run <id>`.
+# Deliberately NOT an attribution rule of its own: it never selects a run, it
+# only recovers the id of the row the caller already proved is this worktree's,
+# so branch $2 AND recorded head $3 must both match and the row's status word
+# must still classify live. The head comparison is the ledger's own abbreviated
+# form (either identity a prefix of the other), because the two surfaces
+# abbreviate independently, and an empty or non-hex head column is no head at
+# all rather than a match against everything. Column positions come from the
+# table's own header rather than a fixed order, branch and status are compared
+# against exact expected words, and the head and the id are charset-validated,
+# so a reshaped or malformed table yields nothing instead of a wrong id.
+fm_nm_home_view_run_id() {  # <toon-output> <branch> <row-head>
+  local out=$1 branch=$2 head=$3 id
+  [ -n "$out" ] && [ -n "$branch" ] && [ -n "$head" ] || return 0
+  id=$(printf '%s\n' "$out" | awk -v want_branch="$branch" -v want_head="$head" '
+    function unquote(v) { gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/^"|"$/, "", v); return v }
+    /^[[:space:]]*runs\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+      header = $0
+      sub(/^[^{]*\{/, "", header)
+      sub(/\}.*$/, "", header)
+      n = split(header, cols, ",")
+      id_col = branch_col = status_col = head_col = 0
+      for (i = 1; i <= n; i++) {
+        col = unquote(cols[i])
+        if (col == "id") id_col = i
+        else if (col == "branch") branch_col = i
+        else if (col == "status") status_col = i
+        else if (col == "head") head_col = i
+      }
+      in_table = (id_col && branch_col && status_col && head_col)
+      next
+    }
+    in_table {
+      if ($0 !~ /^[[:space:]]+[^[:space:]]/ || split($0, f, ",") < n) { in_table = 0; next }
+      if (unquote(f[branch_col]) != want_branch) next
+      if (unquote(f[status_col]) != "running") next
+      row_head = unquote(f[head_col])
+      if (row_head == "" || row_head ~ /[^A-Fa-f0-9]/) next
+      if (index(row_head, want_head) != 1 && index(want_head, row_head) != 1) next
+      print unquote(f[id_col])
+      exit
+    }
+  ')
+  case "$id" in *[!A-Za-z0-9]*|'') return 0 ;; esac
+  printf '%s' "$id"
+}
+
+# The status word alone, the historical contract every caller but crew-state's
+# gate inspection uses: the first field of the decision above, so one scan
+# serves both.
+fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
+  local decision
+  decision=$(fm_nm_runs_decision_for_worktree "$@")
+  printf '%s' "${decision%% *}"
 }
