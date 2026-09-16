@@ -16,9 +16,9 @@
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without waiting for the inactive cadence.
-# A newly delivered terminal line performs one bounded current-state read only
-# when needed to bind the exact terminal run id; failed attribution never delays
-# or suppresses the ledger delivery.
+# When the terminal producer records its exact run id in a `[run=<id>]` tag,
+# delivery copies that identity into the receipt; a line without the tag remains
+# deliverable without a run id.
 # This keeps a mate's PR-ready, finding, and failure outcomes independent of the
 # mate model appending them (docs/secondmate-parent-channel.md).
 # A main home has no parent channel and skips this path because its watcher
