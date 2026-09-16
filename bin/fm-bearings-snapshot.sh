@@ -601,7 +601,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           + [($snap.secondmate_current.records // [])[] as $m | if $m.contributions == null then null else $m.contributions + {owner:$m.id} end])
         | map(if . != null and .owner != "(main)" and .known > 0 and (.valid_until // 0) < ($now | fromdateiso8601)
               then .complete=false | .proven_clear=false | .checked=0 | .captain=[]
-                | .counts={captain:0,fleet:.known,maintainer:0,nobody:0}
+                | .unmeasured=(.unmeasured // 0)
+                | .counts={captain:0,fleet:(.known - .unmeasured),maintainer:0,nobody:0}
               else . end) as $homes
         | ([$homes[] | select(. != null)]) as $measured
         | {scope:"owned contributions per home",known:([$measured[].known] | add // 0),

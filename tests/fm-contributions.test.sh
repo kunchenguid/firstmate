@@ -401,6 +401,39 @@ test_unsupported_forge_is_not_fleet_work() {
   pass 'unsupported forge coverage is disclosed without inventing fleet work'
 }
 
+test_held_unsupported_forge_is_not_captain_work() {
+  local home
+  home=$(new_home held-unsupported-forge)
+  printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship) (hold: choose scope) (hold-kind: captain)\n' >> "$home/data/backlog.md"
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.unmeasured == 1 and .contributions.counts.captain == 0
+    and .contributions.counts.fleet == 0 and (.contributions.captain | length) == 0
+    and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
+    || fail 'a held unsupported forge was classified as captain or fleet work'
+  pass 'held unsupported forge coverage remains unmeasured'
+}
+
+test_expired_child_unsupported_forge_stays_unmeasured() {
+  local home child
+  home=$(new_home expired-unsupported-parent)
+  child=$(new_home expired-unsupported-child)
+  mkdir -p "$child/bin"
+  printf '# Fixture\n' > "$child/AGENTS.md"
+  printf 'child\n' > "$child/.fm-secondmate-home"
+  printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' >> "$child/data/backlog.md"
+  FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary > "$child/state/home-summary.json" \
+    || fail 'could not collect child unsupported-forge coverage'
+  jq '.contributions.valid_until=0' "$child/state/home-summary.json" > "$child/update.json"
+  mv "$child/update.json" "$child/state/home-summary.json"
+  printf -- '- child - fixture (home: %s; scope: fixture; projects: sample; added 2026-09-16)\n' "$child" > "$home/data/secondmates.md"
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.unmeasured == 1 and .contributions.counts.captain == 0
+    and .contributions.counts.fleet == 0 and .contributions.complete == false
+    and .contributions.proven_clear == false' >/dev/null \
+    || fail 'expired child unsupported-forge coverage became fleet work'
+  pass 'expired child unsupported-forge coverage remains unmeasured'
+}
+
 test_watcher_surfaces_new_contribution_once() {
   local home out rc rows
   home=$(new_home watcher-contribution)
@@ -461,7 +494,7 @@ test_unreadable_pending_is_not_empty() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
