@@ -287,8 +287,20 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The poll is bound to its own sidecar, program bytes, and file identities; this
+# cross-check adds the one thing those cannot show, that the task's own record
+# names the same pull request. The record is append-mostly and outlives the
+# arming - bin/fm-spawn.sh's relaunch path rewrites it with control_relaunch_tx=
+# at the tail, and bin/fm-captain-hold.sh appends decisions_reviewed= and
+# decision_keys= - so the guarantee is about PR identity wherever it appears in
+# the file rather than about its tail: exactly one pr= line carries a canonical
+# URL, and every pr_head= line carries a valid head. A key this parser does not
+# know carries no PR identity, so it is skipped rather than treated as
+# tampering; treating it as tampering revoked live merge polls, and because
+# arming rewrote pr= to the end of the file the refusal could only ever surface
+# later, in the watcher.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line key value pr_count=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -298,34 +310,27 @@ fm_pr_metadata_identity_parse() {
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      pr=*)
+      *=*) key=${line%%=*} ;;
+      *) continue ;;
+    esac
+    value=${line#*=}
+    case "$key" in
+      pr)
         pr_count=$((pr_count + 1))
-        [ "$pr_count" -eq 1 ] || continue
-        value=${line#pr=}
-        if fm_pr_url_parse "$value"; then
-          FM_PR_META_PROVIDER=$FM_PR_PROVIDER
-          FM_PR_META_URL=$FM_PR_URL
-          FM_PR_META_HOST=$FM_PR_HOST
-          FM_PR_META_PATH=$FM_PR_PATH
-          FM_PR_META_NUMBER=$FM_PR_NUMBER
-        fi
-        seen_pr=1
+        [ "$pr_count" -eq 1 ] || return 1
+        fm_pr_url_parse "$value" || return 1
+        FM_PR_META_PROVIDER=$FM_PR_PROVIDER
+        FM_PR_META_URL=$FM_PR_URL
+        FM_PR_META_HOST=$FM_PR_HOST
+        FM_PR_META_PATH=$FM_PR_PATH
+        FM_PR_META_NUMBER=$FM_PR_NUMBER
         ;;
-      pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+      pr_head)
+        fm_pr_head_valid "$value" || return 1
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 
