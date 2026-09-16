@@ -143,8 +143,9 @@
 # recorded family-level coupling still expands to the whole family.
 # tests/lib.sh, tests/fixtures.sh, tests/*-helpers.sh and tests/*-fixture.sh are
 # shared files that map to the suites naming them; a fixture under
-# tests/fixtures/<dir>/ is mapped by that directory instead. Curated family arms
-# above those also name individual tests/ files explicitly.
+# tests/fixtures/<dir>/ is mapped by that directory instead, and a file under
+# tests/assets/ by the suites naming its path. Curated family arms above those
+# also name individual tests/ files explicitly.
 set -eu
 
 now_ms() {
@@ -380,7 +381,8 @@ family_for_basename() {
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-layout.test.sh|fm-bearings-board-render.test.sh|\
+    fm-bearings-snapshot.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -1597,6 +1599,23 @@ families_for_changed_path() {
       if [ -e "$path" ]; then
         families_for_unmapped_bin "$path" \
           || printf '%s\n' "__unmapped__:$path"
+      fi
+      ;;
+    tests/assets/*)
+      # An asset belongs to whichever suite reads it, found by the same
+      # reference scan used for shared helpers. Scan references even after
+      # deletion so an unchanged consumer still gets selected, and report an
+      # asset no suite names as unmapped rather than selecting nothing.
+      # Keep this arm above tests/*), which would otherwise claim every asset.
+      # Fixtures in tests/fm-test-run.test.sh must name synthetic assets, never
+      # a real tests/assets/ file: this scan reads test sources, so a real name
+      # embedded there would answer for the asset itself and hide the unmapped
+      # fallback behind that suite's own family.
+      if [ -e "$path" ]; then
+        families_for_test_reference "$path" \
+          || printf '%s\n' "__unmapped__:$path"
+      else
+        families_for_test_reference "$path" || true
       fi
       ;;
     tests/*)
