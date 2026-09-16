@@ -180,12 +180,20 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
+| agy | 4 known tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`) | Scoped guard wired via tracked `.agents/hooks.json` PreToolUse hook; returns `decision: deny` on stdout. |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+### Antigravity (agy), wired via .agents/hooks.json
+
+Antigravity CLI and Antigravity 2.0 discover project lifecycle hooks in `.agents/hooks.json`.
+The hook runner delivers a `PreToolUse` JSON payload on stdin containing `toolCall.name`.
+`bin/fm-subagent-pretool-check.sh` extracts that field, classifies the tool against delegation stems, and emits `{"decision":"deny","reason":"..."}` on stdout with exit 0 to communicate the deny decision to Antigravity.
+The shared primary-scope check (`bin/fm-primary-scope-lib.sh`) ensures the guard is active only in a primary or secondmate home and remains inert in task worktrees.
 
 ### Codex, verified not applicable
 
