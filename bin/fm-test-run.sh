@@ -338,7 +338,7 @@ family_for_basename() {
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-account-slot-live-e2e.test.sh|fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-bearings-board-lavish-live-e2e.test.sh|\
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
@@ -364,7 +364,8 @@ family_for_basename() {
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
-    fm-control.test.sh|fm-control-relaunch.test.sh|\
+    fm-account-slot.test.sh|fm-control.test.sh|fm-control-relaunch.test.sh|\
+    fm-control-recover-missing.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
@@ -679,6 +680,8 @@ tests/fm-backlog-handoff.test.sh 52291
 tests/fm-bearings-board-render.test.sh 1528
 tests/fm-bearings-board.test.sh 4195
 tests/fm-bearings-snapshot.test.sh 116374
+tests/fm-account-slot-live-e2e.test.sh 21
+tests/fm-account-slot.test.sh 6500
 tests/fm-bootstrap-network-parallel.test.sh 8214
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
@@ -1406,8 +1409,13 @@ families_for_changed_path() {
       ;;
     bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-account-slot.test.sh"
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-account-slot.sh|bin/fm-account-slot-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"

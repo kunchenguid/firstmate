@@ -333,6 +333,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/account-slots.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },

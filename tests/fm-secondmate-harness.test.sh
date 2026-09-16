@@ -1284,6 +1284,10 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf '{"version":1,"slots":{"primary-only":{}}}\n' > "$w/home/config/account-slots.json"
+  mkdir -p "$w/sm/config"
+  printf '{"version":1,"slots":{"secondmate-local":{}}}\n' > "$w/sm/config/account-slots.json"
+  cp "$w/sm/config/account-slots.json" "$w/account-slots.before"
   : > "$w/home/config/trace-context"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
@@ -1327,6 +1331,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   [ -e "$w/sm/config/backend" ] \
     && fail "sweep: home backend not removed after the primary cleared it"
+  cmp -s "$w/account-slots.before" "$w/sm/config/account-slots.json" \
+    || fail "sweep: copied or removed the secondmate home's local account registry"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
 }
 
@@ -1606,6 +1612,10 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf '{"version":1,"slots":{"primary-only":{}}}\n' > "$w/home/config/account-slots.json"
+  mkdir -p "$w/sm/config"
+  printf '{"version":1,"slots":{"secondmate-local":{}}}\n' > "$w/sm/config/account-slots.json"
+  cp "$w/sm/config/account-slots.json" "$w/account-slots.before"
   record_live_watcher_fixture "$w/home"
   : > "$w/home/config/trace-context"
   err="$w/config-push-basic.err"
@@ -1636,6 +1646,10 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
     || fail "config push fast-forwarded tracked files"
   [ "$(cat "$w/sm/config/backend")" = tmux ] || fail "config push did not write backend"
+  cmp -s "$w/account-slots.before" "$w/sm/config/account-slots.json" \
+    || fail "config push copied or removed the secondmate home's local account registry"
+  assert_not_contains "$out" "account-slots.json" \
+    "config push exposed the home-local account registry as inherited material"
   instruction=$(reread_instruction_path "$w/sm") || fail "config-push reread instruction missing"
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "config-push reread must include exact backend bytes"
@@ -1659,7 +1673,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   assert_not_contains "$out2" "config-reread: sent" \
     "unchanged config must not send a reread message"
   [ ! -s "$log" ] || fail "unchanged config push still invoked tmux send: $(cat "$log")"
-  pass "B12 config-push propagates via shared live discovery, reports items, rereads on change only, and does not fast-forward"
+  pass "B12 config-push propagates shared config, leaves account slots home-local, rereads on change only, and does not fast-forward"
 }
 
 test_config_push_reports_skips_dirty_and_invalid_home() {

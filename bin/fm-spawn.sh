@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account-slot <id>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account-slot <id>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -28,7 +28,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account-slot <id|default>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -222,8 +222,11 @@
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
-#   pair still checks it against its own brief; a batch spanning modes is two invocations.
+#   applies to every pair. --account-slot is the exception: it is single-task only, and
+#   a batch of more than one pair refuses it, because one slot is one subscription and
+#   every worker needs its own resolved slot. A ship batch therefore carries one delivery
+#   contract, and each pair still checks it against its own brief; a batch spanning modes
+#   is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -500,6 +503,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-account-slot-lib.sh
+. "$SCRIPT_DIR/fm-account-slot-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -511,6 +516,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+ACCOUNT_SLOT=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -518,6 +524,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ACCOUNT_SLOT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -545,6 +552,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    account_slot)
+      ACCOUNT_SLOT=$a
+      ACCOUNT_SLOT_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -595,6 +606,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --account-slot) want_value=account_slot ;;
+  --account-slot=*)
+    ACCOUNT_SLOT=${a#--account-slot=}
+    ACCOUNT_SLOT_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -634,6 +650,10 @@ done
   echo "error: --effort requires a non-empty value" >&2
   exit 1
 }
+[ "$ACCOUNT_SLOT_SET" -eq 0 ] || [ -n "$ACCOUNT_SLOT" ] || {
+  echo "error: --account-slot requires a non-empty value" >&2
+  exit 1
+}
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
   exit 1
@@ -670,6 +690,10 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+if [ "$ACCOUNT_SLOT_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --account-slot applies only to ship and scout workers; persistent secondmate account selection is not supported" >&2
+  exit 1
+fi
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -1281,6 +1305,14 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  # An account slot is one subscription, so sharing it across a batch would put
+  # every worker on the same account and leave its siblings idle. Each worker
+  # needs its own resolved slot: one single-task spawn per worker, which the
+  # captain may run in parallel.
+  if [ "$ACCOUNT_SLOT_SET" -eq 1 ] && [ "${#POS[@]}" -gt 1 ]; then
+    echo "error: --account-slot is single-task only; spawn each worker separately with its own resolved slot" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1290,6 +1322,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$ACCOUNT_SLOT_SET" -eq 0 ] || shared_args+=(--account-slot "$ACCOUNT_SLOT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1450,6 +1483,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_ACCOUNT_SLOT=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1489,8 +1523,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_ACCOUNT_SLOT=$(fm_meta_get "$RELAUNCH_META" account_slot)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ "$KIND" = secondmate ] && [ "$ACCOUNT_SLOT_SET" -eq 1 ]; then
+    echo "error: --account-slot applies only to ship and scout workers; persistent secondmate account selection is not supported" >&2
+    exit 1
+  fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -1689,7 +1728,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __ACCOUNTSLOTFLAG____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1910,6 +1949,33 @@ case "$ARG3" in
   }
   ;;
 esac
+
+# Resolve the home-local account binding before any worktree, endpoint, trust,
+# hook, or task-record mutation. A direct relaunch follows the same precedence
+# as fm-control: explicit value, explicit default clear, same-harness preserve,
+# harness-switch clear. The logical ID is the only account datum retained.
+ACCOUNT_SLOT_EFFECTIVE=
+if [ "$ACCOUNT_SLOT_SET" -eq 1 ]; then
+  if [ "$ACCOUNT_SLOT" != default ]; then
+    ACCOUNT_SLOT_EFFECTIVE=$ACCOUNT_SLOT
+  fi
+elif [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ]; then
+  ACCOUNT_SLOT_EFFECTIVE=$RELAUNCH_PRIOR_ACCOUNT_SLOT
+fi
+if [ -n "$ACCOUNT_SLOT_EFFECTIVE" ]; then
+  [ "$RAW_LAUNCH" -eq 0 ] || {
+    echo "error: --account-slot requires a canonical claude or codex harness, not a raw launch command" >&2
+    exit 1
+  }
+  case "$HARNESS" in
+    claude|codex) ;;
+    *) echo "error: account slots are supported only for claude and codex workers" >&2; exit 1 ;;
+  esac
+  fm_account_slot_resolve "$CONFIG" "$ACCOUNT_SLOT_EFFECTIVE" "$HARNESS" || {
+    echo "error: $FM_ACCOUNT_SLOT_ERROR" >&2
+    exit 1
+  }
+fi
 
 # muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -3581,7 +3647,12 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  if [ -n "$ACCOUNT_SLOT_EFFECTIVE" ]; then
+    trust_command=(env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN "CLAUDE_CONFIG_DIR=$FM_ACCOUNT_SLOT_STORE_PATH" "$FM_ROOT/bin/fm-claude-trust.sh")
+  else
+    trust_command=("$FM_ROOT/bin/fm-claude-trust.sh")
+  fi
+  if ! "${trust_command[@]}" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4063,7 +4134,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort account_slot busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4081,6 +4152,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$ACCOUNT_SLOT_EFFECTIVE" ] || echo "account_slot=$ACCOUNT_SLOT_EFFECTIVE"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4218,8 +4290,13 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+ACCOUNTSLOTFLAG=
+if [ "$HARNESS" = codex ] && [ -n "$ACCOUNT_SLOT_EFFECTIVE" ]; then
+  ACCOUNTSLOTFLAG="-c $(shell_quote 'cli_auth_credentials_store="file"') "
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__ACCOUNTSLOTFLAG__/$ACCOUNTSLOTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
@@ -4256,7 +4333,16 @@ esac
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+if [ -n "$ACCOUNT_SLOT_EFFECTIVE" ]; then
+  case "$HARNESS" in
+    claude)
+      LAUNCH="env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=$(shell_quote "$FM_ACCOUNT_SLOT_STORE_PATH") $LAUNCH"
+      ;;
+    codex)
+      LAUNCH="env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u OPENAI_API_KEY -u CODEX_API_KEY CODEX_HOME=$(shell_quote "$FM_ACCOUNT_SLOT_STORE_PATH") $LAUNCH"
+      ;;
+  esac
+elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

@@ -5,14 +5,14 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 ## Resolution
 
 Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
-`config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
-For a profile array, load `quota-array-dispatch` after establishing harness and provider facts here.
+`config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes, plus an optional account slot on a claude or codex profile (`../../../../../docs/configuration.md` "Account slots" owns that registry).
+For a profile array, or a profile carrying more than one account slot, load `quota-array-dispatch` after establishing harness and provider facts here.
 
 `../secondmate-provisioning/SKILL.md` owns inherited local material.
 Its harness consequence is that a secondmate's workers receive literal `config/crew-harness` and `config/crew-dispatch.json`, while the primary-only `config/secondmate-harness` is never inherited because secondmates do not spawn secondmates.
 A concrete crew value such as `codex` carries that runtime into the secondmate home.
 Unset or `default` carries no concrete value, so its workers use that home's own or detected harness rather than the primary's effective crew harness.
-The inherited dispatch file applies the same best-fit profiles there.
+The inherited dispatch file applies the same best-fit profiles there, but `config/account-slots.json` is never inherited, so a slot an inherited rule names resolves only where that home has its own entry for the same logical ID.
 
 ## Owners
 

@@ -16,9 +16,18 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model discovery | Open the current interactive session's `/model` picker. |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
+## Account slots
+
+One slotted worker selects one vendor profile through a single `CODEX_HOME`; profiles are never merged within a worker.
+Launch pins credential storage to that home with `-c cli_auth_credentials_store="file"`, verified on codex-cli 0.154.0 (see `../../../../../docs/verification/dispatch-auth.md` "Codex slot credential storage").
+`../../../../../docs/configuration.md` "Account slots" owns the home-local registry and operator contract.
+A slot-changing relaunch resolves the replacement profile before the control plane stops the current worker.
+
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+The decision persists for the repository inside the active `CODEX_HOME`, so later worktrees of the same project skip it.
+An account slot swaps `CODEX_HOME` to its own store, so a freshly provisioned slot shows that dialog once per repository even where the ambient home already accepted it, and `--dangerously-bypass-approvals-and-sandbox` does not suppress it; verified on codex-cli 0.154.0 (see `../../../../../docs/verification/dispatch-auth.md` "Codex slot directory trust").
+Nothing pre-registers trust for a Codex slot; handle it with this same post-spawn step, which `AGENTS.md` already requires after every spawn.
 
 ## Skill popup
 

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "slots": {
+    "claude-primary": {
+      "harness": "claude",
+      "storePath": "/absolute/path/to/claude-primary-profile",
+      "expectedAccountId": "<providers[0].account.accountId that quota-axi reports for this store>"
+    },
+    "claude-secondary": {
+      "harness": "claude",
+      "storePath": "/absolute/path/to/claude-secondary-profile",
+      "expectedAccountId": "<providers[0].account.accountId that quota-axi reports for this store>"
+    },
+    "codex-primary": {
+      "harness": "codex",
+      "storePath": "/absolute/path/to/codex-primary-profile",
+      "expectedAccountId": "<providers[0].account.accountId that quota-axi reports for this store>"
+    },
+    "codex-secondary": {
+      "harness": "codex",
+      "storePath": "/absolute/path/to/codex-secondary-profile",
+      "expectedAccountId": "<providers[0].account.accountId that quota-axi reports for this store>"
+    }
+  }
+}

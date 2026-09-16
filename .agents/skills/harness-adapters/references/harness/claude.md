@@ -14,6 +14,12 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
 
+## Account slots
+
+One slotted worker selects one vendor profile through a single `CLAUDE_CONFIG_DIR`; profiles are never merged within a worker.
+`../../../../../docs/configuration.md` "Account slots" owns the home-local registry and operator contract.
+A slot-changing relaunch resolves the replacement profile before the control plane stops the current worker.
+
 ## Workspace trust
 
 Claude gates a folder it has never seen behind an interactive workspace-trust dialog (titled "Quick safety check: Is this a project you created or one you trust?"), so every fresh task worktree would hit it, and so would every secondmate home no operator has opened by hand.

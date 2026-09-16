@@ -1163,6 +1163,102 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_account_slot_bootstrap_validation() {
+  local case_dir fakebin out store
+  case_dir="$TMP_ROOT/account-slots-bootstrap"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  store="$case_dir/home/claude-profile"
+  mkdir -p "$store"
+  chmod 700 "$store"
+  printf '{}\n' > "$store/.credentials.json"
+  chmod 600 "$store/.credentials.json"
+  cat > "$case_dir/home/config/account-slots.json" <<JSON
+{"version":1,"slots":{"claude-a":{"harness":"claude","storePath":"$store","expectedAccountId":"test-account"}}}
+JSON
+  chmod 600 "$case_dir/home/config/account-slots.json"
+  printf '%s\n' '{"default":{"harness":"claude","accountSlots":["claude-a"]}}' > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '%s\n' 'quota-axi 0.1.42'; exit 0; fi
+if [ "${1:-}" = --help ]; then printf '%s\n' 'flags: --tui'; exit 0; fi
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "valid account slot bootstrap should be silent, got: $out"
+
+  # shellcheck disable=SC2016 # The fake script, not this fixture, expands its argument.
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "${1:-}" = --version ]; then echo quota-axi-0.1.42; fi' > "$fakebin/quota-axi"
+  chmod +x "$fakebin/quota-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "CREW_DISPATCH:" "bootstrap reported valid slot configuration as invalid because quota-axi does not advertise a probe flag"
+
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '%s\n' 'quota-axi 0.1.42'; exit 0; fi
+if [ "${1:-}" = --help ]; then printf '%s\n' 'flags: --tui'; exit 0; fi
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
+  mv "$store/.credentials.json" "$case_dir/signed-out-credential"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "CREW_DISPATCH:" "bootstrap reported one signed-out slot as invalid home configuration"
+  mv "$case_dir/signed-out-credential" "$store/.credentials.json"
+  chmod 600 "$store/.credentials.json"
+
+  printf '%s\n' '{"default":{"harness":"claude","accountSlots":["missing-slot"]}}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "slot reference is missing or belongs to another harness: missing-slot" "bootstrap did not report the missing local slot binding"
+
+  # A secondmate inherits crew-dispatch.json but never account-slots.json, so a
+  # home holding slotted rules with no registry of its own cannot resolve them
+  # and is not thereby misconfigured; the spawn naming the slot is what refuses.
+  printf '%s\n' '{"default":{"harness":"claude","accountSlots":["claude-a"]}}' > "$case_dir/home/config/crew-dispatch.json"
+  mv "$case_dir/home/config/account-slots.json" "$case_dir/inherited-registry"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "CREW_DISPATCH:" "bootstrap blocked dispatch in a home that inherited slotted rules without its own registry"
+  mv "$case_dir/inherited-registry" "$case_dir/home/config/account-slots.json"
+  chmod 600 "$case_dir/home/config/account-slots.json"
+  pass "bootstrap validates account-slot registries and references without probing providers or gating on quota-axi"
+
+  # jq ships in a system BASE_PATH dir on many hosts, so mask it the same way the
+  # json-backend case does to keep this assertion host-independent.
+  local no_jq="$case_dir/no-jq.bash"
+  cat > "$no_jq" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$no_jq" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: jq (install:" "a valid registry on a host without jq lost the only jq install instruction"
+  assert_not_contains "$out" "CREW_DISPATCH: invalid config/account-slots.json" \
+    "a missing jq prerequisite was reported as invalid account-slot configuration"
+  mv "$case_dir/home/config/crew-dispatch.json" "$case_dir/registry-only-dispatch"
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$no_jq" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: jq (install:" "a registry with no dispatch rules on a host without jq lost the jq install instruction"
+  assert_not_contains "$out" "CREW_DISPATCH: invalid config/account-slots.json" \
+    "a missing jq prerequisite was reported as invalid account-slot configuration"
+  mv "$case_dir/registry-only-dispatch" "$case_dir/home/config/crew-dispatch.json"
+  pass "reports an absent jq as the missing prerequisite it is, never as invalid slot configuration"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1191,3 +1287,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_account_slot_bootstrap_validation

@@ -11,6 +11,43 @@
 
 FM_QUOTA_AXI_MIN=0.1.29
 
+# Account-slot routing is capability-gated rather than tied to an unpublished
+# version. The existing provider-level dispatch path retains the floor above.
+#
+# This list is the single owner of the account-slot probe's request contract.
+# fm_quota_axi_probe_argv builds the probe's argv from it and
+# fm_quota_axi_probe_capability requires quota-axi --help to advertise every
+# entry, so the probe can never send a flag the gate did not verify.
+FM_QUOTA_AXI_PROBE_FLAGS=(--provider --full --json --no-credential-refresh)
+
+FM_QUOTA_AXI_CAPABILITY_ERROR=
+
+fm_quota_axi_probe_argv() { # <provider>
+  local flag
+  FM_QUOTA_AXI_PROBE_ARGV=()
+  for flag in "${FM_QUOTA_AXI_PROBE_FLAGS[@]}"; do
+    FM_QUOTA_AXI_PROBE_ARGV+=("$flag")
+    case "$flag" in --provider) FM_QUOTA_AXI_PROBE_ARGV+=("$1") ;; esac
+  done
+}
+
+fm_quota_axi_probe_capability() {
+  local timeout=${1:-5} output flag
+  FM_QUOTA_AXI_CAPABILITY_ERROR=
+  command -v quota-axi >/dev/null 2>&1 \
+    || { FM_QUOTA_AXI_CAPABILITY_ERROR="quota-axi is not installed"; return 1; }
+  if declare -F fm_run_timed >/dev/null 2>&1; then
+    output=$(fm_run_timed "$timeout" quota-axi --help 2>/dev/null </dev/null)
+  else
+    output=$(quota-axi --help 2>/dev/null </dev/null)
+  fi || { FM_QUOTA_AXI_CAPABILITY_ERROR="quota-axi --help could not be read"; return 1; }
+  for flag in "${FM_QUOTA_AXI_PROBE_FLAGS[@]}"; do
+    printf '%s\n' "$output" | grep -Eq "(^|[][[:space:],(|/])$flag([])[[:space:],=|]|\$)" && continue
+    FM_QUOTA_AXI_CAPABILITY_ERROR="quota-axi does not support $flag; install a published release that advertises that flag"
+    return 1
+  done
+}
+
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
   local min_major min_minor min_patch min_extra

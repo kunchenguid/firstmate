@@ -13,8 +13,8 @@
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high", "accountSlots": ["claude-primary", "claude-secondary"] },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "accountSlots": ["codex-primary", "codex-secondary"] }
       ],
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
     }

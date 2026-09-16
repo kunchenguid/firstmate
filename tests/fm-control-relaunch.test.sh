@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fm-control.sh relaunch: the transactional replace-the-agent verb.
 #
-# Relaunch is the only control verb that changes durable records, so these
-# tests pin the transaction itself, hermetically (stubbed session provider, no
-# real agent):
+# Relaunch changes durable records (as `recover-missing` does, in its own
+# suite), so these tests pin the transaction itself, hermetically (stubbed
+# session provider, no real agent):
 #   1. A same-harness relaunch keeps every identity axis and reuses the SAME
 #      endpoint and worktree - it replaces an agent, it never forks a task.
 #   2. A harness switch is one ordinary relaunch: the record follows, the
@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The record rewrite leaves an already-armed merge poll authenticated, so
+#      a relaunched task still gets its merge notification.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -25,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -53,6 +57,10 @@ trap relaunch_cleanup EXIT
 make_tmux_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  # No slot store in this suite is signed in to a keychain, so the store-scoped
+  # lookup must answer "absent" without reaching the developer's real keychain.
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 44' > "$fb/security"
+  chmod +x "$fb/security"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -129,6 +137,32 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/timeout" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
+shift
+exec "$@"
+SH
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'flags: --provider --full --json --no-credential-refresh'
+  exit 0
+fi
+if [ "${1:-}" = --version ]; then printf '%s\n' 'quota-axi 0.1.42'; exit 0; fi
+printf 'argv=%s|claude=%s|codex=%s\n' "$*" "${CLAUDE_CONFIG_DIR-}" "${CODEX_HOME-}" >> "${FM_FAKE_QUOTA_CALLS:?}"
+provider=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --provider ]; then provider=$2; shift 2; else shift; fi
+done
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+attempt=oauth
+[ "$provider" != claude ] || attempt=oauth-file
+cat <<JSON
+{"generatedAt":"$now","schemaVersion":5,"providers":[{"provider":"$provider","account":{"accountId":"${FM_FAKE_QUOTA_ID:-test-account}","identityStatus":"verified"},"attempts":[{"source":"$attempt","status":"success"}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"},"selection":{"status":"known","spendPriority":-0.5}}]}}]}
+JSON
+SH
+  chmod +x "$fb/timeout" "$fb/quota-axi"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -137,11 +171,28 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/quota-calls"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
   printf '%s\n' "$dir"
+}
+
+configure_relaunch_slots() { # <case-dir>
+  local dir=$1 home="$1/home" claude_store="$1/claude-profile" codex_store="$1/codex-profile"
+  mkdir -p "$home/config" "$claude_store" "$codex_store"
+  chmod 700 "$home/config" "$claude_store" "$codex_store"
+  printf '{}\n' > "$claude_store/.credentials.json"
+  printf '{}\n' > "$codex_store/auth.json"
+  chmod 600 "$claude_store/.credentials.json" "$codex_store/auth.json"
+  cat > "$home/config/account-slots.json" <<JSON
+{"version":1,"slots":{
+  "claude-a":{"harness":"claude","storePath":"$claude_store","expectedAccountId":"test-account"},
+  "codex-a":{"harness":"codex","storePath":"$codex_store","expectedAccountId":"test-account"}
+}}
+JSON
+  chmod 600 "$home/config/account-slots.json"
 }
 
 # add_ship_task <case-dir> <id> [harness]
@@ -193,6 +244,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_QUOTA_CALLS="$dir/fake/quota-calls" FM_FAKE_QUOTA_ID="${FM_FAKE_QUOTA_ID:-test-account}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -430,6 +482,36 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# Relaunch is a supported recovery step, and it rewrites the durable record of a
+# task that may already have an armed merge poll. Preserving the pr= line is not
+# enough: the watcher re-authenticates the poll against that record on every
+# cycle, so a relaunch that leaves the record unreadable to that check silently
+# revokes the merge notification for the rest of the task's life.
+test_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc state url old_umask
+  dir=$(new_case armed-poll rl40)
+  add_ship_task "$dir" rl40 claude
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/40
+  printf 'pr=%s\n' "$url" >> "$state/rl40.meta"
+  old_umask=$(umask)
+  fm_pr_poll_prepare "$state" rl40 github "$url" github.com example/repo 40 \
+    "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the armed poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the armed poll fixture"
+  umask "$old_umask"
+  fm_pr_poll_artifacts_valid "$state" rl40 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed poll fixture was not authenticated before relaunch"
+
+  out=$(run_control "$dir" rl40 relaunch --note "continuing review work"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with an armed merge poll"$'\n'"$out"
+  [ "$(meta_field "$dir" rl40 pr)" = "$url" ] || fail "relaunch dropped the task PR"
+  [ -n "$(meta_field "$dir" rl40 control_relaunch_tx)" ] \
+    || fail "relaunch did not record its own transaction key on the task record"
+  fm_pr_poll_artifacts_valid "$state" rl40 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch silently revoked the armed merge poll"
+  pass "fm-control relaunch: an armed merge poll survives the record rewrite"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1681,11 +1763,110 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_same_harness_relaunch_preserves_account_slot() {
+  local dir out rc calls
+  dir=$(new_case account-preserve rl50)
+  add_ship_task "$dir" rl50 claude
+  configure_relaunch_slots "$dir"
+  printf 'account_slot=claude-a\n' >> "$dir/home/state/rl50.meta"
+
+  out=$(run_control "$dir" rl50 relaunch --note "continue on the selected account"); rc=$?
+  expect_code 0 "$rc" "same-harness slotted relaunch should succeed"
+  assert_equals claude-a "$(meta_field "$dir" rl50 account_slot)" "same-harness relaunch did not preserve the account slot"
+  assert_equals claude-a "$(journal_field "$dir" rl50 from_account_slot)" "journal omitted the prior account slot"
+  assert_equals claude-a "$(journal_field "$dir" rl50 to_account_slot)" "journal omitted the target account slot"
+  calls=$(wc -l < "$dir/fake/quota-calls" | tr -d ' ')
+  assert_equals 0 "$calls" "an explicit slot relaunch consumed quota evidence"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/claude-profile'" "replacement launch did not bind the preserved slot store"
+  assert_not_contains "$(cat "$dir/home/state/rl50.control-relaunch")" "$dir/claude-profile" "relaunch journal leaked the account path"
+  assert_not_contains "$(cat "$dir/home/state/rl50.control-relaunch")" "test-account" "relaunch journal leaked account identity"
+  pass "same-harness relaunch preserves the logical account slot from the local binding alone"
+}
+
+test_relaunch_can_clear_or_reset_account_slot() {
+  local dir out rc
+  dir=$(new_case account-clear rl51)
+  add_ship_task "$dir" rl51 claude
+  configure_relaunch_slots "$dir"
+  printf 'account_slot=claude-a\n' >> "$dir/home/state/rl51.meta"
+
+  out=$(run_control "$dir" rl51 relaunch --account-slot default --note "return to ambient credentials"); rc=$?
+  expect_code 0 "$rc" "explicit account-slot clear should succeed"
+  assert_equals "" "$(meta_field "$dir" rl51 account_slot)" "explicit default did not clear account metadata"
+  assert_equals "" "$(journal_field "$dir" rl51 to_account_slot)" "journal did not record the account-slot clear"
+
+  dir=$(new_case account-switch rl52)
+  add_ship_task "$dir" rl52 claude
+  configure_relaunch_slots "$dir"
+  printf 'account_slot=claude-a\n' >> "$dir/home/state/rl52.meta"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl52 relaunch --harness codex --note "switch harnesses"); rc=$?
+  expect_code 0 "$rc" "harness switch should clear an incompatible account slot"
+  assert_equals "" "$(meta_field "$dir" rl52 account_slot)" "harness switch retained the old account slot"
+  pass "explicit default and harness switches clear prior account bindings"
+}
+
+test_relaunch_refuses_invalid_account_binding_before_stop() {
+  local dir out rc
+  dir=$(new_case account-missing rl53)
+  add_ship_task "$dir" rl53 claude
+  printf 'account_slot=claude-a\n' >> "$dir/home/state/rl53.meta"
+  out=$(run_control "$dir" rl53 relaunch --note "must not stop"); rc=$?
+  expect_code 1 "$rc" "missing account registry should refuse relaunch"
+  assert_contains "$out" "config/account-slots.json is missing" "missing account binding refusal was unclear"
+  assert_equals claude "$(cat "$dir/fake/command")" "missing account binding stopped the old worker"
+  assert_not_contains "$(cat "$dir/fake/literal")" "/exit" "missing account binding sent an exit command"
+
+  dir=$(new_case account-signed-out rl54)
+  add_ship_task "$dir" rl54 claude
+  configure_relaunch_slots "$dir"
+  printf 'account_slot=claude-a\n' >> "$dir/home/state/rl54.meta"
+  rm "$dir/claude-profile/.credentials.json"
+  out=$(run_control "$dir" rl54 relaunch --note "must not stop"); rc=$?
+  expect_code 1 "$rc" "a signed-out slot should refuse relaunch"
+  assert_contains "$out" "no vendor-managed credential" "signed-out slot refusal was unclear"
+  assert_equals claude "$(cat "$dir/fake/command")" "a signed-out slot stopped the old worker"
+  pass "relaunch validates the local binding before stopping the old worker"
+}
+
+test_direct_spawn_relaunch_refuses_secondmate_account_slot_after_metadata_load() {
+  local dir home smhome out rc
+  dir=$(new_case account-direct-secondmate smslot)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  fm_git_worktree "$dir/proj" "$smhome" smslot-branch
+  mkdir -p "$home/data/smslot" "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf '# secondmate brief\n' > "$home/data/smslot/brief.md"
+  printf 'smslot\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-smslot"
+    echo "endpoint_task_id=smslot"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "home=$smhome"
+  } > "$home/state/smslot.meta"
+  printf '%s\n' fm-smslot > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" smslot --relaunch --account-slot claude-a); rc=$?
+  expect_code 1 "$rc" "direct secondmate relaunch accepted an account slot"
+  assert_contains "$out" "persistent secondmate account selection is not supported" "direct relaunch refusal did not use the recorded secondmate kind"
+  assert_equals zsh "$(cat "$dir/fake/command")" "direct secondmate relaunch started a replacement"
+  pass "direct spawn relaunch rechecks the recorded secondmate kind before account selection"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
@@ -1737,3 +1918,7 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_same_harness_relaunch_preserves_account_slot
+test_relaunch_can_clear_or_reset_account_slot
+test_relaunch_refuses_invalid_account_binding_before_stop
+test_direct_spawn_relaunch_refuses_secondmate_account_slot_after_metadata_load

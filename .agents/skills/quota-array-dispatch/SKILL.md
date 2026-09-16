@@ -2,9 +2,10 @@
 name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from quota-axi's default TOON, ranking by spendPriority after three
+  array or account-slot tuple set from quota-axi evidence, ranking by spendPriority after three
   orthogonal gates.
-  Load when a dispatch rule or default resolves to more than one profile candidate.
+  Load when a dispatch rule or default resolves to more than one profile candidate,
+  or when any matched profile contains more than one accountSlots entry.
 user-invocable: false
 metadata:
   internal: true
@@ -36,7 +37,25 @@ Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-tas
 
 ## Read the default TOON
 
+### Account-slot tuples
+
+When a matched profile contains `accountSlots`, expand it into one `(harness, model, effort, accountSlot)` candidate per logical slot before applying the gates below.
+A single profile with two slots is therefore a quota-aware choice even though the profile itself is not an array.
+Use `bin/fm-account-slot.sh probe-all <slot>...` once with the distinct referenced logical slots.
+That public helper validates the current home's registry, requires quota-axi's help to advertise every flag the probe sends, probes sequentially with credential refresh disabled, verifies configured identity and provenance, and emits only sanitized quota evidence plus logical slot IDs.
+Without that capability there is no automatic slot selection at all: `probe-all` refuses and names the missing flag, and you must pick a slot by explicit captain instruction or leave the profile unslotted.
+Malformed registry data, references, duplicate tuples, and missing requested IDs refuse the whole candidate set.
+After that global validation, an individual slot whose isolated probe is unavailable emits its logical ID with `availability.status=unavailable` and `availability.reason`; exclude that tuple and continue evaluating healthy later slots.
+Carry those reasons into the decision record so a reduced or empty candidate set always states why, and say so plainly instead of reporting no candidates without cause.
+Never run the ordinary provider snapshot for a slotted tuple, and never put account identity, credential paths, source attempts, or raw full JSON into candidate accounting.
+If the selected candidate set also contains legacy ambient profiles, take the default TOON once for those profiles only.
+Duplicate effective tuples are malformed configuration.
+A slot with stale, wrong-source, mismatched, missing, malformed, multi-document, or unverified identity evidence is unavailable for this decision; timeout and network failure make the slot unavailable but do not prove sign-out.
+Apply the same catalog eligibility, strongest reasoning class, completion-horizon feasibility, `spendPriority`, unknown-evidence, and genuine-tie rules below across the expanded tuple set.
+Pass the winning logical slot explicitly with `fm-spawn.sh --account-slot` alongside harness, model, and effort.
+
 Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Skip that default snapshot when every effective candidate is slotted.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.

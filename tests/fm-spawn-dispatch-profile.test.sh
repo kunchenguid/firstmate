@@ -36,6 +36,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift
 exec "$@"
 SH
@@ -47,10 +48,35 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'flags: --provider --full --json --no-credential-refresh'
+elif [ "${1:-}" = --version ]; then
+  printf '%s\n' 'quota-axi 0.1.42'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/quota-axi"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
+}
+
+configure_account_slot() {
+  local home=$1 harness=$2 slot=$3 store="$1/$3-profile" credential
+  mkdir -p "$store"
+  chmod 700 "$store"
+  case "$harness" in
+    claude) credential="$store/.credentials.json" ;;
+    codex) credential="$store/auth.json" ;;
+  esac
+  printf '{}\n' > "$credential"
+  chmod 600 "$credential"
+  cat > "$home/config/account-slots.json" <<JSON
+{"version":1,"slots":{"$slot":{"harness":"$harness","storePath":"$store","expectedAccountId":"test-account"}}}
+JSON
+  chmod 600 "$home/config/account-slots.json"
 }
 
 make_spawn_case() {
@@ -810,6 +836,15 @@ test_batch_forwards_shared_profile_flags() {
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  configure_account_slot "$HOME_DIR" codex codex-a
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high --account-slot codex-a)
+  status=$?
+  expect_code 1 "$status" "a multi-pair batch must refuse one shared account slot"
+  assert_contains "$out" "--account-slot is single-task only" "shared account-slot refusal was unclear"
+  assert_absent "$HOME_DIR/state/$id1.meta" "refused batch still spawned the first pair"
+  assert_absent "$HOME_DIR/state/$id2.meta" "refused batch still spawned the second pair"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
@@ -819,7 +854,23 @@ test_batch_forwards_shared_profile_flags() {
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
-  pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id1.meta")" "account_slot=" "batch spawn invented an account slot"
+  pass "batch dispatch shares --harness, --model, and --effort but refuses one shared --account-slot"
+}
+
+test_single_pair_batch_still_accepts_an_account_slot() {
+  local rec id out status
+  id=profile-batch-single-z9b
+  rec=$(make_spawn_case profile-batch-single codex "$id")
+  read_case_record "$rec"
+  configure_account_slot "$HOME_DIR" codex codex-a
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id=$PROJ_DIR" --harness codex --account-slot codex-a)
+  status=$?
+  expect_code 0 "$status" "a one-pair batch spawn with an account slot should succeed"
+  assert_grep "account_slot=codex-a" "$HOME_DIR/state/$id.meta" "one-pair batch lost its resolved account slot"
+  pass "the single-worker pair form still resolves one account slot"
 }
 
 test_claude_forwards_firstmate_config_dir_when_set() {
@@ -1370,6 +1421,78 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_claude_account_slot_binds_trust_launch_and_metadata() {
+  local rec id out status launch store meta
+  id=account-slot-claude-z24
+  rec=$(make_spawn_case account-slot-claude claude "$id")
+  read_case_record "$rec"
+  configure_account_slot "$HOME_DIR" claude claude-a
+  store="$HOME_DIR/claude-a-profile"
+
+  out=$(CODEX_HOME=/hostile ANTHROPIC_API_KEY=hostile \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --account-slot claude-a)
+  status=$?
+  expect_code 0 "$status" "Claude slotted spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR='$store'" \
+    "Claude launch did not clear competing selectors and bind the selected store"
+  assert_present "$store/.claude.json" "Claude trust was not written in the selected slot"
+  meta=$(cat "$HOME_DIR/state/$id.meta")
+  assert_contains "$meta" "account_slot=claude-a" "metadata omitted the logical account slot"
+  assert_not_contains "$meta" "$store" "metadata leaked the account store path"
+  assert_not_contains "$meta" "test-account" "metadata leaked account identity"
+  pass "Claude account slots bind trust and launch to one store while recording only the logical slot"
+}
+
+test_codex_account_slot_binds_home_and_file_store() {
+  local rec id out status launch store
+  id=account-slot-codex-z25
+  rec=$(make_spawn_case account-slot-codex codex "$id")
+  read_case_record "$rec"
+  configure_account_slot "$HOME_DIR" codex codex-a
+  store="$HOME_DIR/codex-a-profile"
+  printf 'HOME\n' > "$HOME_DIR/config/launch-env-allowlist"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR=/hostile OPENAI_API_KEY=hostile \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --account-slot codex-a)
+  status=$?
+  expect_code 0 "$status" "Codex slotted spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME=" "Codex launch omitted the selected-home binding"
+  assert_contains "$launch" "$store" "Codex launch did not bind the selected home"
+  assert_contains "$launch" "cli_auth_credentials_store=\"file\"" "Codex launch did not force file credential storage"
+  assert_contains "$launch" "/usr/bin/env -i" "test did not exercise the launch environment allowlist"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=/hostile" "Codex launch leaked the competing Claude selector"
+  assert_grep "account_slot=codex-a" "$HOME_DIR/state/$id.meta" "Codex metadata omitted the logical account slot"
+  assert_absent "$store/config.toml" "spawn invented a Codex trust record instead of leaving the one-time dialog to the post-spawn step"
+  assert_equals "auth.json" "$(cd "$store" && ls -A)" "a slotted Codex spawn wrote something other than the provisioned credential into the slot store"
+  pass "Codex account slots survive the environment allowlist, force file credential storage, and pre-register no trust"
+}
+
+test_account_slot_refuses_raw_and_secondmate_launches() {
+  local rec id raw_id sm out status
+  id=account-slot-refuse-z26
+  raw_id=account-slot-raw-z27
+  rec=$(make_spawn_case account-slot-refuse claude "$id" "$raw_id")
+  read_case_record "$rec"
+  configure_account_slot "$HOME_DIR" claude claude-a
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --account-slot claude-a)
+  status=$?
+  expect_code 1 "$status" "persistent secondmate account slot must be refused"
+  assert_contains "$out" "persistent secondmate account selection is not supported" "secondmate refusal was unclear"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$raw_id" "$PROJ_DIR" "claude --custom" --account-slot claude-a)
+  status=$?
+  expect_code 1 "$status" "raw-command account slot must be refused"
+  assert_contains "$out" "not a raw launch command" "raw-command refusal was unclear"
+  pass "account slots refuse raw launches and persistent secondmate agents"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1402,6 +1525,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_single_pair_batch_still_accepts_an_account_slot
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_claude_permission_mode_bypass_matches_absent_launch
@@ -1409,6 +1533,9 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
+test_claude_account_slot_binds_trust_launch_and_metadata
+test_codex_account_slot_binds_home_and_file_store
+test_account_slot_refuses_raw_and_secondmate_launches
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority

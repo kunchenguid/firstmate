@@ -169,9 +169,121 @@ Observed source statuses are `available`, `expired` (with an `error` slug), and 
 
 Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1.16.
 `bin/fm-bootstrap.sh` enforces the current compatibility floor through `bin/fm-quota-axi-lib.sh`.
+These are this report's source names; the quota document spells its own `attempts[].source` differently for Codex, so do not carry these spellings into the account-slot probe (see "Account-slot probe evidence vocabulary").
 
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
+
+## Account-slot producer capability
+
+Verified 2026-09-13 against the installed quota-axi 0.1.42.
+
+```sh
+quota-axi --version
+quota-axi --help
+```
+
+The version command returned `0.1.42`, and the help output listed 12 flags: `--provider`, `--json`, `--full`, `--tui`, `--refresh`, `--once`, `--allow-keychain-prompt`, `--no-credential-refresh`, `--intelligence`, `--sort`, `--help`, and `-v/--version`.
+The account-slot probe sends `--provider`, `--full`, `--json`, and `--no-credential-refresh`; all four are advertised by this measured release, so automatic quota-ranked slot selection runs against it.
+`bin/fm-quota-axi-lib.sh` owns that flag list once: it builds the probe's argv and requires `--help` to advertise every entry, so no probe flag is sent to a release whose own help does not advertise it.
+Isolation does not depend on any of those flags: the probe binds one store through `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, asks for one `--provider`, and refuses evidence whose successful `attempts[].source` is not that store's own.
+An older release that drops one of the four still refuses by naming the first flag its help does not advertise, rather than reading combined or ambient provider evidence.
+Explicit `fm-spawn.sh --account-slot` and `fm-control.sh relaunch --account-slot` consume no quota evidence and are unaffected either way.
+This is not a four-profile live pass.
+After two Claude plus two Codex profiles are provisioned, refresh this evidence with:
+
+```sh
+FM_ACCOUNT_SLOT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-account-slot-live-e2e.test.sh
+```
+
+## Account-slot probe evidence vocabulary
+
+Verified 2026-09-16 against the same quota-axi 0.1.42, captured with `quota-axi --provider <provider> --full --json --no-credential-refresh` and account values elided.
+
+The probe reads the quota document's own `providers[].attempts[].source`, which is not the `quota-axi auth --json` vocabulary recorded above.
+The two single-provider documents' `providers[0]` entries, side by side:
+
+```json
+[
+  { "provider": "claude", "attempts": [
+      { "source": "keychain", "status": "skipped" },
+      { "source": "oauth-file", "status": "success" },
+      { "source": "oauth-profile", "status": "success" } ] },
+  { "provider": "codex", "attempts": [
+      { "source": "oauth", "status": "success" } ] }
+]
+```
+
+Claude's two accepted spellings match the auth report, but Codex's store-scoped credential is `oauth` here and `auth-json` there for the same `auth.json` file.
+Treating the two as one vocabulary makes every Codex slot read as unavailable and silently drops both Codex subscriptions out of routing, so they must stay separate.
+`bin/fm-account-slot-lib.sh` therefore accepts `oauth-file` or `keychain` for Claude and `oauth` for Codex, among successful attempts only, and binds every successful attempt that names an account to the slot's `expectedAccountId`.
+An additional successful source such as Claude's `oauth-profile` is not by itself provenance under that rule, and the ambient `pi:openai-codex` fallback is never accepted for a Codex slot.
+
+`generatedAt` carries milliseconds (`2026-09-16T03:40:05.942Z`), which the freshness gate strips before parsing, and `state` carries `refreshedAt` and `sourcesTried` beside the `status`/`stale` pair the gate requires.
+`tests/fm-account-slot.test.sh` pins both source vocabularies and the millisecond timestamp.
+
+## Claude slot credential storage
+
+Verified 2026-09-14 on macOS 26 (Darwin 25.6.0) aarch64 against the installed Claude Code 2.1.270.
+
+The open question was whether the login keychain outranks a `CLAUDE_CONFIG_DIR`-scoped credential file, which would let a slotted Claude worker authenticate as the ambient account.
+It does not, because the keychain item itself is scoped to the config directory.
+A logging shim named `security` was placed first on `PATH`, recording every argv before handing off to `/usr/bin/security`, and `claude auth status` was run three times against the same user and login keychain:
+
+| `CLAUDE_CONFIG_DIR` | keychain service `claude` asked for |
+| --- | --- |
+| unset | `Claude Code-credentials` |
+| `<lab>/storeA` | `Claude Code-credentials-31620bad` |
+| `<lab>/storeB` | `Claude Code-credentials-7b599179` |
+
+Each suffix is the first eight hex characters of the SHA-256 of the NFC-normalized config directory path, confirmed with `shasum -a 256` over both paths.
+So two slots never read one item, and neither reads the ambient `Claude Code-credentials` that an unslotted Claude uses.
+The `CLAUDE_CONFIG_DIR=<store>` prefix `bin/fm-spawn.sh` puts on a slotted Claude launch is therefore a real per-subscription binding, not an unpinned hint, and it needs no launch-time flag of its own - the Codex `-c cli_auth_credentials_store="file"` pin exists because Codex's store choice is configurable per home, and Claude's is not.
+
+Claude's credential store is a keychain-primary composite with the config-dir file as its fallback, and a successful keychain write deletes the file, so on a host whose panes can reach the login keychain a `claude login` under a slot store leaves no `<storePath>/.credentials.json`.
+Both halves of that composite are scoped to the store, so `fm_account_slot_credential_present` accepts either: the file if it is there, otherwise the store's own keychain item.
+Presence is read with `security find-generic-password -s <service>` and no `-w`, which returns attributes only - it reads no secret and, per the Background-session row in `docs/verification/runtime-backends.md`, still answers where reading the secret would exit 36.
+The measurement host had no `Claude Code-credentials` keychain item at all (`security find-generic-password` exited 44 with keychain access working), so its own credentials live in the file and the file path is the one exercised end to end here; the keychain path is covered deterministically in `tests/fm-account-slot.test.sh` against a `security` stub that answers only for the store-scoped service name.
+
+Re-check this section against a newer Claude Code and update the pinned version with it.
+
+## Codex slot credential storage
+
+Verified 2026-09-14 against codex-cli 0.154.0 (upstream tag `rust-v0.154.0`), because no codex binary is installed on this machine.
+
+`codex-rs/config/src/config_toml.rs` declares the config key:
+
+```rust
+/// Preferred backend for storing CLI auth credentials.
+/// file (default): Use a file in the Codex home directory.
+/// keyring: Use an OS-specific keyring service.
+/// auto: Use the keyring if available, otherwise use a file.
+#[serde(default)]
+pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
+```
+
+`codex-rs/config/src/types.rs` declares its accepted values as a `#[serde(rename_all = "lowercase")]` enum: `file` (the default, documented as "Persist credentials in `CODEX_HOME/auth.json`"), `keyring`, `auto`, and `ephemeral`.
+So `-c cli_auth_credentials_store="file"` names a real key with a real value, and it pins a slotted worker to `<storePath>/auth.json` even when a config layer under that home asks for `keyring` or `auto`.
+That is the same file the registry validates for a Codex slot.
+
+## Codex slot directory trust
+
+Verified 2026-09-14 against codex-cli 0.154.0 (upstream tag `rust-v0.154.0`), same source-only basis as the section above.
+
+`codex-rs/tui/src/lib.rs` decides whether to show the "Do you trust the contents of this directory?" screen with:
+
+```rust
+fn should_show_trust_screen(config: &Config) -> bool {
+    config.active_project.trust_level.is_none()
+}
+```
+
+It consults only whether the active project already has a recorded `trust_level`, and no approval-policy or sandbox input, so `--dangerously-bypass-approvals-and-sandbox` does not suppress it.
+Accepting writes `projects."<path>".trust_level` into the active `CODEX_HOME`'s `config.toml` (`codex-rs/tui/src/config_update.rs`), so the decision is scoped to that home.
+A freshly provisioned account slot therefore shows the dialog once per repository even where the ambient home already accepted it.
+Firstmate pre-registers no Codex trust: `tests/fm-spawn-dispatch-profile.test.sh` asserts a slotted Codex spawn writes no trust record into the slot store, and the existing post-spawn trust step in `AGENTS.md` and the `harness-adapters` Codex reference is what answers the dialog.
+
+Re-check both Codex sections against the installed codex once one is present, and update the pinned version with them.
 
 ## Standalone Grok discovery probe
 
@@ -199,6 +311,8 @@ Re-run the two commands above and update this section and the pinned version tog
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
 `tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
+`tests/fm-account-slot.test.sh` owns portable registry, owner-comparator, mode, symlink, hardlink, identity-field, provenance, source-vocabulary, timestamp-precision, single-document, mixed-availability, capability-gate, unavailability-reason, and sanitized-probe coverage.
+`tests/fm-account-slot-live-e2e.test.sh` is the opt-in prompt-free four-profile producer check; it skips unless enabled and fails when enabled without every probe flag advertised or without two distinct configured profiles for each supported harness.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.
