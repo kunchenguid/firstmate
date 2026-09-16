@@ -477,7 +477,29 @@ on 2026-09-16, because a one-shot headless run cannot exercise an idle session:
 | An actionable event wakes an IDLE captain | prompt the session to arm `sleep 12; echo FM-WAKE-PROBE-FIRED` as a background job and end its turn, then hold the notification subscription open | The agent reported idle 5.0s in, stayed idle through 13.0s, and resumed at 19.0s when the job settled - the completion opened a turn on the idle session. |
 | The block budget cannot loop without limit | mount the real hooks over an SDK profile in the firstmate checkout with one task in flight and no live watcher, then run a tool-free turn to completion | The guard ran four times: three blocking continuations and one attended fail-open, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4`, after which the session settled instead of re-blocking. |
 
-Instruction budget: `dsh-agent-instructions` ships `maxBytes: 65536` while
+### DSH PreToolUse blocker, 2026-09-16
+
+The PreToolUse half of the adapter is NOT working. Registering any PreToolUse
+hook through `dsh-hooks-claude-code` breaks every tool call:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Does a PreToolUse hook fire for the shell tool? | register a `bash`-matcher probe hook that appends to a log, then drive a turn that calls bash | No hook ran, and the tool returned `Error: agent.session.events is not iterable` instead of executing. |
+| Is it the matcher? | register BOTH `bash` and `Bash` matchers | Neither ran; the failure precedes matcher evaluation. |
+| Is it the profile? | repeat in a `base + headless` profile and in a `base + sdk-app` profile | Both fail identically. |
+| Is a projection plugin missing? | mount `@deepseek-ai/dsh-session-turn-outline` alongside the bridge | Still fails identically. |
+
+The throw comes from the bridge's own `lastTurn()`, which reads the
+`turnBoundary` session projection via
+`ctx.sessionProjections.stateOf(agent.session, ...)` before `runPoint` is
+called. `bin/fm-arm-pretool-check.sh`, `bin/fm-cd-pretool-check.sh` and
+`bin/fm-subagent-pretool-check.sh` therefore never run.
+
+The captain composition (base + web-app + hooks) has NOT been tested and is the
+next diagnostic: if the web bundle supplies what `stateOf` needs, the guards
+work there and only non-web profiles are affected.
+
+
 firstmate's `AGENTS.md` is 81127 bytes, so the shipped default truncates the
 chain at line 476 of 612 and drops sections 10-14 plus the captain-precedence
 and maintenance sections. The captain profile raises `maxBytes` to 262144.
