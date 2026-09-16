@@ -39,7 +39,11 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
+#                          resume. Unless afk is active. A pane about to escalate
+#                          whose worker declared why it is quiet - a `paused:`
+#                          external wait or a verified `captain-held` transfer -
+#                          is deferred to that same long recheck cadence instead
+#                          (wedge_wait_evidence), and a pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -421,7 +425,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -941,6 +945,106 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
+# The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
+# read at the one moment it decides anything: when an escalation is about to
+# fire. The worker's own status line is that evidence - a declared `paused:`
+# external wait, or a verified `captain-held` transfer.
+#
+# The generated brief promises that declaring one buys the long recheck cadence
+# instead of a wedge, and the wedge timer is reachable while that declaration
+# stands: a crew that declares a wait and then has an active run or busy pane
+# attributed to it is handed to the timer as provably-working, and the timer then
+# escalates on elapsed idle time alone. The declaration is what the worker said
+# about its OWN silence, so it outranks a liveness verdict that only says
+# something is running.
+#
+# A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
+# not evidence: the wait the worker described is over, so it no longer explains
+# the silence, and the pane keeps the unchanged schedule.
+# Nothing here weakens detection for a pane with no declaration - it never runs
+# for them beyond one status-line read, and their escalation schedule, reason and
+# wording are untouched.
+# WHICH verb declared it is printed, not just that one did, because the caller
+# must not re-derive it: the two block on DIFFERENT humans - `paused:` on an
+# external dependency the worker named, `captain-held:` on the captain themself -
+# so a recheck that named the wrong one would point the reader away from the
+# person who can clear it.
+wedge_wait_evidence() {  # <task> -> `declared` or `held` on stdout
+  local task=$1 last until
+  [ -n "$task" ] || return 1
+  last=$(last_status_line "$STATE/$task.status")
+  if status_is_captain_held "$last"; then
+    printf 'held'
+    return 0
+  fi
+  status_is_paused "$last" || return 1
+  if until=$(status_paused_until "$last"); then
+    [ "$(date +%s)" -lt "$until" ] || return 1
+  fi
+  printf 'declared'
+}
+
+# Defer ONE wedge escalation for a pane whose own declaration explains the quiet
+# (wedge_wait_evidence above). Deliberately the same shape as
+# wedge_defer_writing: a DEFERRAL, not a cancellation, so the idle timer restarts
+# and the next window probes the evidence again - a wait that ends is escalating
+# again within one STALE_ESCALATE_SECS, which is why the worst-case detection
+# time for a pane that stops waiting does not move.
+# How long the wait has held is read from the status file, which is when the
+# worker wrote the line - anchored there rather than on a per-window marker for
+# the same reason handle_paused_stale is: an idle pane churns its display (a
+# clock, a token counter), and a marker this deferral kept touching would let
+# that churn reset the cadence.
+# The recheck names WHICH human the wait is on, for the same reason
+# handle_paused_stale does: a hold is owed by the captain reading the recheck, so
+# wording it as an external dependency points them away from the one action that
+# clears it.
+# A HOLD is not rechecked at all while the away-posture record exists: the one
+# human who can answer it is away, the return brief already lists it, and every
+# other captain-held path in this file absorbs it silently for that reason
+# (handle_paused_stale, surface_nonterminal_stale, captain_call_stale_bound).
+# That absorb arms no throttle, so the recheck is owed in full the moment the
+# record is archived rather than starting a cadence nobody could act on.
+# The escalation counter is left alone, exactly as the write deferral leaves it:
+# this is not an escalation, and a later genuine one must keep the
+# demand-inspection history it had already earned.
+wedge_defer_wait() {  # <window> <task> <since-file> <triage-label> <idle-age> <declared|held>
+  local win=$1 task=$2 since_file=$3 label=$4 age=$5 evidence=$6 key mtime wage min_age kind action waited
+  if [ "$evidence" = held ]; then
+    if afk_record_present; then
+      triage_log "absorbed $label (captain-held, never rechecked while the away-posture record exists): $win"
+      return 0
+    fi
+    kind='captain-held, awaiting the captain - verified hold transfer'
+    action='answer the held decision or release the hold'
+  else
+    kind='declared wait, awaiting external'
+    action='confirm the wait still holds'
+  fi
+  key=$(window_key "$win")
+  mtime=$(stat_mtime "$STATE/$task.status")
+  case "$mtime" in
+    ''|*[!0-9]*)
+      # An unreadable status file ages from the quiet window already in hand.
+      # Anchoring on the current time instead would recompute the wait age as 0
+      # at every threshold, and the bounded re-surface could then never fire at
+      # all - the one outcome this deferral must not produce.
+      wage=$age; min_age=0; waited=''
+      ;;
+    *)
+      wage=$(( $(date +%s) - mtime ))
+      [ "$wage" -ge 0 ] || wage=0
+      min_age=$PAUSE_RESURFACE_SECS; waited=", waiting ${wage}s"
+      ;;
+  esac
+  clear_write_tracking "$key"
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.waiting-resurfaced-$key" "$wage" \
+    "stale: $win (idle ${age}s${waited} - $kind, rechecked on a long cadence not a wedge; $action)" \
+    '' "$min_age"
+  triage_log "absorbed $label (the pane's own wait explains the quiet, idle ${age}s): $win"
+}
+
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
 # long-finished one cannot make the next deferral resurface immediately.
@@ -957,17 +1061,20 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll. The proven-gone endpoint probe sits in that same branch and
-# under the same bound, because this is the single place an escalation is
-# emitted: a busy husk (a closed pane still rendering its harness footer) reaches
-# the ladder through busy_turn_bound_check without ever passing the stale scan's
+# The wait-evidence consult (wedge_wait_evidence, one status-line read), the
+# proven-gone endpoint probe, and the worktree write probe run ONLY here,
+# inside the at-threshold branch that is about to escalate: at most one each
+# per window per STALE_ESCALATE_SECS, never per poll. The wait consult runs
+# first, because a pane whose worker already said why it is quiet has
+# nothing to prove through its worktree or its endpoint. The gone-endpoint
+# probe runs next because this is the single place an escalation is emitted:
+# a busy husk (a closed pane still rendering its harness footer) reaches the
+# ladder through busy_turn_bound_check without ever passing the stale scan's
 # own probe, and every rung of that ladder is a wake nobody can act on. Proof
-# retires the window's records here exactly as the stale scan retires them; every
-# ambiguity escalates as before.
+# retires the window's records here exactly as the stale scan retires them;
+# every ambiguity escalates as before.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -980,6 +1087,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if evidence=$(wedge_wait_evidence "$task"); then
+          wedge_defer_wait "$win" "$task" "$since_file" "$label" "$age" "$evidence"
+          return 0
+        fi
         if fm_backend_endpoint_confirmed_gone "$(window_backend "$win")" "$win"; then
           retire_gone_window_records "$win" "$(window_key "$win")"
           return 0
@@ -1146,13 +1257,15 @@ clear_pause_state() {  # <window-key>
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
-# timer and escalation count, and the write-deferral chain. Split out so a caller
+# timer and escalation count, and both deferral chains the timer can take - the
+# write-deferral chain and the wait-deferral throttle. Split out so a caller
 # that must keep a window's DECLARATION-scoped pause state - its .paused-* flag,
 # recheck, and re-surface throttle - can still reset the per-hash half alone.
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.waiting-resurfaced-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
