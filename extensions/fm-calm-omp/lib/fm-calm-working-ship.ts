@@ -37,16 +37,13 @@ const SAIL_WIDTH = SAIL_RIGHT.length;
 const WAVE_CYCLE = ["~", "~", "-", "~"] as const;
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
-const BLUE = "\u001b[34m";
+// Water uses cyan (36): Apple Terminal's default palette renders blue (34) as a
+// dark violet, while its cyan reads as the water blue this sprite was drawn for.
+// The boat uses yellow (33).
+const BLUE = "\u001b[36m";
 const YELLOW = "\u001b[33m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
-
-export const CALM_WORKING_SHIP_WIDGET_KEY = "firstmate-calm-working-ship";
-/** Scheduler period. One tick advances the water by one phase. */
-export const CALM_WORKING_SHIP_TICK_MS = 220;
-/** Boat moves one column every Nth tick, so it travels at 220 * 4 = 880ms per column. */
-export const CALM_WORKING_SHIP_TICKS_PER_MOVE = 4;
 
 export type CalmWorkingShipAnimation = {
   /** Render one frame that exactly fits `width`, clamping the track to it first. */
