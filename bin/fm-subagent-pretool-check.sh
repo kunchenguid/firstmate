@@ -55,7 +55,11 @@ set -u
 # Lowercase substrings that mark a tool name as delegation-shaped: it creates
 # work, an agent, a schedule, or an isolated workspace that firstmate would not
 # know about. This list is the single owner of the shipped classification.
-DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate spawn dispatch handoff remote sendmessage monitor'
+# ralph is the DeepSeek Harness fresh-agent loop driver: every round spawns an
+# autonomous agent that writes no state/<id>.meta, so it is exactly the
+# unaccounted-work class this guard exists for, and its name matches no other
+# stem.
+DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate spawn dispatch handoff remote sendmessage monitor ralph'
 
 # Exact lowercase tool names that match a stem above but only OBSERVE or STOP
 # work that already exists. Reading or ending unaccounted work is not creating
@@ -63,7 +67,11 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # or end it. A local Claude deny list may still remove these from the
 # schema; this shipped guard deliberately stays narrower so it can never be the
 # reason a runaway task cannot be stopped.
-OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+# listagents and interruptagent are DeepSeek Harness's own observability and stop
+# verbs over children it already started. They normalize into the `agent` stem,
+# but denying them would strand a runaway child with no way to inspect or end it,
+# which is the hazard this list exists to prevent.
+OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell listagents interruptagent'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
 # work. These write only the harness's session-local todo list, which has no

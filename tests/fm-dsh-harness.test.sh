@@ -544,6 +544,38 @@ test_dsh_protocol_states_the_death_window_contract() {
   pass "dsh protocol: the death-window contract matches the seatbelt"
 }
 
+test_dsh_delegation_guard_classifies_real_tool_names() {
+  local rc
+  # The guard matches lowercase substrings of the normalized tool name. Two DSH
+  # names were misclassified in opposite directions: ralph - the fresh-agent
+  # loop driver - creates work no state/<id>.meta records and was ALLOWED, while
+  # list_agents and interrupt_agent were DENIED, stranding a runaway child with
+  # no way to inspect or end it.
+  assert_denied() {
+    rc=0
+    printf '{"tool_name":"%s"}' "$1" | "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "$1 must be denied by the delegation guard, got rc=$rc"
+  }
+  assert_allowed() {
+    rc=0
+    printf '{"tool_name":"%s"}' "$1" | "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || fail "$1 must be allowed, got rc=$rc"
+  }
+  assert_denied subagent
+  assert_denied subagent_fork
+  assert_denied workflow
+  assert_denied send_message
+  assert_denied ralph
+  assert_allowed list_agents
+  assert_allowed interrupt_agent
+  assert_allowed job_output
+  assert_allowed job_kill
+  assert_allowed job_list
+  assert_allowed todo_write
+  assert_allowed bash
+  pass "fm-subagent-pretool-check: DSH tool names classify as intended"
+}
+
 test_dsh_session_lock_matcher_detects_launcher_paths
 test_dsh_session_lock_matcher_rejects_firstmate_paths
 test_dsh_guard_healthy_reset_clears_the_alarm_latch
@@ -572,3 +604,4 @@ test_dsh_supervision_model_is_job
 test_dsh_job_verdict_tolerates_the_between_cycles_gap
 test_dsh_job_verdict_still_alarms_a_real_lapse
 test_dsh_protocol_states_the_death_window_contract
+test_dsh_delegation_guard_classifies_real_tool_names

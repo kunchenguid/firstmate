@@ -514,6 +514,33 @@ three misconfigurations that fail silently. Measured against synthetic homes:
 rather than proceed without it. An absent `jq` or `node` is a failure, because every guard that needs
 one fails open and becomes a silent no-op.
 
+### DSH PreToolUse deny, 2026-09-16
+
+The resolution above proved only that matchers FIRE. Deny was still unverified, and the whole
+delegation guard plus both seatbelts rest on it. Measured through an SDK-driven turn with a
+`bash`-matcher hook that exits 2 with a reason on stderr:
+
+| Question | Result |
+| --- | --- |
+| Does a deny block the call? | Yes. The tool result was `Error: FM-DENY-PROBE: this shell command is refused by policy` with `isError: true`. |
+| Did the command still run? | No. The command's sentinel file was **never created**, which is the only proof that matters. |
+| Is the reason model-visible? | Yes. The model's next reasoning step quoted the refusal and stated it must not retry. |
+
+The hook wrote nothing to stdout, matching the `--claude` path the guards use, so DSH's
+empty-stdout-on-deny behaviour is not exercised either way by this result.
+
+The same pass found two DSH tool names misclassified by the delegation guard in OPPOSITE
+directions, so both were fixed together:
+
+| Tool | Was | Now | Reason |
+| --- | --- | --- | --- |
+| `ralph` | allow | DENY | Its rounds spawn autonomous agents that write no `state/<id>.meta` - exactly the unaccounted-work class the guard exists for |
+| `list_agents` | DENY | allow | Its normalized name matches the `agent` stem, but denying it strands a runaway child with no way to inspect it |
+| `interrupt_agent` | DENY | allow | Same, for the stop path - the hazard `OBSERVE_ONLY_TOOLS` exists to prevent |
+
+`subagent`, `subagent_fork`, `workflow` and `send_message` remain denied as intended;
+`job_output`, `job_kill`, `job_list`, `todo_write` and `bash` remain allowed.
+
 ### DSH PreToolUse resolution, 2026-09-16
 
 PreToolUse initially appeared broken: registering any PreToolUse hook made every

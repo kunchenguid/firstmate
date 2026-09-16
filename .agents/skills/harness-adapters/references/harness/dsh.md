@@ -68,7 +68,7 @@ denies `ps` (harness ancestry, the PID-strict watcher lock and away-mode ownersh
 dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@0.1.5-rc.2
 ```
 
-With the matched build, `UserPromptSubmit`, the `bash`-matcher PreToolUse rows, and the `.*` row all fire (verified 2026-09-16).
+With the matched build, `UserPromptSubmit`, the `bash`-matcher PreToolUse rows, and the `.*` row all fire (verified 2026-09-16), and a **deny genuinely blocks**: exit 2 with the reason on stderr produced an `isError` tool result, left the command's sentinel file uncreated, and reached the model as a refusal it must not retry.
 
 The `--dsh` block budget is an **episode**, not a session lifetime: the ledger is discarded once it is
 older than `FM_DSH_TURNEND_BUDGET_WINDOW` (default 900s), so one exhausted lapse cannot leave a
