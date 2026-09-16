@@ -389,6 +389,22 @@ assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.stat
 mirrored_cursor_is_current "a malformed report pointer prevented the cursor from advancing"
 pass "a structured pointer must end at its token boundary"
 
+printf '# first adjacent report\n' > "$REMOTE/data/reply/adjacent-a.md"
+printf '# second adjacent report\n' > "$REMOTE/data/reply/adjacent-b.md"
+mirror_lines 'done [key=adjacent-reports]: report=data/reply/adjacent-a.md,report=data/reply/adjacent-b.md report=data/reply/result.md alongside report=data/reply/result.md.bak'
+cmp -s "$REMOTE/data/reply/adjacent-a.md" "$PARENT/data/remote-secondmates/ios/data/reply/adjacent-a.md" \
+  || fail "the first comma-separated structured pointer was not fetched"
+cmp -s "$REMOTE/data/reply/adjacent-b.md" "$PARENT/data/remote-secondmates/ios/data/reply/adjacent-b.md" \
+  || fail "the second comma-separated structured pointer was not fetched"
+cmp -s "$REMOTE/data/reply/result.md" "$PARENT/data/remote-secondmates/ios/data/reply/result.md" \
+  || fail "the whitespace-separated structured pointer was not fetched"
+assert_grep 'report=data/remote-secondmates/ios/data/reply/adjacent-a.md,report=data/remote-secondmates/ios/data/reply/adjacent-b.md report=data/remote-secondmates/ios/data/reply/result.md alongside report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
+  "structured pointer rewriting skipped an adjacent pointer or changed a malformed token"
+assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
+  "adjacent deliverable pointers raised a document transfer obligation"
+mirrored_cursor_is_current "adjacent structured pointers prevented the cursor from advancing"
+pass "adjacent pointers are fetched while malformed tokens remain unchanged"
+
 # A line may name a path under ANOTHER home's mirror tree; that document is
 # provably not this mate's to serve, and prose naming it is not an offer.
 mirror_lines 'working [key=cross-home]: the sibling relayed data/remote-secondmates/other/data/reply/report.md and its own data/reply/prose-only.md earlier'

@@ -294,10 +294,46 @@ safe_doc_path() {
 # required before `report=`, so a neighbouring key such as `child-report=` is not
 # this tag. Deduplication spans the WHOLE delta, so one document offered by
 # several lines is fetched, and named in one escalation, exactly once.
+process_document_pointers() { # <extract|rewrite> <pointer-map>
+  POINTER_MAP="$2" LC_ALL=C awk -v mode="$1" '
+    BEGIN {
+      count = split(ENVIRON["POINTER_MAP"], entries, "\n")
+      for (i = 1; i <= count; i++) {
+        separator = index(entries[i], "\t")
+        if (separator > 0)
+          replacements[substr(entries[i], 1, separator - 1)] = substr(entries[i], separator + 1)
+      }
+    }
+    {
+      rest = $0
+      rewritten = ""
+      while (match(rest, /(^|[^A-Za-z0-9._\/-])report=data\/[A-Za-z0-9._\/-]+[.]md/)) {
+        matched = substr(rest, RSTART, RLENGTH)
+        marker = index(matched, "report=")
+        doc = substr(matched, marker + 7)
+        next_index = RSTART + RLENGTH
+        next_char = next_index <= length(rest) ? substr(rest, next_index, 1) : ""
+        if (next_char != "" && next_char ~ /[A-Za-z0-9._\/-]/) {
+          rewritten = rewritten substr(rest, 1, next_index - 1)
+          rest = substr(rest, next_index)
+          continue
+        }
+        if (mode == "extract") {
+          if (!seen[doc]++) print doc
+        } else {
+          replacement = doc in replacements ? replacements[doc] : doc
+          rewritten = rewritten substr(rest, 1, RSTART - 1) \
+            substr(matched, 1, marker + 6) replacement
+        }
+        rest = substr(rest, next_index)
+      }
+      if (mode == "rewrite") print rewritten rest
+    }
+  '
+}
+
 extract_document_pointers() { # <payload-file>
-  LC_ALL=C grep -Eo '(^|[^A-Za-z0-9._/-])report=data/[A-Za-z0-9._/-]+\.md($|[^A-Za-z0-9._/-])' "$1" 2>/dev/null \
-    | sed -E 's|.*report=||; s|[^A-Za-z0-9._/-]$||' \
-    | awk '!seen[$0]++'
+  process_document_pointers extract '' < "$1"
 }
 
 # The reader's own explanation for a refusal, reduced to one bounded, tab-free,
@@ -470,16 +506,7 @@ sort_pointer_map() { # <map>
 }
 
 rewrite_pointers() { # <line> <map>
-  local line=$1 map=$2 doc local_doc
-  if [ -n "$map" ]; then
-    while IFS=$'\t' read -r doc local_doc || [ -n "$doc" ]; do
-      [ -n "$doc" ] || continue
-      line=${line//"$doc"/"$local_doc"}
-    done <<EOF
-$map
-EOF
-  fi
-  printf '%s' "$line"
+  printf '%s\n' "$1" | process_document_pointers rewrite "$2"
 }
 
 # 0 when <path> is already an outstanding obligation in <docs>.
