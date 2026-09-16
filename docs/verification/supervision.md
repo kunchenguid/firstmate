@@ -497,6 +497,23 @@ protocol and the renderer's repair line now name `bin/fm-watch-arm.sh` - the scr
 documents `run_in_background` as its designed mechanism - and a cross-file test keeps the protocol,
 the repair line and the seatbelt in agreement.
 
+### DSH startup preflight, 2026-09-16
+
+`bin/fm-dsh-preflight.sh`, run by `bin/fm-dsh-launch.sh` before the session starts, asserts the
+three misconfigurations that fail silently. Measured against synthetic homes:
+
+| Condition | Result |
+| --- | --- |
+| Bridge 0.0.1-rc.5 against dsh-base 0.1.5-rc.2 | FAIL, naming both versions and the reinstall command |
+| Bridge absent from the profile | FAIL, naming the install command at the running version |
+| AGENTS.md 81127 bytes against maxBytes 65536 | FAIL, naming the patch file to raise |
+| Conforming home | pass, all required checks |
+| `ps` denied by the sandbox | FAIL, naming the permission preset (`sandbox-policy.mode` alone is refused at load) |
+
+`lsof` absence is a warning rather than a failure: teardown's stale-lock proof and orphan reap refuse
+rather than proceed without it. An absent `jq` or `node` is a failure, because every guard that needs
+one fails open and becomes a silent no-op.
+
 ### DSH PreToolUse resolution, 2026-09-16
 
 PreToolUse initially appeared broken: registering any PreToolUse hook made every

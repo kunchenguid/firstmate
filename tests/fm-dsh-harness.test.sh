@@ -247,6 +247,70 @@ test_dsh_protocol_and_seatbelt_agree_on_the_arm_command() {
   pass "dsh protocol, repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
 }
 
+# A synthetic DSH home: <root>/profiles/node_modules holds dsh-base, and the
+# named profile holds its own node_modules and cordis.patch.yml.
+make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
+  local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5
+  mkdir -p "$dir/profiles/node_modules/@deepseek-ai/dsh-base" "$dir/profiles/p" "$dir/fmhome"
+  printf '{"name":"@deepseek-ai/dsh-base","version":"%s"}\n' "$base" \
+    > "$dir/profiles/node_modules/@deepseek-ai/dsh-base/package.json"
+  if [ "$bridge" != - ]; then
+    mkdir -p "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code"
+    printf '{"name":"@deepseek-ai/dsh-hooks-claude-code","version":"%s"}\n' "$bridge" \
+      > "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json"
+  fi
+  if [ "$maxb" != - ]; then
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: %s\n' "$maxb" > "$dir/profiles/p/cordis.patch.yml"
+  fi
+  head -c "$agents" /dev/zero | tr '\0' 'x' > "$dir/fmhome/AGENTS.md"
+  printf '%s\n' "$dir"
+}
+
+run_preflight() {  # <dsh-home> -> stdout in $PREFLIGHT_OUT, exit in $PREFLIGHT_RC
+  PREFLIGHT_OUT=$(DSH_HOME="$1" "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$1/fmhome" 2>&1)
+  PREFLIGHT_RC=$?
+}
+
+test_dsh_preflight_rejects_a_mismatched_bridge() {
+  local home
+  # A stale bridge reads a deprecated session.events and makes EVERY tool call
+  # fail while the guards go inert, so the pin must be asserted, not documented.
+  home=$(make_dsh_home "$TMP_ROOT/pre-badbridge" 0.1.5-rc.2 0.0.1-rc.5 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a mismatched bridge must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "does not match dsh-base" "the mismatch was not named"
+  assert_contains "$PREFLIGHT_OUT" "0.1.5-rc.2" "the remedy did not name the running version"
+  pass "fm-dsh-preflight.sh: a mismatched hooks bridge fails loud"
+}
+
+test_dsh_preflight_rejects_a_missing_bridge() {
+  local home
+  home=$(make_dsh_home "$TMP_ROOT/pre-nobridge" 0.1.5-rc.2 - 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a missing bridge must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "not installed" "the missing bridge was not named"
+  pass "fm-dsh-preflight.sh: a missing hooks bridge fails loud"
+}
+
+test_dsh_preflight_rejects_a_truncating_budget() {
+  local home
+  # The dsh-base default silently drops the later sections of AGENTS.md.
+  home=$(make_dsh_home "$TMP_ROOT/pre-budget" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a truncating budget must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the truncation was not named"
+  pass "fm-dsh-preflight.sh: a truncating instruction budget fails loud"
+}
+
+test_dsh_preflight_passes_a_conforming_home() {
+  local home
+  home=$(make_dsh_home "$TMP_ROOT/pre-good" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a conforming home must pass the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "all required checks passed" "a passing preflight did not say so"
+  pass "fm-dsh-preflight.sh: a conforming home passes"
+}
+
 test_dsh_ancestry_detects_the_launcher_path() {
   local fakebin out
   fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-node" node \
@@ -407,6 +471,20 @@ test_dsh_stop_wrapper_fails_open_without_a_root() {
   pass "fm-turnend-guard-dsh.sh: an unresolvable root fails open"
 }
 
+test_dsh_session_lock_matcher_detects_launcher_paths
+test_dsh_session_lock_matcher_rejects_firstmate_paths
+test_dsh_guard_healthy_reset_clears_the_alarm_latch
+test_dsh_digest_delivers_session_start_stdout_whole
+test_dsh_digest_surfaces_a_durable_alarm
+test_dsh_digest_gate_is_per_session
+test_dsh_digest_retries_when_nothing_was_produced
+test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
+test_dsh_guard_budget_is_an_episode_not_a_session
+test_dsh_protocol_and_seatbelt_agree_on_the_arm_command
+test_dsh_preflight_rejects_a_mismatched_bridge
+test_dsh_preflight_rejects_a_missing_bridge
+test_dsh_preflight_rejects_a_truncating_budget
+test_dsh_preflight_passes_a_conforming_home
 test_dsh_ancestry_detects_the_launcher_path
 test_dsh_ancestry_detects_the_installed_bin_js
 test_dsh_ancestry_rejects_unrelated_node_commands
@@ -417,13 +495,3 @@ test_dsh_guard_budget_is_session_scoped
 test_dsh_guard_clears_the_budget_when_supervision_is_not_needed
 test_dsh_guard_fails_open_on_unusable_input
 test_dsh_stop_wrapper_fails_open_without_a_root
-test_dsh_session_lock_matcher_detects_launcher_paths
-test_dsh_session_lock_matcher_rejects_firstmate_paths
-test_dsh_digest_surfaces_a_durable_alarm
-test_dsh_digest_delivers_session_start_stdout_whole
-test_dsh_digest_gate_is_per_session
-test_dsh_digest_retries_when_nothing_was_produced
-test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
-test_dsh_guard_budget_is_an_episode_not_a_session
-test_dsh_guard_healthy_reset_clears_the_alarm_latch
-test_dsh_protocol_and_seatbelt_agree_on_the_arm_command

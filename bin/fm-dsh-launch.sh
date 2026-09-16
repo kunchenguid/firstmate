@@ -36,4 +36,21 @@ unset CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE 
 # GROK_* are checked by name so an unset variable never trips `set -u`.
 unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null || true
 
+# Assert the three DSH misconfigurations that fail silently, before a session
+# starts depending on them. FM_DSH_SKIP_PREFLIGHT=1 is the escape hatch for a
+# deliberately degraded home.
+if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh" ]; then
+  PROFILE=web
+  want_profile=0
+  for arg in "$@"; do
+    if [ "$want_profile" -eq 1 ]; then PROFILE=$arg; want_profile=0; continue; fi
+    case "$arg" in
+      --profile) want_profile=1 ;;
+      --profile=*) PROFILE=${arg#--profile=} ;;
+      web|headless|acp|sdk|sdk-minimal) [ "$arg" = web ] || PROFILE=$arg ;;
+    esac
+  done
+  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" || exit 3
+fi
+
 exec dsh "$@"

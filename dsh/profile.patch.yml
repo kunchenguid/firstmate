@@ -15,7 +15,9 @@
 #
 # Launch the primary through bin/fm-dsh-launch.sh so FM_DSH_HARNESS, FM_HOME and
 # the locale are set at process start: a tool call cannot set them, and hook
-# subprocesses inherit whatever the host was given.
+# subprocesses inherit whatever the host was given. That wrapper also runs
+# bin/fm-dsh-preflight.sh, which asserts this pin, the maxBytes raise below, and
+# that the sandbox still permits ps - all three fail silently otherwise.
 #
 # Applied over a base+web-app profile whose bundle list also carries this
 # checkout's own bundles. Set FM_ROOT to the firstmate checkout before boot.

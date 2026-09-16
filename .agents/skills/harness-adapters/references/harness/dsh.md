@@ -40,6 +40,14 @@ another harness's pane cannot inherit its identity.
 Launch the primary through it: `bin/fm-dsh-launch.sh web --port 3080`. Documentation alone is not a
 launch boundary; a marker that nothing sets leaves the home identified as whatever marker leaked in.
 
+It runs `bin/fm-dsh-preflight.sh` before exec'ing dsh, because three DSH misconfigurations are silent
+and total: a hooks bridge whose version differs from the running dsh-base (every tool call then fails
+with `agent.session.events is not iterable` while the guards go inert), an `agent-instructions`
+`maxBytes` below the size of `AGENTS.md` (the later sections simply disappear), and a sandbox that
+denies `ps` (harness ancestry, the PID-strict watcher lock and away-mode ownership read "unknown" or
+"down" rather than reporting a misconfiguration). Each check names its own remedy;
+`FM_DSH_SKIP_PREFLIGHT=1` is the escape hatch for a deliberately degraded home.
+
 ## Primary integration
 
 `dsh-hooks-claude-code` runs firstmate's hook scripts unchanged, because DeepSeek Harness implements the Claude Code command-hook dialect. The registration lives in `dsh/hooks.json`, mounted by `dsh/profile.patch.yml`, and three facts about DSH change what that file may contain:
