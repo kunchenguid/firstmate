@@ -2,25 +2,28 @@
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi.
-// This layout removes live and collapsed thinking from a shallow presentation copy
-// while leaving assistant text on Pi's ordinary transcript surface. The message itself,
-// model context, session storage, and export rendering are never touched.
+// This layout removes live and historical step-source thinking from a shallow
+// presentation copy while leaving assistant text on Pi's ordinary transcript surface.
+// Toggling Calm cannot expose superseded steps, while the message itself, model context,
+// session storage, and export rendering are never touched.
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmPresentationHides,
+  calmStockExportRenderingIsActive,
+} from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
 type AssistantMessagePresentationState = {
-  hideThinkingBlock: boolean;
   isStreaming: boolean;
 };
 
 type CalmAssistantPresentation = {
   source: AssistantMessage;
   rendered: AssistantMessage;
-  streamed: boolean;
+  thinkingOwned: boolean;
 };
 
 type CalmAssistantLayoutController = {
@@ -31,6 +34,7 @@ type CalmAssistantLayoutController = {
   ) => void;
   originalUpdateContent: PiAssistantMessageComponent["updateContent"];
   presentations: WeakMap<object, CalmAssistantPresentation>;
+  ownedThinkingMessages: WeakSet<object>;
 };
 
 // The original adapter used this symbol without a mutable implementation delegate.
@@ -62,6 +66,7 @@ export function installCalmAssistantLayout(): void {
       render: () => {},
       originalUpdateContent,
       presentations: new WeakMap(),
+      ownedThinkingMessages: new WeakSet(),
     };
     controller = newController;
     registry[CALM_ASSISTANT_LAYOUT_CONTROLLER] = newController;
@@ -74,15 +79,21 @@ export function installCalmAssistantLayout(): void {
   }
 
   const activeController = controller;
+  // Controllers installed by the prior source revision survive Pi's hot reload.
+  activeController.ownedThinkingMessages ??= new WeakSet();
   // This function is deliberately replaced on every extension load. The wrapper above
   // survives /reload, but no implementation captured by an older source revision does.
   activeController.render = (component, message, isStreaming): void => {
     const prior = activeController.presentations.get(component);
     const sourceMessage = message === prior?.rendered ? prior.source : message;
     const state = component as unknown as AssistantMessagePresentationState;
-    const hideThinking =
-      calmPresentationHides("assistant-thinking") &&
-      (isStreaming || state.hideThinkingBlock || prior?.streamed === true);
+    const calmOwnsThinking = calmPresentationHides("assistant-thinking");
+    const thinkingOwned =
+      calmOwnsThinking ||
+      prior?.thinkingOwned === true ||
+      activeController.ownedThinkingMessages.has(sourceMessage);
+    if (thinkingOwned) activeController.ownedThinkingMessages.add(sourceMessage);
+    const hideThinking = thinkingOwned && !calmStockExportRenderingIsActive();
     const renderedMessage = hideThinking
       ? {
           ...sourceMessage,
@@ -93,7 +104,7 @@ export function installCalmAssistantLayout(): void {
     activeController.presentations.set(component, {
       source: sourceMessage,
       rendered: renderedMessage,
-      streamed: isStreaming || prior?.streamed === true,
+      thinkingOwned,
     });
     // A first-generation wrapper did not forward isStreaming to Pi. Seed the same
     // private field Pi's own default argument reads, then pass the explicit value too.

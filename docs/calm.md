@@ -19,9 +19,9 @@ Calm hides collapsed thinking labels, routine supervision notes, the shells for 
 Calm shows the latest live thinking line in a keyed widget, prefixed with an increasing `Step N:` counter, while the model is streaming.
 Each distinct streamed thinking line updates that component in place instead of accumulating planning transcript rows, and the component is inserted before the ship so later updates cannot move it below the animation.
 Assistant text is commentary rather than a step title and renders through Pi's ordinary assistant transcript component as it streams.
-That commentary remains visible exactly once after its tool turn, across later step replacement, finalization, and session reload, without adding a custom entry or changing the assistant message.
+That commentary remains visible exactly once after its tool turn, across later step replacement, finalization, session reload, and repeated Calm toggles, without adding a custom entry or changing the assistant message.
 When the response settles, live planning thinking is hidden while assistant commentary and the genuine final response stay visible.
-Restored commentary remains visible, while explicit reasoning expansion still restores the original reasoning row.
+Once Calm has owned planning as step input, that historical planning stays hidden after reload and while Calm is off, including during explicit reasoning expansion, so superseded step titles never return to the conversation.
 Hidden planning thinking and routine supervision notes remain in their messages, model context, session storage, and `/export` artifacts.
 The transient step disappears when the main run settles, so commentary and the final answer remain as ordinary transcript output.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
@@ -31,16 +31,16 @@ Outside Pi's same-name built-in override collision described below, Calm changes
 Calm's built-in wrappers preserve Pi's execution behavior, and input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
-Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+Toggling Calm off restores ordinary rendering except for historical planning Calm has already owned as step input, which remains presentation-hidden, and `Ctrl+O` expansion state is preserved.
 
 Pi's supported presentation API does not expose a global transcript filter.
-Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
+Built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
+The assistant-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.

@@ -1217,7 +1217,10 @@ const commandContext = {
 
 await handlers.get("session_start")[0]({ reason: "startup" }, commandContext);
 if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
-  throw new Error("session start did not restore Pi's stock working and thinking presentation");
+  throw new Error("session start did not restore Pi's stock working controls");
+}
+if (!assistantThinkingText.render(100).join("\n").includes("Thinking...")) {
+  throw new Error("session start did not retain stock thinking before Calm owned it");
 }
 const presentationRenderer = entryRenderers.get("firstmate-synthetic-input-presentation");
 if (!presentationRenderer) throw new Error("legacy synthetic presentation renderer was not registered");
@@ -1430,8 +1433,8 @@ if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assista
   throw new Error("Calm-hidden thinking changed final assistant row geometry");
 }
 assistantThinkingTool.setHideThinkingBlock(false);
-if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
-  throw new Error("expanding thinking did not restore the original reasoning content");
+if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("thinking expansion resurrected a superseded step title");
 }
 assistantThinkingTool.setHideThinkingBlock(true);
 if (assistantThinkingTool.render(100).length !== 0) {
@@ -1470,8 +1473,8 @@ if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.ren
 if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
 }
-if (!assistantThinkingTool.render(100).join("\n").includes("Thinking...")) {
-  throw new Error("turning Calm off did not restore the collapsed thinking label");
+if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("turning Calm off resurrected a superseded step title");
 }
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "off\n") {
   throw new Error("Calm did not persist the inactive choice in the effective Firstmate home");
@@ -1514,7 +1517,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary on the transcript exactly once, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
+  pass "Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1659,6 +1662,18 @@ const messages = {
       toolCall,
     ],
   },
+  // A restored persisted row built before this adapter is installed, with Pi's stock
+  // reasoning expansion enabled. This is the exact fallback path that resurrected
+  // every superseded title after reload and during later Calm toggles.
+  expandedHistory: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      { type: "thinking", thinking: "PREEXISTING_STEP_TITLE" },
+      { type: "text", text: "PREEXISTING_DURABLE_COMMENTARY" },
+      toolCall,
+    ],
+  },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
     ...assistantBase,
@@ -1691,7 +1706,7 @@ const messages = {
 const messagesBefore = JSON.stringify(messages);
 const rows = {};
 for (const [name, message] of Object.entries(messages)) {
-  rows[name] = new AssistantMessageComponent(message, true);
+  rows[name] = new AssistantMessageComponent(message, name !== "expandedHistory");
   components.push(rows[name]);
 }
 const rendered = (name) => rows[name].render(100);
@@ -1722,6 +1737,8 @@ for (const name of Object.keys(rows)) {
   if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "initial Calm off");
+requireVisible("expandedHistory", "PREEXISTING_STEP_TITLE", "initial Calm off");
 
 await calm.calmCommand.handler("", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
@@ -1792,6 +1809,8 @@ if ((renderedText("midTurn").match(/MIDTURN_WORKING_NOTE/g) || []).length !== 1)
 }
 requireVisible("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
 requireHidden("truncatedMidTurn", "TRUNCATED_STEP_TITLE", "Calm on");
+requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "Calm on");
+requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "Calm on");
 requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm on");
 requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm on");
 requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
@@ -1809,11 +1828,25 @@ if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
   throw new Error("/calm max was still read as a level instead of the plain toggle");
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
-const restoredRows = snapshot();
-for (const name of Object.keys(rows)) {
-  if (restoredRows[name] !== stockRows[name]) {
-    throw new Error(`turning Calm off did not restore byte-identical ${name} rendering`);
+requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "Calm off after /calm max");
+requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "Calm off after /calm max");
+for (const [name, message] of Object.entries(messages)) {
+  for (const block of message.content) {
+    if (block.type === "thinking") requireHidden(name, block.thinking, "Calm off after ownership");
+    if (block.type === "text") requireVisible(name, block.text, "Calm off after ownership");
   }
+}
+if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
+  throw new Error("turning Calm off changed the genuine final reply row");
+}
+calm = await loadCalmExtension();
+await calm.sessionStart({ reason: "reload" }, context);
+const rebuiltWhileOff = new AssistantMessageComponent(messages.expandedHistory, false);
+if (
+  !rebuiltWhileOff.render(100).join("\n").includes("PREEXISTING_DURABLE_COMMENTARY") ||
+  rebuiltWhileOff.render(100).join("\n").includes("PREEXISTING_STEP_TITLE")
+) {
+  throw new Error("Calm-off reload lost thinking ownership or durable commentary");
 }
 await calm.calmCommand.handler("  MaX  ", context);
 if (
@@ -1837,6 +1870,7 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   visibility.setCalmPresentation(false);
   ui.setHiddenThinkingLabel(undefined);
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "scrambled live state");
   calm = await loadCalmExtension();
   if (calm.registeredTools.length !== 7) {
     throw new Error(
@@ -1854,6 +1888,8 @@ for (const persisted of ["on\n", "max\n", "max"]) {
       );
     }
     requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+    requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", `${reason} session`);
+    requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", `${reason} session`);
   }
   // A session restored as on toggles to off; one that had wrongly dropped to off would
   // persist "on" here instead.
@@ -1862,6 +1898,8 @@ for (const persisted of ["on\n", "max\n", "max"]) {
     throw new Error(`${JSON.stringify(persisted)} did not restore as ordinary Calm on`);
   }
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
+  requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "Calm toggled off after restore");
+  requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "Calm toggled off after restore");
 }
 if (!existsSync(calmPreferencePath)) {
   throw new Error("Calm stopped persisting its preference file");
@@ -1871,7 +1909,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi Calm keeps assistant commentary on the ordinary transcript exactly once across step replacement, finalization, and reload; keeps only thinking as one transient step above the ship; preserves Calm-off, truncated, final-reply, and message-data behavior; ignores every /calm argument; and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary exactly once across step replacement and finalization, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -2433,17 +2471,15 @@ TS
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
-    || fail "thinking expansion did not restore Calm-hidden reasoning"
+  sleep 0.2
+  capture_geometry_viewport "$expanded_snapshot"
+  assert_not_contains "$(cat "$expanded_snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
+    "thinking expansion resurrected a superseded step title"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
+  assert_geometry_gap "$expanded_snapshot" "expanded native Calm transcript"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  i=0
-  while [ "$i" -lt 120 ]; do
-    capture_geometry_viewport "$snapshot"
-    grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
+  sleep 0.2
+  capture_geometry_viewport "$snapshot"
   assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
@@ -2451,13 +2487,14 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
     || fail "turning Calm off did not restore the tool-call row"
-  assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
+  assert_not_contains "$(cat "$calm_off_snapshot")" "CALM_GEOMETRY_THINKING_ONE" \
+    "turning Calm off resurrected a superseded step title"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
-    if ! grep -Fq "probe-one.txt" "$snapshot" && ! grep -Fq "Thinking..." "$snapshot"; then
+    if ! grep -Fq "probe-one.txt" "$snapshot" && ! grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot"; then
       break
     fi
     sleep 0.05
@@ -2479,7 +2516,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
+  pass "Pi Calm native /skill:ahoy geometry keeps superseded thinking at zero height through expansion, reload, restart, and Calm toggles while preserving stored history, final output, and Calm-off tool rendering"
 }
 
 test_working_ship_geometry_and_lifecycle() {
@@ -3734,7 +3771,10 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
-  assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
+  assert_not_contains "$(cat "$default_snapshot")" "first internal reasoning block" \
+    "initial collapsed transcript unexpectedly expanded historical planning"
+  assert_contains "$(cat "$default_snapshot")" "Thinking..." \
+    "reasoning fixture did not render Pi's collapsed thinking label before Calm owned it"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
@@ -3747,6 +3787,8 @@ JSON
   wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
     || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
+  assert_not_contains "$(cat "$expanded_snapshot")" "first internal reasoning block" \
+    "Ctrl+O expansion resurrected a superseded step title while Calm was off"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -3765,6 +3807,8 @@ JSON
     # on screen through this whole redraw rather than disappearing with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
+      ! grep -Fq "fm_watch_arm_pi" "$hidden_snapshot" &&
+      ! grep -Fq "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "$hidden_snapshot" &&
       grep -Fq "I will run one command." "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
@@ -4006,7 +4050,10 @@ JS
   assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "second /calm dropped a transient diagnostic"
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
-  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
+  assert_not_contains "$(cat "$restored_snapshot")" "first internal reasoning block" \
+    "second /calm resurrected a superseded step title"
+  assert_not_contains "$(cat "$restored_snapshot")" "Thinking..." \
+    "second /calm restored a historical planning label"
   assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm removed durable assistant commentary"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 

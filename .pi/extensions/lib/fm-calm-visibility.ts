@@ -31,7 +31,9 @@ export const CALM_TRANSCRIPT_CLASSES = [
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
 // Calm is on or off. Assistant text stays on Pi's ordinary transcript surface while
-// assistant thinking supplies the transient current-step title.
+// assistant thinking supplies the transient current-step title. The assistant layout
+// separately retains ownership of thinking Calm has suppressed so toggling off cannot
+// reveal superseded planning history.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
@@ -86,6 +88,10 @@ export function calmPresentationIsActive(): boolean {
 
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
+}
+
+export function calmStockExportRenderingIsActive(): boolean {
+  return stockExportRendering;
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {

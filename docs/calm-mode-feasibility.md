@@ -225,7 +225,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message that also carries a tool call | Visible through Pi's ordinary assistant component while streaming and after settlement, exactly once from the original message rather than a copied custom entry (verified on Pi 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | The assistant component omits live thinking while a keyed widget shows only its current thinking line as one numbered `Step N:` row above the working ship; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the assistant component omits thinking from its shallow presentation copy and records ownership of that source message; owned thinking stays omitted through later Calm-off fallback, reload, and explicit expansion, while a keyed widget shows only the current live thinking line as one numbered `Step N:` row above the working ship; message data and stock export rendering retain the original reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -283,8 +283,8 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
-It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated thinking updates reuse one transient component while assistant commentary remains once on the ordinary transcript across replacement, finalization, and reload, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
-A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
+It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated thinking updates reuse one transient component while assistant commentary remains once on the ordinary transcript across replacement, finalization, reload, and repeated toggles, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
+A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, proves explicit expansion and Calm-off fallback do not resurrect superseded titles, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
@@ -628,19 +628,21 @@ ok - real Pi 0.85.1 in Herdr reloaded the current Calm adapter over the legacy p
 The deterministic test observed one externally read numbered thinking widget at a time around all three tool calls, verified that each assistant text block stayed on the ordinary transcript exactly once through later step replacement and finalization, and measured every commentary row above the current step with that step above the sailing ship.
 It also verified that settlement removed the transient step and planning thinking while retaining all three commentary rows, and that the original planning, commentary, and tool content remained in the persisted session transcript.
 The credentialed companion test uses the same four Firstmate extensions with the real `openai-codex/gpt-5.6-sol` model at `xhigh`, the existing authenticated user Pi configuration, and isolated Firstmate state plus session output.
-It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, proves earlier commentary remains exactly once during a later step, measures commentary above the current step and both above the ship, and requires the settled `REAL_MODEL_FINAL_RESPONSE` frame to retain all three commentary rows without the step or ship.
+It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, proves commentary remains exactly once above the current step and ship, then reloads and performs two Calm off/on cycles with reasoning and tool expansion enabled.
+Every settled lifecycle frame must omit each captured historical title while retaining all three commentary rows and the final answer exactly once; Calm-off frames must also retain the real tool output.
 
 ```text
 $ FM_CALM_PI_REAL_MODEL_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-real-model-live-e2e.test.sh
-proof - working Step 1:  Step 1: Clarifying single read call limit
-proof - working Step 2:  Step 2: Evaluating bash reading workaround
-proof - working Step 3:  Step 3: Planning multi-turn interaction flow
-proof - retained REAL_COMMENTARY_ONE once above later Step 3 and above the ship
-proof - working Step 4:  Step 4: Clarifying assistant turn boundaries
-proof - working Step 5:  Step 5: Planning single read call per turn
+proof - working Step 1:  Step 1: Clarifying single read call constraint per turn
+proof - working Step 2:  Step 2: Planning single read call with commentary sequence
+proof - working Step 3:  Step 3: Planning to arm watcher for continuation
+proof - working Step 4:  Step 4: Planning environment inspection with bash
+proof - retained REAL_COMMENTARY_ONE once above later Step 4 and above the ship
+proof - reload retained commentary/final output once and no historical step title
+proof - two Calm off/on cycles retained commentary, final answer, and tool output without historical step titles
 proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)
 proof - final:  REAL_MODEL_FINAL_RESPONSE
-ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across 5 steps, retained commentary exactly once across later transitions, ordered commentary and step above the ship, and cleared only the transient presentation at finalization
+ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across 4 steps, retained commentary exactly once, preserved final and tool output, and kept every superseded title hidden through reload plus two Calm off/on cycles
 ```
 
 The earlier live checks were false positives because both started fresh Pi processes after the latest source was already present; neither loaded a legacy process-global wrapper and then exercised `/reload`, which was the divergent captain-facing lifecycle.

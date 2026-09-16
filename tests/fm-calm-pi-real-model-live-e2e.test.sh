@@ -9,7 +9,7 @@ fm_live_gate opt-in FM_CALM_PI_REAL_MODEL_E2E herdr jq pi python3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-commentary-layout)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-toggle-history-regression)
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-real-model-live-e2e)
 PROJECT="$TMP_ROOT/project"
 HOME_DIR="$TMP_ROOT/home"
@@ -32,10 +32,10 @@ trap cleanup EXIT
 
 mkdir -p "$PROJECT" "$HOME_DIR/config" "$SESSIONS" "$EVIDENCE"
 printf 'on\n' >"$HOME_DIR/config/calm"
-printf 'alpha probe\n' >"$PROJECT/.calm-probe-a"
-printf 'beta probe\n' >"$PROJECT/.calm-probe-b"
-printf 'gamma probe\n' >"$PROJECT/.calm-probe-c"
-printf 'REAL_MODEL_FINAL_RESPONSE\n' >"$PROJECT/.calm-final"
+printf 'REAL_TOOL_OUTPUT_ALPHA\n' >"$PROJECT/.calm-probe-a"
+printf 'REAL_TOOL_OUTPUT_BETA\n' >"$PROJECT/.calm-probe-b"
+printf 'REAL_TOOL_OUTPUT_GAMMA\n' >"$PROJECT/.calm-probe-c"
+printf 'FINAL_SOURCE_CONFIRMATION\n' >"$PROJECT/.calm-final"
 
 pi auth check --provider openai-codex --model gpt-5.6-sol --json >/dev/null 2>&1 \
   || fail "the existing user Pi configuration is not authenticated for openai-codex/gpt-5.6-sol"
@@ -69,7 +69,7 @@ for _ in $(seq 1 300); do
 done
 [ "$ready" -eq 1 ] || { printf '%s\n' "$text" >&2; fail "authenticated Pi did not reach its ready composer"; }
 
-PROMPT='Use exactly one read call per assistant turn. Before reading .calm-probe-a, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, ONE. Before reading .calm-probe-b, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, TWO. Before reading .calm-probe-c, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, THREE. Then read .calm-final and reply with its exact content.'
+PROMPT='Use exactly one read call per assistant turn. Before reading .calm-probe-a, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, ONE. Before reading .calm-probe-b, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, TWO. Before reading .calm-probe-c, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, THREE. Then read .calm-final and, after confirming its content, reply with the exact token formed by concatenating REAL_, MODEL_, FINAL_, RESPONSE.'
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" "$PROMPT" >/dev/null
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
@@ -79,6 +79,8 @@ commentary_persisted_after_transition=0
 ordered_frame_count=0
 settled_polls=0
 final_text=
+step_titles="$EVIDENCE/step-titles.txt"
+: >"$step_titles"
 frame=0
 for _ in $(seq 1 1200); do
   text=$(pane_text)
@@ -94,6 +96,8 @@ for _ in $(seq 1 1200); do
     step_number=$(printf '%s\n' "$step_line" | sed -E 's/.*Step ([0-9]+):.*/\1/')
     if ! printf '%s\n' "$seen_step_numbers" | grep -Fxq "$step_number"; then
       seen_step_numbers=$(printf '%s\n%s' "$seen_step_numbers" "$step_number")
+      step_title=$(printf '%s\n' "$step_line" | sed -E 's/.*Step [0-9]+:[[:space:]]*//; s/[[:space:]]+$//')
+      [ "${#step_title}" -lt 8 ] || printf '%s\n' "$step_title" >>"$step_titles"
       printf 'proof - working Step %s: %s\n' "$step_number" "$step_line"
     fi
     printf '%s\n' "$step_line" | grep -Fq 'REAL_COMMENTARY_' \
@@ -137,8 +141,6 @@ done
 unique_steps=$(printf '%s\n' "$seen_step_numbers" | grep -Ec '^[0-9]+$' || true)
 [ "$unique_steps" -ge 2 ] \
   || fail "external pane observed only $unique_steps distinct numbered steps"
-[ "$commentary_persisted_after_transition" -eq 1 ] \
-  || fail "external pane never retained first commentary across a later step transition"
 [ "$ordered_frame_count" -ge 2 ] \
   || fail "external pane produced only $ordered_frame_count commentary/step/ship ordering observations"
 for word in ONE TWO THREE; do
@@ -148,6 +150,70 @@ for word in ONE TWO THREE; do
 done
 printf '%s' "$final_text" | grep -Fq '╲▁▁▁╱' \
   && fail "settled real-model transcript retained the sailing animation"
+
+assert_settled_history() { # <frame> <label> [require-tool-output]
+  local history=$1 label=$2 require_tool_output=${3:-0} word marker title final_count
+  printf '%s\n' "$history" | grep -Eq 'Step [0-9]+:' \
+    && fail "$label restored a numbered transient step"
+  printf '%s\n' "$history" | grep -Fq '╲▁▁▁╱' \
+    && fail "$label retained the sailing animation"
+  while IFS= read -r title; do
+    [ -z "$title" ] && continue
+    printf '%s\n' "$history" | grep -Fq -- "$title" \
+      && fail "$label resurrected superseded historical step title: $title"
+  done <"$step_titles"
+  for word in ONE TWO THREE; do
+    marker="REAL_COMMENTARY_$word"
+    [ "$(printf '%s\n' "$history" | grep -Fc "$marker")" -eq 1 ] \
+      || fail "$label did not retain $marker exactly once"
+  done
+  final_count=$(printf '%s\n' "$history" | grep -Fc 'REAL_MODEL_FINAL_RESPONSE')
+  [ "$final_count" -eq 1 ] \
+    || { printf '%s\n' "$history" >&2; fail "$label retained the final response $final_count times instead of once"; }
+  if [ "$require_tool_output" -eq 1 ]; then
+    for marker in REAL_TOOL_OUTPUT_ALPHA REAL_TOOL_OUTPUT_BETA REAL_TOOL_OUTPUT_GAMMA; do
+      printf '%s\n' "$history" | grep -Fq "$marker" \
+        || fail "$label did not preserve visible tool output $marker"
+    done
+  fi
+}
+
+# Exercise the exact divergent lifecycle against the authenticated, persisted model
+# history: reload once, then toggle Calm off/on twice. Explicitly expand thinking and
+# tools while off so neither fallback route can hide a resurrected title.
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" /reload >/dev/null
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
+sleep 3
+reloaded_text=$(pane_text)
+assert_settled_history "$reloaded_text" "real-model reload"
+printf 'proof - reload retained commentary/final output once and no historical step title\n'
+
+expanded_fallback=0
+for expected in off on off on; do
+  "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" /calm >/dev/null
+  "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
+  matched=0
+  for _ in $(seq 1 100); do
+    [ "$(cat "$HOME_DIR/config/calm" 2>/dev/null || true)" = "$expected" ] && { matched=1; break; }
+    sleep 0.05
+  done
+  [ "$matched" -eq 1 ] || fail "real-model /calm did not persist $expected"
+  sleep 0.3
+  if [ "$expected" = off ]; then
+    if [ "$expanded_fallback" -eq 0 ]; then
+      "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" ctrl+t >/dev/null
+      "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" ctrl+o >/dev/null
+      expanded_fallback=1
+    fi
+    sleep 0.3
+    toggled_text=$(pane_text)
+    assert_settled_history "$toggled_text" "real-model Calm-off expanded fallback" 1
+  else
+    toggled_text=$(pane_text)
+    assert_settled_history "$toggled_text" "real-model Calm-on redraw"
+  fi
+done
+printf 'proof - two Calm off/on cycles retained commentary, final answer, and tool output without historical step titles\n'
 
 session_file=$(find "$SESSIONS" -type f -name '*.jsonl' \
   -exec grep -l 'REAL_MODEL_FINAL_RESPONSE' {} + 2>/dev/null | head -1)
@@ -163,5 +229,5 @@ done
 
 printf 'proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)\n'
 printf 'proof - final: %s\n' "$(printf '%s\n' "$final_text" | grep -F 'REAL_MODEL_FINAL_RESPONSE' | tail -1)"
-printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary exactly once across later transitions, ordered commentary and step above the ship, and cleared only the transient presentation at finalization\n' \
+printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary exactly once, preserved final and tool output, and kept every superseded title hidden through reload plus two Calm off/on cycles\n' \
   "$(pi --version)" "$unique_steps"
