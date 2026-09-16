@@ -1492,6 +1492,12 @@ tests/fm-backend-zellij-smoke.test.sh
 
 The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
 
+### Windows (native, no WSL)
+
+On 2026-09-10, Windows 11 with Git Bash/MSYS and Zellij 0.45.1 verified that a PowerShell-launched headless Zellij session persists after its Git Bash launcher exits, unlike the prior `nohup ... &` background attempt.
+`tests/fm-backend-zellij.test.sh` pins that guarantee portably through stubbed `uname -s` fixtures because CI has no native Windows host.
+The branch keys on the kernel name rather than `OSTYPE`: on 2026-09-14, Git for Windows 2.55.0 shipped a bash built for the Cygwin runtime (`x86_64-pc-cygwin`), so Git Bash reported `OSTYPE=cygwin` and an `OSTYPE` check silently fell back to the `nohup ... &` launch.
+
 ## Orca
 
 Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
