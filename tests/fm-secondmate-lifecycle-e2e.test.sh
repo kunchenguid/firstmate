@@ -248,6 +248,22 @@ phase_teardown() {
     done
   ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR" \
     || fail "could not settle pending-replies before retirement"
+  mkdir -p "$TMP_ROOT/external-pending"
+  printf 'task_id=design\nphase=resolved\n' > "$TMP_ROOT/external-pending/escape"
+  mv "$HOME_DIR/state/pending-replies" "$HOME_DIR/state/pending-replies.safe"
+  ln -s "$TMP_ROOT/external-pending" "$HOME_DIR/state/pending-replies"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a symlinked pending-replies directory"
+  fi
+  assert_present "$SUB" "unsafe pending-replies retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "unsafe pending-replies retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "unsafe pending-replies retirement removed the registry route"
+  assert_present "$TMP_ROOT/external-pending/escape" \
+    "unsafe local retirement removed an external pending reply"
+  rm -f "$HOME_DIR/state/pending-replies"
+  mv "$HOME_DIR/state/pending-replies.safe" "$HOME_DIR/state/pending-replies"
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \

@@ -512,8 +512,8 @@ fi
 REMOTE_HANDOFF_DIR_PRESENT=0
 REMOTE_HANDOFF_DIR_REAL=
 REMOTE_OUTBOX_PRESENT=0
-REMOTE_PENDING_DIR_PRESENT=0
-REMOTE_PENDING_DIR_REAL=
+PENDING_REPLIES_DIR_PRESENT=0
+PENDING_REPLIES_DIR_REAL=
 REMOTE_HANDOFF_LOCK=
 REMOTE_REGISTRY_LOCK=
 REMOTE_REPLY_LIFECYCLE_LOCK=
@@ -735,11 +735,38 @@ remote_teardown_locks_release() {
   fi
 }
 
+# Validate $STATE/pending-replies for local and remote secondmate retirement:
+# refuse a symlinked directory and any non-regular entry, and pin the realpath
+# so later cleanup cannot follow a swapped link target.
+pending_replies_recovery_validate() {
+  local mode=${1:-initial} pending_dir real rec
+  pending_dir="$STATE/pending-replies"
+  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
+    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
+      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      PENDING_REPLIES_DIR_PRESENT=1
+      PENDING_REPLIES_DIR_REAL=$real
+    elif [ "$PENDING_REPLIES_DIR_PRESENT" -ne 1 ] || [ "$PENDING_REPLIES_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+      return 1
+    fi
+    for rec in "$pending_dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+    done
+  elif [ "$mode" != initial ] && [ "$PENDING_REPLIES_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+    return 1
+  fi
+}
+
 remote_recovery_paths_validate() {
-  local mode=${1:-initial} handoff_dir outbox pending_dir real rec
+  local mode=${1:-initial} handoff_dir outbox real
   handoff_dir="$DATA/handoff"
   outbox="$handoff_dir/$ID.outbox.md"
-  pending_dir="$STATE/pending-replies"
   if [ -e "$handoff_dir" ] || [ -L "$handoff_dir" ]; then
     [ -d "$handoff_dir" ] && [ ! -L "$handoff_dir" ] \
       || { echo "REFUSED: remote handoff recovery directory is unsafe" >&2; return 1; }
@@ -768,26 +795,7 @@ remote_recovery_paths_validate() {
     echo "REFUSED: remote backlog outbox changed during retirement" >&2
     return 1
   fi
-  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
-    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
-      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
-    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
-    if [ "$mode" = initial ]; then
-      REMOTE_PENDING_DIR_PRESENT=1
-      REMOTE_PENDING_DIR_REAL=$real
-    elif [ "$REMOTE_PENDING_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_PENDING_DIR_REAL" != "$real" ]; then
-      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
-      return 1
-    fi
-    for rec in "$pending_dir"/*; do
-      [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] \
-        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
-    done
-  elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
-    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
-    return 1
-  fi
+  pending_replies_recovery_validate "$mode" || return 1
 }
 
 # Remove every parent pending-reply record for $ID, plus its delivery
@@ -815,8 +823,8 @@ pending_replies_cleanup_for_task() {
 }
 
 remote_pending_replies_cleanup() {
-  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
-  pending_replies_cleanup_for_task "$STATE/pending-replies" "$REMOTE_PENDING_DIR_REAL"
+  [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ] || return 0
+  pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL"
 }
 
 # Refuse non-forced secondmate retirement while any parent pending-reply for
@@ -3155,6 +3163,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
+  pending_replies_recovery_validate initial || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
@@ -3517,6 +3526,8 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
+  pending_replies_recovery_validate recheck \
+    || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
     :
   else
@@ -3527,8 +3538,10 @@ if [ "$KIND" = secondmate ]; then
   fi
   handoff_wake_retire_stage_commit \
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
-  pending_replies_cleanup_for_task "$STATE/pending-replies" \
-    || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  if [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ]; then
+    pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
+      || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  fi
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
