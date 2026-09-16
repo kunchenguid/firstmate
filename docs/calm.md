@@ -99,13 +99,13 @@ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 
 ## OMP
 
-Calm on OMP is the `fm-calm-omp` extension package under `extensions/fm-calm-omp`, installed into OMP's user plugin scope so it loads in every omp session regardless of working directory.
-`bin/fm-omp-calm-install.sh` runs `omp plugin link` against that package. To unload it, run `omp plugin disable fm-calm-omp` (or delete the linked symlink); `omp plugin uninstall fm-calm-omp` also unloads the extension but leaves the symlink; delete it or run the installer again to restore the link.
-The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
+Calm on OMP is the standalone `fm-calm-omp` package under `extensions/fm-calm-omp/` (including `lib/fm-calm-working-ship.ts`), installed into OMP's user plugin scope so it loads in every omp session regardless of working directory.
+`bin/fm-omp-calm-install.sh` copies that package to `~/.local/share/fm-calm-omp` (override with `FM_CALM_OMP_DIR`) and runs `omp plugin link` against the copy, so the global install does not depend on firstmate checkout path or upstream merge status. Re-run the installer after updating firstmate to refresh the copy.
+To unload it, run `omp plugin disable fm-calm-omp`. The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
 The installer retires a legacy project-local `.omp/extensions/fm-calm-omp.ts` for the same reason, removing an identical copy and renaming a divergent one to `.bak`.
 
 OMP exposes no extension setter for tool-activity visibility, so `/calm-omp` reaches the native toggle through a one-shot widget probe of the focused editor and delegates to it, including its own persisted `display.hideToolActivity` setting, tool images, and terminal-history repainting.
-While that setting hides tool activity and a run is under way, the extension draws the same two-row sailboat Pi draws, from the shared sprite geometry in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts` through `.pi/extensions/lib/fm-calm-working-ship.ts`.
+While that setting hides tool activity and a run is under way, the extension draws the same two-row sailboat animation from the vendored working-ship module in `extensions/fm-calm-omp/lib/`.
 When the probe finds no visibility action the command reports the fallback (`Ctrl+Shift+O` or `/settings > Appearance > Display > Hide Tool Activity`) and changes nothing.
 
 Regression entry point:
