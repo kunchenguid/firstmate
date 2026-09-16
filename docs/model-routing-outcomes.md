@@ -1,7 +1,7 @@
 # Model-routing outcome measurement
 
 `bin/fm-routing-outcomes.py` adds receipt-backed measurement to existing Firstmate tasks without becoming a dispatcher, scheduler, quota provider, grader, or task lifecycle.
-It records one exact task attempt at a time, records evidence-qualified shadow recommendations separately, and renders a compact descriptive scorecard.
+It records one task-linked attempt at a time, records explicitly heuristic shadow suggestions separately, and renders a compact descriptive scorecard.
 Each record is bound to the existing task's current `spawn_gen` incarnation and metadata digest, while quota-axi remains the allowance source and `quota-array-dispatch` remains the routing decision owner.
 
 ## Rollout boundary
@@ -9,12 +9,12 @@ Each record is bound to the existing task's current `spawn_gen` incarnation and 
 This slice supports two independent stages.
 
 1. In `measurement`, import native receipts and verify attribution, token accounting, timing, grading, pricing, and replay behavior without changing the route selected for work.
-2. In `shadow`, record the route that the existing eligibility, capability-class, runway-feasibility, and spend-priority procedure would recommend, but do not execute the recommendation.
+2. In `shadow`, record a human or Firstmate route suggestion with optional raw quota context, but do not execute the suggestion or call it verified.
 The importer itself never launches or switches a model.
 Bounded routing remains deferred until external evidence verifies quota, capability, a genuinely different allowance pool, and safe handoff.
 The committed tool never claims bounded readiness.
 The approved model-category matrix remains private policy and is not committed or activated by this measurement slice.
-Category labels on historical or shadow records are descriptive and policy-unverified, so they never establish routing eligibility.
+Category labels and shadow judgments are descriptive and heuristic, so they never establish routing eligibility.
 
 Initial paired comparisons are limited mechanically to two distinct low-risk pair identifiers per category in one outcome store.
 A comparison manifest must state that the work is non-time-critical, has no private external action, and performs no external action.
@@ -30,14 +30,14 @@ The default append-only stores are private and gitignored:
 
 `FM_DATA_OVERRIDE` relocates both with the rest of the effective home.
 `--store` and `--shadow-store` provide explicit locations for fixtures and intentionally separate evidence sets.
-Legacy `dispatch-log.tsv` history is read only by the explicit `legacy --legacy-log <path>` command.
-It is never an automatic scorecard input, so an unrelated or incompatible legacy file cannot block receipt-backed reporting.
+Legacy dispatch history remains with its existing owner and is not imported by this tool.
 
 An import hashes its normalized record.
 It also requires the named task's current authoritative `state/<task-id>.meta` record and exact `spawn_gen`, preventing telemetry from silently attaching to a reused task identifier.
 Replaying an identical attempt is a no-op, while a changed attempt appends a new revision under the same task-incarnation and attempt identity.
-Reusing a task identifier under a new `spawn_gen` creates a separate durable identity and task scorecard row.
-Readers fold only the newest revision, so a restart, resume, or corrected grade does not duplicate tokens, costs, or accepted-task counts.
+Reusing a task identifier under a new `spawn_gen` creates a separate durable identity and observation.
+Readers fold only the newest revision, so a restart, resume, or corrected grade does not duplicate the attempt.
+A whole native session receipt cannot be attached to a second attempt, which prevents its tokens and cost from being counted twice.
 Writers serialize and fsync each append.
 
 The script header and `--help` own the manifest fields and command syntax.
@@ -70,7 +70,10 @@ Agy's one-shot result gives native usage, and its native selected-model log can 
 These limitations remain visible in `native.completeness` and in scorecard uncertainty.
 A Pi session with mixed or partially missing task, incarnation, model, effort, provider, or API evidence is rejected instead of pooling its usage into one exact route.
 A Claude session with mixed or partially missing assistant-model or session evidence is rejected, while a Claude result may retain separately itemized auxiliary-model usage.
+When a Claude result contains multiple models, the scorecard labels its combined usage as a whole-session multi-model observation rather than assigning every token to the requested main model.
 The manifest harness must agree with the task metadata and receipt kind, and its provider must agree with native provider evidence when present.
+Only Pi receipts carrying the task identifier and `spawn_gen` may certify an accepted outcome.
+Claude and agy receipts remain useful raw measurements, but their task attribution and outcome stay unresolved operator observations.
 
 Token categories retain the native source's accounting.
 Reasoning tokens are reported separately but never added on top of output tokens for cost calculations, because the price catalog contract requires `reasoning: included_in_output`.
@@ -81,15 +84,15 @@ A receipt with a missing category yields unknown for that aggregate rather than 
 
 The manifest records task start and finish plus observable queue, model, tool, review, retry, handoff, and human durations.
 Each attempt's end-to-end duration is computed from its timestamp pair rather than from model time alone.
-The accepted-task table spans the earliest recorded attempt start through the first accepted finish, so retries and one-alternative handoffs are counted without summing overlapping wall-clock attempts.
+The scorecard reports each attempt separately.
+Complete accepted-journey time and cost across task incarnations or handoffs are deferred rather than reconstructed from incomplete lineage.
 Native API duration is retained separately where a tool emits it.
 
 An accepted outcome requires an independent deterministic or blind-review grade, a final pass, explicit task acceptance criteria, a separately identified grader or check, and hashed structured check artifacts covering every criterion.
 Each check artifact is bound to the task identifier, `spawn_gen`, attempt identifier, and SHA-256 of the normalized acceptance criteria.
 The implementation route cannot self-assert acceptance by setting an outcome string alone.
 First-pass result, final result, defect count, fix count, retry count, grader duration, grader tokens, and grader incremental charge stay explicit.
-Model-based grading references a distinct `attempt_role: grader` attempt, so its native usage and timestamped price provenance are reused without duplicating billing logic.
-Missing grader usage or price evidence makes the complete API-equivalent total unknown, while the execution-only subtotal remains explicitly labeled.
+The scorecard retains those supplied grader facts but does not claim a complete model-grader or accepted-task efficiency total.
 The importer does not create a second full review pipeline; callers attach the ordinary task's actual check receipts and use limited blind review only where subjective grading requires it.
 
 ## Cost and allowance attribution
@@ -109,17 +112,16 @@ Quota inputs are native quota-axi schema-version-5 snapshots taken before and af
 The importer retains the selected provider's literal windows and normalized semantics.
 It computes a per-window consumption delta only when reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
 It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
-Each shadow candidate's runway or spend claim separately references an exact quota-axi snapshot, provider, and window, and the claimed remaining value must match the native evidence.
-Missing or unresolved allowance evidence is reported as unverified and cannot support runway or spend claims.
+A shadow candidate may attach one raw dated quota-axi provider snapshot.
+The tool displays its literal windows and semantics beside separately labeled heuristic eligibility, runway, and spend judgments without inferring provider-family mappings or verifying the recommendation.
 
 ## Scorecard interpretation
 
-The scorecard groups exact attempts by category, task shape, harness, provider, effective model, and effective effort.
+The scorecard groups attempt-route observations by category, task shape, harness, provider, effective model, and effective effort.
 When effective model or effort is unavailable, the route uses an explicit `requested-only:` label that is never pooled with observed route evidence.
-It includes sample counts, outcomes, known token/cost/time totals, unknown counts, and unresolved or failed costs at the task level.
-It also prints each shadow recommendation and the eligibility, capability-class fit, runway feasibility, spend priority, explanation, and uncertainty recorded for every candidate.
-Attempts that begin after first acceptance do not increase accepted-task cost, while an attempt overlapping first acceptance contributes an explicit unknown rather than mismatched cost and time.
-The same first-acceptance boundary applies to grader time and cost, and accepted completion includes the finish of a referenced grader attempt.
+Multi-model native results use an explicit whole-session label.
+The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual observation for every task incarnation and attempt.
+It also prints each heuristic shadow suggestion, raw quota context when present, and the recorded eligibility, capability-class fit, runway, spend priority, explanation, and uncertainty.
 
 The scorecard is descriptive.
 It deliberately has no opaque weighted score and does not claim a statistical winner from a few heterogeneous tasks.
@@ -133,5 +135,5 @@ Run the focused behavior suite with:
 tests/fm-routing-outcomes.test.sh
 ```
 
-The suite covers missing provider telemetry, refreshable-auth uncertainty, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, exact price matching, native multi-model accounting, one-alternative handoff, comparison limits, independent grading, and quota/outage shadow fallback.
+The suite covers missing provider telemetry, refreshable-auth uncertainty, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, whole-session receipt reuse, exact price matching, multi-model labeling, non-Pi outcome attribution, one-alternative handoff, comparison limits, independent grading, and heuristic shadow context.
 `tests/fm-spawn-dispatch-profile.test.sh` verifies that a spawned Pi extension writes only the sanitized request-receipt fields.
