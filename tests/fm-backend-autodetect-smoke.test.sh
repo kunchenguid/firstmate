@@ -67,6 +67,8 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3)
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 ID="autodetectsmoke1"
 WT=
+PROMPT_ARMED=0
+PROMPT_LOG="$TMP_ROOT/zsh-startup-input.log"
 cleanup_all() {
   local cleanup_status=0
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
@@ -81,7 +83,39 @@ on_exit() {
   exit "$status"
 }
 trap on_exit EXIT
-"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
+
+# Reproduce the operator-visible launch failure with a real interactive zsh.
+# The one-shot startup reader has the same decisive shape as the Oh My Zsh
+# update prompt: before the fix an immediate `treehouse get` donated its first
+# byte, and the shell later executed `reehouse get`.
+# Scope the one-shot marker by Herdr pane id so Treehouse's nested shell in the
+# task pane does not ask twice while the independently seeded pane still stays
+# isolated.
+if ZSH_BIN=$(command -v zsh 2>/dev/null); then
+  ZDOTDIR="$TMP_ROOT/zdotdir"
+  mkdir -p "$ZDOTDIR"
+  cat > "$ZDOTDIR/.zshrc" <<'ZSH'
+marker="$ZDOTDIR/.startup-input-${HERDR_PANE_ID//:/-}"
+if [[ ! -e "$marker" ]]; then
+  : > "$marker"
+  printf 'oh-my-zsh update prompt: [Y/n] '
+  IFS= read -rk 1 consumed
+  if [[ "$consumed" == $'\n' ]]; then
+    consumed_name=newline
+  else
+    consumed_name=${(q)consumed}
+  fi
+  printf 'pane=%s consumed=%s\n' "$HERDR_PANE_ID" "$consumed_name" >> "$FM_HERDR_STARTUP_PROMPT_LOG"
+fi
+ZSH
+  SHELL="$ZSH_BIN" ZDOTDIR="$ZDOTDIR" FM_HERDR_STARTUP_PROMPT_LOG="$PROMPT_LOG" \
+    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+    || fail "could not provision isolated Herdr lab session with the zsh startup-prompt reproduction"
+  PROMPT_ARMED=1
+else
+  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
+  echo "note: zsh not found; the real startup-prompt arm is skipped while the portable exact-input regression still runs" >&2
+fi
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 
@@ -148,7 +182,7 @@ PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 [ -n "$PANE" ] || fail "auto-detected spawn meta is missing herdr_pane_id"
 pass "real herdr: auto-detected spawn records backend=herdr and herdr_session/workspace/tab/pane fields in meta"
 
-# --- confirm the trivial launch command actually ran in the herdr pane ------
+# --- confirm startup input integrity and the trivial launch ------------------
 
 sleep 1
 CAPTURED=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --source recent --lines 200) || \
@@ -158,6 +192,14 @@ case "$CAPTURED" in
   *autodetect-smoke-ok*) : ;;
   *) fail "the raw launch command did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
 esac
+case "$CAPTURED" in
+  *'command not found: reehouse'*) fail "the zsh startup prompt still consumed the leading byte of treehouse get"$'\n'"$CAPTURED" ;;
+esac
+if [ "$PROMPT_ARMED" -eq 1 ]; then
+  grep -Fxq "pane=$PANE consumed=newline" "$PROMPT_LOG" \
+    || fail "the task pane's zsh startup prompt did not consume the sacrificial blank line"$'\n'"$(cat "$PROMPT_LOG" 2>/dev/null)"
+  pass "real herdr: a zsh startup prompt consumes the sacrificial newline while treehouse get and the worker launch remain byte-complete"
+fi
 pass "real herdr: the auto-detected spawn's launch command actually ran in the herdr pane"
 
 # --- teardown completes the trivial spawn/teardown cycle --------------------

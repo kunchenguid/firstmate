@@ -915,6 +915,32 @@ rc=1
 The refusal is a JSON error on stderr with exit 1 and empty stdout, and both client generations report `.server.compatible` and `.server.protocol` per named session, which is what the selection in `bin/backends/herdr.sh` reads.
 `tests/fm-backend-herdr.test.sh` pins the bypass, same-process same-session caching, cross-session isolation, forced reselection, and both status shapes against fakes; `tests/fm-backend-herdr-smoke.test.sh` refreshes the real status normalization against the installed binary's running lab server.
 
+### Shell-startup command integrity
+
+Measured 2026-09-16 on macOS arm64 against Herdr 0.8.2 protocol 20 in a generated non-default lab session.
+A controlled interactive zsh startup question used the same shell-owned one-character read as the reported Oh My Zsh update prompt.
+Herdr's `pane process-info` described that waiting question as one lone foreground zsh, so process identity cannot distinguish it from a settled prompt and is not a sufficient readiness barrier.
+Firstmate's fixed-command transport now places one sacrificial blank line before the complete command in the same atomic `pane run` request.
+The startup reader consumed the newline, `treehouse get` remained byte-complete, the isolated worktree was acquired, and the trivial worker command ran.
+A settled shell executes the same leading blank line as a no-op.
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
+bin/fm-test-run.sh tests/fm-backend-autodetect-smoke.test.sh
+```
+
+Bounded output:
+
+```text
+ok - fm_backend_herdr_send_text_line: guards the command behind a leading blank line in one atomic pane run
+ok - real herdr: a zsh startup prompt consumes the sacrificial newline while treehouse get and the worker launch remain byte-complete
+ok - real herdr: the auto-detected spawn's launch command actually ran in the herdr pane
+ok - real herdr: isolated lab session removed and default fleet session unchanged
+```
+
+The transport sits before harness launch, so it applies identically to every harness on Herdr.
+The tmux, Zellij, Orca, and cmux launch paths do not call this adapter primitive and are unchanged.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
