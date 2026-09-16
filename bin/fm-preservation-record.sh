@@ -102,7 +102,7 @@ RECORDED=$(node -e '
   const branch = process.argv[4];
   const appBranch = process.argv[5];
   const appHeadArg = process.argv[6];
-  const required = ["kind", "task", "commit", "path", "app_head", "timestamp"];
+  const required = ["kind", "task", "commit", "path", "timestamp"];
   for (const field of required) {
     if (receipt[field] === undefined || receipt[field] === null) {
       process.stderr.write("error: CHECKPOINT_RECEIPT is missing required field: " + field + "\n");
