@@ -141,7 +141,7 @@ drain_ack_pair() {  # <drain-stderr>
 }
 
 start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
-  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i
+  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i process_state
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
@@ -150,7 +150,9 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   i=0
   while [ "$i" -lt 80 ]; do
     grep -q '^watcher: started ' "$armout" 2>/dev/null && return 0
-    is_live_non_zombie "$ARM_PID" || return 0
+    process_state=0
+    is_live_non_zombie "$ARM_PID" || process_state=$?
+    [ "$process_state" -eq 1 ] && return 0
     sleep 0.05
     i=$((i + 1))
   done
@@ -365,7 +367,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
 }
 
 test_marker_publish_failure_retains_recovery_evidence() {
-  local dir home state fakebin first_arm watcher_pid armout
+  local dir home state fakebin first_arm watcher_pid armout process_state
   dir=$(make_case downtime-marker-publish-failure)
   home="$dir/home"
   state="$dir/state"
@@ -382,8 +384,10 @@ test_marker_publish_failure_retains_recovery_evidence() {
 
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
     || fail "marker publication failure discarded stale-lock recovery evidence"
-  ! is_live_non_zombie "$watcher_pid" \
-    || fail "marker-failure fixture watcher remained live"
+  process_state=0
+  is_live_non_zombie "$watcher_pid" || process_state=$?
+  [ "$process_state" -ne 2 ] || fail "marker-failure fixture watcher liveness was unreadable"
+  [ "$process_state" -eq 1 ] || fail "marker-failure fixture watcher remained live"
 
   rmdir "$state/.watcher-down"
   armout="$dir/recovery-arm.out"
