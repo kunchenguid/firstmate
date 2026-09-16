@@ -359,6 +359,7 @@ doctor_route() {
   mkdir -p "$1"
   {
     printf '#!/usr/bin/env bash\n'
+    # shellcheck disable=SC2016 # ${2:-} belongs to the generated fm-on.sh and expands when it runs.
     printf '[ "${2:-}" = fm-remote-doctor.sh ] || exit 64\n'
     printf 'shift 2\n'
     printf 'exec env'
