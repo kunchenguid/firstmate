@@ -59,7 +59,33 @@ throwaway profile and drives real DSH sessions to prove the bridge pin, UserProm
 `bash`-matcher PreToolUse deny, and a bounded blocking Stop. Run with `FM_DSH_LIVE_E2E=1`; it skips
 otherwise. The remaining Phase 5 work is upstreaming the adapter.
 
-**Phase 4 — not started.** Delivery modes, the toolchain, advanced features (away mode, Relay,
+**Phase 4 — scoped, with one more feature verified.** Process-event sources work on DSH: a
+`when` source was armed, polled its condition tokenlessly three times, fired its action, captured the
+result durably, published the normalized wake `check: procevent when when-livetest 1` to
+`state/.wake-queue`, and retired itself once the adapter classified the outcome terminal. That maps
+onto the DSH pattern directly, because `fm-procevent.sh start` is documented as "meant to run as a
+supervised background process, never in a conversational turn" — which is what a DSH background job is.
+
+The rest of Phase 4 is a scoping result rather than a build, and the matrix below is the decision-ready
+form of it.
+
+| Capability | State | Evidence or blocker |
+| --- | --- | --- |
+| Process-event sources | ✅ **verified** | The run above |
+| Crew dispatch (claude, codex, opencode, pi) | ✅ verified | Scout and ship lifecycles |
+| `local-only` delivery | ✅ verified | Merge + teardown |
+| `direct-PR` and `no-mistakes` | ⚠️ needs a GitHub remote | Untested; both push and open a PR |
+| Relay (X/Discord) | ⚠️ needs credentials and a scheduler | No pairing token in this deployment; needs `curl`, `jq` and a wake-into-session path |
+| Away mode (`/afk`, `/quiet`) | ❌ **blocked** | The daemon's only delivery is typing a batched digest into the supervisor's pane after proving the composer empty. DSH has no pane and no inject-into-session primitive, so escalations would buffer forever. Registering `/afk` without a delivery channel is worse than not having it: a leftover `state/.afk` makes `fm_afk_daemon_owns_supervision` prove "supervision healthy" and silently redefines the guard's predicate |
+| Secondmates | ❌ refused | A secondmate is a firstmate instance needing an endpoint nothing could steer; `refuse_dsh_crewmate` refuses it |
+| DSH-subagent crewmates | ❌ blocked | No per-delegation working directory and no child-dispose path |
+| Calm, voice, Lavish board | ❌ out of scope | Module hooks, a TTY with PortAudio, and a live `lavish-axi` session respectively |
+| In-process extension hosts (Pi, omp, OpenCode) | ❌ out of scope | DSH's hook bridge is command-only |
+| Remote secondmates | ❌ out of scope | No remote-execution primitive, and no Aqua-birth proof on macOS |
+
+Each ❌ names what DSH would have to grow: an addressable session-injection primitive for away mode,
+per-delegation `cwd` and a dispose path for DSH crewmates, and a remote-execution surface for remote
+secondmates. None is blocked by firstmate. Delivery modes, the toolchain, advanced features (away mode, Relay,
 process-event sources, secondmates), the optional DSH crewmate, and upstreaming remain. They are
 larger than the work completed above, not smaller.
 
