@@ -628,6 +628,7 @@ __FM_BEARINGS_BOARD_DATA__
           window.lavish.queuePrompt(
             "Captain's Call follow-up - " + item.title + " [" + item.key + "]: " + message,
             { tag: "prompt", text: item.title + " -> " + message, element: freeformForm,
+              queueKey: "followup:" + item.key,
               data: {
                 schema: "fm-bearings-followup.v1",
                 question: item.key,

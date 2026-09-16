@@ -2,11 +2,11 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html> [--freeform-interactions|--choice-interactions]
-// Prints one JSON document. An interaction mode submits the named control on
-// every Captain's Call card through the page's public Lavish queue interface,
-// then includes the rendered state, captured calls, and protocol-shaped Lavish
-// results in the document.
+// Usage: node board-render-harness.mjs <built-board.html> [interaction mode]
+// Interaction modes submit freeform only, choices only, or both controls in
+// either order on every Captain's Call card through the public Lavish queue
+// interface. The result includes rendered state, captured calls, and
+// protocol-shaped Lavish output.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -105,13 +105,20 @@ const queuedPrompts = [];
 globalThis.window = {
   lavish: {
     queuePrompt(prompt, options) {
-      queuedPrompts.push({
+      const question = options.element?.attributes["data-lavish-question"] || "";
+      const queueKey = options.queueKey || (question ? "question:" + question : "");
+      const queued = {
         prompt,
         tag: options.tag,
         text: options.text,
-        queueKey: options.queueKey || "",
+        queueKey,
         data: options.data || {},
-      });
+      };
+      const existing = queueKey
+        ? queuedPrompts.findIndex((candidate) => candidate.queueKey === queueKey)
+        : -1;
+      if (existing === -1) queuedPrompts.push(queued);
+      else queuedPrompts[existing] = queued;
     },
   },
 };
@@ -199,7 +206,13 @@ const lavishResult = (calls) => {
 
 const interactions = [];
 const interactionMode = process.argv[3] || "";
-if (interactionMode === "--freeform-interactions" || interactionMode === "--choice-interactions") {
+const interactionModes = [
+  "--freeform-interactions",
+  "--choice-interactions",
+  "--mixed-choice-first",
+  "--mixed-freeform-first",
+];
+if (interactionModes.includes(interactionMode)) {
   const callDeck = byId.get("bb-call") || new Node("div");
   const stackCount = byId.get("bb-stack-count") || new Node("div");
   const stackPrev = byId.get("bb-stack-prev") || new Node("button");
@@ -215,16 +228,26 @@ if (interactionMode === "--freeform-interactions" || interactionMode === "--choi
     const choiceForm = nodes.find((node) => node.attributes["data-lavish-question"] && node !== freeformForm);
     const label = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform-label"));
     const question = choiceForm?.attributes["data-lavish-question"] || freeformForm?.attributes["data-lavish-question"] || "";
-    if (interactionMode === "--freeform-interactions" && freeform && freeformForm) {
+    const submitFreeform = () => {
+      if (!freeform || !freeformForm) return;
       freeform.value = "Need more context for " + question;
       freeformForm.dispatch("submit");
-    }
-    if (interactionMode === "--choice-interactions") {
+    };
+    const submitChoice = () => {
       const radio = nodes.find((node) => node.type === "radio" && node.value !== "reconcile");
-      if (radio && choiceForm) {
-        radio.checked = true;
-        choiceForm.dispatch("submit");
-      }
+      if (!radio || !choiceForm) return;
+      radio.checked = true;
+      choiceForm.dispatch("submit");
+    };
+    if (interactionMode === "--freeform-interactions") submitFreeform();
+    if (interactionMode === "--choice-interactions") submitChoice();
+    if (interactionMode === "--mixed-choice-first") {
+      submitChoice();
+      submitFreeform();
+    }
+    if (interactionMode === "--mixed-freeform-first") {
+      submitFreeform();
+      submitChoice();
     }
     refreshStack();
     interactions.push({

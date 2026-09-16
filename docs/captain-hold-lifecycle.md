@@ -67,6 +67,7 @@ Every Captain's Call card with multiple effective options also has a separate fr
 `bin/fm-bearings-board.sh build` enables that control deterministically instead of relying on each payload composer to remember it.
 A payload may opt in a card with fewer choices, and an existing `freeform_hint` may replace the default label.
 The shipped board template submits freeform text as a `prompt` carrying `fm-bearings-followup.v1` context with the card key and message.
+Its follow-up-specific queue identity lets that prompt remain pending beside an explicit choice from the same card.
 It does not submit a `choice`, set a selection, declare a close mode, mark the card answered, or advance the card deck.
 The Lavish adapter's structured `read` output therefore preserves the card identity and captain's text for Firstmate to answer, while `answers` and `reconciles` emit nothing from that submission.
 The original captain-held task, merge opportunity, or credential request stays open until the captain later uses an explicit option or another authoritative path.

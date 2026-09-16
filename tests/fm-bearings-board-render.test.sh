@@ -83,6 +83,8 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
 render_call_interactions() {  # <home> <captains-call-json>
   local home=$1 calls=$2 data="$1/payload.json"
   local freeform_render="$home/freeform-render.json" choice_render="$home/choice-render.json"
+  local mixed_choice_first="$home/mixed-choice-first.json"
+  local mixed_freeform_first="$home/mixed-freeform-first.json"
   jq -n --argjson calls "$calls" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:$calls, underway:[], landed:[], charted:[]}' > "$data"
@@ -94,8 +96,15 @@ render_call_interactions() {  # <home> <captains-call-json>
     || fail "the Captain's Call freeform controls could not be exercised"
   node "$HARNESS" "$home/.lavish/bearings-board.html" --choice-interactions > "$choice_render" \
     || fail "the Captain's Call choice controls could not be exercised"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" --mixed-choice-first > "$mixed_choice_first" \
+    || fail "choice-first mixed interactions could not be exercised"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" --mixed-freeform-first > "$mixed_freeform_first" \
+    || fail "freeform-first mixed interactions could not be exercised"
   jq -n --slurpfile freeform "$freeform_render" --slurpfile choice "$choice_render" \
-    '{freeform:$freeform[0], choice:$choice[0]}'
+    --slurpfile mixed_choice_first "$mixed_choice_first" \
+    --slurpfile mixed_freeform_first "$mixed_freeform_first" \
+    '{freeform:$freeform[0], choice:$choice[0],
+      mixedChoiceFirst:$mixed_choice_first[0], mixedFreeformFirst:$mixed_freeform_first[0]}'
 }
 
 run_lavish_adapter() {  # <command> <result-file>
@@ -302,6 +311,36 @@ test_captains_call_freeform_is_context_not_a_decision() {
       "card 1 of 4 · 4 answered"
     ]
   ' >/dev/null || fail "explicit choices did not keep separate queued and answered state: $out"
+  printf '%s' "$out" | jq -e '
+    def preserves_both($run):
+      ($run.queuedPrompts | length) == 7
+      and (["ordinary-decision", "merge.sample-task", "credential.single"]
+        | all(. as $question
+          | ([$run.queuedPrompts[] | select(.data.question == $question)
+              | {tag, queueKey}] | sort_by(.tag)) as $pair
+          | ($pair | map(.tag)) == ["choice", "prompt"]
+            and ($pair[0].queueKey | length) > 0
+            and ($pair[1].queueKey | length) > 0
+            and $pair[0].queueKey != $pair[1].queueKey))
+      and ([$run.queuedPrompts[] | select(.data.question == "merge.single")
+        | .tag] == ["choice"]);
+    def independent_state($run):
+      ([$run.interactions[]
+        | .choiceQueued
+          and (.cardQueued | not)
+          and .cardAnswered
+          and (if .hasFreeform then .messageQueued else (.messageQueued | not) end)] | all)
+      and [$run.interactions[].stackStatus] == [
+        "card 1 of 4 · 1 answered",
+        "card 1 of 4 · 2 answered",
+        "card 1 of 4 · 3 answered",
+        "card 1 of 4 · 4 answered"
+      ];
+    preserves_both(.mixedChoiceFirst)
+      and preserves_both(.mixedFreeformFirst)
+      and independent_state(.mixedChoiceFirst)
+      and independent_state(.mixedFreeformFirst)
+  ' >/dev/null || fail "mixed same-card interactions replaced each other or shared UI state: $out"
 
   freeform_result="$home/freeform.result"
   choice_result="$home/choice.result"
