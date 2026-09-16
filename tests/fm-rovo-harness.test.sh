@@ -12,7 +12,7 @@ set -u
 # the fake ancestry the detection cases set up. Drop the ambient markers so the
 # asserted verdict does not depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+  ATLASSIAN_AGENT_TYPE ROVODEV_CLI OMPCODE FM_OMP_HARNESS
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-rovo-harness)
@@ -395,7 +395,7 @@ SH
   local blind_fakebin
   blind_fakebin=$(fm_fakebin "$dir/blind-ancestry")
   fm_fake_blind_ancestry "$blind_fakebin"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u OMPCODE \
     CLAUDECODE=1 PATH="$blind_fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: rovo's markers outrank an inherited CLAUDECODE, and markerless ancestry still resolves rovo"

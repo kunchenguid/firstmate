@@ -66,6 +66,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -102,22 +104,25 @@ harness_marker() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
-  # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
-  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
-  # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
-  # process environment. FM_OMP_HARNESS=omp is therefore a Firstmate-OWNED
-  # launch marker, established by bin/fm-spawn.sh at the omp launch boundary
-  # (which also clears every foreign marker) and by the README's primary launch
-  # command. It is a PRECEDENCE override, never evidence on its own: it wins
-  # over an inherited CLAUDECODE only when an omp process is genuinely in the
-  # ancestry, so `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies
-  # as omp, while the same variable leaking from an omp secondmate into that
-  # home's claude worker (whose ancestry holds no omp) changes nothing. The
-  # anchored ancestry arm below covers a plain hand-started `omp` by itself.
+  # FM_OMP_HARNESS=omp is a Firstmate-OWNED launch marker, established by
+  # bin/fm-spawn.sh at the omp launch boundary (which also clears every
+  # foreign marker) and by the README's primary launch command. It is a
+  # PRECEDENCE override, never evidence on its own: it wins over an inherited
+  # CLAUDECODE only when an omp process is genuinely in the ancestry, so
+  # `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies as omp,
+  # while the same variable leaking from an omp secondmate into that home's
+  # claude worker (whose ancestry holds no omp) changes nothing. The anchored
+  # ancestry arms below cover a plain hand-started `omp` by itself.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
     return
   fi
+  # omp 18.1.22 sets OMPCODE=1 for its child/tool processes (verified live:
+  # absent from the launching shell, present below the omp process), alongside
+  # CLAUDECODE=1 for compatibility. Its own marker is tested BEFORE CLAUDECODE
+  # for the same inherited-marker reason cursor documents above: without this,
+  # every omp session reads as claude.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -145,14 +150,21 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an exact `omp` process - or bun running the omp launcher script -
+# sits within eight parents of this one. The same anchored match as the
+# ancestry walk below, kept separate so the marker precedence above can demand
+# real process evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(basename -- "$comm")" in
+      bun)
+        args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+        fm_omp_args_are_omp "$args" && return 0
+        ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -210,15 +222,28 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
-    # It sits above the node*|python* interpreter fallback deliberately: the
-    # optional claude-bridge extension runs a nested executable literally
-    # named `claude` with its own node child, and that fallback's *claude*
-    # args glob would otherwise claim it if that subtree were ever walked.
+    # omp arrives in two shapes, both anchored, never *omp*, so ompd, comp,
+    # and similar unrelated commands are not misread as this harness: the
+    # natively-named `omp` process (a Bun-compiled single binary, verified
+    # omp 18.1.11), and since 18.1.22 a bun script (comm bun, argv
+    # `bun .../.bun/bin/omp`), matched by the bun arm below. This arm sits
+    # above the interpreter fallbacks deliberately: the optional
+    # claude-bridge extension runs a nested executable literally named
+    # `claude` with its own node child, and that fallback's *claude* args
+    # glob would otherwise claim it if that subtree were ever walked.
     omp) echo "comm omp"; return ;;
+    bun)
+      # The bun-launcher shape above, at args strength: an interpreter match
+      # is the weakest inference in this function, so it is used only when no
+      # marker is present. Deliberately NOT folded into the node/python arm:
+      # only the omp argv rule applies to bun, so a bun process carrying
+      # claude/codex/etc. in its arguments cannot claim those harnesses.
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      if fm_omp_args_are_omp "$args"; then
+        echo "args omp"
+        return
+      fi
+      ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
