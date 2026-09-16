@@ -206,8 +206,9 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr=, which is only where most
+# of these fixtures want them; a key on either side of pr= is equally valid
+# (test_armed_poll_survives_later_task_record_appends).
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   shift 3
@@ -2417,6 +2418,158 @@ SH
   pass "poll retirement preserves a replacement authority record"
 }
 
+# The watcher only runs a merge poll it can re-authenticate at execution time,
+# and that authentication cross-checks the task's own record. A task record is
+# append-mostly and outlives the arming: bin/fm-spawn.sh's relaunch path
+# rewrites it and puts control_relaunch_tx= at the tail, after the pr= line
+# bin/fm-pr-check.sh wrote. An armed poll has to survive that, or a merge is
+# never reported and the silence is indistinguishable from "not merged yet".
+test_armed_poll_survives_later_task_record_appends() {
+  local dir state rc out
+  dir=$(make_case armed-poll-record-append)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "freshly armed poll was not authenticated"
+
+  # Exactly what a relaunch appends, after the canonical pr= line.
+  printf 'control_relaunch_tx=%s\n' '96772.20260915T115436Z.29459' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a later task-record key after pr= revoked a valid armed poll"
+  # bin/fm-captain-hold.sh appends its own pair the same way.
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' 'nm-1-review' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a second later task-record writer revoked a valid armed poll"
+
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed after a task-record append: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "armed poll did not run after a task-record append: $out" ;;
+  esac
+  assert_no_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "a valid armed poll was refused as an unauthenticated state check"
+  pass "an armed merge poll still runs after its task record gains a later key"
+}
+
+# The record cross-check exists to prove the poll's PR identity is the one the
+# task recorded, so the cases that must still be refused are the ones that make
+# that identity ambiguous - not an unrelated key.
+test_task_record_identity_refusals() {
+  local dir state case_name
+  for case_name in second-pr bad-head; do
+    dir=$(make_case "record-identity-$case_name")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$case_name: fixture poll was not authenticated"
+    case "$case_name" in
+      second-pr) printf 'pr=%s\n' 'https://github.com/o/r/pull/2' >> "$state/task-a.meta" ;;
+      bad-head) printf 'pr_head=%s\n' 'not-a-sha' >> "$state/task-a.meta" ;;
+    esac
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$case_name: an ambiguous task record kept the poll authenticated"
+  done
+
+  # The same refusal applies before the pr= line, where the old tail-only rule
+  # never looked, because every pr_head= is validated wherever it appears.
+  dir=$(make_case record-identity-leading-bad-head)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1 'pr_head=not-a-sha'
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "leading-bad-head: an ambiguous task record kept the poll authenticated"
+  pass "task-record cross-check still refuses an ambiguous PR identity"
+}
+
+# The fingerprint and file-identity bindings are the poll's security boundary.
+# Tampered program bytes, a replaced file carrying identical bytes, and a poll
+# lifted into another home must all stay refused, and the watcher must report
+# the refusal rather than run the check.
+test_registered_poll_trust_boundary() {
+  local dir state other rc out replacement
+
+  dir=$(make_case poll-trust-accepted)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "accepted: watcher failed: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "accepted: a validly registered poll did not run: $out" ;;
+  esac
+
+  dir=$(make_case poll-trust-tampered)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  printf '\nprintf "tampered-bytes-ran\\n"\n' >> "$state/task-a.check.sh"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "tampered: altered program bytes stayed authenticated"
+  # No stop-cycle check here: the refusal wake is emitted after the whole check
+  # loop, so any check that wakes first would preempt it.
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "tampered: watcher failed: $(cat "$dir/watch.err")"
+  grep -F 'rejected unauthenticated state checks' "$dir/watch.out" >/dev/null \
+    || fail "tampered: watcher did not report the refusal: $(cat "$dir/watch.out")"
+  # gh is stubbed MERGED, so an accepted poll would have reported the merge.
+  assert_no_grep 'task-a.check.sh: merged' "$dir/watch.out" \
+    "tampered: the refused poll still produced a merge result"
+
+  dir=$(make_case poll-trust-replaced)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  replacement="$dir/replacement.check.sh"
+  cp "$state/task-a.check.sh" "$replacement"
+  rm -f "$state/task-a.check.sh"
+  mv "$replacement" "$state/task-a.check.sh"
+  chmod 0600 "$state/task-a.check.sh"
+  cmp -s "$POLL" "$state/task-a.check.sh" \
+    || fail "replaced: the replacement fixture did not keep identical bytes"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "replaced: a different file with identical bytes stayed authenticated"
+
+  dir=$(make_case poll-trust-home-a)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  other=$(make_case poll-trust-home-b)
+  cp "$state/task-a.meta" "$state/task-a.check.sh" "$state/task-a.pr-poll" \
+    "$state/task-a.pr-poll-registration" "$other/home/state/"
+  chmod 0600 "$other/home/state/task-a.check.sh" "$other/home/state/task-a.pr-poll" \
+    "$other/home/state/task-a.pr-poll-registration"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "cross-home: the source home's own poll stopped authenticating"
+  ! fm_pr_poll_artifacts_valid "$other/home/state" task-a "$POLL" \
+    || fail "cross-home: a poll registered in another home was accepted here"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$other/home" "$other/fakebin" > "$other/watch.out" 2> "$other/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "cross-home: watcher failed: $(cat "$other/watch.err")"
+  grep -F 'rejected unauthenticated state checks' "$other/watch.out" >/dev/null \
+    || fail "cross-home: watcher did not report the refusal: $(cat "$other/watch.out")"
+  pass "registered polls run only with intact fingerprints, file identity, and home"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2450,3 +2603,6 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_armed_poll_survives_later_task_record_appends
+test_task_record_identity_refusals
+test_registered_poll_trust_boundary

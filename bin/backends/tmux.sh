@@ -71,6 +71,34 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
+# fm_backend_tmux_recreate_session: ensure <session> exists so a task window
+# can be created in it, for the recovery case where the endpoint went missing
+# because the WHOLE session (or the whole server) is gone, not just the task's
+# window. Creating the session is what separates that shape from a missing
+# window in a live session: fm_backend_tmux_create_task can only add a window
+# to a session that already exists, and `tmux new-session -d` also starts the
+# server when no server is running - the other way a recorded endpoint reads
+# missing.
+#
+# Idempotent by design: an existing session is left exactly as it is, so the
+# common missing-window shape recreates nothing and this is a no-op. The
+# session is created DETACHED and with no command, so it holds only an
+# ordinary shell; the task's own window is still created by
+# fm_backend_tmux_create_task, which stays the single owner of task-window
+# creation and of pinning the fm-<id> name.
+#
+# Callers must pass a session name already proved to belong to this task by
+# fm_backend_validate_task_endpoint, which is what refuses a recorded endpoint
+# string that does not parse as <session>:fm-<id>.
+fm_backend_tmux_recreate_session() {  # <session> <proj-abs>
+  local ses=$1 proj_abs=$2
+  tmux has-session -t "=$ses" 2>/dev/null && return 0
+  tmux new-session -d -s "$ses" -c "$proj_abs" 2>/dev/null || {
+    echo "error: could not recreate tmux session $ses" >&2
+    return 1
+  }
+}
+
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
@@ -116,8 +144,32 @@ fm_backend_tmux_send_text_line() {  # <target> <text>
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no
 # submission - the caller sends Enter separately (fm-spawn.sh's launch-command
 # send pauses between the literal send and Enter for the harness to settle).
-# Mirrors `tmux send-keys -t "$T" -l "<text>"`.
+# Mirrors `tmux send-keys -t "$T" -l "<text>"`, behind the pane input-readiness
+# gate.
+#
+# The gate is what makes a long launch command land at all. A pane whose shell
+# is still running something has its tty in canonical mode, where the kernel
+# buffers the line and silently discards the whole thing past MAX_CANON - the
+# 2026-09-15 report where a ~1117-byte launch command vanished and the worker
+# never started. Splitting the text across several sends does not help, because
+# the limit is on the accumulated line and not on the write; waiting for the
+# pane to read input itself does, and a ready pane takes 4088 bytes intact.
+# fm_tmux_wait_pane_input_ready (bin/fm-tmux-lib.sh) owns the mode read and the
+# bounded wait, and treats an unreadable tty as ready so this can only ever hold
+# back a pane it positively measured as busy.
+#
+# The gate samples the mode once and cannot hold it, so it closes the measured
+# cause without making the send atomic - see docs/verification/runtime-backends.md
+# "Known limitation: readiness is sampled, not held" for what remains.
+#
+# Exit status 2 is the gate refusing a busy pane, and is distinct from 1 so
+# callers can tell it from `tmux send-keys` itself failing - a dead server or a
+# killed session is not a line-discipline problem and must not be reported as one.
 fm_backend_tmux_send_literal() {  # <target> <text>
+  if ! fm_tmux_wait_pane_input_ready "$1"; then
+    echo "error: pane $1 was still busy after ${FM_PANE_READY_TIMEOUT:-5}s and never started reading input; refusing to type ${#2} bytes it would silently discard" >&2
+    return 2
+  fi
   tmux send-keys -t "$1" -l "$2"
 }
 

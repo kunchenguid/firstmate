@@ -4362,7 +4362,24 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+# A refused literal send means the launch command is not in the terminal, so
+# sending Enter would submit an empty line and leave recovery to report later
+# that no running agent could be confirmed. Fail here instead, naming the reason
+# the refusal actually has. tmux signs the readiness gate's refusal with status
+# 2 - the pane never started reading input - and every other non-zero status is
+# the backend's own send failing, which on a dead server or a killed session has
+# nothing to do with the terminal's line limit.
+LAUNCH_SEND_STATUS=0
+spawn_send_literal "$T" "$LAUNCH" || LAUNCH_SEND_STATUS=$?
+if [ "$LAUNCH_SEND_STATUS" -ne 0 ]; then
+  case "$BACKEND:$LAUNCH_SEND_STATUS" in
+    tmux:2) LAUNCH_SEND_REASON="window $T was still busy and never started reading input" ;;
+    *) LAUNCH_SEND_REASON="the $BACKEND backend refused the literal send to $T" ;;
+  esac
+  printf 'failed: %s\n' "launch command not delivered: $LAUNCH_SEND_REASON" >> "$STATE/$ID.status"
+  echo "error: task $ID's launch command was not delivered: $LAUNCH_SEND_REASON; no agent was started, inspect window $T" >&2
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
