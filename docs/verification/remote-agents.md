@@ -80,6 +80,7 @@ It verifies:
 - compatibility for legacy iDA config records with a model field and durable task records without one;
 - permanent reading of an existing `cloud-worker/aime` plus `fm-aime-task-state.v1` record without migration;
 - public iDA probe and direct dispatch with the version field absent, with a stale legacy config version, and without any bytedcli version query or comparison;
+- foreground `PATH` resolution plus watcher-successor fallback to the user-global npm launcher, preserving the exact existing remote task and returning its result without replacement research, with genuinely missing and installed-but-unusable launchers kept distinct from CLI-emitted exit 126 or 127;
 - child-local removal of all conventional proxy variables while preserving an unrelated environment sentinel across SG probe, reconciliation, and create;
 - required-command discovery through domain-restricted MCP plus the exact parent-position `ida --region sg deep-research create` command through `run_command`, with refusal evidence if that placement drifts;
 - raw-session reconciliation after provider-driven renaming, exact private first-message marker verification, and structured empty-result identity normalization;
@@ -95,7 +96,7 @@ It verifies:
 - idempotent process-event replay after acknowledgement, without a second state transition or status application;
 - post-terminal nonterminal and terminal generations acknowledged without state regression, report replacement, source re-arm, or a duplicate terminal notification;
 - source-local coalescing of identical nonterminal transient iDA read failures before a second captured generation, including bounded exponential retry timing, restart recovery from the state-linked observation, reset on successful or changed state, authorization, materially different error and terminal bypass, and idempotent handling of an earlier queued generation;
-- local iDA launch, empty-output, malformed-JSON, invalid-structure, nonzero-exit, and session-mismatch read failures classified without persisting raw stdout or stderr, surfaced as one idempotent actionable blocker, and recovered by adoption of the exact recorded task without another create or cancellation;
+- local iDA executable-resolution, empty-output, malformed-JSON, invalid-structure, nonzero-exit, and session-mismatch read failures classified without persisting raw stdout or stderr, surfaced as one idempotent actionable blocker, and recovered by adoption of the exact recorded task without another create or cancellation;
 - preservation of that local blocker across a genuine provider outage and a response missing the bound task, followed by resolution only after healthy task-bound readback and exactly one completion;
 - captain-authorized abandonment of a wedged ambiguous task after an authoritative complete non-truncated zero-match session list, its refusal without the authorization flag and on duplicate markers, and decision-gated retirement of the abandoned record;
 - normalized terminal result capture and a state-bound mode-`0600` report;

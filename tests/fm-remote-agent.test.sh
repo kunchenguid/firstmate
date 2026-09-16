@@ -839,8 +839,7 @@ test_local_readback_failure_and_recovery() {
   local mode class home fakebin id source mode_file sha marker provider state first status before tries expected_phase recovery_seq
   for mode in launch-126 launch-127 empty malformed multiple exit-error structure session-mismatch; do
     case "$mode" in
-      launch-126) class=cli-not-executable ;;
-      launch-127) class=cli-not-found ;;
+      launch-126|launch-127) class=cli-exit-error ;;
       empty) class=response-empty ;;
       malformed|multiple) class=response-invalid-json ;;
       exit-error) class=cli-exit-error ;;
@@ -945,6 +944,71 @@ test_local_readback_failure_and_recovery() {
   pass "local read failures capture actionable blockers, retire only waiting, and recover the exact task once"
 }
 
+test_bytedcli_resolution_and_background_successor() {
+  local home fakebin id=ida-background-successor source mode_file sha marker provider state
+  local installed_home missing_home unusable_home observation tries
+  home=$(new_home background-successor); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  source="ida-$id"; mode_file="$home/mode"; : >"$home/bytedcli.log"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  marker="firstmate:$id:${sha:0:16}"
+  printf '%s\t%s\trunning\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+  provider=$(jq -cn --arg marker "$marker" '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",agent_id:"9001",agent_name:"iDA Test",model:null,provider_status:"running"}')
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"
+    fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 1
+    fm_remote_meta_write "$3" ida research || exit 1
+    fm_remote_state_transition "$3" running "" "" provider-running not-armed unavailable "" "" "{}"
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "background successor fixture failed"
+  state=$(state_file "$home" "$id")
+
+  installed_home="$home/installed-home"
+  mkdir -p "$installed_home/.npm-global/bin"
+  cp "$fakebin/bytedcli" "$installed_home/.npm-global/bin/bytedcli"
+  chmod 0755 "$installed_home/.npm-global/bin/bytedcli"
+  printf 'running\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "background successor source arm failed"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "foreground-path generation failed"
+  jq -e '.phase == "running" and .provider_state.session_id == "70001" and .provider_state.task_id == "80001"' "$state" >/dev/null \
+    || fail "foreground-path generation lost the exact remote identity"
+  assert_present "$home/state/procevent/$source.source" "running generation did not rearm its successor"
+
+  printf 'recorded-task-conflict\n' >"$mode_file"
+  HOME="$installed_home" PATH=/usr/bin:/bin \
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    FM_IDA_FAKE_MODE_FILE="$mode_file" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+    || fail "background successor reconciliation failed"
+  tries=300
+  while [ ! -f "$home/state/procevent-inbox/$source.2.handled" ] && [ "$tries" -gt 0 ]; do sleep 0.03; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "background successor result was not handled"
+  jq -e '.phase == "terminal-success" and .provider_state.session_id == "70001"
+    and .provider_state.task_id == "80001" and .result_availability == "available"' "$state" >/dev/null \
+    || fail "watcher-environment successor did not recover the exact task result"
+  assert_grep 'FM_IDA_READINESS_V1' "$home/data/$id/report.md" "background successor lost the task answer"
+  assert_no_grep 'OTHER_TASK_ANSWER' "$home/data/$id/report.md" "background successor selected a sibling answer"
+
+  missing_home="$home/missing-home"; mkdir -p "$missing_home"
+  observation="$home/missing-observation.json"
+  HOME="$missing_home" PATH=/usr/bin:/bin FM_HOME="$home" \
+    "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$observation"
+  jq -e '.error_class == "cli-not-found"' "$observation" >/dev/null \
+    || fail "a genuinely missing bytedcli was not classified as cli-not-found"
+
+  unusable_home="$home/unusable-home"; mkdir -p "$unusable_home/.npm-global/bin"
+  printf '%s\n' '#!/bin/sh' 'exit 0' >"$unusable_home/.npm-global/bin/bytedcli"
+  chmod 0600 "$unusable_home/.npm-global/bin/bytedcli"
+  observation="$home/unusable-observation.json"
+  HOME="$unusable_home" PATH=/usr/bin:/bin FM_HOME="$home" \
+    "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$observation"
+  jq -e '.error_class == "cli-not-executable"' "$observation" >/dev/null \
+    || fail "an unusable installed bytedcli was not classified as cli-not-executable"
+  pass "iDA resolves a user-global bytedcli for background successors and preserves lookup versus CLI exit failures"
+}
+
 test_transient_readback_coalescing_and_backoff() {
   local home fakebin id=ida-transient source mode_file result_one runner sleep_log sleep_release
   local results wakes artifacts revision replay tries sha marker provider staged
@@ -954,6 +1018,7 @@ test_transient_readback_coalescing_and_backoff() {
 #!/usr/bin/env bash
 set -u
 if [ -z "${FM_IDA_FAKE_SLEEP_LOG:-}" ]; then exec /bin/sleep "$@"; fi
+case "$1" in 0.0*) ;; *) exec /bin/sleep "$@" ;; esac
 printf '%s\n' "$1" >>"$FM_IDA_FAKE_SLEEP_LOG"
 count=$(wc -l <"$FM_IDA_FAKE_SLEEP_LOG" | tr -d '[:space:]')
 if [ "$count" -ge "${FM_IDA_FAKE_SLEEP_BLOCK_AFTER:-1}" ]; then
@@ -1304,6 +1369,7 @@ test_terminal_outcomes_with_visible_answer
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
 test_local_readback_failure_and_recovery
+test_bytedcli_resolution_and_background_successor
 test_transient_readback_coalescing_and_backoff
 test_artifact_store_idempotency
 test_abandon_after_authoritative_zero_match
