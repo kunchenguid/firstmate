@@ -21,7 +21,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-project-cockpit-snapshot.sh` | Project one canonical fleet snapshot into the bounded observational `fm-project-cockpit.v1` model |
 | `fm-project-cockpit-contract.sh` | Own the shared Project Cockpit schema-list and derived model-size bounds |
-| `fm-project-cockpit-board.sh` | Build or serve the stable read-only Project Cockpit artifact without answer binding |
+| `fm-project-cockpit-board.sh` | Build, refresh, or optionally serve the stable read-only Project Cockpit artifact without answer binding |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Guarded self-update of firstmate and local or remote secondmate homes, reconciling redundant divergence and classifying every live mate left on the target commit for restart or fallback nudge |
 | `fm-secondmate-restart.sh` | Persist open conversational work, then restart eligible second mates or report the fallback outcome |
