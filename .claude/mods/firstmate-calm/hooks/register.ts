@@ -45,7 +45,7 @@ import {
 import {
   calmPreferencePath,
   parseCalmPreference,
-  restoredAssistantText,
+  classifyRestoredTranscript,
   serializeCalmPreference,
   stepTextIsWorkingNote,
   userTextIsOperational,
@@ -109,7 +109,7 @@ async function load($: EngineInterface): Promise<void> {
   calm = parseCalmPreference(await readPreference($, preferencePath));
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
-    const restored = restoredAssistantText(await $.session.messages());
+    const restored = classifyRestoredTranscript(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
     for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
@@ -229,17 +229,14 @@ export const register: Register = (on) => {
     const result = await stream.result;
     if (e.agentId === undefined) {
       let changed = false;
-      if (stepTextIsWorkingNote(result)) {
-        for (const text of [...blocks.values(), result.answer]) {
-          const key = workingNoteKey(text);
-          if (key === "" || finalReplies.has(key) || workingNotes.has(key)) continue;
+      for (const text of [...blocks.values(), result.answer]) {
+        const key = workingNoteKey(text);
+        if (key === "") continue;
+        if (stepTextIsWorkingNote(result, text)) {
+          if (finalReplies.has(key) || workingNotes.has(key)) continue;
           workingNotes.add(key);
           changed = true;
-        }
-      } else {
-        for (const text of [...blocks.values(), result.answer]) {
-          const key = workingNoteKey(text);
-          if (key === "") continue;
+        } else {
           if (!finalReplies.has(key)) {
             finalReplies.add(key);
             changed = true;

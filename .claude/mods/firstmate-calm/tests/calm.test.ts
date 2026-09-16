@@ -240,7 +240,7 @@ describe("mid-turn working notes", () => {
     return { seen, result: step.value as { answer: string; stopReason: string | null } };
   }
 
-  test("hides the text blocks of a step that stopped to call tools, and forwards the stream untouched", async ($, on) => {
+  test("hides brief narration but preserves substantive text before tool calls, and forwards the stream untouched", async ($, on) => {
     const { journal } = world(on, { preference: "on\n" });
     const set = stepper(on);
     set({
@@ -248,7 +248,7 @@ describe("mid-turn working notes", () => {
         { kind: "text", index: 0, text: "Let me " },
         { kind: "text", index: 0, text: "look first." },
         { kind: "tool", index: 1, id: "t1", name: "Bash" },
-        { kind: "text", index: 2, text: "Then I read it." },
+        { kind: "text", index: 2, text: "Then I read it.\n" },
         { kind: "stop", stopReason: "tool_use", usage: null },
       ],
       result: { answer: "Let me look first.\nThen I read it.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
@@ -258,10 +258,10 @@ describe("mid-turn working notes", () => {
     expect(seen).toHaveLength(5);
     expect(result.answer).toBe("Let me look first.\nThen I read it.");
     expect(journal.invalidations).toContain("ui.render");
-    expect(isHidden(await $.ui.render(assistantMessage("Let me look first.")))).toBe(true);
-    expect(isHidden(await $.ui.render(assistantMessage("Then I read it.\n")))).toBe(true);
-    expect(isHidden(await $.ui.render(assistantMessage("Let me look first.\nThen I read it.")))).toBe(true);
-    expect(isStock(await $.ui.render(assistantMessage("Something else")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Let me look first."))), "brief narration").toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Then I read it.\n"))), "multi-line block").toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Let me look first.\nThen I read it."))), "complete answer").toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Something else"))), "unrelated text").toBe(true);
   });
 
   test("keeps a final reply visible when its text matches an earlier working note", async ($, on) => {
@@ -377,6 +377,29 @@ describe("mid-turn working notes", () => {
     expect(isStock(await $.ui.render(assistantMessage("Checking.")))).toBe(true);
     await $.command.run(calmCommand());
     expect(isHidden(await $.ui.render(assistantMessage("Checking.")))).toBe(true);
+  });
+
+  test("preserves substantive mid-turn text restored from the transcript", async ($, on) => {
+    const multiLine = "The result is substantive.\nHere is the context needed to continue.";
+    const atThreshold = "x".repeat(240);
+    const belowThreshold = "x".repeat(239);
+    world(on, {
+      preference: "on\n",
+      messages: [
+        { role: "user", text: "multi-line", toolUses: [] },
+        { role: "assistant", text: multiLine, toolUses: [] },
+        { role: "assistant", text: "", toolUses: [{}] },
+        { role: "user", text: "at threshold", toolUses: [] },
+        { role: "assistant", text: atThreshold, toolUses: [] },
+        { role: "assistant", text: "", toolUses: [{}] },
+        { role: "user", text: "below threshold", toolUses: [] },
+        { role: "assistant", text: belowThreshold, toolUses: [] },
+        { role: "assistant", text: "", toolUses: [{}] },
+      ],
+    });
+    expect(isStock(await $.ui.render(assistantMessage(multiLine)))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage(atThreshold)))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage(belowThreshold)))).toBe(true);
   });
 
   test("seeds notes from a restored transcript without hiding a colliding final reply", async ($, on) => {
