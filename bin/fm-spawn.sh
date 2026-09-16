@@ -1451,6 +1451,24 @@ RAW_LAUNCH=0
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
 RELAUNCH_MISSING=0
+relaunch_missing_handoff_valid() {
+  local journal="$STATE/$ID.control-relaunch" tx recorded_kind recorded_worktree
+  [ "$SPAWN_CONTROL_PARENT" = 1 ] || return 1
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  tx=${FM_CONTROL_RELAUNCH_TX:-}
+  [ -n "$tx" ] && fm_backend_endpoint_atom_valid "$tx" || return 1
+  recorded_kind=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ -n "$recorded_kind" ] || recorded_kind=ship
+  recorded_worktree=$(fm_backend_meta_exact_value "$RELAUNCH_META" worktree) || return 1
+  [ "$(fm_backend_meta_exact_value "$journal" task 2>/dev/null)" = "$ID" ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" phase 2>/dev/null)" = launching ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" backend 2>/dev/null)" = "$BACKEND" ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" endpoint 2>/dev/null)" = "$RELAUNCH_TARGET" ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" worktree 2>/dev/null)" = "$recorded_worktree" ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" kind 2>/dev/null)" = "$recorded_kind" ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" exit_result 2>/dev/null)" = already-missing ] \
+    && [ "$(fm_backend_meta_exact_value "$journal" relaunch_tx 2>/dev/null)" = "$tx" ]
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1486,10 +1504,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_STATE" = missing ] && [ "$BACKEND" = herdr ] \
-      && [ "${FM_CONTROL_RELAUNCH_MISSING:-0}" = 1 ] \
-      && [ -f "$STATE/$ID.control-relaunch" ] \
-      && grep -Fqx 'phase=exited' "$STATE/$ID.control-relaunch" \
-      && grep -Fqx 'exit_result=already-missing' "$STATE/$ID.control-relaunch"; then
+      && relaunch_missing_handoff_valid; then
     # Control has positively observed that the recorded Herdr pane is gone and
     # checkpointed the task before asking this launch owner to recreate it.
     RELAUNCH_MISSING=1
@@ -2999,6 +3014,7 @@ else
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$RELAUNCH_MISSING" -eq 1 ]; then
+      [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
       [ "$(fm_backend_herdr_server_running_state "$HERDR_SES")" = running ] || {
         echo "error: task $ID's recorded Herdr session '$HERDR_SES' is not positively running; refusing endpoint recreation" >&2
         exit 1
