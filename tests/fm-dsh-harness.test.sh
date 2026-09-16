@@ -287,17 +287,19 @@ install_fm_preset() {  # <dsh-home>
   cp -R "$ROOT/.dsh/agent-presets/firstmate" "$1/fmhome/.dsh/agent-presets/firstmate"
 }
 
-# A synthetic DSH home: <root>/profiles/node_modules holds dsh-base and the
-# named profile holds its own node_modules. A stand-in `dsh` on <root>/fakebin
-# answers `--profile p --dump-config` with <root>/dump.yml, or with
+# A synthetic DSH home: <root>/install is the dsh installation, holding dsh-base
+# beside a stand-in `dsh` that <root>/fakebin links to, and the named profile
+# holds its own node_modules. There is no <root>/profiles/node_modules mirror,
+# which DSH only creates when a host boots, so every fixture is a fresh home.
+# The stand-in answers `--profile p --dump-config` with <root>/dump.yml, or with
 # <root>/dump-patched.yml when a --patch overlay is forwarded, and fails for any
 # other profile or a missing dump; any other invocation records the environment
 # it booted with in <root>/dsh-env.
 make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
   local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5 fakebin
-  mkdir -p "$dir/profiles/node_modules/@deepseek-ai/dsh-base" "$dir/profiles/p" "$dir/fmhome"
+  mkdir -p "$dir/install/node_modules/@deepseek-ai/dsh-base" "$dir/install/lib" "$dir/profiles/p" "$dir/fmhome"
   printf '{"name":"@deepseek-ai/dsh-base","version":"%s"}\n' "$base" \
-    > "$dir/profiles/node_modules/@deepseek-ai/dsh-base/package.json"
+    > "$dir/install/node_modules/@deepseek-ai/dsh-base/package.json"
   if [ "$bridge" != - ]; then
     mkdir -p "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code"
     printf '{"name":"@deepseek-ai/dsh-hooks-claude-code","version":"%s"}\n' "$bridge" \
@@ -306,7 +308,7 @@ make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agent
   [ "$maxb" = - ] || write_dump "$dir/dump.yml" "$maxb"
   head -c "$agents" /dev/zero | tr '\0' 'x' > "$dir/fmhome/AGENTS.md"
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/dsh" <<SH
+  cat > "$dir/install/lib/dsh" <<SH
 #!/usr/bin/env bash
 case " \$* " in
   *" --dump-config "*) ;;
@@ -317,7 +319,8 @@ dump='$dir/dump.yml'
 case " \$* " in *" --patch "*) dump='$dir/dump-patched.yml' ;; esac
 [ -f "\$dump" ] && cat "\$dump"
 SH
-  chmod +x "$fakebin/dsh"
+  chmod +x "$dir/install/lib/dsh"
+  ln -s "$dir/install/lib/dsh" "$fakebin/dsh"
   printf '%s\n' "$dir"
 }
 
@@ -354,6 +357,8 @@ test_dsh_preflight_rejects_a_mismatched_bridge() {
   local home
   # A stale bridge reads a deprecated session.events and makes EVERY tool call
   # fail while the guards go inert, so the pin must be asserted, not documented.
+  # The fixture is a fresh home with no profiles/node_modules mirror, the first
+  # launch where a bridge installed from the stale npm tag is most likely.
   home=$(make_dsh_home "$TMP_ROOT/pre-badbridge" 0.1.5-rc.2 0.0.1-rc.5 262144 81127)
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "a mismatched bridge must fail the preflight, got rc=$PREFLIGHT_RC"
@@ -763,14 +768,20 @@ test_dsh_delegation_guard_classifies_real_tool_names() {
   # loop driver - creates work no state/<id>.meta records and was ALLOWED, while
   # list_agents and interrupt_agent were DENIED, stranding a runaway child with
   # no way to inspect or end it.
+  # The guard is inert outside a primary home, and this checkout may itself be a
+  # linked worktree, so it is scoped to a primary-shaped fixture.
+  local home
+  home=$(make_guard_home guard-classify)
   assert_denied() {
     rc=0
-    printf '{"tool_name":"%s"}' "$1" | "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    printf '{"tool_name":"%s"}' "$1" | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 2 ] || fail "$1 must be denied by the delegation guard, got rc=$rc"
   }
   assert_allowed() {
     rc=0
-    printf '{"tool_name":"%s"}' "$1" | "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    printf '{"tool_name":"%s"}' "$1" | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || fail "$1 must be allowed, got rc=$rc"
   }
   assert_denied subagent
@@ -863,11 +874,18 @@ test_dsh_tracked_hooks_dispatch_and_fail_safe() {
   # exact failure the escaping bug produced.
   cmd=$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("fm-subagent-pretool-check.sh"))][0]' "$hooks")
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "the tracked hooks register no delegation guard"
+  # The wrapper resolves this checkout, but the guard it reaches is inert outside
+  # a primary home and this checkout may be a linked worktree, so the guard's own
+  # scope is a primary-shaped fixture.
+  local scope
+  scope=$(make_guard_home guard-dispatch)
   rc=0
-  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$ROOT" FM_ROOT_OVERRIDE="$scope" FM_HOME="$scope" FM_STATE_OVERRIDE="$scope/state" \
+    bash -c "$cmd" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 2 ] || fail "the tracked delegation guard must deny through its wrapper (got rc=$rc); a malformed self-check makes it a silent no-op"
   rc=0
-  printf '{"tool_name":"bash"}' | CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  printf '{"tool_name":"bash"}' | CLAUDE_PROJECT_DIR="$ROOT" FM_ROOT_OVERRIDE="$scope" FM_HOME="$scope" FM_STATE_OVERRIDE="$scope/state" \
+    bash -c "$cmd" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "the tracked delegation guard must allow an ordinary tool (got rc=$rc)"
 
   # Fail-safe proof, for every registered wrapper (digest, arm, cd, delegation

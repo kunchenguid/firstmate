@@ -57,7 +57,6 @@ SCRIPT_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FM_HOME_DIR=${FM_HOME_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
 DSH_HOME_DIR=${DSH_HOME:-$HOME/.dsh}
 PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
-SHARED_MODULES="$DSH_HOME_DIR/profiles/node_modules"
 
 FAILED=0
 WARNED=0
@@ -72,17 +71,29 @@ pkg_version() {  # <package.json path>
 
 # --- 1. hooks bridge version matches the running dsh-base --------------------
 BRIDGE_PKG="$PROFILE_DIR/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json"
-BASE_PKG="$SHARED_MODULES/@deepseek-ai/dsh-base/package.json"
-[ -f "$BASE_PKG" ] || BASE_PKG="$PROFILE_DIR/node_modules/@deepseek-ai/dsh-base/package.json"
+# DSH resolves dsh-base from its own installation first. $DSH_HOME/profiles/
+# node_modules only mirrors that installation, and DSH creates it when a host
+# boots, so on a fresh home's first launch it does not exist yet. Resolve from
+# the installation instead, walking node_modules up from the real dsh binary.
+DSH_BIN=$(command -v dsh || true)
+BASE_PKG=
+[ -z "$DSH_BIN" ] || BASE_PKG=$(node -e '
+  const fs = require("node:fs"), path = require("node:path");
+  for (let dir = path.dirname(fs.realpathSync(process.argv[1])); ; dir = path.dirname(dir)) {
+    const pkg = path.join(dir, "node_modules/@deepseek-ai/dsh-base/package.json");
+    if (fs.existsSync(pkg)) { console.log(pkg); break; }
+    if (path.dirname(dir) === dir) break;
+  }' "$DSH_BIN" 2>/dev/null || true)
 
 BASE_VERSION=$(pkg_version "$BASE_PKG" || true)
 BRIDGE_VERSION=$(pkg_version "$BRIDGE_PKG" || true)
 
-if [ -z "$BRIDGE_VERSION" ]; then
+if [ -z "$BASE_VERSION" ]; then
+  fail "could not read the running dsh-base version from the dsh installation (${DSH_BIN:-dsh is not on PATH})" \
+    "put the dsh CLI on PATH: without dsh-base's version the hooks bridge pin cannot be checked, and a mismatched bridge makes every tool call fail"
+elif [ -z "$BRIDGE_VERSION" ]; then
   fail "the hooks bridge is not installed in profile '$PROFILE'" \
-    "install it at the running dsh-base version: dsh plugin --profile $PROFILE add @deepseek-ai/dsh-hooks-claude-code@${BASE_VERSION:-<version>}"
-elif [ -z "$BASE_VERSION" ]; then
-  warn "could not read the running dsh-base version" "checked $BASE_PKG"
+    "install it at the running dsh-base version: dsh plugin --profile $PROFILE add @deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION"
 elif [ "$BRIDGE_VERSION" != "$BASE_VERSION" ]; then
   fail "hooks bridge $BRIDGE_VERSION does not match dsh-base $BASE_VERSION" \
     "a mismatched bridge throws before any hook matches and makes every tool call fail; reinstall: dsh plugin --profile $PROFILE add @deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION"
