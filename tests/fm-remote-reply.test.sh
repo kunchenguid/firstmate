@@ -355,11 +355,10 @@ assert_grep "offset=$retry_offset" "$PARENT/state/remote-replies/ios.cursor" \
 pass "local document storage failures remain retryable until delivery succeeds"
 
 # ---------------------------------------------------------------------------
-# The document a line OFFERS is a durable, re-attemptable obligation, never a
-# verdict. The reader cannot tell a report that is still being written from one
-# that will never exist, so an early offer must escalate, say why, and then
-# clear itself the moment the document arrives - while the cursor keeps
-# advancing so no delta ever stalls on one pointer.
+# A document a line OFFERS is fetched; one the reader cannot deliver fails open.
+# The reader cannot tell a report still being written from one that will never
+# exist, so a refusal never becomes a decision on the parent's board: the line
+# keeps its own pointer, the cursor advances, and an unkeyed note says why.
 GEN=8
 mirror_lines() { # <line>...
   GEN=$((GEN + 1))
@@ -374,8 +373,11 @@ mirrored_cursor_is_current() { # <label>
   offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
   assert_grep "offset=$offset" "$PARENT/state/remote-replies/ios.cursor" "$1"
 }
-document_decision_open() {
-  status_open_decisions "$PARENT/state/ios.status" | grep -q '^remote-reply-document-ios	'
+assert_no_document_decision() { # <label>
+  if status_open_decisions "$PARENT/state/ios.status" | grep -q '^remote-reply-document-'; then
+    fail "$1"
+  fi
+  assert_no_grep '[key=remote-reply-document-' "$PARENT/state/ios.status" "$1"
 }
 
 printf '# valid report behind a malformed pointer\n' > "$REMOTE/data/reply/result.md"
@@ -384,8 +386,7 @@ assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/result.md" \
   "a valid prefix of a malformed report pointer was fetched"
 assert_grep 'report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
   "a valid prefix of a malformed report pointer was rewritten"
-assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
-  "a malformed report pointer raised a document transfer obligation"
+assert_no_document_decision "a malformed report pointer raised a document decision"
 mirrored_cursor_is_current "a malformed report pointer prevented the cursor from advancing"
 pass "a structured pointer must end at its token boundary"
 
@@ -400,166 +401,91 @@ cmp -s "$REMOTE/data/reply/result.md" "$PARENT/data/remote-secondmates/ios/data/
   || fail "the whitespace-separated structured pointer was not fetched"
 assert_grep 'report=data/remote-secondmates/ios/data/reply/adjacent-a.md,report=data/remote-secondmates/ios/data/reply/adjacent-b.md report=data/remote-secondmates/ios/data/reply/result.md alongside report=data/reply/result.md.bak' "$PARENT/state/ios.status" \
   "structured pointer rewriting skipped an adjacent pointer or changed a malformed token"
-assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
-  "adjacent deliverable pointers raised a document transfer obligation"
 mirrored_cursor_is_current "adjacent structured pointers prevented the cursor from advancing"
 pass "adjacent pointers are fetched while malformed tokens remain unchanged"
 
-mkdir -p "$REMOTE/data/remote-secondmates/other/data/reply"
-printf '# another homes report\n' > "$REMOTE/data/remote-secondmates/other/data/reply/report.md"
-printf '# this mates report\n' > "$REMOTE/data/reply/cross-home-own.md"
-mirror_lines 'done [key=cross-home]: foreign report=data/remote-secondmates/other/data/reply/report.md own report=data/reply/cross-home-own.md'
-assert_grep 'foreign report=data/remote-secondmates/other/data/reply/report.md own report=data/remote-secondmates/ios/data/reply/cross-home-own.md' "$PARENT/state/ios.status" \
-  "the cross-home pointer was changed or the mate-owned pointer was not rewritten"
-assert_absent "$PARENT/data/remote-secondmates/ios/data/remote-secondmates" \
-  "a structured pointer under another home's mirror tree was fetched from this mate"
-cmp -s "$REMOTE/data/reply/cross-home-own.md" "$PARENT/data/remote-secondmates/ios/data/reply/cross-home-own.md" \
-  || fail "the mate-owned structured pointer alongside a cross-home pointer was not fetched"
-document_decision_open && fail "a structured cross-home pointer opened a document obligation"
-assert_no_grep 'doc data/remote-secondmates/' "$PARENT/state/remote-replies/ios.pending-docs" \
-  "a structured cross-home pointer was recorded as a pending obligation"
-mirrored_cursor_is_current "a delta containing a structured cross-home pointer did not advance the cursor"
-pass "structured cross-home pointers stay untouched while mate-owned reports transfer"
+# A rejected candidate must not make the text right after it look like the start
+# of a line: the second `report=` here has no boundary of its own.
+printf '# glued report\n' > "$REMOTE/data/reply/glued.md"
+mirror_lines 'working [key=glued-pointers]: glued report=data/reply/glued-prefix.mdreport=data/reply/glued.md'
+assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/glued.md" \
+  "a pointer with no preceding boundary was fetched after a rejected candidate"
+assert_grep 'glued report=data/reply/glued-prefix.mdreport=data/reply/glued.md' "$PARENT/state/ios.status" \
+  "a pointer with no preceding boundary was rewritten after a rejected candidate"
+pass "a rejected candidate never gives the following text a false leading boundary"
 
-# STEP 1 of the reported timeline: the mate offers a report it has not written
-# yet. The escalation must name the document AND the reader's own reason.
-mirror_lines 'reply [corr=3333333333333333]: dispatched the voice scout report=data/reply/late.md, will relay on completion'
-assert_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
-  "an offered document that could not be delivered raised no escalation"
-assert_grep 'data/reply/late.md: file is not a non-symlink regular file' "$PARENT/state/ios.status" \
-  "the escalation discarded the reader's own reason for refusing"
-document_decision_open || fail "the undelivered document did not open a decision on the parent's board"
-assert_grep 'report=data/reply/late.md' "$PARENT/state/ios.status" \
-  "an undelivered document's line was not mirrored with its own pointer intact"
-assert_grep 'doc data/reply/late.md	' "$PARENT/state/remote-replies/ios.pending-docs" \
-  "the undelivered document was not recorded as a re-attemptable obligation"
-mirrored_cursor_is_current "an undelivered document held the cursor back"
-pass "an offered document the reader cannot deliver escalates with its reason and does not stall"
+# A `report=` under a remote-secondmates mirror tree is fetched like any other
+# structured offer. When this mate genuinely holds it, it is a nested remote
+# report worth relaying; when it does not, the fetch fails open and harmlessly.
+mkdir -p "$REMOTE/data/remote-secondmates/nested/data/reply"
+printf '# nested grandchild report\n' > "$REMOTE/data/remote-secondmates/nested/data/reply/report.md"
+mirror_lines 'done [key=nested-remote]: nested report=data/remote-secondmates/nested/data/reply/report.md foreign report=data/remote-secondmates/other/data/reply/report.md'
+cmp -s "$REMOTE/data/remote-secondmates/nested/data/reply/report.md" \
+  "$PARENT/data/remote-secondmates/ios/data/remote-secondmates/nested/data/reply/report.md" \
+  || fail "a nested remote report this mate holds was not relayed"
+assert_grep 'nested report=data/remote-secondmates/ios/data/remote-secondmates/nested/data/reply/report.md foreign report=data/remote-secondmates/other/data/reply/report.md' "$PARENT/state/ios.status" \
+  "the nested pointer was not rewritten or the undeliverable foreign pointer was changed"
+assert_grep 'note: remote document did not transfer for ios: data/remote-secondmates/other/data/reply/report.md - ' "$PARENT/state/ios.status" \
+  "an undeliverable foreign pointer left no note"
+assert_no_document_decision "an undeliverable foreign pointer raised a document decision"
+mirrored_cursor_is_current "an undeliverable foreign pointer prevented the cursor from advancing"
+pass "nested remote reports relay while an undeliverable foreign pointer fails open"
 
-# STEP 2: two more lines in ONE delta offer the SAME still-absent document.
-# The gap is named once, and an unchanged obligation raises nothing new.
-blocks_before=$(grep -cF 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status")
+# The reported incident, end to end. The mate announces a scout and names in
+# prose the path its report WILL be written to, then explains the resulting
+# false alarm in two more lines of the same delta. None of that is an offer, so
+# nothing is fetched, nothing is noted, and no decision ever opens. The report
+# arrives through the ledger publisher's structured offer once it exists.
+INCIDENT_DOC=data/reply/voice-scout-report.md
+rm -f "$REMOTE/$INCIDENT_DOC"
+mirror_lines "reply [corr=3333333333333333]: dispatched the voice scout, report path $INCIDENT_DOC, will relay on completion"
 mirror_lines \
-  'reply [corr=3333333333333333]: no report to transfer yet, report=data/reply/late.md is not written' \
-  'reply [corr=3333333333333333]: same - the scout is still working on report=data/reply/late.md'
-[ "$(grep -cF 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status")" -eq "$blocks_before" ] \
-  || fail "re-offering an already-recorded document accumulated a second escalation"
-newest_block=$(grep -F 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" | tail -1)
-[ "$(printf '%s\n' "$newest_block" | grep -oF 'data/reply/late.md' | wc -l | tr -d ' ')" -eq 1 ] \
-  || fail "one missing document was named more than once in a single escalation: $newest_block"
-pass "one missing document is named once per escalation and never accumulates"
-
-# STEP 3 and 4: the scout finishes and writes the report. The very next delta
-# re-attempts the obligation, so recovery no longer depends on some later line
-# happening to offer the same path again.
-printf '# late scout report\n\nfindings\n' > "$REMOTE/data/reply/late.md"
-mirror_lines 'working [key=unrelated]: unrelated later progress line'
-cmp -s "$REMOTE/data/reply/late.md" "$PARENT/data/remote-secondmates/ios/data/reply/late.md" \
-  || fail "the re-attempted document was not fetched once it existed"
-assert_grep 'resolved [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
-  "the arriving document did not retire its own escalation"
-assert_grep 'data/remote-secondmates/ios/data/reply/late.md' "$PARENT/state/ios.status" \
-  "the resolution did not name the local copy the captain can now read"
-document_decision_open && fail "the escalation stayed open after its document arrived"
-assert_no_grep 'doc data/reply/late.md	' "$PARENT/state/remote-replies/ios.pending-docs" \
-  "a delivered document was left recorded as outstanding"
-mirrored_cursor_is_current "the recovering delta did not advance the cursor"
-pass "an undelivered document is re-attempted and its escalation clears itself"
-
-# STEP 5: the same self-clearing must work on a channel that stays QUIET, where
-# no further delta is coming. The obligation rides the channel's own poll.
+  "reply [corr=3333333333333333]: No report to transfer YET - $INCIDENT_DOC is NOT yet written; nothing is lost" \
+  "reply [corr=3333333333333333]: same - the report does not exist yet (scout still working, $INCIDENT_DOC not written)"
+assert_no_document_decision "a report path mentioned in prose raised a document decision"
+assert_no_grep "note: remote document did not transfer for ios: $INCIDENT_DOC" "$PARENT/state/ios.status" \
+  "a report path mentioned in prose was treated as an undeliverable offer"
+assert_grep "report path $INCIDENT_DOC, will relay" "$PARENT/state/ios.status" \
+  "the prose announcement was not mirrored verbatim"
+mirrored_cursor_is_current "the prose announcement delta did not advance the cursor"
+printf '# voice scout report\n\nfindings\n' > "$REMOTE/$INCIDENT_DOC"
 # The exact shape bin/fm-inactive-reconcile.sh publishes for a finished child.
-mirror_lines 'done [key=child-outcome-quiet-scout-done-ab12cd34]: child quiet-scout done: report ready mode=scout report=data/reply/quiet.md'
-document_decision_open || fail "the second undelivered document opened no decision"
-printf '# quiet-window report\n' > "$REMOTE/data/reply/quiet.md"
-set +e
-FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/quiet-retry.out" 2>&1
-quiet_retry_rc=$?
-set -e
-[ "$quiet_retry_rc" -eq 75 ] || fail "the quiet retry window exited with an unexpected status: $quiet_retry_rc"
-[ ! -s "$TMP_ROOT/quiet-retry.out" ] \
-  || fail "the poll's document retry wrote to the captured-result stream: $(cat "$TMP_ROOT/quiet-retry.out")"
-cmp -s "$REMOTE/data/reply/quiet.md" "$PARENT/data/remote-secondmates/ios/data/reply/quiet.md" \
-  || fail "a quiet channel never re-attempted its outstanding document"
-document_decision_open && fail "a quiet channel's escalation never cleared itself"
-pass "an outstanding document is re-attempted on the channel's own poll and clears the board"
+mirror_lines "done [key=child-outcome-voice-scout-done-ab12cd34]: child voice-scout done: report ready mode=scout report=$INCIDENT_DOC"
+cmp -s "$REMOTE/$INCIDENT_DOC" "$PARENT/data/remote-secondmates/ios/$INCIDENT_DOC" \
+  || fail "the structured ledger offer did not deliver the finished report"
+assert_grep "report ready mode=scout report=data/remote-secondmates/ios/$INCIDENT_DOC" "$PARENT/state/ios.status" \
+  "the structured ledger offer was not rewritten to its local copy"
+assert_no_document_decision "the reported incident left a document decision standing"
+pass "the reported incident raises no standing decision and still delivers the report"
 
-# A document that goes missing AGAIN must re-open the board. The escalation for
-# an already-seen document and reason is otherwise byte-identical to the earlier
-# one, and the at-most-once append would silently swallow it.
-rm -f "$REMOTE/data/reply/quiet.md"
-mirror_lines 'reply [corr=5555555555555555]: relaying the second scout once more, report=data/reply/quiet.md'
-document_decision_open || fail "a document that went missing again did not re-open its decision"
-[ "$(grep -cF 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status")" -ge 3 ] \
-  || fail "the repeated escalation was suppressed as duplicate bytes"
-printf '# quiet-window report\n' > "$REMOTE/data/reply/quiet.md"
-set +e
-FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
-set -e
-document_decision_open && fail "the repeated escalation did not clear itself a second time"
-[ "$(grep -cF 'resolved [key=remote-reply-document-ios]' "$PARENT/state/ios.status")" -ge 2 ] \
-  || fail "the repeated resolution was suppressed as duplicate bytes"
-pass "a document that fails again re-opens the board, and its later arrival clears it again"
+# A structured offer the reader cannot deliver fails open with its own reason.
+# Offered again twice in one delta, the unchanged note is not repeated.
+mirror_lines 'reply [corr=4444444444444444]: dispatched a scout report=data/reply/never-written.md'
+assert_grep 'note: remote document did not transfer for ios: data/reply/never-written.md - file is not a non-symlink regular file' "$PARENT/state/ios.status" \
+  "an undeliverable structured offer left no note carrying the reader's reason"
+assert_grep 'dispatched a scout report=data/reply/never-written.md' "$PARENT/state/ios.status" \
+  "an undeliverable offer's line was not mirrored with its own pointer intact"
+assert_no_document_decision "an undeliverable structured offer raised a document decision"
+mirrored_cursor_is_current "an undeliverable structured offer held the cursor back"
+mirror_lines \
+  'reply [corr=4444444444444444]: still writing report=data/reply/never-written.md' \
+  'reply [corr=4444444444444444]: same, report=data/reply/never-written.md'
+[ "$(grep -cF 'note: remote document did not transfer for ios: data/reply/never-written.md' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "re-offering the same undeliverable document repeated its note"
+assert_no_document_decision "re-offering an undeliverable document raised a document decision"
+pass "an undeliverable structured offer fails open with one note and never a decision"
 
 # The positive remote-refusal case with a genuinely non-transient cause: the
-# reader bounds document size, and that refusal must reach the board by name.
+# reader bounds document size, and that refusal is visible by its own reason.
 head -c 300000 /dev/zero | tr '\0' 'x' > "$REMOTE/data/reply/big.md"
 mirror_lines 'done [key=big-report]: oversize deliverable report=data/reply/big.md'
-assert_grep 'data/reply/big.md: file exceeds max-bytes' "$PARENT/state/ios.status" \
-  "an oversize document's refusal did not reach the board with its reason"
-document_decision_open || fail "an oversize document raised no obligation"
+assert_grep 'note: remote document did not transfer for ios: data/reply/big.md - file exceeds max-bytes' "$PARENT/state/ios.status" \
+  "an oversize document's refusal did not surface with its reason"
 assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/big.md" \
   "a refused oversize document was stored locally anyway"
+assert_no_document_decision "an oversize document raised a document decision"
 mirrored_cursor_is_current "an oversize document held the cursor back"
-printf '# trimmed deliverable\n' > "$REMOTE/data/reply/big.md"
-set +e
-FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
-set -e
-document_decision_open && fail "the oversize obligation did not clear once the document fit the bound"
-pass "a remote refusal names its own reason and stays re-attemptable"
-
-# Two documents outstanding at once are ONE obligation whose set is
-# order-independent: re-offering a document already recorded must not manufacture
-# a fresh escalation just because it re-enters the set from the other side.
-mirror_lines 'reply [corr=6666666666666666]: first deliverable report=data/reply/pair-a.md'
-mirror_lines 'reply [corr=6666666666666666]: second deliverable report=data/reply/pair-b.md'
-blocks_before=$(grep -cF 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status")
-mirror_lines 'reply [corr=6666666666666666]: re-offering report=data/reply/pair-a.md while the second is written'
-[ "$(grep -cF 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status")" -eq "$blocks_before" ] \
-  || fail "an unchanged set of outstanding documents raised a fresh escalation"
-printf '# first deliverable\n' > "$REMOTE/data/reply/pair-a.md"
-printf '# second deliverable\n' > "$REMOTE/data/reply/pair-b.md"
-set +e
-FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
-set -e
-document_decision_open && fail "both documents arrived and the obligation stayed open"
-cmp -s "$REMOTE/data/reply/pair-b.md" "$PARENT/data/remote-secondmates/ios/data/reply/pair-b.md" \
-  || fail "the second outstanding document was never re-attempted"
-pass "several outstanding documents are one order-independent obligation"
-
-# A remote line mirrors once whichever pointer forms it carried when it was
-# written. A line offering two documents where only one is deliverable produces
-# a MIXED rendering; once the second arrives, a whole-log recapture renders the
-# same line all-local, and it must still be recognized as already mirrored.
-printf '# mixed deliverable a\n' > "$REMOTE/data/reply/mixed-a.md"
-rm -f "$REMOTE/data/reply/mixed-b.md"
-mirror_lines 'done [key=mixed-pair]: two deliverables report=data/reply/mixed-a.md and report=data/reply/mixed-b.md'
-assert_grep 'report=data/remote-secondmates/ios/data/reply/mixed-a.md and report=data/reply/mixed-b.md' "$PARENT/state/ios.status" \
-  "the mixed rendering did not keep the delivered pointer local and the undelivered one remote"
-document_decision_open || fail "the undelivered half of the offered pair opened no obligation"
-printf '# mixed deliverable b\n' > "$REMOTE/data/reply/mixed-b.md"
-set +e
-FM_REMOTE_REPLY_WAIT_SECONDS=1 remote_env "$ADAPTER" source ios >/dev/null 2>&1
-set -e
-document_decision_open && fail "the second half of the pair arrived and the obligation stayed open"
-cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-mixed-replay"
-rm -f "$PARENT/state/remote-replies/ios.cursor"
-GEN=$((GEN + 1))
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
-  || fail "the mixed-pointer whole-log recapture was not captured"
-cmp -s "$TMP_ROOT/ios-status-before-mixed-replay" "$PARENT/state/ios.status" \
-  || fail "a whole-log recapture mirrored the mixed-pointer line a second time"
-pass "a line mirrors once whichever pointer forms it carried when it was written"
+pass "a remote refusal surfaces its own reason without opening a decision"
 
 # A failed extraction pass must leave the delta wholly uncommitted. Once the
 # parser works again, the same captured delta applies in full.
@@ -572,11 +498,15 @@ cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-extractfail"
 EXTRACT_FAIL_BIN="$TMP_ROOT/extract-fail-bin"
 mkdir -p "$EXTRACT_FAIL_BIN"
 REAL_AWK=$(command -v awk)
+# The stand-in awk refuses only the extraction pass, so every other awk the
+# relay depends on keeps working.
 {
-  printf '#!/usr/bin/env bash\n'
-  printf 'for argument in "$@"; do\n'
-  printf '  [ "$argument" != mode=extract ] || exit 97\n'
-  printf 'done\n'
+  cat <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  [ "$argument" != mode=extract ] || exit 97
+done
+SH
   printf 'exec %q "$@"\n' "$REAL_AWK"
 } > "$EXTRACT_FAIL_BIN/awk"
 chmod +x "$EXTRACT_FAIL_BIN/awk"
@@ -810,8 +740,6 @@ remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
-assert_absent "$PARENT/state/remote-replies/ios.pending-docs" \
-  "adapter retirement left a document obligation a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 echo "ALL TESTS PASSED"

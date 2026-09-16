@@ -53,8 +53,6 @@
 #   - documents a line explicitly OFFERS through a structured `report=data/....md`
 #     pointer, fetched through the path-confined remote file reader and rewritten
 #     to their local copies, because the parent cannot read the remote filesystem
-#   - a durable, re-attemptable obligation for a document the reader could not
-#     deliver yet, because a refusal is a fact about now rather than forever
 #   - at-most-once append, because a captured generation can be replayed
 #   - control-byte normalization, so content-bearing bytes from another machine
 #     cannot make the parent's status file unsafe to read
@@ -79,11 +77,10 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # transport or unknown remote completion. Any other nonzero status is the remote
 # reader's own refusal of that path at that moment. The reader has no permanence
 # vocabulary - a report the mate has not finished writing refuses exactly like a
-# path that will never exist - so a refusal is recorded as an obligation to
-# re-attempt rather than inferred to be final.
+# path that will never exist - so a refusal fails open rather than being read as
+# final (see cmd_ingest).
 SSH_UNAVAILABLE=255
 DOCUMENT_LOCAL_FAILURE=2
-PENDING_DOCS_SCHEMA=fm-remote-reply-pending-docs.v1
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -258,12 +255,6 @@ cmd_source() {
   local id=${1:-} started rc=0
   validate_id "$id"
   read_cursor "$id"
-  # Re-attempt outstanding documents before opening the next window, so a quiet
-  # channel still clears its own escalation. This command's STDOUT is the
-  # captured result, so the whole attempt is confined to a subshell whose output
-  # is discarded and whose failure - including a refused record - can never fail
-  # the poll.
-  ( retry_document_obligations_locked "$id" ) >/dev/null 2>&1 || true
   started=$(fm_pending_reply_now)
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
@@ -287,29 +278,25 @@ safe_doc_path() {
 # the tag a home's own ledger publisher emits for a report it has already
 # confirmed exists (bin/fm-inactive-reconcile.sh), and a bracketed
 # `[report=data/....md]` form reads identically. A bare path inside prose is a
-# mention, not an offer: treating one as a fetch instruction made a mate's own
-# sentence about a document it had not written yet - or about a document that
-# belongs to another home entirely, and so is provably not this mate's to serve -
-# manufacture a transfer obligation the mate never made. A token boundary is
-# required before `report=`, so a neighbouring key such as `child-report=` is not
-# this tag. Deduplication spans the WHOLE delta, so one document offered by
-# several lines is fetched, and named in one escalation, exactly once.
-# One boundary-valid recognition of a structured pointer, shared by extraction,
-# rewriting, and canonical identity, so those three can never disagree about
-# what counts as a pointer.
+# mention, not an offer: fetching every mention made a mate's sentence about a
+# report it had not written yet trigger a transfer it never offered.
 #
-# The map arrives through a FILE, never the process environment. A delta may
-# legitimately carry many pointers, and the expanded map can exceed the
-# platform's exec argument limit; awk would then fail to start, and a caller
-# that did not check would append the empty result as a blank line and advance
-# the cursor past dropped status content. Every caller checks the exit status.
+# One boundary-valid recognition serves both extraction and rewriting, so the two
+# can never disagree about what counts as a pointer. A pointer must start and end
+# at a token boundary: `child-report=` is not this tag, and
+# `report=data/x.md.bak` offers nothing, not even its `data/x.md` prefix. Each
+# line is scanned behind a sentinel byte that normalized payload can never
+# contain, so every candidate needs a real preceding boundary character. A
+# rejected candidate therefore cannot make the text after it look like the start
+# of a line, while adjacent pointers each keep their own boundary.
 #
-# `canonical` maps every pointer to the local form it would have once delivered,
-# whether or not it has been. That makes a mirrored line's identity independent
-# of which of its documents happened to be deliverable when it was written, so a
-# previously mirrored MIXED rendering is still recognized as the same line.
-process_document_pointers() { # <extract|rewrite|canonical> <pointer-map-file> <local-base>
-  LC_ALL=C awk -v mode="$1" -v mapfile="$2" -v base="$3" '
+# The rewrite map arrives through a FILE, never the process environment. A delta
+# may carry many delivered pointers, and an expanded map can exceed the platform's
+# exec argument limit; awk would then fail to start, and a caller that did not
+# check would append the empty result as a blank line and advance the cursor past
+# dropped status content. Every caller checks the exit status.
+process_document_pointers() { # <extract|rewrite> <pointer-map-file>
+  LC_ALL=C awk -v mode="$1" -v mapfile="$2" '
     BEGIN {
       if (mapfile != "") {
         while ((getline entry < mapfile) > 0) {
@@ -321,59 +308,50 @@ process_document_pointers() { # <extract|rewrite|canonical> <pointer-map-file> <
       }
     }
     {
-      rest = $0
+      rest = "\001" $0
       rewritten = ""
-      while (match(rest, /(^|[^A-Za-z0-9._\/-])report=data\/[A-Za-z0-9._\/-]+[.]md/)) {
-        matched = substr(rest, RSTART, RLENGTH)
-        marker = index(matched, "report=")
-        doc = substr(matched, marker + 7)
+      while (match(rest, /[^A-Za-z0-9._\/-]report=data\/[A-Za-z0-9._\/-]+[.]md/)) {
+        doc = substr(rest, RSTART + 8, RLENGTH - 8)
         next_index = RSTART + RLENGTH
         next_char = next_index <= length(rest) ? substr(rest, next_index, 1) : ""
-        if (next_char != "" && next_char ~ /[A-Za-z0-9._\/-]/) {
-          rewritten = rewritten substr(rest, 1, next_index - 1)
-          rest = substr(rest, next_index)
-          continue
-        }
-        if (index(doc, "data/remote-secondmates/") == 1) {
-          if (mode != "extract")
-            rewritten = rewritten substr(rest, 1, next_index - 1)
-          rest = substr(rest, next_index)
-          continue
-        }
-        if (mode == "extract") {
-          if (!seen[doc]++) print doc
-        } else {
-          if (mode == "canonical")
-            replacement = index(doc, base) == 1 ? doc : base doc
-          else
+        if (next_char == "" || next_char !~ /[A-Za-z0-9._\/-]/) {
+          if (mode == "extract") {
+            if (!seen[doc]++) print doc
+          } else {
             replacement = doc in replacements ? replacements[doc] : doc
-          rewritten = rewritten substr(rest, 1, RSTART - 1) \
-            substr(matched, 1, marker + 6) replacement
+            rewritten = rewritten substr(rest, 1, RSTART + 7) replacement
+            rest = substr(rest, next_index)
+            continue
+          }
         }
+        if (mode != "extract")
+          rewritten = rewritten substr(rest, 1, next_index - 1)
         rest = substr(rest, next_index)
       }
-      if (mode != "extract") print rewritten rest
+      if (mode != "extract") print substr(rewritten rest, 2)
     }
   '
 }
 
 extract_document_pointers() { # <payload-file>
-  process_document_pointers extract '' '' < "$1"
+  process_document_pointers extract '' < "$1"
+}
+
+rewrite_document_pointers() { # <input-file> <pointer-map-file> <output-file>
+  process_document_pointers rewrite "$2" < "$1" > "$3"
 }
 
 # The reader's own explanation for a refusal, reduced to one bounded, tab-free,
 # control-free line. bin/fm-procevent.sh runs this adapter with its stderr
-# discarded, so a reason that is not carried into the durable record and into the
-# escalation line is lost - which is exactly why an escalation could once say
-# only that a document "did not transfer" and never why.
+# discarded, so a reason that is not carried into the status stream is lost.
 summarize_fetch_reason() { # <stderr-file> <remote-relative>
   local reason
   reason=$(LC_ALL=C tr '\000-\010\011\013-\037\177' ' ' < "$1" 2>/dev/null \
     | awk 'NF { last = $0 } END { if (last != "") print last }' \
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   reason=${reason#error: }
-  # The escalation already names the document, so the reader's habit of echoing
-  # the path back is redundant noise in the line the captain reads.
+  # The note already names the document, so the reader's habit of echoing the
+  # path back is redundant noise.
   reason=${reason%": $2"}
   [ -n "$reason" ] || reason='the remote reader gave no reason'
   [ "${#reason}" -le 160 ] || reason="${reason:0:157}..."
@@ -427,8 +405,8 @@ normalize_payload() { # <source> <destination>
 }
 
 # The one place a line enters the parent status stream. A captured generation can
-# be replayed, so every append - a mirrored line or an escalation this adapter
-# raises itself - is at most once on exact bytes.
+# be replayed, so every append - a mirrored line, or an escalation or note this
+# adapter raises itself - is at most once on exact bytes.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -436,176 +414,10 @@ append_status_once() { # <status-file> <line>
   return 0
 }
 
-# --- the document obligation this channel owes the parent --------------------
-#
-# A document the reader could not deliver is a durable, re-attemptable
-# obligation, not a verdict. The channel records what it still owes, re-attempts
-# every outstanding entry on its own poll and again on every later delta, and
-# announces each change to that set on the parent's status stream - so the
-# escalation clears itself the moment the document arrives. The cursor still
-# advances and no delta ever stalls on one bad pointer, which is the property
-# the escalation was introduced to protect.
-#
-# Every announcement carries a strictly increasing notice ordinal. Without it a
-# later escalation whose set and reason happened to match an earlier one would be
-# suppressed as duplicate bytes by the at-most-once append, leaving the board
-# reading clear while a document was still owed. A replay of the SAME transition
-# recomputes the same ordinal and the same bytes, so replay stays idempotent.
-pending_docs_path() { printf '%s/%s.pending-docs\n' "$CURSOR_DIR" "$1"; }
-
-# Sets PENDING_NOTICE and PENDING_DOCS, one "<remote-relative>\t<reason>" line per
-# outstanding document. The record survives an empty set so its ordinal does.
-read_pending_docs() { # <id>
-  local path schema notice
-  path=$(pending_docs_path "$1")
-  PENDING_NOTICE=0
-  PENDING_DOCS=''
-  [ -e "$path" ] || [ -L "$path" ] || return 0
-  [ -f "$path" ] && [ ! -L "$path" ] || die "remote reply document record is unsafe: $path"
-  schema=$(sed -n 's/^schema=//p' "$path")
-  [ "$schema" = "$PENDING_DOCS_SCHEMA" ] \
-    || die "remote reply document record has an incompatible schema: $path"
-  notice=$(sed -n 's/^notice=//p' "$path")
-  case "$notice" in ''|*[!0-9]*) die "remote reply document record has an invalid notice: $path" ;; esac
-  PENDING_NOTICE=$notice
-  PENDING_DOCS=$(sed -n 's/^doc //p' "$path")
-}
-
-write_pending_docs() { # <id> <notice> <docs>
-  local id=$1 notice=$2 docs=$3 path tmp
-  mkdir -p "$CURSOR_DIR" || return 1
-  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
-  path=$(pending_docs_path "$id")
-  [ ! -L "$path" ] || return 1
-  tmp=$(umask 077; mktemp "$CURSOR_DIR/.pending-docs.XXXXXX") || return 1
-  {
-    printf 'schema=%s\n' "$PENDING_DOCS_SCHEMA"
-    printf 'notice=%s\n' "$notice"
-    [ -z "$docs" ] || printf '%s\n' "$docs" | sed 's/^/doc /'
-  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$path"
-}
-
-# The obligation entries whose document is NOT among the newline-separated paths
-# in <paths>, so a document this delta already attempted is not attempted twice.
-pending_docs_excluding() { # <docs> <paths>
-  local rel reason
-  [ -n "$1" ] || return 0
-  if [ -z "$2" ]; then
-    printf '%s\n' "$1"
-    return 0
-  fi
-  printf '%s\n' "$1" | while IFS=$'\t' read -r rel reason || [ -n "$rel" ]; do
-    [ -n "$rel" ] || continue
-    printf '%s\n' "$2" | grep -Fqx -- "$rel" && continue
-    printf '%s\t%s\n' "$rel" "$reason"
-  done
-}
-
-# A "<remote-relative>\t<local-relative>" map ordered longest pointer first, so
-# rewriting one path can never eat a longer one that merely starts with it.
-sort_pointer_map() { # <map>
-  [ -n "$1" ] || return 0
-  printf '%s\n' "$1" | LC_ALL=C awk -F '\t' '
-    $1 != "" { printf "%d\t%s\n", length($1), $0 }
-  ' | LC_ALL=C sort -rn -k1,1 | cut -f2-
-}
-
-# Rewrite every line of <input-file> through <map-file>, or map every pointer to
-# its canonical local form when <map-file> is empty and <local-base> is given.
-rewrite_pointer_stream() { # <mode> <input-file> <map-file> <local-base> <output-file>
-  process_document_pointers "$1" "$3" "$4" < "$2" > "$5"
-}
-
-# 0 when <path> is already an outstanding obligation in <docs>.
-pending_docs_has() { # <docs> <path>
-  [ -n "$1" ] || return 1
-  printf '%s\n' "$1" | cut -f1 | grep -Fqx -- "$2"
-}
-
-# Re-attempt every entry in <docs>. Never fatal: an outstanding document's
-# transport or storage failure must not fail a fresh delta or the channel poll -
-# it simply stays outstanding for the next attempt. Sets RETRY_DOCS to what is
-# still owed and RETRY_CLEARED to the local paths that just arrived.
-retry_document_obligations() { # <id> <docs>
-  local id=$1 docs=$2 rel reason local_doc rc kept='' cleared=''
-  RETRY_DOCS=''
-  RETRY_CLEARED=''
-  [ -n "$docs" ] || return 0
-  while IFS=$'\t' read -r rel reason || [ -n "$rel" ]; do
-    [ -n "$rel" ] || continue
-    rc=0
-    local_doc=''
-    fetch_document "$id" "$rel" local_doc || rc=$?
-    if [ "$rc" -eq 0 ]; then
-      cleared="${cleared}${cleared:+$'\n'}$local_doc"
-      continue
-    fi
-    [ "$rc" -ne 1 ] || reason=$FETCH_DOC_REASON
-    kept="${kept}${kept:+$'\n'}${rel}"$'\t'"${reason}"
-  done <<EOF
-$docs
-EOF
-  RETRY_DOCS=$kept
-  RETRY_CLEARED=$cleared
-}
-
-# Commit a changed obligation set and announce the change on the parent status
-# stream. Returns 0 when no line was appended, 1 when one was, and 2 when the
-# append or the record write itself failed.
-announce_pending_docs() { # <id> <status-file> <docs> <cleared-local-paths>
-  local id=$1 status_file=$2 docs=$3 cleared=$4 notice detail line append_rc=0
-  # One canonical order for the set, so the same outstanding documents arriving
-  # in a different order are the same obligation rather than a fresh escalation.
-  docs=$(printf '%s\n' "$docs" | LC_ALL=C awk 'NF' | LC_ALL=C sort)
-  cleared=$(printf '%s\n' "$cleared" | LC_ALL=C awk 'NF' | LC_ALL=C sort -u)
-  [ "$docs" != "$PENDING_DOCS" ] || return 0
-  notice=$((PENDING_NOTICE + 1))
-  if [ -n "$docs" ]; then
-    detail=$(printf '%s\n' "$docs" | LC_ALL=C awk -F '\t' '
-      $1 != "" { printf "%s%s: %s", sep, $1, $2; sep = "; " }
-    ')
-    line="blocked [key=remote-reply-document-$id]: remote documents have not transferred for $id - notice $notice: $detail"
-  else
-    detail=$(printf '%s\n' "$cleared" | LC_ALL=C awk 'NF { printf "%s%s", sep, $0; sep = ", " }')
-    [ -n "$detail" ] || detail='nothing is outstanding'
-    line="resolved [key=remote-reply-document-$id]: remote documents transferred for $id - notice $notice: $detail"
-  fi
-  append_status_once "$status_file" "$line" || append_rc=$?
-  [ "$append_rc" -ne 2 ] || return 2
-  write_pending_docs "$id" "$notice" "$docs" || return 2
-  PENDING_NOTICE=$notice
-  PENDING_DOCS=$docs
-  [ "$append_rc" -eq 0 ] || return 0
-  return 1
-}
-
-# The poll-side re-attempt, so a channel that stays quiet still clears its own
-# escalation once the mate finishes writing the report. Runs under the ingest
-# lock, which is the one writer of both the record and the escalation line.
-retry_document_obligations_locked() { # <id>
-  local id=$1 lock status_file
-  read_pending_docs "$id"
-  [ -n "$PENDING_DOCS" ] || return 0
-  status_file="$STATE/$id.status"
-  [ ! -L "$status_file" ] || return 1
-  lock="$STATE/.remote-reply-ingest-$id.lock"
-  fm_lock_acquire_wait "$lock" || return 1
-  trap 'fm_lock_release "$lock"' EXIT
-  read_pending_docs "$id"
-  [ -n "$PENDING_DOCS" ] || return 0
-  retry_document_obligations "$id" "$PENDING_DOCS"
-  announce_pending_docs "$id" "$status_file" "$RETRY_DOCS" "$RETRY_CLEARED" || true
-  return 0
-}
-
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
-  local fetch_rc append_rc announce_rc=0 offered='' delivered='' delivered_map=''
-  local local_base='' mirrored='' payload_ids='' seen_ids=''
-  local canonical='' carried='' outstanding='' undelivered='' cleared=''
+  local fetch_rc append_rc offered='' delivered_map='' mirrored='' undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -659,23 +471,24 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
-  read_pending_docs "$id"
   # Every document this delta OFFERS, deduplicated across the whole delta, is
-  # attempted exactly once here. A refusal names the gap once with the reader's
-  # own reason instead of once per mentioning line.
+  # attempted exactly once.
   if ! offered=$(extract_document_pointers "$normalized_payload"); then
     fm_lock_release "$lock"
     die "cannot extract remote document pointers"
   fi
+  delivered_map="$tmp/delivered.map"
+  : > "$delivered_map" || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
   while IFS= read -r doc || [ -n "$doc" ]; do
     [ -n "$doc" ] || continue
     fetch_rc=0
     local_doc=''
     fetch_document "$id" "$doc" local_doc || fetch_rc=$?
     if [ "$fetch_rc" -eq 1 ]; then
-      # The reader could not deliver this document now. Mirror the mate's line
-      # with its own pointer intact rather than inventing a local path or
-      # stalling the stream, and carry the gap as an obligation to re-attempt.
+      # Fail open. A refusal is never a decision: the mate's line keeps its own
+      # pointer, the cursor still advances, and one unkeyed note says why. A
+      # keyed escalation raised here once stood open forever describing a report
+      # that had in fact arrived, because nothing could ever resolve it.
       undelivered="${undelivered}${undelivered:+$'\n'}${doc}"$'\t'"${FETCH_DOC_REASON}"
       continue
     fi
@@ -683,60 +496,33 @@ cmd_ingest() {
       || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
     [ "$fetch_rc" -eq 0 ] \
       || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
-    delivered="${delivered}${delivered:+$'\n'}${doc}"$'\t'"${local_doc}"
-    if pending_docs_has "$PENDING_DOCS" "$doc"; then
-      cleared="${cleared}${cleared:+$'\n'}$local_doc"
-    fi
+    printf '%s\t%s\n' "$doc" "$local_doc" >> "$delivered_map" \
+      || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
   done <<EOF
 $offered
 EOF
-  # Longest pointer first, so rewriting one path can never eat a longer one that
-  # merely starts with it.
-  delivered_map="$tmp/delivered.map"
-  sort_pointer_map "$delivered" > "$delivered_map" \
-    || { fm_lock_release "$lock"; die "cannot stage the delivered document map"; }
-  local_base="data/remote-secondmates/$id/"
   mirrored="$tmp/mirrored"
-  payload_ids="$tmp/payload-ids"
-  seen_ids="$tmp/seen-ids"
-  [ -e "$status_file" ] || : > "$status_file" \
-    || { fm_lock_release "$lock"; die "cannot create the parent status log"; }
-  # Three whole-stream passes rather than two awk forks per line: the delivered
-  # rendering that gets mirrored, its delivery-state-independent identity, and
-  # the identity of every line already on the stream. Each prints exactly one
-  # line per input line, so the first two stay aligned.
-  rewrite_pointer_stream rewrite "$normalized_payload" "$delivered_map" '' "$mirrored" \
+  rewrite_document_pointers "$normalized_payload" "$delivered_map" "$mirrored" \
     || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
-  rewrite_pointer_stream canonical "$normalized_payload" '' "$local_base" "$payload_ids" \
-    || { fm_lock_release "$lock"; die "cannot derive remote reply line identity"; }
-  rewrite_pointer_stream canonical "$status_file" '' "$local_base" "$seen_ids" \
-    || { fm_lock_release "$lock"; die "cannot derive mirrored line identity"; }
-  exec 8< "$mirrored" || { fm_lock_release "$lock"; die "cannot read the rewritten payload"; }
-  exec 9< "$payload_ids" || { exec 8<&-; fm_lock_release "$lock"; die "cannot read the payload line identities"; }
-  while IFS= read -r rewritten <&8; do
-    IFS= read -r canonical <&9 || canonical=$rewritten
+  while IFS= read -r rewritten || [ -n "$rewritten" ]; do
     [ -n "$rewritten" ] || continue
-    grep -Fqx -- "$canonical" "$seen_ids" 2>/dev/null && continue
-    if ! printf '%s\n' "$rewritten" >> "$status_file"; then
-      exec 8<&- 9<&-
-      fm_lock_release "$lock"
-      die "cannot append remote reply"
-    fi
-    printf '%s\n' "$canonical" >> "$seen_ids"
-    appended=$((appended + 1))
-  done
-  exec 8<&- 9<&-
-  # Obligations this delta did not itself attempt are re-attempted now, so a
-  # document that has since been written arrives on the very next delta rather
-  # than only if some later line happens to offer it again.
-  retry_document_obligations "$id" "$(pending_docs_excluding "$PENDING_DOCS" "$offered")"
-  carried=$RETRY_DOCS
-  [ -z "$RETRY_CLEARED" ] || cleared="${cleared}${cleared:+$'\n'}$RETRY_CLEARED"
-  outstanding=$(printf '%s\n%s\n' "$carried" "$undelivered")
-  announce_rc=0
-  announce_pending_docs "$id" "$status_file" "$outstanding" "$cleared" || announce_rc=$?
-  [ "$announce_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot record the remote document obligation for $id"; }
-  [ "$announce_rc" -ne 1 ] || appended=$((appended + 1))
+    append_rc=0
+    append_status_once "$status_file" "$rewritten" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  done < "$mirrored"
+  # A note, never a decision: it stays visible without entering the open-decision
+  # fold, so it cannot stand open the way a keyed block did.
+  while IFS=$'\t' read -r doc reason || [ -n "$doc" ]; do
+    [ -n "$doc" ] || continue
+    append_rc=0
+    append_status_once "$status_file" "note: remote document did not transfer for $id: $doc - $reason" \
+      || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote document note"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  done <<EOF
+$undelivered
+EOF
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
@@ -859,7 +645,6 @@ cmd_retire_finalize_locked() {
     fi
   fi
   rm -f -- "$(cursor_path "$id")"
-  rm -f -- "$(pending_docs_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
