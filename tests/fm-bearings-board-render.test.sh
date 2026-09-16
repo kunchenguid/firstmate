@@ -78,6 +78,25 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
+# Build Captain's Call cards and submit their controls through the rendered
+# board's public Lavish queue interface.
+render_call_interactions() {  # <home> <captains-call-json>
+  local home=$1 calls=$2 data="$1/payload.json"
+  jq -n --argjson calls "$calls" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, captains_call:$calls, underway:[], landed:[], charted:[]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$BOARD" build "$data" >/dev/null || fail "the Captain's Call board did not build"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" --interactions \
+    || fail "the Captain's Call controls could not be exercised"
+}
+
+run_lavish_adapter() {  # <command> <result-file>
+  "$ROOT/bin/fm-procevent-lavish.sh" "$1" "$2"
+}
+
 charted_next_count() {  # <render-json>
   printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
 }
@@ -227,6 +246,60 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
+
+test_captains_call_freeform_is_context_not_a_decision() {
+  local home out freeform_result choice_result read_out answer_out reconcile_out
+  home=$(make_home call-freeform)
+  out=$(render_call_interactions "$home" '[
+    {"key":"ordinary-decision","type":"decision","repo":"sample","title":"Choose a route",
+     "options":[{"value":"north","label":"Take the north route"},{"value":"south","label":"Take the south route"}]},
+    {"key":"merge.sample-task","type":"merge","repo":"sample","title":"Merge the sample change",
+     "risk":"low","options":[{"value":"merge","label":"Merge now"},{"value":"hold","label":"Not yet"}]}
+  ]')
+
+  printf '%s' "$out" | jq -e '
+    [.interactions[]
+      | .freeformLabel == "Ask a question or give another instruction"
+        and .cardQueuedAfterFreeform == false
+        and .cardQueuedAfterChoice == true] | all
+  ' >/dev/null || fail "freeform did not remain a clearly labeled non-decision path: $out"
+  printf '%s' "$out" | jq -e '
+    [.queuedPrompts[] | select(.tag == "prompt")
+      | {question:.data.question, message:.data.message, schema:.data.schema}] == [
+        {question:"ordinary-decision", message:"Need more context for ordinary-decision", schema:"fm-bearings-followup.v1"},
+        {question:"merge.sample-task", message:"Need more context for merge.sample-task", schema:"fm-bearings-followup.v1"}
+      ]
+  ' >/dev/null || fail "freeform submissions lost card identity or supervisor text: $out"
+
+  freeform_result="$home/freeform.result"
+  choice_result="$home/choice.result"
+  printf '%s' "$out" | jq -r '.freeformLavishResult' > "$freeform_result"
+  printf '%s' "$out" | jq -r '.choiceLavishResult' > "$choice_result"
+  read_out=$(run_lavish_adapter read "$freeform_result") \
+    || fail "the adapter could not present the freeform capture"
+  assert_contains "$read_out" "ordinary-decision" \
+    "the supervisor presentation lost the ordinary card identity"
+  assert_contains "$read_out" "Need more context for ordinary-decision" \
+    "the supervisor presentation lost the ordinary freeform text"
+  assert_contains "$read_out" "merge.sample-task" \
+    "the supervisor presentation lost the merge card identity"
+  assert_contains "$read_out" "Need more context for merge.sample-task" \
+    "the supervisor presentation lost the merge freeform text"
+  answer_out=$(run_lavish_adapter answers "$freeform_result") \
+    || fail "the adapter could not classify freeform answers"
+  [ -z "$answer_out" ] || fail "freeform text entered keyed answers or merge authority: $answer_out"
+  reconcile_out=$(run_lavish_adapter reconciles "$freeform_result") \
+    || fail "the adapter could not classify freeform reconciliation"
+  [ -z "$reconcile_out" ] || fail "freeform text created a reconcile request: $reconcile_out"
+
+  answer_out=$(run_lavish_adapter answers "$choice_result") \
+    || fail "the adapter could not classify explicit choices"
+  [ "$answer_out" = "$(printf 'ordinary-decision\tnorth\tChoose a route -> north\nmerge.sample-task\tmerge\tMerge the sample change -> merge')" ] \
+    || fail "explicit decision and merge controls changed behavior: $answer_out"
+  pass "Captain's Call freeform reaches the supervisor without answering or merging"
+}
+
+test_captains_call_freeform_is_context_not_a_decision
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

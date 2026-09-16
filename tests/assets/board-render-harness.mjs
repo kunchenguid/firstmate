@@ -2,10 +2,11 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+// Usage: node board-render-harness.mjs <built-board.html> [--interactions]
+// Prints one JSON document. The optional interaction mode submits each
+// Captain's Call freeform control and first explicit option through the page's
+// public Lavish queue interface, then includes the captured calls and
+// protocol-shaped Lavish results in the document.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -24,9 +25,24 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.name = "";
+    this.placeholder = "";
+    this.listeners = {};
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => {
+        this.className = this.className.split(/\s+/).filter((name) => name && name !== c).join(" ");
+      },
+      toggle: (c, force) => {
+        const present = this.className.split(/\s+/).includes(c);
+        const wanted = force === undefined ? !present : force;
+        if (wanted && !present) this.className = (this.className + " " + c).trim();
+        if (!wanted && present) {
+          this.className = this.className.split(/\s+/).filter((name) => name && name !== c).join(" ");
+        }
+        return wanted;
+      },
     };
   }
   get textContent() {
@@ -37,7 +53,14 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, listener) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(listener);
+  }
+  dispatch(type) {
+    const event = { preventDefault() {} };
+    for (const listener of this.listeners[type] || []) listener(event);
+  }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -78,8 +101,32 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+const queuedPrompts = [];
+globalThis.window = {
+  lavish: {
+    queuePrompt(prompt, options) {
+      queuedPrompts.push({
+        prompt,
+        tag: options.tag,
+        text: options.text,
+        queueKey: options.queueKey || "",
+        data: options.data || {},
+      });
+    },
+  },
+};
 globalThis.TextEncoder = TextEncoder;
+globalThis.FormData = class {
+  constructor(form) {
+    this.values = new Map();
+    const visit = (node) => {
+      if (node.name && (node.type !== "radio" || node.checked)) this.values.set(node.name, node.value);
+      node.children.forEach(visit);
+    };
+    visit(form);
+  }
+  get(name) { return this.values.has(name) ? this.values.get(name) : null; }
+};
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
@@ -122,5 +169,76 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+const descendants = (node) => {
+  const out = [];
+  const walk = (current) => {
+    current.children.forEach((child) => { out.push(child); walk(child); });
+  };
+  walk(node);
+  return out;
+};
+
+const lavishResult = (calls) => {
+  const escaped = (value) => '"' + String(value)
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n") + '"';
+  const rows = calls.map((call, index) => {
+    const prompt = call.prompt + "\n\nContext data:\n" + JSON.stringify(call.data);
+    return "  " + [String(index + 1), prompt, "form", call.tag, call.text].map(escaped).join(",");
+  });
+  return [
+    "session:",
+    "  file: /bearings-board.html",
+    "  status: feedback",
+    "  session_ended: false",
+    `prompts[${calls.length}]{uid,prompt,selector,tag,text}:`,
+    ...rows,
+  ].join("\n") + "\n";
+};
+
+const interactions = [];
+if (process.argv[3] === "--interactions") {
+  const callDeck = byId.get("bb-call") || new Node("div");
+  callDeck.children.forEach((card) => {
+    const nodes = descendants(card);
+    const freeform = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform"));
+    const freeformForm = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform-form"));
+    const choiceForm = nodes.find((node) => node.attributes["data-lavish-question"] && node !== freeformForm);
+    const label = nodes.find((node) => node.className.split(/\s+/).includes("bb-freeform-label"));
+    const question = choiceForm?.attributes["data-lavish-question"] || freeformForm?.attributes["data-lavish-question"] || "";
+    let cardQueuedAfterFreeform = false;
+    if (freeform && freeformForm) {
+      freeform.value = "Need more context for " + question;
+      freeformForm.dispatch("submit");
+      cardQueuedAfterFreeform = card.classList.contains("is-queued");
+    }
+    const radio = nodes.find((node) => node.type === "radio" && node.value !== "reconcile");
+    if (radio && choiceForm) {
+      radio.checked = true;
+      choiceForm.dispatch("submit");
+    }
+    interactions.push({
+      question,
+      freeformLabel: label?.textContent || "",
+      freeformPlaceholder: freeform?.placeholder || "",
+      cardQueuedAfterFreeform,
+      cardQueuedAfterChoice: card.classList.contains("is-queued"),
+    });
+  });
+}
+const freeformCalls = queuedPrompts.filter((call) => call.tag === "prompt");
+const choiceCalls = queuedPrompts.filter((call) => call.tag === "choice");
+
+process.stdout.write(JSON.stringify({
+  stats,
+  underway,
+  charted,
+  empty,
+  more,
+  error: errorText,
+  interactions,
+  queuedPrompts,
+  freeformLavishResult: lavishResult(freeformCalls),
+  choiceLavishResult: lavishResult(choiceCalls),
+}) + "\n");

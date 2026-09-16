@@ -200,10 +200,10 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
-/* One rhythm owner: the answer form is a flex column with the same 12px gap as
-   the card pad, and the foot rides margin-top:auto so every Queue answer button
-   sits on the same baseline with identical breathing room. */
-.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
+/* One rhythm owner: the explicit-choice form is a flex column with the same
+   12px gap as the card pad, and the foot rides margin-top:auto so every Queue
+   answer button sits on the same baseline with identical breathing room. */
+.bb-choice-form { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
 .bb-opts { display: flex; flex-direction: column; gap: 7px; }
 .bb-opt {
   display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; cursor: pointer;
@@ -229,9 +229,14 @@ a { color: inherit; text-decoration: none; }
 .is-queued .bb-queued { display: inline-flex; }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
-  background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
+.bb-freeform-form { display: flex; flex-direction: column; gap: 8px; padding-top: 12px;
+  border-top: 1px solid var(--border-soft); }
+.bb-freeform-label { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); }
+.bb-freeform { width: 100%; min-height: 72px; resize: vertical; font-family: var(--font-sans);
+  font-size: var(--fs-sm); line-height: 1.4; color: var(--text-strong); background: var(--surface-card);
+  border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.bb-freeform-form .bb-decision__foot { margin-top: 0; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -515,79 +520,125 @@ __FM_BEARINGS_BOARD_DATA__
       pad.appendChild(ctx);
     }
 
-    var form = document.createElement("form");
-    form.setAttribute("data-lavish-question", item.key);
-    var opts = el("div", "bb-opts");
-    item.options.forEach(function (o) {
-      var lab = el("label", "bb-opt");
-      var input = document.createElement("input");
-      input.type = "radio"; input.name = "answer"; input.value = o.value;
-      lab.appendChild(input);
-      var body = el("span", "bb-opt__body");
-      body.appendChild(el("span", "bb-opt__label", o.label));
-      if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
-      lab.appendChild(body);
-      if (item.recommend_value && o.value === item.recommend_value) {
-        lab.appendChild(el("span", "bb-opt__rec", "rec"));
-      }
-      opts.appendChild(lab);
-    });
-    form.appendChild(opts);
+    if (item.options.length) {
+      var choiceForm = document.createElement("form");
+      choiceForm.className = "bb-choice-form";
+      choiceForm.setAttribute("data-lavish-question", item.key);
+      var opts = el("div", "bb-opts");
+      item.options.forEach(function (o) {
+        var lab = el("label", "bb-opt");
+        var input = document.createElement("input");
+        input.type = "radio"; input.name = "answer"; input.value = o.value;
+        lab.appendChild(input);
+        var body = el("span", "bb-opt__body");
+        body.appendChild(el("span", "bb-opt__label", o.label));
+        if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
+        lab.appendChild(body);
+        if (item.recommend_value && o.value === item.recommend_value) {
+          lab.appendChild(el("span", "bb-opt__rec", "rec"));
+        }
+        opts.appendChild(lab);
+      });
+      choiceForm.appendChild(opts);
 
-    if (item.allow_freeform) {
-      var ff = document.createElement("input");
-      ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
+      var foot = el("div", "bb-decision__foot");
+      var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
+      btn.type = "submit";
+      foot.appendChild(btn);
+      var q = el("span", "bb-queued");
+      q.innerHTML = CHECK_SVG + " queued";
+      foot.appendChild(q);
+      var answerLimit = el("span", "bb-limit");
+      answerLimit.setAttribute("role", "alert");
+      foot.appendChild(answerLimit);
+      choiceForm.appendChild(foot);
+
+      choiceForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        answerLimit.classList.remove("is-visible");
+        var value = new FormData(choiceForm).get("answer");
+        if (!value) return;
+        if (utf8ByteLength(value) > 512) {
+          answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
+          answerLimit.classList.add("is-visible");
+          return;
+        }
+        if (window.lavish && window.lavish.queuePrompt) {
+          var ctxData = {
+            schema: "fm-bearings-answer.v1",
+            question: item.key,
+            selection: value,
+            note: ""
+          };
+          if (item.close) ctxData.close = item.close;
+          window.lavish.queuePrompt(
+            "Captain's Call answer - " + item.title + ": " + value,
+            { tag: "choice", text: item.title + " -> " + value, element: choiceForm,
+              data: ctxData }
+          );
+        }
+        card.classList.add("is-queued");
+        /* deal the next card once this one is answered */
+        setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
+      });
+
+      pad.appendChild(choiceForm);
     }
 
-    var foot = el("div", "bb-decision__foot");
-    var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
-    btn.type = "submit";
-    foot.appendChild(btn);
-    var q = el("span", "bb-queued");
-    q.innerHTML = CHECK_SVG + " queued";
-    foot.appendChild(q);
-    var answerLimit = el("span", "bb-limit");
-    answerLimit.setAttribute("role", "alert");
-    foot.appendChild(answerLimit);
-    form.appendChild(foot);
+    if (item.allow_freeform) {
+      var freeformForm = document.createElement("form");
+      freeformForm.className = "bb-freeform-form";
+      freeformForm.setAttribute("data-lavish-question", item.key);
+      var freeformId = "bb-freeform-" + item.key;
+      var freeformLabel = el("label", "bb-freeform-label",
+        item.freeform_hint || "Ask a question or give another instruction");
+      freeformLabel.setAttribute("for", freeformId);
+      freeformForm.appendChild(freeformLabel);
+      var ff = document.createElement("textarea");
+      ff.id = freeformId;
+      ff.name = "message";
+      ff.className = "bb-freeform";
+      ff.placeholder = "Type your question or instruction";
+      freeformForm.appendChild(ff);
+      var freeformFoot = el("div", "bb-decision__foot");
+      var freeformButton = el("button", "fm-btn fm-btn--sm fm-btn--primary", "Send to Firstmate");
+      freeformButton.type = "submit";
+      freeformFoot.appendChild(freeformButton);
+      var freeformQueued = el("span", "bb-queued");
+      freeformQueued.innerHTML = CHECK_SVG + " message queued";
+      freeformFoot.appendChild(freeformQueued);
+      var freeformLimit = el("span", "bb-limit");
+      freeformLimit.setAttribute("role", "alert");
+      freeformFoot.appendChild(freeformLimit);
+      freeformForm.appendChild(freeformFoot);
 
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      answerLimit.classList.remove("is-visible");
-      var fd = new FormData(form);
-      var value = fd.get("answer");
-      var note = (fd.get("note") || "").trim();
-      var displayAnswer = value ? (note ? value + " - " + note : value) : note;
-      if (!displayAnswer) return;
-      if (utf8ByteLength(displayAnswer) > 512) {
-        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
-        answerLimit.classList.add("is-visible");
-        return;
-      }
-      if (window.lavish && window.lavish.queuePrompt) {
-        /* The versioned context keeps the selected option separate from its
-           note, while close carries the composer-declared completion mode. */
-        var ctxData = {
-          schema: "fm-bearings-answer.v1",
-          question: item.key,
-          selection: value || "",
-          note: note
-        };
-        if (item.close) ctxData.close = item.close;
-        window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + displayAnswer,
-          { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
-            data: ctxData }
-        );
-      }
-      card.classList.add("is-queued");
-      /* deal the next card once this one is answered */
-      setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
-    });
+      freeformForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        freeformLimit.classList.remove("is-visible");
+        var message = (new FormData(freeformForm).get("message") || "").trim();
+        if (!message) return;
+        if (utf8ByteLength(message) > 512) {
+          freeformLimit.textContent = "Message is too long to queue (512 bytes maximum).";
+          freeformLimit.classList.add("is-visible");
+          return;
+        }
+        if (window.lavish && window.lavish.queuePrompt) {
+          window.lavish.queuePrompt(
+            "Captain's Call follow-up - " + item.title + " [" + item.key + "]: " + message,
+            { tag: "prompt", text: item.title + " -> " + message, element: freeformForm,
+              data: {
+                schema: "fm-bearings-followup.v1",
+                question: item.key,
+                message: message
+              } }
+          );
+        }
+        freeformForm.classList.add("is-queued");
+        ff.value = "";
+      });
 
-    pad.appendChild(form);
+      pad.appendChild(freeformForm);
+    }
     card.appendChild(pad);
     deck.appendChild(card);
   });

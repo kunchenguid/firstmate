@@ -74,8 +74,9 @@
 # intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
 # just an ephemeral discussion format that happens to carry answers.
 #
-# Only rows tagged `choice` are read. A freeform captain message is prose that may
-# contain anything, and must never be able to forge a decision key.
+# Only rows tagged `choice` with a non-empty structured selection are read.
+# A freeform Captain's Call follow-up uses `prompt`, and a stale board's empty
+# selection plus note is also rejected, so prose can never forge a decision key.
 #
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
@@ -478,10 +479,9 @@ cmd_choice_rows() {
         $note = $data->{note};
         next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
           || !defined($note) || ref($note);
-        next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+        next unless $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
         next unless length($note) <= 512;
-        next unless length($selected) || length($note);
-        $answer = length($selected) ? $selected : $note;
+        $answer = $selected;
         $legacy = 0;
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
