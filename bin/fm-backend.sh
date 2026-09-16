@@ -833,6 +833,26 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_content: the composer's normalized text content - what a
+# human typed or the harness restored - for callers that must compare content,
+# not just classify it (fm-send.sh's post-interrupt clear proof). Same thin-
+# adapter rule as the verdict: capture plus a capability descriptor fed to the
+# one shared extractor (bin/fm-composer-lib.sh,
+# fm_composer_extract_selected_content). Fails when the backend cannot capture
+# or no composer shape is provable.
+fm_backend_composer_content() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_composer_content "$@" ;;
+    herdr) fm_backend_herdr_composer_content "$@" ;;
+    cmux) fm_backend_cmux_composer_content "$@" ;;
+    zellij) fm_backend_zellij_composer_content "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

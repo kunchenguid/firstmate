@@ -222,6 +222,31 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   pass "matrix: muse's ⟩ reads empty everywhere and survives losing the styled-glyph signal"
 }
 
+test_matrix_muse_bottom_rule_keeps_bare_composer() {
+  # muse 1.3.0-R3057.1 closes its bare composer with a pure `─` rule (verified
+  # live 2026-09-15). That rule is the composer's own bottom edge, not a
+  # dangling pi separator: without the adjacency exemption the cursorless
+  # selection vetoed the bare row and every cursorless backend read muse
+  # `unknown` forever.
+  local screen plain out
+  screen=$'── Voice input (⌥ + v to start) ─────\n'"${ESC}[0m${ESC}[38;2;90;160;255m❯${ESC}[0m"$'\n────────────────────────\n  echo · /ws · YOLO'
+  plain=$'── Voice input (⌥ + v to start) ─────\n❯\n────────────────────────\n  echo · /ws · YOLO'
+  assert_screen "muse 1.3.0 idle on tmux" empty "$CAPS_TMUX" "$screen" 1
+  assert_screen "muse 1.3.0 idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "muse 1.3.0 idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "muse 1.3.0 idle on cmux/orca" empty "$CAPS_PLAIN" "$plain"
+  # The restored prompt muse puts back after an interrupt is real typed text
+  # inside the same framed composer: pending on styled captures, and the
+  # content extractor must return it for the post-interrupt clear proof.
+  screen=$'── Voice input (⌥ + v to start) ─────\n'"${ESC}[0m${ESC}[38;2;90;160;255m❯ ${ESC}[38;2;204;211;219msecond turn to interrupt${ESC}[39m"$'\n────────────────────────\n  echo · /ws · YOLO'
+  assert_screen "muse 1.3.0 restored prompt on tmux" pending "$CAPS_TMUX" "$screen" 1
+  assert_screen "muse 1.3.0 restored prompt on herdr" pending "$CAPS_STYLED" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'second turn to interrupt' ] \
+    || fail "muse 1.3.0 restored prompt did not extract, got '$out'"
+  pass "matrix: muse 1.3.0's bottom rule is its own composer edge, not a separator veto"
+}
+
 test_matrix_cursor_reverse_video_placeholder_remnant() {
   # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
   # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
@@ -785,6 +810,7 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_muse_bottom_rule_keeps_bare_composer
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer

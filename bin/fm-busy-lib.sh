@@ -361,17 +361,28 @@ function metadataWorkspace(file) {
     descriptor = fs.openSync(file, "r");
     const buffer = Buffer.alloc(65536);
     const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
-    const newline = buffer.indexOf(10, 0);
-    if (newline < 0 || newline >= length) return null;
-    const record = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-    return record?.payload?.record?.workspace_root ?? null;
+    // The workspace-binding metadata record is one of the first records but
+    // not always the first LINE: muse 1.3.0 prepends a retained_frame wrapper
+    // record ahead of it (0.1.0 wrote metadata on line 1). Scan the bounded
+    // prefix for the first top-level metadata record.
+    const prefix = buffer.subarray(0, length).toString("utf8");
+    for (const line of prefix.split("\n").slice(0, 8)) {
+      if (!line.includes('"kind":"metadata"')) continue;
+      try {
+        const record = JSON.parse(line);
+        const root = record?.payload?.record?.workspace_root;
+        if (record?.payload?.kind === "metadata" && typeof root === "string") return root;
+      } catch {
+        continue;
+      }
+    }
+    return null;
   } catch {
     return null;
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
   }
 }
-
 for (const year of directories(root)) {
   for (const month of directories(year)) {
     for (const day of directories(month)) {
@@ -609,6 +620,36 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
       print terminal
     }
   '
+}
+
+# fm_busy_muse_last_run_prompt: the prompt text of the LAST run started event
+# in <session-log> - the text muse restores into its composer when Escape
+# cancels that run (docs/verification/muse.md). JSON-parsed rather than
+# prefix-matched because the prompt is an escaped JSON string; the same
+# payload.kind=="run" + event.kind=="started" anchoring as
+# fm_busy_muse_run_events keeps nested decoy records out.
+fm_busy_muse_last_run_prompt() {  # <session-log>
+  [ -f "$1" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  node - "$1" <<'NODE'
+const fs = require("fs");
+let prompt = "";
+try {
+  for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+    if (!line.includes('"kind":"run"')) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    const event = record?.payload?.event;
+    if (record?.payload?.kind === "run" && event?.kind === "started" && typeof event.prompt === "string") {
+      prompt = event.prompt;
+    }
+  }
+} catch {
+  process.exit(1);
+}
+if (prompt === "") process.exit(1);
+process.stdout.write(prompt);
+NODE
 }
 
 # cursor conversation-transcript busy source
