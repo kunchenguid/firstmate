@@ -37,8 +37,7 @@ A patch replaces a row's whole config, so the tracked `permission` row restates 
 `bin/fm-dsh-launch.sh` applies the tracked patch itself, so the documented launch needs no manual install step, and exports no `DSH_PERMISSION_MODE`: the pin is the only mechanism.
 
 `bin/fm-dsh-preflight.sh` cannot probe `ps` under either sandbox: it runs in the launching shell before DSH starts, where nothing is sandboxed, so a `ps` there always succeeds.
-It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, which the tracked patch pins literally; only a `!!js` expression left by a later layer that does not pin the row is evaluated, in the environment the preflight and the host share.
-Such a layer therefore fails unless that environment happens to carry `DSH_PERMISSION_MODE=danger-full-access`, which firstmate never sets.
+It asserts what launch can observe instead, and fails unless both are `danger-full-access`: the permission preset a new session is seeded with, which is `permission.defaultPreset` in `$DSH_HOME/settings.yaml` (the settings page writes it, and it outranks the profile) or else the composed profile row; and the composed `sandbox-policy` mode, which must be the literal the tracked patch pins; a `!!js` expression, `dsh-base`'s own included, fails as unpinned whatever the environment holds.
 That proves the defaults, not any one session: a resumed session keeps the preset it recorded, and the per-session `/permission` control can still downgrade a session after launch.
 
 ## Instruction budget

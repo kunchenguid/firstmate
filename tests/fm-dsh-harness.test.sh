@@ -656,35 +656,31 @@ test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
   local home rc out
   # The hooks bridge runs a hook with no session, so the hook gets the host's
   # sandbox-policy mode, not the session's permission preset. The tracked patch
-  # pins that mode literally, the only mechanism, which must pass with no
-  # DSH_PERMISSION_MODE at all; dsh-base's own row computes it from that
-  # variable, so left unpinned it must fail without it, as must a profile
-  # pinning another mode.
+  # pins that mode literally, the only mechanism. dsh-base's own row computes it
+  # from DSH_PERMISSION_MODE, so an expression must fail as unpinned even from a
+  # shell that happens to carry danger-full-access, as must a literal other mode.
   home=$(make_dsh_home "$TMP_ROOT/pre-hookmode" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
-  rc=0
-  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
-    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "a literally pinned danger-full-access mode must pass with no DSH_PERMISSION_MODE, got rc=$rc: $out"
-  assert_contains "$out" "hooks run under the danger-full-access sandbox mode" "the pinned hook mode was not reported"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a literally pinned danger-full-access mode must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under the danger-full-access sandbox mode" "the pinned hook mode was not reported"
   { sandbox_row; permission_row danger-full-access
     printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   rc=0
-  out=$(env -u DSH_PERMISSION_MODE DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+  out=$(DSH_PERMISSION_MODE=danger-full-access DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
     "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
-  [ "$rc" -eq 3 ] || fail "an unpinned mode defaulting to workspace-write must fail the preflight, got rc=$rc: $out"
-  assert_contains "$out" "hooks run under sandbox mode 'workspace-write'" "the hook sandbox mode was not named"
+  [ "$rc" -eq 3 ] || fail "dsh-base's expression must fail even under an ambient danger-full-access, got rc=$rc: $out"
+  assert_contains "$out" "hooks run under an unpinned sandbox mode (!!js process.env.DSH_PERMISSION_MODE" "dsh-base's expression was not named as unpinned"
   { sandbox_row workspace-write; permission_row danger-full-access
     printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "a profile pinning workspace-write must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
   assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode 'workspace-write'" "the pinned mode was not named"
-  # An expression only DSH's loader scope can evaluate is not a passing mode.
   { sandbox_row '!!js ctx.loader.mode'; permission_row danger-full-access
     printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
   run_preflight "$home"
-  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an unevaluable mode must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
-  assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode '<unreadable>'" "the unevaluable mode was not named"
-  pass "fm-dsh-preflight.sh: hooks must run under a sandbox mode that permits ps"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an expression only DSH's loader can evaluate must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under an unpinned sandbox mode (!!js ctx.loader.mode)" "the loader expression was not named as unpinned"
+  pass "fm-dsh-preflight.sh: hooks must run under a literally pinned sandbox mode that permits ps"
 }
 
 test_dsh_preflight_passes_a_conforming_home() {

@@ -13,8 +13,8 @@
 #
 # The contracts, each of which was once assumed and later measured:
 #   1. A hooks bridge pinned at the running dsh-base passes the preflight with
-#      the tracked patch and no DSH_PERMISSION_MODE, so the hook sandbox mode it
-#      reads comes from the patch's literal pin alone.
+#      the tracked patch, whose literal pin is the only hook sandbox mode the
+#      preflight accepts.
 #   2. UserPromptSubmit delivers additionalContext BEFORE the first request.
 #      DSH's SessionStart hook runs detached and lands after it, so the digest
 #      rides UserPromptSubmit; if that ever stops holding, the session-start
@@ -141,9 +141,8 @@ SH
 # Invoked with the tracked patch, because that is what the launcher passes. The
 # throwaway profile already mounts the bridge, raises the budget and sets the
 # default permission preset; the hook sandbox mode comes only from the tracked
-# patch's literal pin. DSH_PERMISSION_MODE is unset, so the check cannot pass on
-# dsh-base's expression over a variable inherited from the caller's shell.
-if ! env -u DSH_PERMISSION_MODE "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
+# patch's literal pin, because the preflight refuses dsh-base's expression.
+if ! "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
     --patch "$ROOT/.dsh/profile.patch.yml" >/dev/null 2>&1; then
   fail "fm-dsh-preflight.sh rejected the freshly pinned profile '$PROFILE' with the tracked patch (dsh-base $BASE_VERSION)"
 fi

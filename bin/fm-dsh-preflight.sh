@@ -244,19 +244,18 @@ if [ -n "$DUMP" ]; then
 
   # Hooks are not session tool calls: the hooks bridge runs them with no
   # session, so they get the host's sandbox-policy mode whatever preset a
-  # session was seeded with. DSH evaluates a `!!js` mode at host start in the
-  # environment it was launched with, so it is evaluated here in this one.
-  SANDBOX_ROW=$(printf '%s\n' "$DUMP" | entry_lines sandbox-policy)
-  HOOK_MODE=$(printf '%s\n' "$SANDBOX_ROW" | entry_value mode)
-  case "$HOOK_MODE" in
-    '!!js '*)
-      HOOK_MODE=$(node -e 'process.stdout.write(String(eval(process.argv[1])))' \
-        "$(printf '%s\n' "$SANDBOX_ROW" | sed -n 's/^mode:[[:space:]]*!!js[[:space:]]*//p' | tail -1)" 2>/dev/null) || HOOK_MODE= ;;
-  esac
+  # session was seeded with. Only a literal mode is a pin: a `!!js` expression,
+  # dsh-base's own included, or no mode at all resolves from whatever the host
+  # starts with.
+  HOOK_MODE=$(printf '%s\n' "$DUMP" | entry_lines sandbox-policy | entry_value mode)
   if [ "$HOOK_MODE" = danger-full-access ]; then
     ok "hooks run under the danger-full-access sandbox mode"
   else
-    fail "hooks run under sandbox mode '${HOOK_MODE:-<unreadable>}', not danger-full-access" \
+    case "$HOOK_MODE" in
+      ''|'!!js '*) HOOK_DESC="an unpinned sandbox mode (${HOOK_MODE:-none set})" ;;
+      *) HOOK_DESC="sandbox mode '$HOOK_MODE'" ;;
+    esac
+    fail "hooks run under $HOOK_DESC, not a literal danger-full-access" \
       "pin the sandbox-policy entry's mode to danger-full-access alongside the permission entry's defaultPreset, as .dsh/profile.patch.yml does and bin/fm-dsh-launch.sh applies, and drop any later --patch overlay that overrides that row: the hooks bridge runs hooks with no session, so ps is denied in every hook and the digest reads READ-ONLY with an unknown harness"
   fi
 fi
