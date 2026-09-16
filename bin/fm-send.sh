@@ -271,7 +271,8 @@ fm_send_id_from_meta() { # <meta-file>
 # Classifying a restored prompt as pending input is correct - the text really
 # is unsubmitted - but leaving it there means the NEXT steer types onto the end
 # of it and submits both as one garbled message. Ctrl-U clears the composer
-# (verified), so the interrupt is not complete until it has been sent.
+# (verified), so the interrupt is not complete until the composer is proven
+# free of the restored prompt.
 # The clear is PROOF-GATED: it fires only when the composer's extracted content
 # is provably the restored prompt (a suffix of the cancelled run's recorded
 # started prompt - a suffix because a long prompt can outgrow the bounded
